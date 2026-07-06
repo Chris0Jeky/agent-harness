@@ -85,6 +85,13 @@ CASES = [
     ("git reset --hard HEAD~1", 4, {"relaxed_work_loss_guards": True}, "deny"),
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True, "wave_mode": True}, "deny"),
     ("git push -f", 3, {"relaxed_work_loss_guards": True}, "deny"),  # floor unaffected
+    # --- substitution scanning (ported from wealthlens pre_tool_use hardening) ---
+    ("git commit $(git push --force origin main) -m wip", 1, {}, "deny"),
+    ('git commit -m "wip $(rm -rf /)"', 1, {}, "deny"),      # dbl quotes EXPAND -> scanned
+    ("git commit -m 'wip $(rm -rf /)'", 1, {}, "allow"),     # single quotes inert
+    ("git commit -F <(sudo x) -m wip", 1, {}, "deny"),       # process substitution scanned
+    ("git stash `sudo id`", 1, {}, "deny"),                  # backticks scanned
+    ('echo "total $(wc -l notes.md)"', 1, {}, "allow"),      # benign inner command
     # --- MUST ALLOW: false-positive regression tests ---
     ('git commit -m "block rm -rf / in the hook"', 1, {}, "allow"),
     ('git commit -m "prevent git push --force everywhere"', 4, {}, "allow"),

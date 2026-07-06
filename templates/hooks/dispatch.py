@@ -24,18 +24,29 @@ import os
 import re
 import sys
 
-FLOOR_VERSION = "1.1.0 (2026-07-06)"
+FLOOR_VERSION = "1.2.0 (2026-07-06)"
 
 # --- helpers ---------------------------------------------------------------
 
-_QUOTED = [re.compile(r'"[^"]*"'), re.compile(r"'[^']*'")]
+_SINGLE_Q = re.compile(r"'[^']*'")
+_DOUBLE_Q = re.compile(r'"(?:\\.|[^"\\])*"')
 
 
 def strip_quotes(text: str) -> str:
-    """Remove quoted substrings so message/body text can never trip a rule."""
-    for rx in _QUOTED:
-        text = rx.sub(" ", text)
-    return text
+    """Remove INERT quoted substrings so message/body text can never trip a rule.
+
+    Single-quoted text never expands -> always stripped. Double-quoted text is
+    stripped only when it contains no unescaped $ or backtick; if it does, the
+    shell EXECUTES the substitution, so the text must stay visible for scanning.
+    (Semantics ported from wealthlens-hq's earned pre_tool_use hardening: the
+    naive strip-all-quotes let `git commit -m "wip $(rm -rf /)"` fail open.)
+    """
+    text = _SINGLE_Q.sub(" ", text)
+
+    def _dq(m: "re.Match[str]") -> str:
+        return m.group(0) if re.search(r"(?<!\\)[$`]", m.group(0)) else " "
+
+    return _DOUBLE_Q.sub(_dq, text)
 
 
 def norm_path(p: str) -> str:
@@ -66,8 +77,13 @@ def load_tier(project_dir: str) -> dict:
 
 
 def segments(sanitized: str):
-    """Split a sanitized command line into per-command segments."""
-    return [s.strip() for s in re.split(r"[;\n]|&&|\|\||\|", sanitized) if s.strip()]
+    """Split a sanitized command line into per-command segments.
+
+    Splits on chains (; newline | || &&) AND on substitution/subshell delimiters
+    ($( ), <( ), backticks, parens) so an inner command is checked exactly like a
+    top-level one — `git commit $(git push --force ...)` must not fail open.
+    """
+    return [s.strip() for s in re.split(r"[;\n()`|]|&&", sanitized) if s.strip()]
 
 
 def tokens(segment: str):
