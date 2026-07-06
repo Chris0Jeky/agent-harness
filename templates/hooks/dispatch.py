@@ -9,7 +9,9 @@ Contract (BLUEPRINT §2, SPECS §5-6):
 - Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
   the project, pipe-to-shell installs, sudo, secret-file mutation, PowerShell pipe-deletes.
 - Work-loss guards (reset --hard, clean -f, checkout -- ., restore .) are tier-dependent:
-  allow at T1-T2, ask at T3, deny at T4 or wave_mode.
+  allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
+  relaxed-git (tier.json flag `relaxed_work_loss_guards`) keeps them allow below T4/wave_mode;
+  the flag is IGNORED at T4 and under wave_mode (other agents' work is in the blast radius).
 - NEVER inspects commit-message / PR-body text: quoted strings are stripped before matching.
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
@@ -22,7 +24,7 @@ import os
 import re
 import sys
 
-FLOOR_VERSION = "1.0.0 (2026-07-06)"
+FLOOR_VERSION = "1.1.0 (2026-07-06)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -82,6 +84,9 @@ def check(command: str, tier_cfg: dict, project_dir: str):
     wave = bool(flags.get("wave_mode"))
     sensitive = bool(flags.get("sensitive_data"))
     strict = tier >= 4 or wave  # work-loss guards become walls
+    # Declared relaxed-git posture (BLUEPRINT §2): work-loss guards stay allow below
+    # T4/wave_mode. Never weakens `strict` — the flag is ignored where guards are walls.
+    relaxed = bool(flags.get("relaxed_work_loss_guards")) and not strict
 
     sanitized = strip_quotes(command)
 
@@ -125,13 +130,13 @@ def check(command: str, tier_cfg: dict, project_dir: str):
             if sub == "reset" and "--hard" in toks:
                 if strict:
                     return "deny", "T4/wave: hard reset discards work that may not be yours. Inspect state; ask."
-                if tier >= 3:
+                if tier >= 3 and not relaxed:
                     return "ask", "T3: git reset --hard discards uncommitted work. Confirm you want this."
 
             if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", t) for t in toks[2:]):
                 if strict:
                     return "deny", "T4/wave: git clean -f deletes untracked files that may belong to another agent."
-                if tier >= 3:
+                if tier >= 3 and not relaxed:
                     return "ask", "T3: git clean -f deletes untracked files. Confirm."
 
             if sub == "checkout" and "--" in toks:
@@ -139,13 +144,13 @@ def check(command: str, tier_cfg: dict, project_dir: str):
                 if "." in after:
                     if strict:
                         return "deny", "T4/wave: checkout -- . wipes all local modifications."
-                    if tier >= 3:
+                    if tier >= 3 and not relaxed:
                         return "ask", "T3: checkout -- . wipes local modifications. Confirm."
 
             if sub == "restore" and "." in toks[2:] and "--staged" not in toks:
                 if strict:
                     return "deny", "T4/wave: git restore . wipes all local modifications."
-                if tier >= 3:
+                if tier >= 3 and not relaxed:
                     return "ask", "T3: git restore . wipes local modifications. Confirm."
 
         # ---- rm rules ----

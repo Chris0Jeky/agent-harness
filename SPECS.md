@@ -47,7 +47,8 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   "tier": 3,
   "name": "workshop",
   "authority": { "push": "free", "merge": "gated" },
-  "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false },
+  "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
+             "relaxed_work_loss_guards": false },
   "model_routing": { "harness_and_review": "top", "slices": "mid", "maintenance": "cheap" },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
@@ -57,6 +58,10 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
 
 - `authority.push` / `.merge`: `free` | `gated` | `human-only` (the dial: leave-PRs-open →
   push-gated-like-merge → merge-behind-full-gate).
+- `flags.relaxed_work_loss_guards`: declared relaxed-git posture — work-loss guards
+  (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
+  instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
+  unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
 - Read by: dispatcher hook, Gardener, bootstrapper, CI templates.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);

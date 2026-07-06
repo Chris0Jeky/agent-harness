@@ -77,6 +77,14 @@ CASES = [
     ("git checkout -- .", 4, {}, "deny"),
     ("git push --force-with-lease origin feat", 2, {}, "allow"),
     ("git push --force-with-lease origin feat", 4, {}, "deny"),
+    # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
+    ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    ("git checkout -- .", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    ("git restore .", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    ("git reset --hard HEAD~1", 4, {"relaxed_work_loss_guards": True}, "deny"),
+    ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True, "wave_mode": True}, "deny"),
+    ("git push -f", 3, {"relaxed_work_loss_guards": True}, "deny"),  # floor unaffected
     # --- MUST ALLOW: false-positive regression tests ---
     ('git commit -m "block rm -rf / in the hook"', 1, {}, "allow"),
     ('git commit -m "prevent git push --force everywhere"', 4, {}, "allow"),

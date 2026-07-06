@@ -170,7 +170,9 @@ tier, protecting only the IRREVERSIBLE:
 **Work-loss guards are tier-dependent, not floor**: `reset --hard`, `clean -fd`,
 `checkout -- .` are *allowed* at T1–T2 (solo relaxed-git posture — wealthlens proved blocking
 them causes merge-gymnastics workarounds), warn at T3, deny at T4 and under `wave_mode`
-(another agent's work is then in the blast radius).
+(another agent's work is then in the blast radius). A T3 repo whose relaxed posture is
+*declared* (`tier.json` flag `relaxed_work_loss_guards`, per SPECS §2) keeps them allow below
+T4/wave_mode — the flag is ignored where guards are walls.
 
 **Never scan commit-message or PR-body text at any tier.** Proven repeatedly to block the
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
