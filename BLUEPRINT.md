@@ -1,0 +1,410 @@
+# Agent Harness Blueprint
+
+Last Updated: 2026-07-06 · Applies to: every repo, every machine, every model tier
+Concrete schemas, skeletons, and literal file drafts live in [SPECS.md](./SPECS.md).
+
+**Thesis.** A repo's harness is defined by its **blast radius** — what can irreversibly break
+there. Everything else follows: how much standing context it may cost, which gates exist, what
+authority agents hold, and what the repo is allowed to grow for itself. The harness assumes the
+model may be weak, wrong, or cheaper next year: judgment gets encoded into *structure* (hooks,
+budgets, region maps, restricted toolsets) that a weaker model inherits for free.
+
+Every mechanism here was either proven in the estate or is the missing half of something that
+half-worked. Nothing is speculative.
+
+---
+
+## 0. The Ten Laws (cross-cutting, all tiers)
+
+1. **Enforcement ladder.** memory → CLAUDE.md → skill → hook → CI → structure (restricted
+   toolset, branch protection, sandbox). Every rule lives at exactly ONE layer — the cheapest
+   that actually enforces it. Prose is promoted to a hook only when violation is objectively
+   machine-detectable AND has recurred. (Formalizes Options `workflow_enforcement.md`.)
+2. **One home per policy.** Every policy has exactly one file; everything else links, never
+   restates. (Taskdeck's review policy lived in 7 files; #1220 took 14 review rounds partly
+   reconciling copies.)
+3. **Second-occurrence rule + pruning symmetry.** Nothing is built speculatively — structure
+   arrives with the second item (second correction → rule; third bulk-read → region map; second
+   repo needing a skill → hoist it global). Every growth trigger has a decay twin: session logs
+   expire in 14 days, memories uncited 90 days fold to one line, skills uninvoked a quarter get
+   archived, superseded strategies collapse to one SUPERSEDED line. Growth without decay
+   produced olb's 1,251-file memory swamp.
+4. **Budgets with rotation.** Every standing artifact has a hard line cap (table in SPECS §3).
+   Overflow ROTATES to `archive/` — never deleted, never accumulates in the routed path.
+   A mandate that cannot be literally obeyed (Taskdeck's ~80k-token required-reading chain)
+   teaches agents to ignore mandates — the most corrosive failure mode found in the estate.
+5. **Tripwires are not walls.** Regex deny hooks, stamp checks, and token-presence checks are
+   tripwires: cheap, worth keeping, never counted as safety. Walls are branch protection that
+   *requires named checks*, toolset-restricted subagents, and hermetic runtimes. (The old
+   prefix deny list missed `git push -f`; Taskdeck's branch protection "required nothing.")
+6. **The weaker the model, the harder the harness.** Spend the top model writing structure and
+   reviewing; run cheap models only inside mapped regions with skills, stop conditions, and
+   PR-only output. A weak model + tight region + stop-hook verification beats a strong model +
+   an 80k-token read mandate.
+7. **Capture is automatic; promotion must be scheduled.** Any ledger/memory/inbox without a
+   scheduled consumer degrades into noise (314/314 failure-ledger entries unclassified after
+   8 weeks; nightly lane red 5/5 days unnoticed). The Gardener (§4) is that consumer.
+8. **Authority is declared, not negotiated.** Push/merge autonomy is a written per-repo setting
+   in `tier.json` — the same developer currently runs opposite git postures in different repos,
+   discoverable only by tripping hooks.
+9. **Tracked-issue-or-it-doesn't-exist.** Plans living only in prose lose to tracked issues
+   every time (Taskdeck's only archive plan sat in a gitignored file while agents worked the
+   tracker). Any doc-resident plan gets mirrored into the tracker or it will not happen.
+10. **Misleading authority is worse than nothing.** Dead repos get 3-line tombstones; stale
+    authoritative docs (metricalgo's 245-line AGENTS.md for a path that no longer exists) get
+    deleted, not maintained; superseded docs leave the routed path.
+
+---
+
+## 1. The Tier Ladder
+
+| Tier | Name | Defined by (blast radius) | Standing context | CI | Authority (default) | Estate examples |
+|---|---|---|---|---|---|---|
+| T0 | **Tombstone** | Nothing runs here | ≤200 tokens | none | none | jekyt, repos, Taskdeck-gemini, pr812-fixes, junk wrappers |
+| T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | full, incl. main | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
+| T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free | extract-api (reference implementation), NavSentinel |
+| T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push free, merge behind self-review gate | Taskdeck (after diet), wealthlens-hq |
+| T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind full gate | olb/series_tools_python, staticprofit (if revived) |
+
+**Overlay flags** (orthogonal to tier, set in `tier.json`):
+- `sensitive_data` — adds privacy denies (block pushes to public remotes, `gh repo create --public`)
+  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity.
+- `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
+  guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
+  clean main after every wave.
+- `dormant_production` — frozen but revivable live system: strip to a ≤20-line REVIVAL.md
+  (how to run, hazards, re-seed tier) + the floor. (identity/platform-identity, staticprofit.)
+
+### T0 — Tombstone
+3-line CLAUDE.md: `FROZEN <date>. Do not develop here. Live repo: <path>.` Delete any other
+scaffold — stale config actively misleads. Tombstone junk 1-commit wrappers at the wrapper
+level so `git -C` at the wrong depth self-identifies. One row in `~/.claude/ESTATE.md`.
+Gardener skips these dirs entirely. **Exit:** human revives → `harness seed --tier N` removes
+the tombstone in the same commit that installs the floor.
+
+### T1 — Sandbox
+The current *global* posture, demoted to an explicit per-repo choice. `bypassPermissions` in
+uncommitted `settings.local.json`. Global deny floor (§2) rides along free. CLAUDE.md ≤40
+lines: what this is, how to run it, any hard data rule. No CI, no STATUS, no skills beyond the
+global process three, no review policy, no read-first list. Fan-out banned — inline is always
+cheaper here. **Promote to T2** on evidence of durable use: 3rd+ return session, something
+consuming its output, or the first "wish I had a test" moment.
+
+### T2 — Daily driver (template: extract-api, the estate's cleanest instance)
+- SessionStart hook prints a 4-line orientation (rules digest + next BACKLOG item + open
+  HUMAN_TODO items) — replaces doc re-reading at ~0 tokens.
+- `HUMAN_TODO.md` (standard name; existing wired names like Taskdeck's OUTSTANDING_TASKS.md
+  are grandfathered — note the alias in ESTATE.md): human-only items with IDs, surfaced in
+  every summary, cleared only by the human.
+- `tasks/BACKLOG.md` session protocol (law 9 starts here).
+- PostToolUseFailure → sanitized JSONL ledger, with a triage cadence (Gardener, §4).
+- 3–5 process skills ≤60 lines (onramp, safe-slice, verification-closeout, failure-capture).
+  HARD RULE: no read-first ladders; never re-mandate auto-injected files.
+- Stack allowlist lives HERE in repo `settings.json` — not in the user-level file.
+- Hooks `$CLAUDE_PROJECT_DIR`-relative and self-tested (`make test-hooks`). Absolute paths
+  silently break worktree agents (olb's do today).
+- Optional diff-scoped pre-commit: fast lint/typecheck only; every local gate ≤60s or it
+  breeds `--no-verify` culture.
+**Promote to T3** when: another repo/person/automation consumes output; a regression costs
+>1 hour; the same failure class recurs twice; or the repo exceeds one context window (→ the
+first region map IS the promotion act). **Demote to T1** after 60 days dormant.
+
+### T3 — Workshop
+Everything in T2, plus:
+- **Required CI lane**, single OS, <10 min: lint + typecheck + unit + docs-stamp/budget script.
+  No OS matrices, no container builds on docs-only changes, no scheduled lanes without the
+  red-lane law (below).
+- **Branch protection requiring the lane by name** (verify via `gh api`, don't assume).
+- **Region system ON** (§3) — the promotion trigger and the cure are the same thing.
+- **Atomic review pipeline skill**: review → post findings on PR → fix ALL severities → push →
+  verify; one skill, never pauses between steps ("the answer is ALWAYS yes"). PostToolUse nudge
+  after `gh pr create` points at it (~20 tokens, exactly when relevant).
+- **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
+  this session must have a findings comment; src edits must have a test run (warn at T3, block
+  at T4). Stated-override path required, or it trains hook-disabling. Spec in SPECS §7.
+- Two-file truth split with hard caps: "now" doc ≤150 lines, history rotates to archive.
+- Diff-scoped pre-commit (staged .cs → build, .ts/.vue → typecheck) IF measured ≤60s, else the
+  check stays in CI. The latency budget is the law; content adapts.
+**Promote to T4** when deployed anywhere, consumed automatically, or you want agent MERGE
+autonomy for batches — autonomy and independent verification rise together. **Demotion
+trigger:** a required lane red >7 days while work continues means the gate is dead — fix it or
+formally demote; permanently red gates teach gate-ignoring.
+
+### T4 — Live wire
+Everything in T3, plus:
+- **Canonical merge gate** (verbatim from extract-api working-style): 2 independent adversarial
+  reviews — at least one from the toolset-restricted no-Bash/no-Write reviewer agent — + ALL
+  bot threads resolved + green CI + PR aged so external bots weigh in (bots caught real bugs
+  self-review missed 3+ recorded times) + never `--delete-branch` a stacked base. Sweep-then-push
+  for large PRs: one multi-agent sweep, one push — never 14 round-per-push cycles.
+- **Blocking diff-scoped gitleaks** in the required lane (pr-mode never reds on legacy).
+- **Advisory-first gate flips** (ADR-0035 pattern): every new gate lands `enforce:false` with an
+  inline comment naming the flip condition, tracking issue, and break-glass path.
+- **Red-lane law enforced by cron**: any scheduled lane red 2 consecutive runs → fix-or-delete
+  issue auto-filed. Perf gates on shared runners are trend artifacts, never pass/fail.
+- Release discipline: consumers pull tagged releases; forward-only migrations validated in CI;
+  rollback exercised at least once, on a schedule; deploys are human-confirmed HUMAN_TODO items.
+- Coverage/typecheck ratchets (quality only moves up). Hermetic per-vendor runtimes and
+  per-tool MCP write gates. Harness version pinning + verify-by-artifact during money-path
+  waves (the CC 2.1.15x tool-channel corruption cost a 55-PR audit — at T4 the harness itself
+  is in the threat model).
+- Human-commit bypass: below T4, human direct commits are exempt by design (the Claude hook
+  only sees agent commits). At T4 the wall is branch protection + PR-only merges, which binds
+  humans too; optional `core.hooksPath` git-native fast checks if wanted.
+**No tier above.** T4's standing review is for DEMOTION, quarterly: when users/money stop
+depending on it, tear down deliberately within a month — strip release lanes and dual-review
+ceremony, keep the floor, leave a tombstone or REVIVAL.md. (Taskdeck's ~1,000 lines of dead
+release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
+
+---
+
+## 2. The Floor (the only thing that never varies)
+
+One global, argv-aware PreToolUse deny hook (dispatcher spec in SPECS §5), identical at every
+tier, protecting only the IRREVERSIBLE:
+
+- force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
+- `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
+- secret-file mutation; with `sensitive_data`: pushes to public remotes, `gh repo create --public`
+
+**Work-loss guards are tier-dependent, not floor**: `reset --hard`, `clean -fd`,
+`checkout -- .` are *allowed* at T1–T2 (solo relaxed-git posture — wealthlens proved blocking
+them causes merge-gymnastics workarounds), warn at T3, deny at T4 and under `wave_mode`
+(another agent's work is then in the blast radius).
+
+**Never scan commit-message or PR-body text at any tier.** Proven repeatedly to block the
+agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
+gitleaks' job (diff-scoped); command safety is the argv parser's job.
+
+The floor is a tripwire by law 5 — the walls at T3+ are branch protection and restricted
+toolsets. The floor ships with a bypass test matrix (SPECS §6) and `make test-hooks`; a change
+to the floor is T4-class work (top model + review) no matter which repo it runs in.
+
+---
+
+## 3. Regions — the context-economy primitive (T3+; embryo at T2)
+
+The mechanism that makes "work in a self-contained region without digging into others" real:
+
+1. **`AGENT_MAP.md`** at repo root, ≤100 lines: seam table (domain → entry points → invariants
+   → verification command) + an explicit **Do-Not-Read-By-Default** negative index (archives,
+   generated artifacts, node_modules, dead dirs) + the 6-line Minimum Handoff Shape.
+2. **Directory-scoped `CLAUDE.md`** (≤30 lines) in each region root — harness-native: it
+   auto-loads only when files there are touched. Region-local rules live here, nowhere else.
+3. **Optional detail maps** `docs/regions/<domain>.md` (≤100 lines), loaded on demand.
+4. **The write path**: updating the map is part of Definition of Done when a seam moves —
+   enforced by the DoD checklist, not memory. This is what makes the repo SELF-EXPANDING
+   without a crawler or scheduled re-scan burning credits.
+5. **Task prompts name a region.** Worker agents log a one-line reason before reading outside
+   it. Subagents receive a region map, never "the repo".
+
+**Fan-out economics**: stay INLINE when a task touches ≤2 files in one mapped region. Fan out
+when regions are disjoint, required context exceeds ~20k tokens, or an independent lens is
+structurally required (review). T0/T1 never fan out. Heuristics, not laws — deep coupling makes
+"disjoint" illusory (worktree waves leaked 5/6 despite protocols); when a fan-out produces
+merge conflicts, that's evidence the regions aren't real yet.
+
+**Stale-map risk**: a wrong map misroutes — worse than no map. Maps carry `Last-Verified:`
+stamps; the budget script flags >90 days; human edits outside the harness are the known hole
+(the weekly sitting is the backstop).
+
+---
+
+## 4. Self-expansion — the Gardener loop (T2+)
+
+`capture (hooks, zero inline tokens) → triage (scheduled cheap-model agent) → promote/prune
+(ONE ≤100-line PR) → ratify (human merges)`.
+
+- **Cadence**: weekly per active repo, cheap model, effort low, runs against its own worktree
+  (never the live checkout — one-writer rule per checkout). SessionStart nudges if the ledger
+  exceeds 25 entries or 14 days untriaged.
+- **What it does**: classify ledger entries (4-way: blocker / non-blocking-risk / pre-existing
+  noise / invalid signal); route recurring lessons via the destination table (rule → CLAUDE.md,
+  workflow → skill, domain → region map, decision → ADR — Taskdeck's GUIDE_UPDATE_PROTOCOL,
+  extracted nearly verbatim); run the budget script; flag stale stamps; fold expired memories;
+  flag tier/reality mismatches (deploy scripts present but tier < T4).
+- **Skill-forge** (the "automate skill creation" requirement): clustered ledger entries or a
+  second-occurrence memory line → draft SKILL.md from the anatomy template (frontmatter
+  trigger, "Do not use when" anti-trigger, ≤60 lines, verbatim guard phrases) → validation
+  script → branch + PR. The human ratifies by merging; agents never self-install skills.
+- **Self-limiting (load-bearing)**: two consecutive unmerged Gardener PRs auto-pause the
+  Gardener for that repo and flag tier mismatch. The pipeline must not become ceremony that
+  runs unread — that is the 314/314 failure recurring one level up.
+- **Human rhythm**: ONE weekly ~15-minute estate sitting — merge/reject Gardener PRs, glance
+  at red lanes, clear HUMAN_TODO items. A scheduled agent aggregates every repo's HUMAN_TODO
+  into hq-private (the existing command centre). Bounded weekly attention is the actual fix
+  for every noise-decay failure observed.
+
+---
+
+## 5. Model & effort routing
+
+Route by JUDGMENT vs MECHANICAL, never by size. Effort level is the cheaper dial — use it
+before switching models. Full table in SPECS §8; the shape:
+
+| Work | Model | Effort |
+|---|---|---|
+| Harness growth: region maps, skills, hooks, ADRs, global laws; adversarial review; promotion/demotion audits; anything irreversible | top (Fable now → Opus later) | xhigh |
+| Feature slices inside mapped regions; routine PRs | mid (Sonnet-class) | medium–high |
+| Gardener triage, doc rotation, formatting sweeps, tombstones, classification | cheap (Haiku-class) | low |
+
+- **Default-up rule**: when unsure whether a task needs judgment, use the stronger model.
+- **Hard rails**: a weak model never merges, never edits canonical docs or the deny floor,
+  never approves its own tier's gates. Pinned via `model:` in `.claude/agents/*.md` (walls)
+  + the routing table in global CLAUDE.md (convention — hooks cannot reliably see the running
+  model, so this part is honestly a tripwire).
+- **Acceptance test for the whole blueprint**: a weaker model completes one mapped-region task
+  per active repo without reading outside the region. That passing is the success criterion.
+- **The Fable-now strategy**: spend the temporary top model WRITING STRUCTURE, not doing
+  chores — global CLAUDE.md, deny floor + dispatcher, region maps for Taskdeck/olb, agent
+  definitions, this repo — then adversarially review them with it. Judgment encoded in
+  structure is judgment a weaker model inherits for free. Mechanical migration (rotation,
+  compaction, tombstones) goes to cheaper models inside that structure.
+
+---
+
+## 6. Global & machine layers
+
+**`~/.claude/` becomes a versioned repo** (config, CLAUDE.md, hooks/, agents/, skills/,
+selected scripts — NOT caches/history) with a private remote, plus scheduled backup of
+`projects/*/memory/`. Today the entire meta-system and 139 memory files are one disk failure
+from gone.
+
+- **Global CLAUDE.md** (~40 lines, literal draft in SPECS §1): the universal laws currently
+  re-earned per repo as duplicate memory files — never merge red CI, zero-skip reviews,
+  verify-before-done, close-keyword hygiene, no `--delete-branch` on stacked bases, HUMAN_TODO
+  surfacing, question protocol, worktree guard, tier check. Ship it in the same commit that
+  DELETES the graduated per-repo memory duplicates.
+- **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
+  global `defaultMode` returns to prompt/acceptEdits; remove global
+  `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.
+- **`~/.claude/ESTATE.md`** registry: repo → root (source/, Desktop/, …) → tier → status →
+  live path → wrapper warnings → HUMAN_TODO alias. Covers ALL roots; doubles as the
+  promotion-audit worksheet. New-repo intake: `harness seed --tier 1` at creation; human
+  assigns tier.
+- **Machine layer, `MACHINE.md` + bootstrap** (distinct from repo tiers and global laws):
+  front-load `C:\Program Files\Git\cmd` in PATH permanently (Cygwin git), commit vitest
+  `maxWorkers` config where it OOMs, scheduled `gh auth` refresh, `DISABLE_AUTOUPDATER`
+  rationale + harness version pinning policy. Each of these already cost multiple failed
+  sessions and lives only in memory files today.
+- **Global agents** (`~/.claude/agents/`): `reviewer.md` (NO Bash/Write — structural; a
+  "read-only" instruction to a Bash-capable agent demonstrably does not hold),
+  `gardener.md` (cheap model, write-scoped to docs/ + .claude/), `worktree-worker.md`.
+- **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
+  verification-closeout — already good). Repo-tier skills come from the template layer here;
+  domain skills grow per-repo by the second-occurrence rule.
+- **Plugins**: enable only what maps to a workflow verb actually used; where a plugin overlaps
+  a local skill (pr-review-toolkit vs adversarial-review), pick ONE per verb and record the
+  choice in ESTATE.md. Delete disabled marketplace clones (~40MB of Glob noise).
+- **MCP policy**: tier-neutral default = single gateway (MCP_DOCKER) + deferred ToolSearch. A
+  repo earns a dedicated MCP server by the second-occurrence rule (a workflow needed it 3+
+  times). Per-tool write gates (approve only mutating tools) from T3. One config format per
+  vendor, dead entries removed at migration.
+- **Token instrumentation**: record a per-repo baseline (typical session cost) in tier.json at
+  migration; the Gardener PR reports its own token spend; scheduled agents carry a hard spend
+  cap (cheap model + effort low + one ≤100-line PR) and the auto-pause rule is the kill switch.
+  The blueprint's promise is token economy — measure it or it's a vibe.
+
+---
+
+## 7. Multi-vendor policy
+
+**Single-runtime by default.** No `.codex/` mirror unless a second vendor genuinely runs
+sessions in that repo (decision recorded in ESTATE.md per repo).
+
+- **Keep external bot reviewers everywhere at T3+** (Codex/Gemini on PRs): they are a free
+  external review tier that caught real bugs self-review missed. "PR must age so automation
+  weighs in" is load-bearing, not ceremony.
+- **If a second runtime is real** (olb today): thin vendor shim only — routing README +
+  runtime config + one dated `00_ACTIVE.md` pointer (edited on pivots; it propagated the
+  archive pivot in one 54-line edit). Shared skill BODIES with 4-line vendor adapters, plus a
+  CI parity-diff that fails on drift. Never forked SKILL.md mirrors — 10 of 13 drifted at
+  Taskdeck; "keep mirrors aligned" as a doc instruction never works.
+- **Resolve policy conflicts at the canon level**: one delegation policy stated once (in
+  AGENTS.md), vendor files link to it. (Today Codex says "spawn subagents without asking"
+  while CLAUDE.md says "only when asked" — same repo.)
+
+---
+
+## 8. Estate migration map
+
+Order chosen by risk × leverage. Fable does steps marked ★ (judgment); cheap models execute
+the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
+create a parallel plan (law 9).
+
+1. ★ **Global layer** (one evening, highest leverage): write `~/.claude/CLAUDE.md` +
+   ESTATE.md + MACHINE.md; settings diet; argv-aware deny floor + dispatcher + test matrix;
+   global agents; `git init` ~/.claude config; delete global detritus (pr600-review/,
+   teams/session-*, blocklist test entries, daemon.lock, disabled marketplaces, the four
+   stale Apr-9 bootstrap-*.ps1 after salvaging as template source).
+2. **olb hotfixes FIRST despite the blueprint order** — highest-stakes / lowest-hygiene combo
+   (production money, deployed daily): convert absolute-path hooks to `$CLAUDE_PROJECT_DIR`
+   (they silently break worktree agents today); verify branch protection actually requires
+   named checks via `gh api`. Two hours, real risk retired.
+3. **Tombstones + REVIVAL.md files** (30 min): jekyt, repos, Taskdeck-gemini,
+   TaskdeckDemoExpansion, pr812-fixes, AgentForge(+Archive), all junk wrappers;
+   REVIVAL.md for platform-identity and metricalgo/staticprofit (replacing the stale-path
+   245-line AGENTS.md). Then cold-archive or delete the dead duplicates (several GB of
+   search noise).
+4. ★ **Certify extract-api as the T2 reference**: extract its scaffold (CLAUDE.md split,
+   4 skills, self-tested hooks, BACKLOG protocol) into `templates/tier2/` here; write its
+   tier.json. First Gardener cycle on its 2,324-line ledger.
+5. **hq-private → T1 + `sensitive_data`**: add tier line + privacy denies; rename to
+   HUMAN_TODO.md convention or record alias. Verify it has a private remote (irreplaceable
+   content). Nothing else — it already conforms.
+6. ★ **Build the seed/bootstrapper CLI** (SPECS §9): `harness seed --tier N`, `harness
+   tier-up`, `harness audit`. Write-once germ; REFUSES to overwrite evolved files — the
+   bootstrap-*.ps1 scripts failed precisely by snapshotting evolved files.
+7. **Taskdeck → T3 diet, via its own tracked issues**: #1138 (STATUS → ≤150-line head +
+   rotation), #1275/ARCHIVE-07 (CI right-sizing: drop dual-OS matrix, path-filter, DELETE the
+   5/5-red nightly perf + 4/4-red mutation lanes under the red-lane law), #1276/ARCHIVE-08
+   (dead surface: ~1,000 lines of release/staging/SBOM YAML, ORCHESTRATION_STATE.md out of the
+   routed path, stale worktree dirs), #1269/ARCHIVE-01 (two-tier review gate = this
+   blueprint's T3 review pipeline). New small issues to seed: one-home policy collapse
+   (7 copies → 1), retire the .codex skill mirror (keep 00_ACTIVE.md + bot reviewers), strip
+   skill read-first ladders to region-map references, move bypassPermissions to
+   settings.local.json, remove/fence scripts/git/redistribute-commit-dates.ps1.
+   ★ Region maps: backend (Domain/Application/Infrastructure/Api), frontend
+   (views/stores/composables), automation/capture-review, CI+docs.
+8. **wealthlens-hq → T3**: tier.json codifying its relaxed-git authority (it is the written
+   spec for sub-T4 git freedom); Gardener on the 1,602-line ledger; red-lane law over its 11
+   workflows; ★ region maps for the 33.9k-file tree.
+9. ★ **olb → T4 formalization**: memory compaction (1,251-file .codex/memories + 111-file
+   memories/ + 12.6KB index → extract-api's 4-file endpoint is the target); encode its earned
+   rules (tagged-release pulls, forward-only migrations, UAI deploy sequencing, 2-review gate,
+   ratchets) into tier.json + CLAUDE.md; skill suite 21 → ~8; single-runtime decision for
+   Codex there (runtime with thin shim + parity CI, or bot-reviewer-only).
+10. **Memory graduation pass** across all 7 memory dirs: universal laws → global CLAUDE.md
+    (delete the duplicates same-commit), contradictions resolved (worktrees-broken vs -fixed),
+    session logs pruned, Options' 12.6KB index → one-liners.
+11. **Turn on the rhythm**: weekly Gardener on the 4 active repos only; weekly 15-minute
+    estate sitting; HUMAN_TODO aggregation into hq-private.
+12. ★ **Acceptance test before the Fable window closes**: hand a weaker model one
+    mapped-region task per active repo; fix whatever it stumbles on. Then flip the routing
+    table: Opus inherits harness-growth work, Sonnet runs mapped slices.
+
+---
+
+## 9. How this blueprint fails (watch for these)
+
+- **It becomes the next sprawl.** The harness obeys its own budgets: total standing harness
+  ≤500 lines at T3; the blueprint is subject to the one-home rule and Gardener pruning like
+  everything else. If the quarterly demotion review gets skipped, ceremony calcifies — same
+  disease, better names.
+- **The dispatcher is a single point of failure.** One bug drops the floor everywhere. It
+  fails CLOSED, ships with tests, and changes to it are always T4-class work.
+- **Caps degrade content instead of curating it.** The budget checker must emit ROTATE
+  instructions, never "trim to pass"; rotation is the Gardener's job, not inline deletion
+  under CI pressure.
+- **Cheap maintenance agents confidently corrupt canon.** They only ever open PRs; the human
+  merges. If merges become rubber stamps, the rail has already failed — auto-pause exists for
+  exactly this.
+- **Stale region maps misroute** — worse than no map. Stamps + max-age tripwires + the weekly
+  sitting; human edits outside the harness remain the known hole.
+- **Model routing misclassifies judgment as mechanical.** Default-up when unsure, and accept
+  the eroded savings.
+- **Gate fatigue at T3+.** Every local gate ≤60s; demotion must feel like honest right-sizing,
+  not failure — otherwise the ladder gets climbed once and then ignored.
+- **Promotion-by-incident** means most tier boundaries are paid for with one real failure.
+  Acceptable for a solo dev ONLY because irreversible-loss classes are floor-level from day 0
+  and never promotion-gated.
