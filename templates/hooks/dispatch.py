@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-FLOOR_VERSION = "1.2.0 (2026-07-06)"
+FLOOR_VERSION = "1.3.0 (2026-07-06)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -58,6 +58,61 @@ def is_absolute(p: str) -> bool:
 
 
 DANGEROUS_ROOTS = re.compile(r"^(/|~|~/|[a-zA-Z]:/?|/c/users/[^/]+|c:/users/[^/]+)$")
+
+# Env-var spellings of the home / user-profile root. Git Bash expands $HOME,
+# ${HOME}, and "$HOME" to the home dir, so `rm -rf $HOME` is byte-identical in
+# effect to the denied `rm -rf ~`. Matched AFTER norm_path (lowercased, trailing
+# slash stripped); double-quoted "$HOME" survives strip_quotes because it holds a $.
+ENV_ROOTS = re.compile(r'^"?(\$\{?home\}?|\$env:userprofile|%userprofile%)"?$', re.IGNORECASE)
+
+# git global options that consume a SEPARATE value token (git -C <dir> push ...).
+# If we do not skip the value, the first non-dash token (the value) is misread as
+# the subcommand and every push/reset/clean/checkout/restore rule is skipped.
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                   "--super-prefix", "--config-env"}
+
+# Command wrappers to skip so the REAL command head is matched (env git push …,
+# nice -n 5 git …). VAR=value assignment prefixes are skipped the same way.
+_WRAPPERS = {"env", "command", "builtin", "nice", "nohup", "time", "stdbuf", "xargs"}
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
+
+
+def command_head(toks):
+    """Normalize toks to (head, command_toks): strip leading VAR=val assignments
+    and known wrappers, drop the head's directory + .exe/.cmd suffix. So
+    `env FOO=bar /usr/bin/git.exe push` and `git push` both resolve head='git'
+    with command_toks starting at the git invocation."""
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if _ASSIGN.match(t):
+            i += 1
+            continue
+        base = _EXE_SUFFIX.sub("", t.replace("\\", "/").split("/")[-1]).lower()
+        if base in _WRAPPERS:
+            i += 1
+            while i < len(toks) and _ASSIGN.match(toks[i]):  # env VAR=val ...
+                i += 1
+            continue
+        return base, toks[i:]
+    return "", []
+
+
+def git_subcommand(toks):
+    """Return the git subcommand, skipping global options AND their value tokens.
+    toks starts at the git invocation (toks[0] is git[.exe])."""
+    i = 1
+    while i < len(toks):
+        t = toks[i]
+        if t in _GIT_VALUE_OPTS:
+            i += 2  # skip the option and its separate value
+            continue
+        if t.startswith("-"):
+            i += 1  # valueless global option, or --opt=value (glued)
+            continue
+        return t.lower()
+    return ""
 
 
 def load_tier(project_dir: str) -> dict:
@@ -114,24 +169,27 @@ def check(command: str, tier_cfg: dict, project_dir: str):
         return "deny", "Piping into Remove-Item/del deletes whatever upstream matched. Enumerate first, delete explicitly."
 
     for seg in segments(sanitized):
-        toks = tokens(seg)
+        raw = tokens(seg)
+        if not raw:
+            continue
+        # Normalize away wrappers / VAR=val / path + .exe so `env git`, `git.exe`,
+        # `/usr/bin/git`, `sudo.exe` all resolve to their real head (bypass fix).
+        head, toks = command_head(raw)
         if not toks:
             continue
-        head = toks[0].lower()
 
         if head == "sudo":
             return "deny", "sudo is blocked at the floor. If elevation is truly needed, the human runs it."
 
         # ---- git rules ----
         if head == "git":
-            sub = ""
-            for t in toks[1:]:
-                if not t.startswith("-"):
-                    sub = t.lower()
-                    break
+            sub = git_subcommand(toks)
+            # Args AFTER the subcommand, robust to leading global options
+            # (git -C <dir> push --force -> args = [--force, ...], not misaligned).
+            args = toks[toks.index(sub) + 1:] if sub in toks else []
 
             if sub == "push":
-                for t in toks[2:]:
+                for t in args:
                     if t == "--force" or (t.startswith("--force=")):
                         return "deny", "Force-push rewrites shared history. Use --force-with-lease on your own branch, or merge instead."
                     if t == "--force-with-lease" or t.startswith("--force-with-lease="):
@@ -143,27 +201,27 @@ def check(command: str, tier_cfg: dict, project_dir: str):
                     if t.startswith("+") and len(t) > 1:
                         return "deny", "A +refspec is a forced update in disguise."
 
-            if sub == "reset" and "--hard" in toks:
+            if sub == "reset" and "--hard" in args:
                 if strict:
                     return "deny", "T4/wave: hard reset discards work that may not be yours. Inspect state; ask."
                 if tier >= 3 and not relaxed:
                     return "ask", "T3: git reset --hard discards uncommitted work. Confirm you want this."
 
-            if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", t) for t in toks[2:]):
+            if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", t) for t in args):
                 if strict:
                     return "deny", "T4/wave: git clean -f deletes untracked files that may belong to another agent."
                 if tier >= 3 and not relaxed:
                     return "ask", "T3: git clean -f deletes untracked files. Confirm."
 
-            if sub == "checkout" and "--" in toks:
-                after = toks[toks.index("--") + 1:]
+            if sub == "checkout" and "--" in args:
+                after = args[args.index("--") + 1:]
                 if "." in after:
                     if strict:
                         return "deny", "T4/wave: checkout -- . wipes all local modifications."
                     if tier >= 3 and not relaxed:
                         return "ask", "T3: checkout -- . wipes local modifications. Confirm."
 
-            if sub == "restore" and "." in toks[2:] and "--staged" not in toks:
+            if sub == "restore" and "." in args and "--staged" not in args:
                 if strict:
                     return "deny", "T4/wave: git restore . wipes all local modifications."
                 if tier >= 3 and not relaxed:
@@ -180,7 +238,7 @@ def check(command: str, tier_cfg: dict, project_dir: str):
                     nt = norm_path(target)
                     if target == "*":
                         return "deny", "rm -rf * is a floor rule: enumerate and delete explicitly."
-                    if DANGEROUS_ROOTS.match(nt):
+                    if DANGEROUS_ROOTS.match(nt) or ENV_ROOTS.match(nt):
                         return "deny", f"rm -rf {target}: refusing a filesystem/home root."
                     if is_absolute(target):
                         proj = norm_path(project_dir) if project_dir else ""

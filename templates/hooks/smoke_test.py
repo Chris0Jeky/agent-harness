@@ -92,6 +92,30 @@ CASES = [
     ("git commit -F <(sudo x) -m wip", 1, {}, "deny"),       # process substitution scanned
     ("git stash `sudo id`", 1, {}, "deny"),                  # backticks scanned
     ('echo "total $(wc -l notes.md)"', 1, {}, "allow"),      # benign inner command
+    # --- v1.3.0: global-option value tokens must not hide the git subcommand ---
+    ("git -C . push --force", 1, {}, "deny"),
+    ("git -C /repo push --force origin main", 4, {}, "deny"),
+    ("git -C . push -f origin main", 2, {}, "deny"),
+    ("git -C . push origin +main", 1, {}, "deny"),
+    ("git -c core.pager=cat push --force origin main", 4, {}, "deny"),
+    ("git -C . reset --hard HEAD~3", 4, {}, "deny"),
+    ("git -C . clean -fd", 4, {}, "deny"),
+    ("git -C . push --force-with-lease origin feat", 2, {}, "allow"),  # own branch, T2
+    ("git -C . status", 1, {}, "allow"),                     # benign global-opt use
+    ("git -c user.name=x commit -m wip", 1, {}, "allow"),    # benign -c
+    # --- v1.3.0: env-var home root must be blocked like ~ ---
+    ("rm -rf $HOME", 1, {}, "deny"),
+    ("rm -rf ${HOME}", 1, {}, "deny"),
+    ('rm -rf "$HOME"', 1, {}, "deny"),
+    ("rm -rf $HOME/", 1, {}, "deny"),
+    ("rm -rf $HOME/build", 1, {}, "allow"),                  # subpath, like rm -rf ~/build
+    # --- v1.3.0: wrapper / path / .exe head normalization ---
+    ("git.exe push --force", 1, {}, "deny"),
+    ("/usr/bin/git push --force origin main", 1, {}, "deny"),
+    ("env git push --force", 1, {}, "deny"),
+    ("sudo.exe apt-get install x", 1, {}, "deny"),
+    ("FOO=bar git push --force", 1, {}, "deny"),
+    ("env FOO=bar git push --force", 1, {}, "deny"),
     # --- MUST ALLOW: false-positive regression tests ---
     ('git commit -m "block rm -rf / in the hook"', 1, {}, "allow"),
     ('git commit -m "prevent git push --force everywhere"', 4, {}, "allow"),
