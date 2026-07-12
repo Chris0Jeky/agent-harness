@@ -192,6 +192,11 @@ Effort is the first dial (cheaper than a model swap). Default-up when unsure. In
 sessions: pick per the table at session start; don't leave xhigh pinned globally for
 maintenance work.
 
+The current concrete calibration — which named model at which effort, any temporary access
+window, and the fan-out fleet caps — lives in the `model-effort-routing` global skill, not here.
+This table is the durable judgment-vs-mechanical shape; the skill carries the model-specific
+detail so it updates without a SPECS edit.
+
 ## §9 Bootstrapper CLI + ESTATE.md
 
 Home: this repo. Commands (PowerShell/Python, single implementation, no .sh/.ps1 twins):
@@ -246,8 +251,12 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - `~/.claude/prompts/ORCHESTRATOR_PROMPT.md` (13KB proto-blueprint): fold its state-file /
   task-lifecycle / dual-review / merge-gate content into the T3+ wave-mode skill and
   `.claude/agents/` definitions; retire the paste variant once those exist.
-- 3 global process skills (safe-shell, small-safe-slice, verification-closeout): keep as-is —
-  they already obey the ≤40-line stack-agnostic rule.
+- 5 global process skills: safe-shell, small-safe-slice, verification-closeout (≤40 lines each,
+  keep as-is); plus two ≤80-line workflow-mode skills — `guided-walkthrough` (backlog→numbered-q-N
+  guided mode: per item context + suggested action + owner tag + step-by-step for human-only items)
+  and `model-effort-routing` (effort→model→fan-out ladder; Opus 4.8 default reach, Fable-with-fallback
+  for the hardest work, fleet caps ≤3–5 / ≤8–12). These are the single home for their behavior;
+  global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
 - Plugins: keep pr-review-toolkit/code-review/feature-dev ONLY where a repo hasn't chosen its
   local skill for that verb (record per-repo in ESTATE.md); delete disabled marketplace clones.

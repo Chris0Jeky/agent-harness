@@ -92,7 +92,9 @@ consuming its output, or the first "wish I had a test" moment.
 
 ### T2 — Daily driver (template: extract-api, the estate's cleanest instance)
 - SessionStart hook prints a 4-line orientation (rules digest + next BACKLOG item + open
-  HUMAN_TODO items) — replaces doc re-reading at ~0 tokens.
+  HUMAN_TODO items) — replaces doc re-reading at ~0 tokens. When open HUMAN_TODO items + open
+  PRs exceed a threshold it appends a one-line nudge to run the `guided-walkthrough` skill (§6);
+  the skill is the home, the hook only points at it.
 - `HUMAN_TODO.md` (standard name; existing wired names like Taskdeck's OUTSTANDING_TASKS.md
   are grandfathered — note the alias in ESTATE.md): human-only items with IDs, surfaced in
   every summary, cleared only by the human.
@@ -204,7 +206,11 @@ The mechanism that makes "work in a self-contained region without digging into o
 when regions are disjoint, required context exceeds ~20k tokens, or an independent lens is
 structurally required (review). T0/T1 never fan out. Heuristics, not laws — deep coupling makes
 "disjoint" illusory (worktree waves leaked 5/6 despite protocols); when a fan-out produces
-merge conflicts, that's evidence the regions aren't real yet.
+merge conflicts, that's evidence the regions aren't real yet. **Right-size the fleet**: default
+≤3–5 subagents, a broad sweep/audit ≤8–12, never a reflexive fleet; put wide mechanical fan-out
+on a cheap model at low effort and reserve the top model + high/xhigh for the narrow judgment
+core. This is what stops a top-model session from spawning a subagent fleet that drains the
+budget before finishing — the `model-effort-routing` skill (§6) is the home for the sizing rules.
 
 **Stale-map risk**: a wrong map misroutes — worse than no map. Maps carry `Last-Verified:`
 stamps; the budget script flags >90 days; human edits outside the harness are the known hole
@@ -257,6 +263,11 @@ before switching models. Full table in SPECS §8; the shape:
   model, so this part is honestly a tripwire).
 - **Acceptance test for the whole blueprint**: a weaker model completes one mapped-region task
   per active repo without reading outside the region. That passing is the success criterion.
+- **Concrete ladder lives in the `model-effort-routing` skill** (§6): Opus 4.8 as the default
+  reach with effort dialed to the task; Fable only for the hardest work, with a named Opus-4.8
+  fallback and its access window; Haiku for mechanical; and the fan-out fleet caps (§3). The
+  blueprint keeps only the DURABLE rule — effort-first, judgment-vs-mechanical, default-up — so the
+  model-specific calibration can change without a blueprint edit.
 - **The Fable-now strategy**: spend the temporary top model WRITING STRUCTURE, not doing
   chores — global CLAUDE.md, deny floor + dispatcher, region maps for Taskdeck/olb, agent
   definitions, this repo — then adversarially review them with it. Judgment encoded in
@@ -293,8 +304,15 @@ from gone.
   "read-only" instruction to a Bash-capable agent demonstrably does not hold),
   `gardener.md` (cheap model, write-scoped to docs/ + .claude/), `worktree-worker.md`.
 - **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
-  verification-closeout — already good). Repo-tier skills come from the template layer here;
-  domain skills grow per-repo by the second-occurrence rule.
+  verification-closeout — already good); plus two ≤80-line workflow-mode skills: `guided-walkthrough`
+  (turns a cumulative backlog — HUMAN_TODO + open PRs + ledger blockers — into a numbered q-N
+  walkthrough with per-item context, suggested action, owner tag, and a step-by-step for human-only
+  items; the explicitly-requested exception to law-6 batching) and `model-effort-routing` (the
+  effort→model→agent-count ladder: Opus 4.8 as the default reach, Fable only for the hardest work
+  with a named fallback, and the §3 fan-out caps that stop a reflexive subagent fleet). Global
+  CLAUDE.md (law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
+  Repo-tier skills come from the template layer here; domain skills grow per-repo by the
+  second-occurrence rule.
 - **Plugins**: enable only what maps to a workflow verb actually used; where a plugin overlaps
   a local skill (pr-review-toolkit vs adversarial-review), pick ONE per verb and record the
   choice in ESTATE.md. Delete disabled marketplace clones (~40MB of Glob noise).
