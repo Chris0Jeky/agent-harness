@@ -343,6 +343,13 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 - **Resolve policy conflicts at the canon level**: one delegation policy stated once (in
   AGENTS.md), vendor files link to it. (Today Codex says "spawn subagents without asking"
   while CLAUDE.md says "only when asked" — same repo.)
+- **Global vendor mirror**: the universal laws Claude gets from `~/.claude/CLAUDE.md` reach Codex
+  through `~/.codex/AGENTS.md` (Codex's global personal-instructions file) — a faithful mirror of
+  the ten laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
+  and the floor note. It declares `~/.claude/CLAUDE.md` canonical and must be kept in sync (a
+  parity-diff belongs on the roadmap). This is WHY per-repo dual-runtime AGENTS.md files stay thin:
+  the universal rules arrive globally for Codex exactly as they do for Claude, so nothing is
+  restated per repo — only the vendor-runtime delta and repo-specific rules live in the repo file.
 
 ---
 
