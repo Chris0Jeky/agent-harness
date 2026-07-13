@@ -11,7 +11,7 @@ explicit where their hook/config contracts differ.
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
 | `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up Codex global sync |
-| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.1 bypass matrix. Deployed copies live in `~/.claude/hooks/` and per-repo hook adapters; `harness audit` detects drift |
+| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.1 bypass matrix. Codex global drift/install is explicit through `harness.py sync-global`; project adapter wiring remains repo-owned |
 | `templates/codex/` | Codex lifecycle-hook wiring; install paths are rendered at sync time |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 

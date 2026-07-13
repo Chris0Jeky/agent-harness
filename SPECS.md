@@ -165,9 +165,11 @@ absolute dispatcher path by `harness.py sync-global`.
 - **Fail-closed contract**: an unhandled exception in the PRE path returns deny-with-message
   ("dispatcher error — floor unavailable, fix hooks before proceeding"); POST/session paths
   fail open with a warning (nudges are not safety).
-- The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`); repos get a
-  copy at seed time; `harness audit` diffs copies against the template (bootstrap-drift guard).
-- Self-tested: `python .claude/hooks/smoke_test.py` (or `make test-hooks`) runs the §6 matrix
+- The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`). `harness.py seed`
+  writes only the runtime-neutral tier declaration. `harness.py sync-global` reports Codex global
+  drift in dry-run mode and installs reviewed copies only with explicit `--apply`; project hook
+  adapters remain repo-owned.
+- Self-tested: `python templates/hooks/smoke_test.py` runs the §6 matrix
   + one allow-case per event. A floor/dispatcher change is T4-class work in any repo.
   The matrix defines a bounded parser contract, not exhaustive shell-language coverage. The
   dispatcher is a defense-in-depth tripwire, not a shell sandbox or a substitute for runtime/OS

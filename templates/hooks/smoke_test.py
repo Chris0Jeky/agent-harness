@@ -510,6 +510,13 @@ CASES = [
     ("git push --dele origin old", 1, {}, "deny"),
     ("git push --mir origin", 1, {}, "deny"),
     ("git push --pru origin", 1, {}, "deny"),
+    ('git -C "C:/Path With Space/repo" push --force origin main', 1, {}, "deny"),
+    (
+        'git --git-dir "C:/Path With Space/repo/.git" push --force origin main',
+        1,
+        {},
+        "deny",
+    ),
     ("F=force; git push --$F origin main", 1, {}, "deny"),
     ('flag=-f; git push "$flag" origin main', 1, {}, "deny"),
     ("FLAGS=-rf; TARGET=/; rm $FLAGS $TARGET", 1, {}, "deny"),
@@ -603,6 +610,13 @@ CASES = [
     ("git push origin main", 1, {}, "allow"),
     ("git push -u origin feature", 1, {}, "allow"),
     ("git push --all origin", 1, {}, "allow"),
+    ('git -C "C:/Path With Space/repo" push origin main', 1, {}, "allow"),
+    (
+        'git --git-dir "C:/Path With Space/repo/.git" push origin main',
+        1,
+        {},
+        "allow",
+    ),
     ("git config --get remote.origin.push", 1, {}, "allow"),
     ("git config --unset alias.p", 1, {}, "allow"),
     ("git config user.name Example", 1, {}, "allow"),
@@ -1252,9 +1266,21 @@ def main():
     sensitive_remote_cases = []
     sensitive_cfg = {"tier": 2, "flags": {"sensitive_data": True}}
     for expected, resolver, label in (
-        ("deny", lambda _args, _cwd: (True, "public"), "sensitive public push"),
-        ("allow", lambda _args, _cwd: (False, "private"), "sensitive private push"),
-        ("deny", lambda _args, _cwd: (None, "unknown"), "sensitive unknown push"),
+        (
+            "deny",
+            lambda _args, _cwd, _globals: (True, "public"),
+            "sensitive public push",
+        ),
+        (
+            "allow",
+            lambda _args, _cwd, _globals: (False, "private"),
+            "sensitive private push",
+        ),
+        (
+            "deny",
+            lambda _args, _cwd, _globals: (None, "unknown"),
+            "sensitive unknown push",
+        ),
     ):
         got, _reason = dispatch_module.check(
             "git push origin main",
@@ -1264,6 +1290,29 @@ def main():
             remote_resolver=resolver,
         )
         sensitive_remote_cases.append((label, got, expected))
+    observed_git_globals = []
+
+    def context_remote_resolver(_args, _cwd, git_globals):
+        observed_git_globals.extend(git_globals)
+        return (True, "public-child")
+
+    context_decision, _reason = dispatch_module.check(
+        "git -C child push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=context_remote_resolver,
+    )
+    sensitive_remote_cases.extend(
+        [
+            ("sensitive git -C public push", context_decision, "deny"),
+            (
+                "sensitive resolver receives git repository context",
+                observed_git_globals,
+                ["-C", "child"],
+            ),
+        ]
+    )
     for label, got, expected in sensitive_remote_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
@@ -1322,6 +1371,48 @@ def main():
                 "git@github.com:example/push.git",
             )
         )
+        child = os.path.join(remote_project, "child repo")
+        os.makedirs(child)
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=child,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/public-child.git",
+            ],
+            cwd=child,
+            check=True,
+            capture_output=True,
+        )
+        remote_resolution_cases.extend(
+            [
+                (
+                    "git -C remote lookup keeps the child repository context",
+                    dispatch_module.push_remote(
+                        ["origin", "main"],
+                        remote_project,
+                        ["-C", "child repo"],
+                    ),
+                    "https://github.com/example/public-child.git",
+                ),
+                (
+                    "git --git-dir remote lookup keeps the selected repository",
+                    dispatch_module.push_remote(
+                        ["origin", "main"],
+                        remote_project,
+                        ["--git-dir", "child repo/.git"],
+                    ),
+                    "https://github.com/example/public-child.git",
+                ),
+            ]
+        )
     for label, got, expected in remote_resolution_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
@@ -1335,16 +1426,43 @@ def main():
         runtime_neutral_cases.extend(
             [
                 (
-                    "runtime-neutral tier takes precedence",
+                    "runtime-neutral tier tightens co-located legacy authority",
                     invoke_case("git reset --hard HEAD~1", project),
                     "deny",
                 ),
                 (
-                    "runtime-neutral overlay takes precedence",
+                    "runtime-neutral overlay tightens co-located legacy authority",
                     invoke_case("gh repo create leak --public", project),
                     "deny",
                 ),
             ]
+        )
+    with tempfile.TemporaryDirectory(dir=HERE) as project:
+        write_agent_tier(project, 1, {})
+        write_tier(project, 4, {"sensitive_data": True})
+        runtime_neutral_cases.extend(
+            [
+                (
+                    "legacy tier cannot be masked by runtime-neutral authority",
+                    invoke_case("git reset --hard HEAD~1", project),
+                    "deny",
+                ),
+                (
+                    "legacy overlay cannot be masked by runtime-neutral authority",
+                    invoke_case("gh repo create leak --public", project),
+                    "deny",
+                ),
+            ]
+        )
+    with tempfile.TemporaryDirectory(dir=HERE) as project:
+        write_agent_tier(project, 3, {"relaxed_work_loss_guards": True})
+        write_tier(project, 3, {"relaxed_work_loss_guards": False})
+        runtime_neutral_cases.append(
+            (
+                "co-located relaxed guard requires unanimous authority",
+                invoke_case("git reset --hard HEAD~1", project),
+                "ask",
+            )
         )
     for label, got, expected in runtime_neutral_cases:
         status = "ok" if got == expected else "FAIL"

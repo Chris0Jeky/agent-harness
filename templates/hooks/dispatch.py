@@ -48,6 +48,7 @@ _CWD_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
+_INERT_QUOTED = "__HARNESS_INERT_QUOTED_31C7__"
 
 
 def strip_quotes(text: str) -> str:
@@ -59,10 +60,10 @@ def strip_quotes(text: str) -> str:
     (Semantics ported from wealthlens-hq's earned pre_tool_use hardening: the
     naive strip-all-quotes let `git commit -m "wip $(rm -rf /)"` fail open.)
     """
-    text = _SINGLE_Q.sub(" ", text)
+    text = _SINGLE_Q.sub(_INERT_QUOTED, text)
 
     def _dq(m: "re.Match[str]") -> str:
-        return m.group(0) if re.search(r"(?<!\\)[$`]", m.group(0)) else " "
+        return m.group(0) if re.search(r"(?<!\\)[$`]", m.group(0)) else _INERT_QUOTED
 
     return _DOUBLE_Q.sub(_dq, text)
 
@@ -1328,7 +1329,9 @@ def command_output(argv: list[str], cwd: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def push_remote(args: list[str], project_dir: str) -> str:
+def push_remote(
+    args: list[str], project_dir: str, git_globals: list[str] | None = None
+) -> str:
     """Resolve the destination token/remote URL for a git push."""
     remote = ""
     value_options = {"--exec", "--receive-pack", "--push-option", "-o"}
@@ -1360,7 +1363,10 @@ def push_remote(args: list[str], project_dir: str) -> str:
         return ""
     if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
         return remote
-    return command_output(["git", "remote", "get-url", "--push", remote], project_dir)
+    return command_output(
+        ["git", *(git_globals or []), "remote", "get-url", "--push", remote],
+        project_dir,
+    )
 
 
 def github_repo_slug(remote: str) -> str:
@@ -1377,9 +1383,13 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
-def public_remote_status(args: list[str], project_dir: str) -> tuple[bool | None, str]:
+def public_remote_status(
+    args: list[str],
+    project_dir: str,
+    git_globals: list[str] | None = None,
+) -> tuple[bool | None, str]:
     """Return (is_public, label); None means privacy could not be established."""
-    remote = push_remote(args, project_dir)
+    remote = push_remote(args, project_dir, git_globals)
     if not remote:
         return None, "unresolved push remote"
     normalized = remote.lower()
@@ -1399,27 +1409,8 @@ def public_remote_status(args: list[str], project_dir: str) -> tuple[bool | None
     return None, slug
 
 
-def load_tier(project_dir: str) -> dict:
-    """Read and validate tier authority; absent -> sandbox defaults.
-
-    A present but unreadable or invalid declaration is a safety failure and must
-    propagate to the PRE-path fail-closed handler. The runtime-neutral location
-    takes precedence over the legacy Claude-specific location.
-    """
-    cfg = {"tier": 1, "flags": {}}
-    if not project_dir:
-        return cfg
-    path = None
-    for authority_dir in (".agent-harness", ".claude"):
-        candidate = os.path.join(project_dir, authority_dir, "tier.json")
-        try:
-            os.lstat(candidate)
-        except FileNotFoundError:
-            continue
-        path = candidate
-        break
-    if path is None:
-        return cfg
+def read_tier_file(path: str) -> dict:
+    """Read and strictly validate one tier declaration."""
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh, object_pairs_hook=reject_duplicate_keys)
     if not isinstance(data, dict):
@@ -1435,9 +1426,39 @@ def load_tier(project_dir: str) -> dict:
         for key, value in flags.items()
     ):
         raise ValueError("tier.json flags must map string names to booleans")
-    cfg["tier"] = tier
-    cfg["flags"] = flags
-    return cfg
+    return {"tier": tier, "flags": flags}
+
+
+def load_tier(project_dir: str) -> dict:
+    """Merge co-located runtime-neutral and legacy authority conservatively.
+
+    A present but unreadable or invalid declaration is a safety failure and must
+    propagate to the PRE-path fail-closed handler. During migration neither file
+    may mask a stricter tier or overlay in the other.
+    """
+    if not project_dir:
+        return {"tier": 1, "flags": {}}
+    configs = []
+    for authority_dir in (".agent-harness", ".claude"):
+        path = os.path.join(project_dir, authority_dir, "tier.json")
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        configs.append(read_tier_file(path))
+    if not configs:
+        return {"tier": 1, "flags": {}}
+
+    flags = {}
+    for cfg in configs:
+        for key, value in cfg["flags"].items():
+            if key == "relaxed_work_loss_guards":
+                continue
+            flags[key] = bool(flags.get(key)) or value
+    flags["relaxed_work_loss_guards"] = all(
+        bool(cfg["flags"].get("relaxed_work_loss_guards")) for cfg in configs
+    )
+    return {"tier": max(cfg["tier"] for cfg in configs), "flags": flags}
 
 
 def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
@@ -2058,15 +2079,16 @@ def check(
                         "Dynamic git-push options/refspecs cannot be inspected safely.",
                     )
                 for t in args:
-                    if any(
-                        t != dangerous and git_option_abbreviates(t, dangerous)
-                        for dangerous in (
-                            "--force",
-                            "--force-with-lease",
-                            "--delete",
-                            "--mirror",
-                            "--prune",
-                        )
+                    dangerous_options = {
+                        "--force",
+                        "--force-with-lease",
+                        "--delete",
+                        "--mirror",
+                        "--prune",
+                    }
+                    if t not in dangerous_options and any(
+                        git_option_abbreviates(t, dangerous)
+                        for dangerous in dangerous_options
                     ):
                         return (
                             "deny",
@@ -2138,7 +2160,11 @@ def check(
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
                 if sensitive:
-                    is_public, remote = remote_resolver(args, project_dir)
+                    is_public, remote = remote_resolver(
+                        args,
+                        project_dir,
+                        toks[1:subcommand_index],
+                    )
                     if is_public is True:
                         return (
                             "deny",
