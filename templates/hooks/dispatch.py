@@ -19,6 +19,11 @@ Contract (BLUEPRINT §2, SPECS §5-6):
 
 A change here must keep `smoke_test.py` green: python smoke_test.py
 """
+
+import base64
+import binascii
+import codecs
+import fnmatch
 import json
 import ntpath
 import os
@@ -27,13 +32,21 @@ import shlex
 import sys
 import tempfile
 
-FLOOR_VERSION = "1.3.2 (2026-07-13)"
+FLOOR_VERSION = "1.3.3 (2026-07-13)"
 
 # --- helpers ---------------------------------------------------------------
 
 _SINGLE_Q = re.compile(r"'[^']*'")
 _DOUBLE_Q = re.compile(r'"(?:\\.|[^"\\])*"')
-_QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+_QUOTED = re.compile(
+    r"\$'(?:\\.|[^'\\])*'|\$\"(?:\\.|[^\"\\])*\"|'[^']*'|\"(?:\\.|[^\"\\])*\""
+)
+_CWD_REFERENCE = re.compile(
+    r"(?:\$(?:\{(?:PWD|OLDPWD)\}|(?:PWD|OLDPWD)(?![A-Za-z0-9_])|"
+    r"\{env:(?:PWD|OLDPWD)\}|env:(?:PWD|OLDPWD)(?![A-Za-z0-9_]))|%CD%)",
+    re.IGNORECASE,
+)
+_LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 
 
 def strip_quotes(text: str) -> str:
@@ -53,7 +66,138 @@ def strip_quotes(text: str) -> str:
     return _DOUBLE_Q.sub(_dq, text)
 
 
-def quote_aware_segments(command: str) -> list[list[str]]:
+def remove_shell_line_continuations(text: str) -> str:
+    return re.sub(r"\\\r?\n", "", text)
+
+
+def powershell_unescape(text: str) -> str:
+    """Conservatively expose tokens hidden with PowerShell backtick escapes."""
+    escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "e": "\x1b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    result = []
+    index = 0
+    while index < len(text):
+        if text[index] != "`" or index + 1 >= len(text):
+            result.append(text[index])
+            index += 1
+            continue
+        next_char = text[index + 1]
+        if next_char == "\r" and index + 2 < len(text) and text[index + 2] == "\n":
+            index += 3
+            continue
+        if next_char == "\n":
+            index += 2
+            continue
+        unicode_match = re.match(r"u\{([0-9A-Fa-f]{1,6})\}", text[index + 1 :])
+        if unicode_match:
+            try:
+                result.append(chr(int(unicode_match.group(1), 16)))
+            except ValueError:
+                result.append("\ufffd")
+            index += 1 + len(unicode_match.group(0))
+            continue
+        result.append(escapes.get(next_char.lower(), next_char))
+        index += 2
+    return "".join(result)
+
+
+def cmd_unescape(text: str) -> str:
+    """Expose cmd.exe caret-escaped command and option characters."""
+    text = re.sub(r"\^(?:\r\n|\r|\n)", "", text)
+    return re.sub(r"\^(.)", r"\1", text, flags=re.DOTALL)
+
+
+_LITERAL_CALL_OPERATOR = re.compile(
+    r"(?:^|(?<=[;|{}\n]))\s*[&.]\s*\(\s*(['\"])([A-Za-z0-9_.\\/-]+)\1\s*\)"
+)
+
+
+def normalize_literal_call_operators(text: str) -> str:
+    """Expose PowerShell &('command') / .('command') literal invocations."""
+    return _LITERAL_CALL_OPERATOR.sub(lambda match: f" {match.group(2)}", text)
+
+
+def is_dynamic_value(text: str) -> bool:
+    candidate = text.strip()
+    return bool(
+        re.fullmatch(
+            r"(?:\$\{?[A-Za-z_][A-Za-z0-9_:]*\}?|%[^%]+%|![^!]+!)",
+            candidate,
+        )
+    )
+
+
+def has_dynamic_shell_token(token: str) -> bool:
+    lowered = token.lower()
+    if lowered.endswith(":$false") or lowered.endswith(":$true"):
+        return False
+    return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token))
+
+
+_QUOTED_HEREDOC = re.compile(
+    r"<<(?P<tabs>-)?\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")"
+)
+
+
+def inert_heredoc_receiver(header: str) -> bool:
+    """Return whether a quoted heredoc is data for a known non-executing sink."""
+    if "|" in header:
+        return False
+    parsed = quote_aware_segments(header.split("<<", 1)[0])
+    if not parsed:
+        return False
+    head, toks = command_head(parsed[-1])
+    if head == "cat":
+        return ">" not in header
+    if head == "git" and git_subcommand(toks) == "commit":
+        return ("-F" in toks or "--file" in toks) and "-" in toks
+    if head == "gh" and len(toks) >= 3 and toks[1:3] == ["pr", "create"]:
+        return "--body-file" in toks and "-" in toks
+    return False
+
+
+def strip_quoted_heredoc_bodies(command: str) -> str:
+    """Remove inert bodies whose quoted delimiter disables shell expansion."""
+    lines = command.splitlines(keepends=True)
+    result = []
+    pending: list[tuple[str, bool]] = []
+    in_body: tuple[str, bool] | None = None
+    for line in lines:
+        if in_body:
+            delimiter, strip_tabs = in_body
+            candidate = line.rstrip("\r\n")
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                result.append("\n")
+                in_body = pending.pop(0) if pending else None
+            else:
+                result.append("\n")
+            continue
+        result.append(line)
+        for match in _QUOTED_HEREDOC.finditer(line):
+            if inert_heredoc_receiver(line):
+                pending.append(
+                    (
+                        match.group("single") or match.group("double"),
+                        bool(match.group("tabs")),
+                    )
+                )
+        if pending:
+            in_body = pending.pop(0)
+    return "".join(result)
+
+
+def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
     """Tokenize executable argv while protecting quoted operator characters.
 
     This preserves quoted flags and paths for policy checks without mistaking
@@ -64,10 +208,25 @@ def quote_aware_segments(command: str) -> list[list[str]]:
     def protect(match: "re.Match[str]") -> str:
         placeholder = f"__HARNESS_QUOTED_{len(quoted)}__"
         token = match.group(0)
-        try:
-            value = shlex.split(token, posix=True)[0]
-        except (IndexError, ValueError):
-            value = token[1:-1]
+        if token.startswith("$'"):
+            try:
+                value = codecs.decode(token[2:-1], "unicode_escape")
+            except (UnicodeDecodeError, ValueError):
+                value = "__HARNESS_UNRESOLVED_ANSI_C_QUOTE__"
+        elif token.startswith('$"'):
+            if re.search(r"(?<!\\)[$`]", token[2:-1]):
+                value = "__HARNESS_UNRESOLVED_LOCALE_QUOTE__"
+            else:
+                try:
+                    value = shlex.split(token[1:], posix=True)[0]
+                except (IndexError, ValueError):
+                    value = "__HARNESS_UNRESOLVED_LOCALE_QUOTE__"
+        else:
+            try:
+                value = shlex.split(token, posix=True)[0]
+            except (IndexError, ValueError):
+                value = token[1:-1]
+        value = value.replace(",", _LITERAL_COMMA)
         quoted[placeholder] = value
         return placeholder
 
@@ -82,12 +241,12 @@ def quote_aware_segments(command: str) -> list[list[str]]:
         return []
 
     separators = set(";&|\n")
-    result: list[list[str]] = []
+    result: list[tuple[list[str], str]] = []
     current: list[str] = []
     for raw_token in raw_tokens:
         if raw_token and all(char in separators for char in raw_token):
             if current:
-                result.append(current)
+                result.append((current, raw_token))
                 current = []
             continue
         token = raw_token
@@ -98,8 +257,14 @@ def quote_aware_segments(command: str) -> list[list[str]]:
             token = token.replace(placeholder, replacement)
         current.append(token)
     if current:
-        result.append(current)
+        result.append((current, ""))
     return result
+
+
+def quote_aware_segments(command: str) -> list[list[str]]:
+    return [
+        segment for segment, _operator in quote_aware_segments_with_operators(command)
+    ]
 
 
 def norm_path(p: str) -> str:
@@ -149,8 +314,54 @@ def is_within_path(target: str, root: str) -> bool:
         return False
 
 
+def is_within_path_lexical(target: str, root: str) -> bool:
+    """Containment without dereferencing symlinks, for authority ancestry only."""
+    try:
+        raw_target = os.path.expanduser(target.strip("\"'"))
+        raw_root = os.path.expanduser(root.strip("\"'"))
+        windows = bool(
+            re.match(r"^[A-Za-z]:[\\/]", raw_target)
+            and re.match(r"^[A-Za-z]:[\\/]", raw_root)
+        )
+        path_module = ntpath if windows else os.path
+        canonical_target = path_module.normcase(
+            path_module.normpath(path_module.abspath(raw_target))
+        )
+        canonical_root = path_module.normcase(
+            path_module.normpath(path_module.abspath(raw_root))
+        )
+        return (
+            path_module.commonpath([canonical_target, canonical_root]) == canonical_root
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def is_same_path(left: str, right: str) -> bool:
+    try:
+        left_flavor, canonical_left = canonical_path(left)
+        right_flavor, canonical_right = canonical_path(right)
+        return left_flavor == right_flavor and canonical_left == canonical_right
+    except (OSError, ValueError):
+        return False
+
+
+def is_safe_containment_root(root: str) -> bool:
+    """Reject filesystem roots and the user home as deletion boundaries."""
+    try:
+        flavor, canonical_root = canonical_path(root)
+        path_module = ntpath if flavor == "windows" else os.path
+        if path_module.dirname(canonical_root) == canonical_root:
+            return False
+        if DANGEROUS_ROOTS.match(norm_path(canonical_root)):
+            return False
+        return not is_same_path(canonical_root, os.path.expanduser("~"))
+    except (OSError, ValueError):
+        return False
+
+
 def is_within_project(target: str, project_dir: str) -> bool:
-    return is_within_path(target, project_dir)
+    return is_safe_containment_root(project_dir) and is_within_path(target, project_dir)
 
 
 def is_within_temp(target: str) -> bool:
@@ -161,7 +372,7 @@ def is_within_temp(target: str) -> bool:
         home_flavor, canonical_home = canonical_path(os.path.expanduser("~"))
     except (OSError, ValueError):
         return False
-    if DANGEROUS_ROOTS.match(norm_path(canonical_root)):
+    if not is_safe_containment_root(canonical_root):
         return False
     if root_flavor == home_flavor and canonical_root == canonical_home:
         return False
@@ -169,30 +380,340 @@ def is_within_temp(target: str) -> bool:
         return False
     path_module = ntpath if target_flavor == "windows" else os.path
     try:
-        return path_module.commonpath([canonical_target, canonical_root]) == canonical_root
+        return (
+            path_module.commonpath([canonical_target, canonical_root]) == canonical_root
+        )
     except ValueError:
         return False
 
 
-DANGEROUS_ROOTS = re.compile(r"^(/|~|~/|[a-zA-Z]:/?|/c/users/[^/]+|c:/users/[^/]+)$")
+DANGEROUS_ROOTS = re.compile(
+    r"^(/|~|~/|[a-zA-Z]:/?|/(?:mnt/)?[a-zA-Z]/users/[^/]+|c:/users/[^/]+)$"
+)
 
 # Env-var spellings of the home / user-profile root. Git Bash expands $HOME,
 # ${HOME}, and "$HOME" to the home dir, so `rm -rf $HOME` is byte-identical in
 # effect to the denied `rm -rf ~`. Matched AFTER norm_path (lowercased, trailing
 # slash stripped); double-quoted "$HOME" survives strip_quotes because it holds a $.
-ENV_ROOTS = re.compile(r'^"?(\$\{?home\}?|\$env:userprofile|%userprofile%)"?$', re.IGNORECASE)
+ENV_ROOTS = re.compile(
+    r'^"?(\$\{?home\}?|\$env:userprofile|%userprofile%)"?$', re.IGNORECASE
+)
+
+_SECRET_PATH = re.compile(
+    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\.|id_rsa|\.pem$",
+    re.IGNORECASE,
+)
+_SECRET_GLOB_PROBES = {
+    ".env",
+    ".env.local",
+    "credentials.json",
+    "credential.txt",
+    "secret.txt",
+    "secrets.json",
+    "id_rsa",
+    "key.pem",
+}
+
+
+def is_secret_path(target: str) -> bool:
+    normalized = target.replace(_LITERAL_COMMA, ",").replace("\\", "/")
+    if _SECRET_PATH.search(normalized):
+        return True
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    return any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES)
+
+
+def token_mentions_secret_path(token: str) -> bool:
+    """Return True when a shell token embeds a secret-looking path.
+
+    Output options and language APIs commonly bind the path to punctuation
+    (``of=.env``, ``-OutFile:.env``, ``WriteAllText('.env', ...)``).  Split
+    those syntactic wrappers before applying the canonical path predicate.
+    """
+    normalized = token.replace(_LITERAL_COMMA, ",")
+    candidates = [normalized]
+    candidates.extend(
+        part.strip("'\"[]{}() ;") for part in re.split(r"[=,:()]", normalized) if part
+    )
+    return any(candidate and is_secret_path(candidate) for candidate in candidates)
+
 
 # git global options that consume a SEPARATE value token (git -C <dir> push ...).
 # If we do not skip the value, the first non-dash token (the value) is misread as
 # the subcommand and every push/reset/clean/checkout/restore rule is skipped.
-_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                   "--super-prefix", "--config-env"}
+_GIT_VALUE_OPTS = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--config-env",
+}
 
 # Command wrappers to skip so the REAL command head is matched (env git push …,
 # nice -n 5 git …). VAR=value assignment prefixes are skipped the same way.
-_WRAPPERS = {"env", "command", "builtin", "nice", "nohup", "time", "stdbuf", "xargs"}
+_WRAPPERS = {
+    "env",
+    "command",
+    "builtin",
+    "exec",
+    "nice",
+    "nohup",
+    "time",
+    "timeout",
+    "ionice",
+    "setsid",
+    "chroot",
+    "busybox",
+    "toybox",
+    "stdbuf",
+    "xargs",
+}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
+_OPAQUE_WRAPPER = "__harness_opaque_wrapper__"
+
+
+def _after_separate_value(toks: list[str], index: int) -> int | None:
+    return index + 2 if index + 1 < len(toks) else None
+
+
+def wrapper_command_index(name: str, toks: list[str], index: int) -> int | None:
+    """Return a wrapper's executable index; None means options are opaque."""
+    current = index + 1
+    while current < len(toks):
+        token = toks[current]
+        lowered = token.lower()
+        if token == "--":
+            if name == "timeout":
+                return current + 2 if current + 2 < len(toks) else len(toks)
+            return current + 1
+
+        if name == "env":
+            if _ASSIGN.match(token):
+                current += 1
+                continue
+            if lowered in {"-i", "--ignore-environment", "-0", "--null"}:
+                current += 1
+                continue
+            if lowered in {"-u", "--unset"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if lowered.startswith("--unset=") or (
+                lowered.startswith("-u") and len(token) > 2
+            ):
+                current += 1
+                continue
+            # These options synthesize argv or change cwd, so the execution
+            # context cannot be reconstructed safely by the floor.
+            if lowered in {"-c", "--chdir", "-s", "--split-string"} or any(
+                lowered.startswith(prefix)
+                for prefix in ("--chdir=", "--split-string=", "-c", "-s")
+            ):
+                return None
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name in {"command", "builtin"}:
+            if token in {"-v", "-V"}:
+                return len(toks)  # lookup only; no wrapped command executes
+            if token == "-p":
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "exec":
+            if token in {"-c", "-l"}:
+                current += 1
+                continue
+            if token == "-a":
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "nice":
+            if lowered in {"-n", "--adjustment"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if (
+                lowered.startswith("--adjustment=")
+                or re.fullmatch(r"-n[+-]?\d+", lowered)
+                or re.fullmatch(r"-[+-]?\d+", lowered)
+            ):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "nohup":
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "time":
+            if lowered in {
+                "-p",
+                "--portability",
+                "-a",
+                "--append",
+                "-v",
+                "--verbose",
+                "--quiet",
+                "-q",
+            }:
+                current += 1
+                continue
+            if lowered in {"-f", "--format", "-o", "--output"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if any(
+                lowered.startswith(prefix)
+                for prefix in ("--format=", "--output=", "-f", "-o")
+            ):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "timeout":
+            if lowered in {"--preserve-status", "--foreground", "--verbose"}:
+                current += 1
+                continue
+            if lowered in {"-s", "--signal", "-k", "--kill-after"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if any(
+                lowered.startswith(prefix)
+                for prefix in ("--signal=", "--kill-after=", "-s", "-k")
+            ):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current + 1 if current + 1 < len(toks) else len(toks)
+
+        if name == "ionice":
+            if token in {"-t"} or lowered in {"--ignore"}:
+                current += 1
+                continue
+            if token in {"-c", "-n"} or lowered in {"--class", "--classdata"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if token in {"-p", "-P", "-u"} or lowered in {
+                "--pid",
+                "--pgid",
+                "--uid",
+            }:
+                return None
+            if any(
+                token.startswith(prefix) and len(token) > 2 for prefix in ("-c", "-n")
+            ) or any(
+                lowered.startswith(prefix) for prefix in ("--class=", "--classdata=")
+            ):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "setsid":
+            if lowered in {"-c", "--ctty", "-f", "--fork", "-w", "--wait"}:
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "chroot":
+            return None
+
+        if name in {"busybox", "toybox"}:
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "stdbuf":
+            if lowered in {"-i", "--input", "-o", "--output", "-e", "--error"}:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if any(
+                lowered.startswith(prefix)
+                for prefix in (
+                    "--input=",
+                    "--output=",
+                    "--error=",
+                    "-i",
+                    "-o",
+                    "-e",
+                )
+            ):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        if name == "xargs":
+            if token in {"-0", "-r", "-t", "-p", "-x", "-o"} or lowered in {
+                "--null",
+                "--no-run-if-empty",
+                "--verbose",
+                "--interactive",
+                "--exit",
+                "--open-tty",
+                "--show-limits",
+            }:
+                current += 1
+                continue
+            short_values = {"-a", "-E", "-e", "-I", "-L", "-l", "-n", "-P", "-s", "-d"}
+            long_values = {
+                "--arg-file",
+                "--eof",
+                "--replace",
+                "--max-lines",
+                "--max-args",
+                "--max-procs",
+                "--max-chars",
+                "--delimiter",
+            }
+            if token in short_values or lowered in long_values:
+                current = _after_separate_value(toks, current)
+                if current is None:
+                    return None
+                continue
+            if any(
+                token.startswith(prefix) and len(token) > 2 for prefix in short_values
+            ) or any(lowered.startswith(f"{option}=") for option in long_values):
+                current += 1
+                continue
+            if token.startswith("-"):
+                return None
+            return current
+
+        return None
+    return len(toks)
 
 
 def command_head(toks):
@@ -207,18 +728,33 @@ def command_head(toks):
             i += 1
             continue
         base = _EXE_SUFFIX.sub("", t.replace("\\", "/").split("/")[-1]).lower()
+        if base.startswith("microsoft.powershell."):
+            for qualified_head in (
+                "remove-item",
+                "rename-item",
+                "set-content",
+                "add-content",
+                "clear-content",
+                "copy-item",
+                "move-item",
+                "out-file",
+                "new-item",
+            ):
+                if base.endswith(qualified_head):
+                    base = qualified_head
+                    break
         if base in _WRAPPERS:
-            i += 1
-            while i < len(toks) and _ASSIGN.match(toks[i]):  # env VAR=val ...
-                i += 1
+            next_index = wrapper_command_index(base, toks, i)
+            if next_index is None:
+                return _OPAQUE_WRAPPER, toks[i:]
+            i = next_index
             continue
         return base, toks[i:]
     return "", []
 
 
-def git_subcommand(toks):
-    """Return the git subcommand, skipping global options AND their value tokens.
-    toks starts at the git invocation (toks[0] is git[.exe])."""
+def git_subcommand_index(toks):
+    """Return the git subcommand index after global options, or None."""
     i = 1
     while i < len(toks):
         t = toks[i]
@@ -228,8 +764,167 @@ def git_subcommand(toks):
         if t.startswith("-"):
             i += 1  # valueless global option, or --opt=value (glued)
             continue
-        return t.lower()
-    return ""
+        return i
+    return None
+
+
+def git_subcommand(toks):
+    """Return the normalized git subcommand after global options."""
+    index = git_subcommand_index(toks)
+    return toks[index].lower() if index is not None else ""
+
+
+def git_inline_alias(toks: list[str], subcommand: str) -> str | None:
+    """Return an inline `git -c alias.name=...` expansion for this invocation."""
+    index = 1
+    result = None
+    while index < len(toks):
+        token = toks[index]
+        config_value = None
+        if token == "-c" and index + 1 < len(toks):
+            config_value = toks[index + 1]
+            index += 2
+        elif token.startswith("-c") and len(token) > 2:
+            config_value = token[2:]
+            index += 1
+        else:
+            index += 1
+        if not config_value or "=" not in config_value:
+            continue
+        key, value = config_value.split("=", 1)
+        if key.lower() == f"alias.{subcommand}".lower():
+            result = value
+    return result
+
+
+def git_inline_configs(toks: list[str]) -> dict[str, list[str]]:
+    """Return every inline git config value, preserving multi-valued keys."""
+    result: dict[str, list[str]] = {}
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        config_value = None
+        if token == "-c" and index + 1 < len(toks):
+            config_value = toks[index + 1]
+            index += 2
+        elif token.startswith("-c") and len(token) > 2:
+            config_value = token[2:]
+            index += 1
+        else:
+            index += 1
+        if config_value and "=" in config_value:
+            key, value = config_value.split("=", 1)
+            result.setdefault(key.lower(), []).append(value)
+    return result
+
+
+def git_config_env_keys(toks: list[str]) -> list[str] | None:
+    """Return ``--config-env`` keys; None means malformed/opaque syntax."""
+    keys = []
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        config_env = None
+        if token == "--config-env":
+            if index + 1 >= len(toks):
+                return None
+            config_env = toks[index + 1]
+            index += 2
+        elif token.startswith("--config-env="):
+            config_env = token.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+        if config_env is None:
+            continue
+        if "=" not in config_env:
+            return None
+        key, variable = config_env.split("=", 1)
+        if not key or not variable:
+            return None
+        keys.append(key.lower())
+    return keys
+
+
+def has_git_config_environment(raw: list[str]) -> bool:
+    """Detect per-command or inherited Git config environment injection."""
+    if any(name.upper().startswith("GIT_CONFIG") for name in os.environ):
+        return True
+    for token in raw:
+        base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
+        if base == "git":
+            break
+        assignment = _ASSIGN.match(token)
+        if assignment:
+            name = token.split("=", 1)[0]
+            if name.upper().startswith("GIT_CONFIG"):
+                return True
+    return False
+
+
+def is_git_config_environment_mutation(raw: list[str]) -> bool:
+    """Detect shell commands that establish Git config injection state."""
+    if not raw:
+        return False
+    first = raw[0].lower()
+    if re.match(r"^\$env:git_config[a-z0-9_]*=", first, re.IGNORECASE):
+        return True
+    if first in {"export", "set", "setx"}:
+        return any(
+            re.match(r'^"?git_config[a-z0-9_]*=', token, re.IGNORECASE)
+            for token in raw[1:]
+        )
+    if first in {"set-item", "new-item", "si", "ni"}:
+        return any(
+            re.match(r"^(?:env:|environment::)git_config", token, re.IGNORECASE)
+            for token in raw[1:]
+        )
+    return False
+
+
+def git_option_abbreviates(token: str, dangerous: str) -> bool:
+    """Git accepts unambiguous long-option prefixes; fail closed on them."""
+    option = token.split("=", 1)[0]
+    return option.startswith("--") and len(option) >= 4 and dangerous.startswith(option)
+
+
+_GIT_CONFIG_READ_FLAGS = {
+    "--get",
+    "--get-all",
+    "--get-regexp",
+    "--get-urlmatch",
+    "--list",
+    "-l",
+    "--show-origin",
+    "--show-scope",
+    "--get-color",
+    "--get-colorbool",
+}
+_GIT_CONFIG_REMOVAL_FLAGS = {"--unset", "--unset-all", "--remove-section"}
+
+
+def dangerous_git_config_mutation(args: list[str]) -> bool:
+    """Reject writes that can persist force/mirror behavior behind a later push."""
+    lowered = [token.lower() for token in args]
+    if any(token in _GIT_CONFIG_READ_FLAGS for token in lowered):
+        return False
+    if any(token in _GIT_CONFIG_REMOVAL_FLAGS for token in lowered):
+        return False
+    protected_index = next(
+        (
+            index
+            for index, token in enumerate(lowered)
+            if re.fullmatch(r"alias\.[^.]+", token)
+            or re.fullmatch(r"remote\.[^.]+\.(?:push|mirror)", token)
+        ),
+        None,
+    )
+    if protected_index is None:
+        return False
+    # A lone key is the legacy read form (`git config section.key`).
+    return protected_index + 1 < len(args) or any(
+        token in {"--add", "--replace-all", "--rename-section"} for token in lowered
+    )
 
 
 _POWERSHELL_ENV = re.compile(
@@ -278,9 +973,12 @@ def resolve_delete_operand(
     *,
     powershell_semantics: bool,
     cwd_uncertain: bool,
+    cwd_changed: bool,
 ) -> str | None:
     """Resolve a recursive-delete operand for canonical containment checks."""
-    raw = target
+    raw = target.replace(_LITERAL_COMMA, ",")
+    if cwd_changed and _CWD_REFERENCE.search(raw):
+        return None
     if re.search(r"\$\(|@\(|`|[<>]\(|\{[^{}]*(?:,|\.\.)[^{}]*\}", raw):
         return None
     if powershell_semantics:
@@ -297,7 +995,7 @@ def resolve_delete_operand(
     expanded = expand_environment_references(raw)
     if expanded is None:
         return None
-    if re.search(r"\$|%[A-Za-z_][A-Za-z0-9_]*%|@\(", expanded):
+    if re.search(r"\$|%[^%]+%|![^!]+!|@\(", expanded):
         return None
 
     drive, drive_tail = ntpath.splitdrive(expanded)
@@ -330,15 +1028,131 @@ def is_powershell_recurse_flag(token: str) -> bool:
     return bool(name) and "recurse".startswith(name.lower())
 
 
+def powershell_bound_value(token: str, names: set[str]) -> tuple[bool, str]:
+    """Return a colon-bound PowerShell parameter value, including abbreviations."""
+    if not token.startswith("-"):
+        return False, ""
+    name, separator, value = token.lstrip("-").partition(":")
+    lowered = name.lower()
+    if separator and lowered and any(full.startswith(lowered) for full in names):
+        return True, value
+    return False, ""
+
+
+def location_transition(
+    head: str,
+    toks: list[str],
+    command_cwd: str,
+    cwd_uncertain: bool,
+    cwd_changed: bool,
+) -> tuple[str, bool]:
+    """Resolve a static location change; dynamic/pop transitions become unknown."""
+    if head in {"popd", "pop-location"}:
+        return command_cwd, True
+    powershell_semantics = head in {
+        "push-location",
+        "set-location",
+        "sl",
+    }
+    target = None
+    for token in toks[1:]:
+        is_bound_path, bound_path = powershell_bound_value(
+            token,
+            {"path", "literalpath"},
+        )
+        if is_bound_path:
+            target = bound_path
+            break
+        if token in {"--", "/d"} or token.startswith("-"):
+            continue
+        target = token
+        break
+    if (
+        not target
+        or re.fullmatch(r"@[A-Za-z_][A-Za-z0-9_]*", target)
+        or re.fullmatch(r"[+-]\d*", target)
+        or (
+            re.match(r"^[A-Za-z][A-Za-z0-9_.-]+:", target)
+            and not _FILESYSTEM_PROVIDER.match(target)
+        )
+        or ("," in target and _LITERAL_COMMA not in target)
+    ):
+        return command_cwd, True
+    resolved = resolve_delete_operand(
+        target,
+        command_cwd,
+        powershell_semantics=powershell_semantics,
+        cwd_uncertain=cwd_uncertain,
+        cwd_changed=cwd_changed,
+    )
+    if resolved is None:
+        return command_cwd, True
+    return resolved, False
+
+
+def decode_powershell_command(value: str) -> str:
+    """Decode PowerShell -EncodedCommand's strict Base64 UTF-16LE contract."""
+    try:
+        raw = base64.b64decode(value, validate=True)
+        if not raw or len(raw) % 2:
+            raise ValueError("encoded command has invalid UTF-16LE length")
+        return raw.decode("utf-16-le")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("cannot safely decode PowerShell encoded command") from exc
+
+
+def unwrap_powershell_scriptblock(script: str) -> str:
+    """Expose the executable body of a simple outer PowerShell script block."""
+    candidate = script.strip()
+    candidate = re.sub(r"^[&.]\s*(?=\{)", "", candidate, count=1)
+    if candidate.startswith("{"):
+        depth = 0
+        quote = None
+        escaped = False
+        for index, char in enumerate(candidate):
+            if escaped:
+                escaped = False
+                continue
+            if char in {"\\", "`"}:
+                escaped = True
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    body = candidate[1:index].strip()
+                    suffix = candidate[index + 1 :].strip()
+                    if suffix.startswith((";", "|", "&")):
+                        return f"{body} {suffix}"
+                    return body
+    return candidate
+
+
 def recursive_delete_decision(
     head: str,
     toks: list[str],
     project_dir: str,
     command_cwd: str,
     cwd_uncertain: bool,
+    cwd_changed: bool,
+    complete_argv: bool,
 ) -> tuple[str, str] | None:
     """Check POSIX, PowerShell, and cmd recursive-delete spellings."""
+    delete_heads = {"rm", "remove-item", "ri", "del", "erase", "rd", "rmdir"}
+    if head in delete_heads and any(
+        has_dynamic_shell_token(token) for token in toks[1:]
+    ):
+        return "deny", "Dynamic delete options/targets cannot be inspected safely."
     if head == "rm":
+
         def has_short_flag(token: str, flag: str) -> bool:
             return (
                 token.startswith("-")
@@ -346,50 +1160,74 @@ def recursive_delete_decision(
                 and flag in token[1:].lower()
             )
 
+        def has_long_flag(token: str, name: str) -> bool:
+            if not token.startswith("--"):
+                return False
+            option = token[2:].partition("=")[0].lower()
+            return bool(option) and name.startswith(option)
+
         is_recursive = any(
-            token.lower() == "--recursive" or has_short_flag(token, "r")
+            has_long_flag(token, "recursive") or has_short_flag(token, "r")
             for token in toks[1:]
         )
         is_force = any(
-            token.lower() == "--force" or has_short_flag(token, "f")
+            has_long_flag(token, "force") or has_short_flag(token, "f")
             for token in toks[1:]
         )
         targets = [t for t in toks[1:] if not t.startswith("-")]
         if is_recursive and is_force:
             if not targets:
-                return "deny", "rm -rf with no clear target."
+                if complete_argv:
+                    return "deny", "rm -rf with no clear target."
+                return None
             decision = check_delete_targets(
                 targets,
                 project_dir,
                 command_cwd,
                 powershell_semantics=False,
                 cwd_uncertain=cwd_uncertain,
+                cwd_changed=cwd_changed,
                 label="rm -rf",
             )
             if decision:
                 return decision
 
-    powershell_heads = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"}
+    powershell_heads = delete_heads
     if head not in powershell_heads:
         return None
+    if any(re.fullmatch(r"@[A-Za-z_][A-Za-z0-9_]*", token) for token in toks[1:]):
+        return "deny", "Cannot safely inspect a splatted recursive-delete command."
     powershell_recurse = any(is_powershell_recurse_flag(token) for token in toks[1:])
     cmd_recurse = head in {"del", "erase", "rd", "rmdir"} and any(
-        token.lower() == "/s" for token in toks[1:]
+        "/s" in token.lower() and bool(re.fullmatch(r"(?:/[sqf])+", token.lower()))
+        for token in toks[1:]
     )
     if not (powershell_recurse or cmd_recurse):
         return None
     cmd_flags = {"/s", "/q", "/f"}
-    targets = [
-        token
-        for token in toks[1:]
-        if not token.startswith("-") and token.lower() not in cmd_flags
-    ]
+    targets = []
+    for token in toks[1:]:
+        is_bound_path, bound_path = powershell_bound_value(
+            token,
+            {"path", "literalpath"},
+        )
+        if is_bound_path:
+            targets.extend(bound_path.split(","))
+        elif (
+            not token.startswith("-")
+            and token.lower() not in cmd_flags
+            and not re.fullmatch(r"(?:/[sqf])+", token.lower())
+        ):
+            targets.extend(token.split(","))
+    if not any(target for target in targets) and not complete_argv:
+        return None
     return check_delete_targets(
         targets,
         project_dir,
         command_cwd,
         powershell_semantics=True,
         cwd_uncertain=cwd_uncertain,
+        cwd_changed=cwd_changed,
         label="recursive Remove-Item",
     )
 
@@ -401,21 +1239,40 @@ def check_delete_targets(
     *,
     powershell_semantics: bool,
     cwd_uncertain: bool,
+    cwd_changed: bool,
     label: str,
 ) -> tuple[str, str] | None:
+    if not targets:
+        return "deny", f"{label} with no clear target."
     for target in targets:
+        if not target:
+            return "deny", f"{label} with an empty target."
         if target == "*":
-            return "deny", f"{label} * is floor-blocked: enumerate and delete explicitly."
+            return (
+                "deny",
+                f"{label} * is floor-blocked: enumerate and delete explicitly.",
+            )
+        if (
+            cwd_changed
+            and not is_absolute(target)
+            and not is_within_project(command_cwd, project_dir)
+        ):
+            return "deny", f"{label} uses a relative target after leaving the project."
         resolved = resolve_delete_operand(
             target,
             command_cwd,
             powershell_semantics=powershell_semantics,
             cwd_uncertain=cwd_uncertain,
+            cwd_changed=cwd_changed,
         )
         if resolved is None:
             return "deny", f"Cannot safely resolve {label} target: {target}"
         normalized = norm_path(resolved)
-        if DANGEROUS_ROOTS.match(normalized) or ENV_ROOTS.match(normalized):
+        if (
+            DANGEROUS_ROOTS.match(normalized)
+            or ENV_ROOTS.match(normalized)
+            or is_same_path(resolved, os.path.expanduser("~"))
+        ):
             return "deny", f"{label} {target}: refusing a filesystem/home root."
         if not (is_within_project(resolved, project_dir) or is_within_temp(resolved)):
             return "deny", f"{label} outside the project: {target}"
@@ -426,7 +1283,9 @@ def declared_project_dirs(start_dir: str) -> list[str]:
     """Return every ancestor carrying a tier declaration, nearest first."""
     if not start_dir:
         return []
-    current = os.path.realpath(os.path.abspath(start_dir))
+    # Keep the lexical ancestor chain. Resolving a symlinked cwd first can jump
+    # outside the declaring repo and silently discard its tier authority.
+    current = os.path.abspath(start_dir)
     declared = []
     while True:
         tier_path = os.path.join(current, ".claude", "tier.json")
@@ -475,7 +1334,10 @@ def load_tier(project_dir: str) -> dict:
         raise ValueError("tier.json tier must be an integer from 0 through 4")
     if not isinstance(flags, dict):
         raise ValueError("tier.json flags must be an object")
-    if any(not isinstance(key, str) or type(value) is not bool for key, value in flags.items()):
+    if any(
+        not isinstance(key, str) or type(value) is not bool
+        for key, value in flags.items()
+    ):
         raise ValueError("tier.json flags must map string names to booleans")
     cfg["tier"] = tier
     cfg["flags"] = flags
@@ -492,12 +1354,17 @@ def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
     payload_projects = declared_project_dirs(payload_cwd)
     env_projects = declared_project_dirs(env_project_dir)
     if payload_cwd:
-        project_dir = payload_projects[0] if payload_projects else os.path.realpath(
-            os.path.abspath(payload_cwd)
-        )
+        if payload_projects:
+            project_dir = payload_projects[0]
+        elif env_project_dir and is_within_path_lexical(payload_cwd, env_project_dir):
+            project_dir = os.path.abspath(env_project_dir)
+        else:
+            project_dir = os.path.realpath(os.path.abspath(payload_cwd))
     elif env_project_dir:
-        project_dir = env_projects[0] if env_projects else os.path.realpath(
-            os.path.abspath(env_project_dir)
+        project_dir = (
+            env_projects[0]
+            if env_projects
+            else os.path.realpath(os.path.abspath(env_project_dir))
         )
     else:
         project_dir = ""
@@ -539,11 +1406,102 @@ def segments(sanitized: str):
     ($( ), <( ), backticks, parens) so an inner command is checked exactly like a
     top-level one — `git commit $(git push --force ...)` must not fail open.
     """
-    return [s.strip() for s in re.split(r"[;\n()`|]|&&", sanitized) if s.strip()]
+    return [s.strip() for s in re.split(r"[;\n()`|{}]|&&", sanitized) if s.strip()]
 
 
 def tokens(segment: str):
     return segment.split()
+
+
+_CONTROL_PREFIXES = {
+    "!",
+    "if",
+    "then",
+    "elif",
+    "else",
+    "while",
+    "until",
+    "do",
+    "{",
+    "try",
+    "catch",
+    "finally",
+    "trap",
+    "function",
+}
+_CONTROL_ONLY = {"fi", "done", "esac", "}"}
+
+
+def strip_control_prefixes(raw: list[str]) -> list[str]:
+    """Expose commands nested behind shell/PowerShell control keywords."""
+    result = list(raw)
+    while result and result[0].lower() in _CONTROL_PREFIXES:
+        result.pop(0)
+    if result and result[0].lower() in _CONTROL_ONLY:
+        return []
+    return result
+
+
+def has_download_pipe_to_shell(command: str) -> bool:
+    """Recognize pipeline endpoints after path/wrapper normalization."""
+    download_seen = False
+    for stage, operator_after in quote_aware_segments_with_operators(command):
+        stage_head, _ = command_head(stage)
+        if download_seen and stage_head in {
+            "sh",
+            "bash",
+            "zsh",
+            "dash",
+            "ash",
+            "ksh",
+            "fish",
+            "csh",
+            "tcsh",
+            "pwsh",
+            "powershell",
+            "cmd",
+            "source",
+            ".",
+            "eval",
+            "iex",
+            "invoke-expression",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "php",
+            "node",
+            "lua",
+            "r",
+            "rscript",
+        }:
+            return True
+        if stage_head in {"curl", "wget", "iwr", "irm"}:
+            download_seen = True
+        if operator_after not in {"|", "|&"}:
+            download_seen = False
+    return False
+
+
+def has_pipe_to_delete(command: str) -> bool:
+    """Recognize direct or shell-wrapped pipeline deletion sinks."""
+    delete_heads = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"}
+    previous_pipe = False
+    for stage, operator_after in quote_aware_segments_with_operators(command):
+        downstream, _ = command_head(stage)
+        if previous_pipe and downstream in delete_heads:
+            return True
+        if (
+            previous_pipe
+            and downstream in {"pwsh", "powershell"}
+            and any(
+                token.lower().replace("\\", "/").split("/")[-1] in delete_heads
+                for token in stage[1:]
+            )
+        ):
+            return True
+        previous_pipe = operator_after in {"|", "|&"}
+    return False
 
 
 # --- rules ------------------------------------------------------------------
@@ -555,6 +1513,8 @@ def check(
     project_dir: str,
     command_cwd: str,
     _depth: int = 0,
+    _cwd_uncertain: bool = False,
+    _cwd_changed: bool = False,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _depth > 4:
@@ -568,154 +1528,816 @@ def check(
     # T4/wave_mode. Never weakens `strict` — the flag is ignored where guards are walls.
     relaxed = bool(flags.get("relaxed_work_loss_guards")) and not strict
 
+    command = strip_quoted_heredoc_bodies(remove_shell_line_continuations(command))
+    unwrapped = unwrap_powershell_scriptblock(command)
+    if unwrapped != command.strip():
+        return check(
+            unwrapped,
+            tier_cfg,
+            project_dir,
+            command_cwd,
+            _depth + 1,
+            _cwd_uncertain,
+            _cwd_changed,
+        )
+    call_normalized = normalize_literal_call_operators(command)
+    if re.search(
+        r"(?:^|[;|{}\n])\s*[&.]\s*(?:\$|%|!|\()",
+        call_normalized,
+    ):
+        return "deny", "A dynamic call-operator target cannot be inspected safely."
     sanitized = strip_quotes(command)
+    for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}\|?\s*(\S+)", sanitized):
+        redirect_target = full_redirect.group(1).strip("'\"")
+        if is_dynamic_value(redirect_target) or redirect_target.startswith("("):
+            return "deny", "A dynamic redirect target cannot be inspected safely."
+        if is_secret_path(redirect_target):
+            return (
+                "deny",
+                f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
+            )
 
     # Pipe rules run on the full sanitized text (the pipe IS the signal).
-    if re.search(r"\b(curl|wget|iwr|irm)\b[^|;&]*\|\s*(sh|bash|zsh|pwsh|powershell|iex)\b",
-                 sanitized, re.IGNORECASE):
-        return "deny", "Piping a download straight into a shell is irreversible-by-design. Download, inspect, then run."
-    if re.search(
-        r"\|\s*(Remove-Item|ri|rm|del|erase|rd|rmdir)\b",
-        sanitized,
-        re.IGNORECASE,
-    ):
-        return "deny", "Piping into Remove-Item/del deletes whatever upstream matched. Enumerate first, delete explicitly."
+    if has_download_pipe_to_shell(command):
+        return (
+            "deny",
+            "Piping a download straight into a shell is irreversible-by-design. Download, inspect, then run.",
+        )
+    if has_pipe_to_delete(command):
+        return (
+            "deny",
+            "Piping into Remove-Item/del deletes whatever upstream matched. Enumerate first, delete explicitly.",
+        )
 
-    execution_segments = [(raw, True, "") for raw in quote_aware_segments(command)]
+    inspection_variants = [command]
+    for normalized in (
+        call_normalized,
+        powershell_unescape(command),
+        cmd_unescape(command),
+        cmd_unescape(powershell_unescape(command)),
+    ):
+        if normalized not in inspection_variants:
+            inspection_variants.append(normalized)
+    execution_segments = []
+    pass_id = 0
+    for variant in inspection_variants:
+        execution_segments.extend(
+            (raw, True, "", operator, pass_id, index)
+            for index, (raw, operator) in enumerate(
+                quote_aware_segments_with_operators(variant)
+            )
+        )
+        pass_id += 1
     execution_segments.extend(
-        (tokens(segment), False, segment) for segment in segments(sanitized)
+        (tokens(segment), False, segment, "", pass_id, index)
+        for index, segment in enumerate(segments(sanitized))
     )
-    cwd_uncertain = False
-    previous_quote_aware = True
-    for raw, quote_aware, segment_text in execution_segments:
-        if previous_quote_aware and not quote_aware:
-            cwd_uncertain = False
-        previous_quote_aware = quote_aware
+    initial_cwd = command_cwd
+    current_cwd = command_cwd
+    cwd_uncertain = _cwd_uncertain
+    cwd_changed = _cwd_changed
+    cwd_conditionally_changed = False
+    previous_pass = None
+    for (
+        raw,
+        quote_aware,
+        segment_text,
+        operator_after,
+        current_pass,
+        segment_index,
+    ) in execution_segments:
+        if previous_pass is not None and current_pass != previous_pass:
+            current_cwd = initial_cwd
+            cwd_uncertain = _cwd_uncertain
+            cwd_changed = _cwd_changed
+            cwd_conditionally_changed = False
+        previous_pass = current_pass
         if not raw:
             continue
+        raw = strip_control_prefixes(raw)
+        if not raw:
+            continue
+        if is_git_config_environment_mutation(raw):
+            return (
+                "deny",
+                "Mutating Git's config-injection environment is floor-blocked.",
+            )
+        first_token = raw[0]
+        inert_powershell_assignment = bool(
+            re.match(r"^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=", first_token)
+            or (
+                re.match(r"^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*$", first_token)
+                and len(raw) > 1
+                and raw[1] == "="
+            )
+        )
+        if inert_powershell_assignment:
+            continue
+        compact_cmd = re.fullmatch(
+            r"(?i)(rd|rmdir|del|erase)((?:/[A-Za-z]){1,4})",
+            raw[0],
+        )
+        if compact_cmd:
+            raw = (
+                [compact_cmd.group(1)]
+                + re.findall(
+                    r"/[A-Za-z]",
+                    compact_cmd.group(2),
+                )
+                + raw[1:]
+            )
         # Normalize away wrappers / VAR=val / path + .exe so `env git`, `git.exe`,
         # `/usr/bin/git`, `sudo.exe` all resolve to their real head (bypass fix).
         head, toks = command_head(raw)
         if not toks:
             continue
-
+        if quote_aware and re.match(r"^(?:\$|%[^%]+%$|![^!]+!$|`|\$\()", toks[0]):
+            return "deny", "A dynamic executable name cannot be inspected safely."
+        if any(
+            marker in token
+            for token in toks
+            for marker in (
+                "__HARNESS_UNRESOLVED_ANSI_C_QUOTE__",
+                "__HARNESS_UNRESOLVED_LOCALE_QUOTE__",
+            )
+        ):
+            return "deny", "Cannot safely decode an executable shell word."
+        if head == _OPAQUE_WRAPPER:
+            return "deny", "Cannot safely inspect wrapper options that alter execution."
+        if head in {"eval", "iex", "invoke-expression"}:
+            evaluated_args = list(toks[1:])
+            if evaluated_args and evaluated_args[0] == "--":
+                evaluated_args.pop(0)
+            if (
+                head in {"iex", "invoke-expression"}
+                and evaluated_args
+                and evaluated_args[0].startswith("-")
+                and "command".startswith(evaluated_args[0].lstrip("-").lower())
+            ):
+                evaluated_args.pop(0)
+            if evaluated_args:
+                evaluated = " ".join(evaluated_args)
+                if is_dynamic_value(evaluated):
+                    return (
+                        "deny",
+                        "A dynamic evaluator argument cannot be inspected safely.",
+                    )
+                evaluated_decision = check(
+                    evaluated,
+                    tier_cfg,
+                    project_dir,
+                    current_cwd,
+                    _depth + 1,
+                    cwd_uncertain,
+                    cwd_changed,
+                )
+                if evaluated_decision[0] != "allow":
+                    return evaluated_decision
+            continue
         if head == "sudo":
-            return "deny", "sudo is blocked at the floor. If elevation is truly needed, the human runs it."
+            return (
+                "deny",
+                "sudo is blocked at the floor. If elevation is truly needed, the human runs it.",
+            )
+        if head in {"start-process", "saps"}:
+            return (
+                "deny",
+                "Start-Process can conceal an irreversible child command. Run the child directly.",
+            )
+        if head == "call":
+            if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
+                return "deny", "A dynamic cmd call target cannot be inspected safely."
+            nested_decision = check(
+                " ".join(toks[1:]),
+                tier_cfg,
+                project_dir,
+                current_cwd,
+                _depth + 1,
+                cwd_uncertain,
+                cwd_changed,
+            )
+            if nested_decision[0] != "allow":
+                return nested_decision
+        if head == "find" and any(
+            token in {"-exec", "-execdir", "-delete"} for token in toks[1:]
+        ):
+            return (
+                "deny",
+                "find execution/deletion actions are opaque to the deny floor. Enumerate first.",
+            )
 
         if head in {
-            "cd", "chdir", "pushd", "popd", "push-location", "pop-location",
-            "set-location", "sl",
+            "cd",
+            "chdir",
+            "pushd",
+            "popd",
+            "push-location",
+            "pop-location",
+            "set-location",
+            "sl",
         }:
-            cwd_uncertain = True
+            if not quote_aware:
+                continue
+            if segment_index == 0 and operator_after == "&&":
+                current_cwd, cwd_uncertain = location_transition(
+                    head,
+                    toks,
+                    current_cwd,
+                    cwd_uncertain,
+                    cwd_changed,
+                )
+                cwd_conditionally_changed = True
+            else:
+                cwd_uncertain = True
+            cwd_changed = True
 
         nested_script = None
         if head == "cmd":
             for index, token in enumerate(toks[1:], start=1):
                 if token.lower() in ("/c", "/k") and index + 1 < len(toks):
-                    nested_script = " ".join(toks[index + 1:])
+                    nested_script = " ".join(toks[index + 1 :])
                     break
         elif head in {"bash", "sh", "zsh", "pwsh", "powershell"}:
             for index, token in enumerate(toks[1:], start=1):
-                option = token.lstrip("-").lower()
-                is_command = token == "-c" or (
-                    head in {"bash", "sh", "zsh"}
-                    and bool(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token))
-                ) or (
+                option_text = token.lstrip("-/")
+                option, separator, bound_value = option_text.partition(":")
+                option = option.lower()
+                is_encoded = (
                     head in {"pwsh", "powershell"}
                     and bool(option)
-                    and "command".startswith(option)
+                    and "encodedcommand".startswith(option)
                 )
-                if is_command and index + 1 < len(toks):
-                    nested_script = " ".join(toks[index + 1:])
+                if is_encoded:
+                    encoded_value = (
+                        bound_value
+                        if separator
+                        else (toks[index + 1] if index + 1 < len(toks) else "")
+                    )
+                    try:
+                        nested_script = decode_powershell_command(encoded_value)
+                    except ValueError:
+                        return (
+                            "deny",
+                            "Cannot safely decode PowerShell -EncodedCommand.",
+                        )
                     break
+                is_command = (
+                    token == "-c"
+                    or (
+                        head in {"bash", "sh", "zsh"}
+                        and bool(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token))
+                    )
+                    or (
+                        head in {"pwsh", "powershell"}
+                        and bool(option)
+                        and "command".startswith(option)
+                    )
+                )
+                is_command_with_args = (
+                    head in {"pwsh", "powershell"}
+                    and bool(option)
+                    and (option == "cwa" or "commandwithargs".startswith(option))
+                )
+                if is_command or is_command_with_args:
+                    if separator:
+                        nested_script = bound_value
+                    elif index + 1 < len(toks):
+                        if head in {"bash", "sh", "zsh"}:
+                            nested_script = toks[index + 1]
+                        elif is_command_with_args:
+                            nested_script = toks[index + 1]
+                        else:
+                            nested_script = " ".join(toks[index + 1 :])
+                    break
+            if nested_script is None and head in {"pwsh", "powershell"}:
+                default_script = " ".join(toks[1:]).strip()
+                if re.match(r"^(?:[&.]\s*)?\{", default_script):
+                    nested_script = default_script
         if nested_script:
+            if is_dynamic_value(nested_script):
+                return (
+                    "deny",
+                    "A dynamic nested-shell script cannot be inspected safely.",
+                )
+            if head == "cmd":
+                nested_script = cmd_unescape(nested_script)
+            elif head in {"pwsh", "powershell"}:
+                nested_script = unwrap_powershell_scriptblock(nested_script)
             nested_decision = check(
                 nested_script,
                 tier_cfg,
                 project_dir,
-                command_cwd,
+                current_cwd,
                 _depth + 1,
+                cwd_uncertain,
+                cwd_changed,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
 
         # ---- git rules ----
         if head == "git":
-            sub = git_subcommand(toks)
+            subcommand_index = git_subcommand_index(toks)
+            sub = toks[subcommand_index].lower() if subcommand_index is not None else ""
             # Args AFTER the subcommand, robust to leading global options
             # (git -C <dir> push --force -> args = [--force, ...], not misaligned).
-            args = toks[toks.index(sub) + 1:] if sub in toks else []
+            args = toks[subcommand_index + 1 :] if subcommand_index is not None else []
+            inline_configs = git_inline_configs(toks)
+            config_env_keys = git_config_env_keys(toks)
+            if sub == "push" and inline_configs:
+                return (
+                    "deny",
+                    "Inline git config can conceal push execution or force semantics.",
+                )
+            if sub == "push" and (config_env_keys is None or config_env_keys):
+                return "deny", "Git --config-env is opaque during a push."
+            if sub == "push" and has_git_config_environment(raw):
+                return (
+                    "deny",
+                    "Git config environment injection is opaque during a push.",
+                )
+            if sub == "config" and dangerous_git_config_mutation(args):
+                return (
+                    "deny",
+                    "Persisting git aliases or remote push/mirror config is floor-blocked.",
+                )
+
+            alias_expansion = git_inline_alias(toks, sub)
+            if alias_expansion is not None:
+                if alias_expansion.lstrip().startswith("!"):
+                    return (
+                        "deny",
+                        "Shell-backed git aliases are opaque to the deny floor.",
+                    )
+                try:
+                    expanded_alias = shlex.split(alias_expansion, posix=True)
+                except ValueError:
+                    return "deny", "Cannot safely parse an inline git alias."
+                alias_decision = check(
+                    shlex.join(["git"] + expanded_alias + args),
+                    tier_cfg,
+                    project_dir,
+                    current_cwd,
+                    _depth + 1,
+                    cwd_uncertain,
+                    cwd_changed,
+                )
+                if alias_decision[0] != "allow":
+                    return alias_decision
+
+            known_git_subcommands = {
+                "",
+                "add",
+                "am",
+                "apply",
+                "archive",
+                "bisect",
+                "blame",
+                "branch",
+                "bundle",
+                "cat-file",
+                "checkout",
+                "cherry",
+                "cherry-pick",
+                "clean",
+                "clone",
+                "commit",
+                "config",
+                "describe",
+                "diff",
+                "fetch",
+                "for-each-ref",
+                "format-patch",
+                "gc",
+                "grep",
+                "help",
+                "init",
+                "log",
+                "ls-files",
+                "ls-remote",
+                "ls-tree",
+                "maintenance",
+                "merge",
+                "mv",
+                "name-rev",
+                "notes",
+                "pull",
+                "range-diff",
+                "rebase",
+                "reflog",
+                "remote",
+                "reset",
+                "restore",
+                "rev-parse",
+                "revert",
+                "rm",
+                "shortlog",
+                "show",
+                "show-ref",
+                "stash",
+                "status",
+                "submodule",
+                "switch",
+                "tag",
+                "version",
+                "whatchanged",
+                "worktree",
+            }
+            if sub not in known_git_subcommands | {"push"}:
+                return (
+                    "deny",
+                    "An unknown git alias/subcommand is opaque to the deny floor.",
+                )
 
             if sub == "push":
+                if any(has_dynamic_shell_token(token) for token in args):
+                    return (
+                        "deny",
+                        "Dynamic git-push options/refspecs cannot be inspected safely.",
+                    )
                 for t in args:
+                    if any(
+                        t != dangerous and git_option_abbreviates(t, dangerous)
+                        for dangerous in (
+                            "--force",
+                            "--force-with-lease",
+                            "--delete",
+                            "--mirror",
+                            "--prune",
+                        )
+                    ):
+                        return (
+                            "deny",
+                            "An abbreviated destructive git-push option is floor-blocked.",
+                        )
                     if t == "--force" or (t.startswith("--force=")):
-                        return "deny", "Force-push rewrites shared history. Use --force-with-lease on your own branch, or merge instead."
+                        return (
+                            "deny",
+                            "Force-push rewrites shared history. Use --force-with-lease on your own branch, or merge instead.",
+                        )
                     if t == "--force-with-lease" or t.startswith("--force-with-lease="):
                         if strict:
-                            return "deny", "T4/wave: no force variants at all — other work rides on these refs."
+                            return (
+                                "deny",
+                                "T4/wave: no force variants at all — other work rides on these refs.",
+                            )
                         continue
                     if re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", t):
-                        return "deny", "git push -f is a force-push. Use --force-with-lease on your own branch, or merge instead."
+                        return (
+                            "deny",
+                            "git push -f is a force-push. Use --force-with-lease on your own branch, or merge instead.",
+                        )
                     if t.startswith("+") and len(t) > 1:
                         return "deny", "A +refspec is a forced update in disguise."
+                    if t.startswith(":") and len(t) > 1:
+                        return "deny", "A :refspec deletes a remote ref."
+                    if t in {"--mirror", "--prune", "--delete", "-d"}:
+                        return (
+                            "deny",
+                            "Mirroring or deleting remote refs is floor-blocked.",
+                        )
+
+                push_value_options = {
+                    "--exec",
+                    "--receive-pack",
+                    "--repo",
+                    "--push-option",
+                    "-o",
+                }
+                positionals = []
+                remote_by_option = False
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token == "--":
+                        positionals.extend(args[index + 1 :])
+                        break
+                    if token in push_value_options:
+                        if token == "--repo":
+                            remote_by_option = True
+                        index += 2
+                        continue
+                    if token.startswith("--repo="):
+                        remote_by_option = True
+                        index += 1
+                        continue
+                    if token.startswith("--") or (
+                        token.startswith("-") and len(token) > 1
+                    ):
+                        index += 1
+                        continue
+                    positionals.append(token)
+                    index += 1
+                explicit_selector = any(token in {"--all", "--tags"} for token in args)
+                required_positionals = 1 if remote_by_option else 2
+                if len(positionals) < required_positionals and not explicit_selector:
+                    return (
+                        "deny",
+                        "A git push without an explicit refspec can inherit opaque config.",
+                    )
 
             if sub == "reset" and "--hard" in args:
                 if strict:
-                    return "deny", "T4/wave: hard reset discards work that may not be yours. Inspect state; ask."
+                    return (
+                        "deny",
+                        "T4/wave: hard reset discards work that may not be yours. Inspect state; ask.",
+                    )
                 if tier >= 3 and not relaxed:
-                    return "ask", "T3: git reset --hard discards uncommitted work. Confirm you want this."
+                    return (
+                        "ask",
+                        "T3: git reset --hard discards uncommitted work. Confirm you want this.",
+                    )
 
-            if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", t) for t in args):
+            if sub == "clean" and any(
+                t == "--force" or bool(re.match(r"^-[a-zA-Z]*f", t)) for t in args
+            ):
                 if strict:
-                    return "deny", "T4/wave: git clean -f deletes untracked files that may belong to another agent."
+                    return (
+                        "deny",
+                        "T4/wave: git clean -f deletes untracked files that may belong to another agent.",
+                    )
                 if tier >= 3 and not relaxed:
                     return "ask", "T3: git clean -f deletes untracked files. Confirm."
 
             if sub == "checkout" and "--" in args:
-                after = args[args.index("--") + 1:]
+                after = args[args.index("--") + 1 :]
                 if "." in after:
                     if strict:
-                        return "deny", "T4/wave: checkout -- . wipes all local modifications."
+                        return (
+                            "deny",
+                            "T4/wave: checkout -- . wipes all local modifications.",
+                        )
                     if tier >= 3 and not relaxed:
-                        return "ask", "T3: checkout -- . wipes local modifications. Confirm."
+                        return (
+                            "ask",
+                            "T3: checkout -- . wipes local modifications. Confirm.",
+                        )
 
             if sub == "restore" and "." in args and "--staged" not in args:
                 if strict:
-                    return "deny", "T4/wave: git restore . wipes all local modifications."
+                    return (
+                        "deny",
+                        "T4/wave: git restore . wipes all local modifications.",
+                    )
                 if tier >= 3 and not relaxed:
-                    return "ask", "T3: git restore . wipes local modifications. Confirm."
+                    return (
+                        "ask",
+                        "T3: git restore . wipes local modifications. Confirm.",
+                    )
 
         delete_decision = recursive_delete_decision(
             head,
             toks,
             project_dir,
-            command_cwd,
+            current_cwd,
             cwd_uncertain,
+            cwd_changed,
+            quote_aware,
         )
         if delete_decision:
             return delete_decision
 
         # ---- secret-file mutation ----
-        secret_rx = re.compile(r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\.|id_rsa|\.pem$",
-                               re.IGNORECASE)
-        if head in ("rm", "del", "mv", "set-content", "sc"):
-            for target in (t for t in toks[1:] if not t.startswith("-")):
-                if secret_rx.search(target):
-                    return "deny", f"Mutating a secret-looking file ({target}) is floor-blocked. The human manages secrets."
+        secret_mutators = {
+            "rm",
+            "del",
+            "erase",
+            "remove-item",
+            "ri",
+            "mv",
+            "move",
+            "move-item",
+            "mi",
+            "rename-item",
+            "ren",
+            "rni",
+            "cp",
+            "copy",
+            "copy-item",
+            "ci",
+            "set-content",
+            "sc",
+            "add-content",
+            "ac",
+            "clear-content",
+            "clc",
+            "out-file",
+            "tee",
+            "tee-object",
+            "touch",
+            "truncate",
+            "new-item",
+            "ni",
+            "unlink",
+        }
+        if head in secret_mutators:
+            if any(token.startswith("@") for token in toks[1:]):
+                return (
+                    "deny",
+                    "Array/splatted secret-mutation targets cannot be inspected safely.",
+                )
+            explicit_paths = []
+            positional_groups = []
+            index = 1
+            path_parameters = {"path", "literalpath", "filepath", "destination"}
+            while index < len(toks):
+                token = toks[index]
+                is_bound_path, bound_path = powershell_bound_value(
+                    token,
+                    path_parameters,
+                )
+                if is_bound_path:
+                    explicit_paths.append(bound_path)
+                    index += 1
+                    continue
+                if token.startswith("-"):
+                    parameter = token.lstrip("-").lower()
+                    if parameter and any(
+                        name.startswith(parameter) for name in path_parameters
+                    ):
+                        if index + 1 < len(toks):
+                            explicit_paths.append(toks[index + 1])
+                            index += 2
+                            continue
+                    if head in {
+                        "set-content",
+                        "sc",
+                        "add-content",
+                        "ac",
+                        "out-file",
+                        "tee",
+                        "tee-object",
+                    } and parameter in {
+                        "value",
+                        "inputobject",
+                        "encoding",
+                        "filter",
+                        "include",
+                        "exclude",
+                    }:
+                        index += 2
+                        continue
+                    index += 1
+                    continue
+                if token.lower() not in {"/s", "/q", "/f"}:
+                    positional_groups.append(token.split(","))
+                index += 1
+
+            positional = [item for group in positional_groups for item in group]
+            if head in {
+                "set-content",
+                "sc",
+                "add-content",
+                "ac",
+                "clear-content",
+                "clc",
+                "out-file",
+                "tee-object",
+                "new-item",
+                "ni",
+            }:
+                mutation_targets = explicit_paths or (
+                    positional_groups[0] if positional_groups else []
+                )
+            elif head == "tee":
+                mutation_targets = explicit_paths + positional
+            else:
+                mutation_targets = explicit_paths + positional
+            for target in mutation_targets:
+                if is_dynamic_value(target) or target.startswith("("):
+                    return (
+                        "deny",
+                        "A dynamic secret-mutation target cannot be inspected safely.",
+                    )
+                if is_secret_path(target):
+                    return (
+                        "deny",
+                        f"Mutating a secret-looking file ({target}) is floor-blocked. The human manages secrets.",
+                    )
+
+        # Common output/mutation tools whose destination syntax differs from
+        # the filesystem mutators above. This remains a bounded parser
+        # contract; unfamiliar writers are covered by follow-up hardening and
+        # OS/runtime permissions, not by claiming this hook is a shell sandbox.
+        if head == "dd" and any(
+            token.lower().startswith("of=") and token_mentions_secret_path(token)
+            for token in toks[1:]
+        ):
+            return "deny", "dd output to a secret-looking file is floor-blocked."
+        if (
+            head in {"sed", "gsed"}
+            and any(
+                token == "-i" or token.startswith(("-i", "--in-place"))
+                for token in toks[1:]
+            )
+            and any(token_mentions_secret_path(token) for token in toks[1:])
+        ):
+            return "deny", "In-place editing of a secret-looking file is floor-blocked."
+        if head == "install" and any(
+            token_mentions_secret_path(token) for token in toks[1:]
+        ):
+            return "deny", "Installing over a secret-looking file is floor-blocked."
+        if head in {"curl", "wget", "iwr", "invoke-webrequest"}:
+            output_flags = {
+                "-o",
+                "--output",
+                "--output-document",
+                "-outfile",
+                "outfile",
+            }
+            for index, token in enumerate(toks[1:], start=1):
+                lowered = token.lower()
+                bound_output = lowered.startswith(
+                    ("--output=", "--output-document=", "-outfile:")
+                ) or (lowered.startswith("-o") and len(token) > 2 and head == "curl")
+                if bound_output and token_mentions_secret_path(token):
+                    return (
+                        "deny",
+                        "Downloading into a secret-looking file is floor-blocked.",
+                    )
+                if lowered in output_flags and index + 1 < len(toks):
+                    target = toks[index + 1]
+                    if is_dynamic_value(target) or target.startswith("("):
+                        return (
+                            "deny",
+                            "A dynamic download destination cannot be inspected safely.",
+                        )
+                    if token_mentions_secret_path(target):
+                        return (
+                            "deny",
+                            "Downloading into a secret-looking file is floor-blocked.",
+                        )
+        if head == "export-clixml" and any(
+            token_mentions_secret_path(token) for token in toks[1:]
+        ):
+            return "deny", "Serializing into a secret-looking file is floor-blocked."
+        if (
+            ("::" in head or head.startswith("["))
+            and re.search(
+                r"(?i)(?:writealltext|writeallbytes|appendalltext|create|delete|move|copy)",
+                head,
+            )
+            and token_mentions_secret_path(" ".join(toks))
+        ):
+            return "deny", "A file API write to a secret-looking path is floor-blocked."
         if quote_aware:
             for index, token in enumerate(raw[:-1]):
-                if token in (">", ">>") and secret_rx.search(raw[index + 1]):
-                    return "deny", f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked."
+                if token in (">", ">>") and is_secret_path(raw[index + 1]):
+                    return (
+                        "deny",
+                        f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
+                    )
         else:
-            redir = re.search(r">{1,2}\s*(\S+)", segment_text)
-            if redir and secret_rx.search(redir.group(1)):
-                return "deny", f"Redirecting output into a secret-looking file ({redir.group(1)}) is floor-blocked."
+            redir = re.search(r"(?:\d*|&)?>{1,2}\|?\s*(\S+)", segment_text)
+            if redir and is_secret_path(redir.group(1)):
+                return (
+                    "deny",
+                    f"Redirecting output into a secret-looking file ({redir.group(1)}) is floor-blocked.",
+                )
 
         # ---- sensitive_data overlay ----
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":
                 if any(t in ("--public", "-p") for t in toks):
-                    return "deny", "sensitive_data repo: creating PUBLIC repos/gists is blocked."
+                    return (
+                        "deny",
+                        "sensitive_data repo: creating PUBLIC repos/gists is blocked.",
+                    )
+            if len(toks) >= 3 and toks[1:3] == ["repo", "edit"]:
+                if any(
+                    token.lower() == "--visibility=public"
+                    or (
+                        token.lower() == "public"
+                        and index > 0
+                        and toks[index - 1].lower() == "--visibility"
+                    )
+                    for index, token in enumerate(toks)
+                ):
+                    return (
+                        "deny",
+                        "sensitive_data repo: PUBLIC visibility changes are blocked.",
+                    )
+            if len(toks) >= 2 and toks[1] == "api":
+                method = None
+                has_fields = False
+                for index, token in enumerate(toks[2:], start=2):
+                    lowered = token.lower()
+                    if lowered in {"-x", "--method"} and index + 1 < len(toks):
+                        method = toks[index + 1].upper()
+                    elif lowered.startswith("--method="):
+                        method = token.split("=", 1)[1].upper()
+                    elif lowered in {"-f", "-F", "--raw-field", "--field", "--input"}:
+                        has_fields = True
+                    elif lowered.startswith(("--raw-field=", "--field=", "--input=")):
+                        has_fields = True
+                if (method and method != "GET") or (method is None and has_fields):
+                    return (
+                        "deny",
+                        "sensitive_data repo: arbitrary gh api mutations are blocked.",
+                    )
+
+        if cwd_conditionally_changed and operator_after != "&&":
+            cwd_uncertain = True
 
     return "allow", ""
 
@@ -729,13 +2351,17 @@ def respond(decision: str, reason: str, runtime: str = "claude"):
         reason = f"Codex does not support ask decisions; conservative deny. {reason}"
     if decision == "allow":
         sys.exit(0)
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": f"[floor {FLOOR_VERSION}] {reason}",
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": decision,
+                    "permissionDecisionReason": f"[floor {FLOOR_VERSION}] {reason}",
+                }
+            }
+        )
+    )
     sys.exit(0)
 
 
@@ -815,7 +2441,10 @@ def main():
             payload_cwd or env_project_dir,
         )
     except Exception as exc:  # fail CLOSED after a Bash payload is identified
-        respond("deny", f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix ~/.claude/hooks before proceeding.")
+        respond(
+            "deny",
+            f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix ~/.claude/hooks before proceeding.",
+        )
         return
     respond(decision, reason, runtime)
 
