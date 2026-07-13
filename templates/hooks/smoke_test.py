@@ -1717,6 +1717,38 @@ def main():
                 "deny",
             )
         )
+    for recursive_command, expected in (
+        (
+            "git push --recurse-submodules=check --recurse-submodules=only private main",
+            "deny",
+        ),
+        (
+            "git push --recurse-submodules=only --recurse-submodules=check private main",
+            "allow",
+        ),
+        (
+            "git push --no-recurse-submodules --recurse-submodules=only private main",
+            "deny",
+        ),
+        (
+            "git push --recurse-submodules=only --no-recurse-submodules private main",
+            "allow",
+        ),
+    ):
+        repeated_recurse_decision, _reason = dispatch_module.check(
+            recursive_command,
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+        )
+        sensitive_remote_cases.append(
+            (
+                f"last recursive mode wins: {recursive_command}",
+                repeated_recurse_decision,
+                expected,
+            )
+        )
 
     fake_time = [0.0]
     original_monotonic = dispatch_module.time.monotonic

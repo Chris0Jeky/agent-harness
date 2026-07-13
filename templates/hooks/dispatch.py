@@ -979,14 +979,22 @@ def git_push_short_option_shape(token: str) -> tuple[str, bool]:
 
 def git_push_recurse_mode(args: list[str]) -> str | None:
     """Return an explicit push recurse-submodules mode, if present."""
-    for index, token in enumerate(args):
+    mode = None
+    index = 0
+    while index < len(args):
+        token = args[index]
         if token == "--no-recurse-submodules":
-            return "no"
+            mode = "no"
+            index += 1
+            continue
         if token == "--recurse-submodules" and index + 1 < len(args):
-            return args[index + 1].lower()
+            mode = args[index + 1].lower()
+            index += 2
+            continue
         if token.startswith("--recurse-submodules="):
-            return token.split("=", 1)[1].lower()
-    return None
+            mode = token.split("=", 1)[1].lower()
+        index += 1
+    return mode
 
 
 _GIT_CONFIG_READ_FLAGS = {
