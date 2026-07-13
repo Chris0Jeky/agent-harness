@@ -1012,11 +1012,39 @@ _GIT_CONFIG_READ_FLAGS = {
 _GIT_CONFIG_REMOVAL_FLAGS = {"--unset", "--unset-all", "--remove-section"}
 
 
+def git_config_option_present(tokens: list[str], option: str) -> bool:
+    """Return whether config argv contains an exact or accepted long prefix."""
+    return any(
+        token == option or git_option_abbreviates(token, option) for token in tokens
+    )
+
+
+def protected_git_config_section(section: str) -> bool:
+    """Return whether a section can alter push destinations or inject config."""
+    lowered = section.lower()
+    return lowered.startswith(("remote.", "url.", "includeif.")) or lowered == "include"
+
+
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
     lowered = [token.lower() for token in args]
     if any(token in _GIT_CONFIG_READ_FLAGS for token in lowered):
         return False
+    for index, token in enumerate(lowered):
+        if (
+            token == "--remove-section"
+            or git_option_abbreviates(token, "--remove-section")
+        ) and index + 1 < len(lowered):
+            if protected_git_config_section(lowered[index + 1]):
+                return True
+        if (
+            token == "--rename-section"
+            or git_option_abbreviates(token, "--rename-section")
+        ) and any(
+            protected_git_config_section(section)
+            for section in lowered[index + 1 : index + 3]
+        ):
+            return True
     protected_index = next(
         (
             index
@@ -1032,11 +1060,15 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
     if protected_index is None:
         return False
     protected_key = lowered[protected_index]
-    if any(token in _GIT_CONFIG_REMOVAL_FLAGS for token in lowered):
+    if any(
+        git_config_option_present(lowered, option)
+        for option in _GIT_CONFIG_REMOVAL_FLAGS
+    ):
         return protected_key.startswith(("remote.", "url.", "include"))
     # A lone key is the legacy read form (`git config section.key`).
     return protected_index + 1 < len(args) or any(
-        token in {"--add", "--replace-all", "--rename-section"} for token in lowered
+        git_config_option_present(lowered, option)
+        for option in {"--add", "--replace-all", "--rename-section"}
     )
 
 
