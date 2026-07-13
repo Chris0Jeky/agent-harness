@@ -51,6 +51,11 @@ _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 
 
+def has_shell_expansion_marker(value: str) -> bool:
+    """Keep $ and backtick visible because escaping differs across runtimes."""
+    return any(char in {"$", "`"} for char in value)
+
+
 def inert_quoted_value(token: str) -> str | None:
     """Return an inert quote's shell value; None means expansion stays visible."""
     if token.startswith("$'"):
@@ -59,10 +64,10 @@ def inert_quoted_value(token: str) -> str | None:
         except (UnicodeDecodeError, ValueError):
             return _INVALID_INERT_QUOTED
     if token.startswith('$"'):
-        if re.search(r"(?<!\\)[$`]", token[2:-1]):
+        if has_shell_expansion_marker(token[2:-1]):
             return None
         token = token[1:]
-    elif token.startswith('"') and re.search(r"(?<!\\)[$`]", token[1:-1]):
+    elif token.startswith('"') and has_shell_expansion_marker(token[1:-1]):
         return None
     if token.startswith("'"):
         return token[1:-1]
@@ -261,7 +266,7 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             except (UnicodeDecodeError, ValueError):
                 value = "__HARNESS_UNRESOLVED_ANSI_C_QUOTE__"
         elif token.startswith('$"'):
-            if re.search(r"(?<!\\)[$`]", token[2:-1]):
+            if has_shell_expansion_marker(token[2:-1]):
                 value = "__HARNESS_UNRESOLVED_LOCALE_QUOTE__"
             else:
                 try:

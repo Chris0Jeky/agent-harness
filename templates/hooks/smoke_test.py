@@ -249,6 +249,8 @@ CASES = [
     ("git commit $(git push --force origin main) -m wip", 1, {}, "deny"),
     ('git commit -m "wip $(rm -rf /)"', 1, {}, "deny"),  # dbl quotes EXPAND -> scanned
     ("git commit -m 'wip $(rm -rf /)'", 1, {}, "allow"),  # single quotes inert
+    (r'git commit -m "\$(git push --force origin main)"', 1, {}, "deny"),
+    (r'git commit -m "\\$(git push --force origin main)"', 1, {}, "deny"),
     ("git commit -F <(sudo x) -m wip", 1, {}, "deny"),  # process substitution scanned
     ("git stash `sudo id`", 1, {}, "deny"),  # backticks scanned
     ('echo "total $(wc -l notes.md)"', 1, {}, "allow"),  # benign inner command
