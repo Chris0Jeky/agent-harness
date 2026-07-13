@@ -1460,6 +1460,7 @@ def push_remotes(
 ) -> list[str]:
     """Resolve every effective destination URL for a git push."""
     remote = ""
+    option_remote = ""
     value_options = (_GIT_PUSH_VALUE_LONG_OPTIONS - {"--repo"}) | {"-o"}
     i = 0
     while i < len(args):
@@ -1467,11 +1468,13 @@ def push_remotes(
         if abbreviated_git_push_value_option(arg):
             return []
         if arg == "--repo" and i + 1 < len(args):
-            remote = args[i + 1]
-            break
+            option_remote = args[i + 1]
+            i += 2
+            continue
         if arg.startswith("--repo="):
-            remote = arg.split("=", 1)[1]
-            break
+            option_remote = arg.split("=", 1)[1]
+            i += 1
+            continue
         if arg == "--":
             remote = args[i + 1] if i + 1 < len(args) else ""
             break
@@ -1491,6 +1494,8 @@ def push_remotes(
             remote = arg
             break
         i += 1
+    if not remote:
+        remote = option_remote
     if not remote:
         return []
     if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
@@ -2337,7 +2342,6 @@ def check(
 
                 push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
                 positionals = []
-                remote_by_option = False
                 index = 0
                 while index < len(args):
                     token = args[index]
@@ -2345,12 +2349,9 @@ def check(
                         positionals.extend(args[index + 1 :])
                         break
                     if token in push_value_options:
-                        if token == "--repo":
-                            remote_by_option = True
                         index += 2
                         continue
                     if token.startswith("--repo="):
-                        remote_by_option = True
                         index += 1
                         continue
                     _short_flags, short_consumes_next = git_push_short_option_shape(
@@ -2367,8 +2368,7 @@ def check(
                     positionals.append(token)
                     index += 1
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
-                required_positionals = 1 if remote_by_option else 2
-                if len(positionals) < required_positionals and not explicit_selector:
+                if len(positionals) < 2 and not explicit_selector:
                     return (
                         "deny",
                         "A git push without an explicit refspec can inherit opaque config.",

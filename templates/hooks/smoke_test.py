@@ -628,7 +628,8 @@ CASES = [
     ("git push --push-option harmless origin main", 1, {}, "allow"),
     ("git push --receive-pack helper origin main", 1, {}, "allow"),
     ("git push --recurse-submodules check origin main", 1, {}, "allow"),
-    ("git push --repo origin main", 1, {}, "allow"),
+    ("git push --repo origin main", 1, {}, "deny"),
+    ("git push --repo origin --all", 1, {}, "allow"),
     ("git push -vo harmless origin main", 1, {}, "allow"),
     ("git push -od origin main", 1, {}, "allow"),
     ("git 'pu''sh' origin main", 1, {}, "allow"),
@@ -1502,6 +1503,31 @@ def main():
             "deny",
         )
     )
+    for repo_option in (
+        "--repo C:/private-default",
+        "--repo=C:/private-default",
+    ):
+        positional_public_decision, _reason = dispatch_module.check(
+            f"git push {repo_option} https://github.com/example/public.git main",
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=lambda args, cwd, git_globals: (
+                dispatch_module.public_remote_status(
+                    args,
+                    cwd,
+                    git_globals,
+                    command_runner=clustered_public_runner,
+                )
+            ),
+        )
+        sensitive_remote_cases.append(
+            (
+                f"sensitive positional repository overrides {repo_option.split()[0]}",
+                positional_public_decision,
+                "deny",
+            )
+        )
     for label, got, expected in sensitive_remote_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
@@ -1525,6 +1551,31 @@ def main():
             "non-GitHub remote has no provider slug",
             dispatch_module.github_repo_slug("https://gitlab.example/example/repo.git"),
             "",
+        ),
+        (
+            "positional repository overrides --repo default",
+            dispatch_module.push_remotes(
+                [
+                    "--repo",
+                    "C:/private-default",
+                    "https://github.com/example/public-positional.git",
+                    "main",
+                ],
+                HERE,
+            ),
+            ["https://github.com/example/public-positional.git"],
+        ),
+        (
+            "last repeated --repo wins without a positional repository",
+            dispatch_module.push_remotes(
+                [
+                    "--repo=C:/private-first",
+                    "--repo=https://github.com/example/public-last.git",
+                    "--all",
+                ],
+                HERE,
+            ),
+            ["https://github.com/example/public-last.git"],
         ),
     ]
     with tempfile.TemporaryDirectory(dir=HERE) as remote_project:
