@@ -2255,7 +2255,7 @@ def check(
                         recurse_mode = args[index + 1]
                     elif token.startswith("--recurse-submodules="):
                         recurse_mode = token.split("=", 1)[1]
-                    if sensitive and recurse_mode.lower() == "on-demand":
+                    if sensitive and recurse_mode.lower() in {"on-demand", "only"}:
                         return (
                             "deny",
                             "sensitive_data repo: recursive submodule pushes have additional destinations.",

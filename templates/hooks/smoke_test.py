@@ -1633,6 +1633,24 @@ def main():
             True,
         )
     )
+    for recursive_command in (
+        "git push --recurse-submodules=only origin main",
+        "git push --recurse-submodules only origin main",
+    ):
+        recursive_only_decision, _reason = dispatch_module.check(
+            recursive_command,
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+        )
+        sensitive_remote_cases.append(
+            (
+                f"sensitive recursive-only push blocks {recursive_command.split()[2]}",
+                recursive_only_decision,
+                "deny",
+            )
+        )
 
     fake_time = [0.0]
     original_monotonic = dispatch_module.time.monotonic
