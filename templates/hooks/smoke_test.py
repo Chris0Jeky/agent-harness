@@ -510,6 +510,10 @@ CASES = [
     ("git push --dele origin old", 1, {}, "deny"),
     ("git push --mir origin", 1, {}, "deny"),
     ("git push --pru origin", 1, {}, "deny"),
+    ("git push --push-o /tmp/harmless origin main", 1, {}, "deny"),
+    ("git push --rece git-receive-pack public main", 1, {}, "deny"),
+    ("git push --exe helper origin main", 1, {}, "deny"),
+    ("git push --rep origin main", 1, {}, "deny"),
     ('git -C "C:/Path With Space/repo" push --force origin main', 1, {}, "deny"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push --force origin main',
@@ -610,6 +614,9 @@ CASES = [
     ("git push origin main", 1, {}, "allow"),
     ("git push -u origin feature", 1, {}, "allow"),
     ("git push --all origin", 1, {}, "allow"),
+    ("git push --push-option harmless origin main", 1, {}, "allow"),
+    ("git push --receive-pack helper origin main", 1, {}, "allow"),
+    ("git push --repo origin main", 1, {}, "allow"),
     ('git -C "C:/Path With Space/repo" push origin main', 1, {}, "allow"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push origin main',
@@ -1291,9 +1298,11 @@ def main():
         )
         sensitive_remote_cases.append((label, got, expected))
     observed_git_globals = []
+    observed_git_cwds = []
 
-    def context_remote_resolver(_args, _cwd, git_globals):
+    def context_remote_resolver(_args, cwd, git_globals):
         observed_git_globals.extend(git_globals)
+        observed_git_cwds.append(cwd)
         return (True, "public-child")
 
     context_decision, _reason = dispatch_module.check(
@@ -1310,6 +1319,66 @@ def main():
                 "sensitive resolver receives git repository context",
                 observed_git_globals,
                 ["-C", "child"],
+            ),
+            (
+                "sensitive resolver receives tracked cwd after cd",
+                dispatch_module.check(
+                    "cd child && git push origin main",
+                    sensitive_cfg,
+                    HERE,
+                    HERE,
+                    remote_resolver=context_remote_resolver,
+                )[0],
+                "deny",
+            ),
+            (
+                "sensitive resolver first inspects changed cwd",
+                dispatch_module.norm_path(observed_git_cwds[-1]),
+                dispatch_module.norm_path(os.path.join(HERE, "child")),
+            ),
+        ]
+    )
+    uncertain_cwd_decision, _reason = dispatch_module.check(
+        "cd $TARGET && git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+    )
+    sensitive_remote_cases.append(
+        (
+            "sensitive push after uncertain cwd transition",
+            uncertain_cwd_decision,
+            "deny",
+        )
+    )
+    quoted_contexts = []
+
+    def quoted_private_resolver(_args, cwd, git_globals):
+        quoted_contexts.append((cwd, list(git_globals)))
+        return (False, "private-child")
+
+    quoted_context_decision, _reason = dispatch_module.check(
+        'git -C "child repo" push origin main',
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=quoted_private_resolver,
+    )
+    sensitive_remote_cases.extend(
+        [
+            (
+                "sensitive quoted git -C private push",
+                quoted_context_decision,
+                "allow",
+            ),
+            (
+                "sensitive quoted git -C survives every inspection pass",
+                quoted_contexts,
+                [
+                    (HERE, ["-C", "child repo"]),
+                    (HERE, ["-C", "child repo"]),
+                ],
             ),
         ]
     )
@@ -1364,11 +1433,35 @@ def main():
             check=True,
             capture_output=True,
         )
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                "https://github.com/example/public-second.git",
+            ],
+            cwd=remote_project,
+            check=True,
+            capture_output=True,
+        )
         remote_resolution_cases.append(
             (
                 "named remote uses pushurl",
                 dispatch_module.push_remote(["origin", "main"], remote_project),
                 "git@github.com:example/push.git",
+            )
+        )
+        remote_resolution_cases.append(
+            (
+                "all configured pushurls are preserved",
+                dispatch_module.push_remotes(["origin", "main"], remote_project),
+                [
+                    "git@github.com:example/push.git",
+                    "https://github.com/example/public-second.git",
+                ],
             )
         )
         child = os.path.join(remote_project, "child repo")
@@ -1413,6 +1506,46 @@ def main():
                 ),
             ]
         )
+
+    def mixed_visibility_runner(argv, _cwd):
+        if argv[0] == "git":
+            return (
+                "https://github.com/example/private.git\n"
+                "https://github.com/example/public.git"
+            )
+        return "PUBLIC" if "example/public" in argv else "PRIVATE"
+
+    remote_resolution_cases.append(
+        (
+            "any public pushurl makes a sensitive destination public",
+            dispatch_module.public_remote_status(
+                ["origin", "main"],
+                HERE,
+                command_runner=mixed_visibility_runner,
+            )[0],
+            True,
+        )
+    )
+
+    def mixed_unknown_runner(argv, _cwd):
+        if argv[0] == "git":
+            return (
+                "https://github.com/example/private.git\n"
+                "https://gitlab.example/example/unknown.git"
+            )
+        return "PRIVATE"
+
+    remote_resolution_cases.append(
+        (
+            "any unknown pushurl makes a sensitive destination unknown",
+            dispatch_module.public_remote_status(
+                ["origin", "main"],
+                HERE,
+                command_runner=mixed_unknown_runner,
+            )[0],
+            None,
+        )
+    )
     for label, got, expected in remote_resolution_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:

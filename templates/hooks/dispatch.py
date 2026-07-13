@@ -2,8 +2,8 @@
 """Harness dispatcher — the shared Claude/Codex deny floor for all tiers.
 
 Canonical copy: agent-harness/templates/hooks/dispatch.py
-Deployed copies: ~/.claude/hooks/dispatch.py and ~/.codex/hooks/dispatch.py.
-`harness audit` diffs deployed copies against the canonical one.
+Runtime copies are installed through explicit runtime-specific sync commands or
+repo-owned adapters. `harness sync-global` reports drift for the global Codex copy.
 
 Contract (BLUEPRINT §2, SPECS §5-6):
 - Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
@@ -48,7 +48,38 @@ _CWD_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
-_INERT_QUOTED = "__HARNESS_INERT_QUOTED_31C7__"
+_INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
+
+
+def encode_inert_quoted(match: "re.Match[str]") -> str:
+    """Hide inert quoted text while preserving a reversible structural token."""
+    value = match.group(0)[1:-1]
+    encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
+    return _INERT_QUOTED_PREFIX + encoded.rstrip("=")
+
+
+def decode_inert_quoted(token: str) -> str:
+    """Recover an inert quoted token for command-specific structural parsing."""
+    if not token.startswith(_INERT_QUOTED_PREFIX):
+        return token
+    encoded = token[len(_INERT_QUOTED_PREFIX) :]
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        return base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        ).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return "__HARNESS_INVALID_INERT_QUOTED__"
+
+
+def decode_inert_git_token(token: str) -> str:
+    """Recover quoted Git structural values without exposing them globally."""
+    if "=" in token:
+        name, value = token.split("=", 1)
+        return f"{name}={decode_inert_quoted(value)}"
+    return decode_inert_quoted(token)
 
 
 def strip_quotes(text: str) -> str:
@@ -60,10 +91,12 @@ def strip_quotes(text: str) -> str:
     (Semantics ported from wealthlens-hq's earned pre_tool_use hardening: the
     naive strip-all-quotes let `git commit -m "wip $(rm -rf /)"` fail open.)
     """
-    text = _SINGLE_Q.sub(_INERT_QUOTED, text)
+    text = _SINGLE_Q.sub(encode_inert_quoted, text)
 
     def _dq(m: "re.Match[str]") -> str:
-        return m.group(0) if re.search(r"(?<!\\)[$`]", m.group(0)) else _INERT_QUOTED
+        if re.search(r"(?<!\\)[$`]", m.group(0)):
+            return m.group(0)
+        return encode_inert_quoted(m)
 
     return _DOUBLE_Q.sub(_dq, text)
 
@@ -890,6 +923,27 @@ def git_option_abbreviates(token: str, dangerous: str) -> bool:
     return option.startswith("--") and len(option) >= 4 and dangerous.startswith(option)
 
 
+_GIT_PUSH_VALUE_LONG_OPTIONS = {
+    "--exec",
+    "--push-option",
+    "--receive-pack",
+    "--repo",
+}
+
+
+def abbreviated_git_push_value_option(token: str) -> bool:
+    """Return whether token is a unique prefix of a value-taking push option."""
+    option = token.split("=", 1)[0]
+    if not option.startswith("--") or option in _GIT_PUSH_VALUE_LONG_OPTIONS:
+        return False
+    matches = [
+        candidate
+        for candidate in _GIT_PUSH_VALUE_LONG_OPTIONS
+        if candidate.startswith(option)
+    ]
+    return len(matches) == 1
+
+
 _GIT_CONFIG_READ_FLAGS = {
     "--get",
     "--get-all",
@@ -1329,15 +1383,20 @@ def command_output(argv: list[str], cwd: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def push_remote(
-    args: list[str], project_dir: str, git_globals: list[str] | None = None
-) -> str:
-    """Resolve the destination token/remote URL for a git push."""
+def push_remotes(
+    args: list[str],
+    project_dir: str,
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+) -> list[str]:
+    """Resolve every effective destination URL for a git push."""
     remote = ""
     value_options = {"--exec", "--receive-pack", "--push-option", "-o"}
     i = 0
     while i < len(args):
         arg = args[i]
+        if abbreviated_git_push_value_option(arg):
+            return []
         if arg == "--repo" and i + 1 < len(args):
             remote = args[i + 1]
             break
@@ -1360,13 +1419,30 @@ def push_remote(
             break
         i += 1
     if not remote:
-        return ""
+        return []
     if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
-        return remote
-    return command_output(
-        ["git", *(git_globals or []), "remote", "get-url", "--push", remote],
+        return [remote]
+    output = command_runner(
+        [
+            "git",
+            *(git_globals or []),
+            "remote",
+            "get-url",
+            "--push",
+            "--all",
+            remote,
+        ],
         project_dir,
     )
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def push_remote(
+    args: list[str], project_dir: str, git_globals: list[str] | None = None
+) -> str:
+    """Compatibility helper returning the first effective push destination."""
+    remotes = push_remotes(args, project_dir, git_globals)
+    return remotes[0] if remotes else ""
 
 
 def github_repo_slug(remote: str) -> str:
@@ -1387,26 +1463,39 @@ def public_remote_status(
     args: list[str],
     project_dir: str,
     git_globals: list[str] | None = None,
+    command_runner=command_output,
 ) -> tuple[bool | None, str]:
-    """Return (is_public, label); None means privacy could not be established."""
-    remote = push_remote(args, project_dir, git_globals)
-    if not remote:
+    """Classify every push destination; unknown is fail-closed to the caller."""
+    remotes = push_remotes(args, project_dir, git_globals, command_runner)
+    if not remotes:
         return None, "unresolved push remote"
-    normalized = remote.lower()
-    if normalized.startswith("file://") or re.match(r"^([a-zA-Z]:[\\/]|[./~])", remote):
-        return False, "local destination"
-    slug = github_repo_slug(remote)
-    if not slug:
-        return None, "unverified non-GitHub destination"
-    visibility = command_output(
-        ["gh", "repo", "view", slug, "--json", "visibility", "--jq", ".visibility"],
-        project_dir,
-    ).upper()
-    if visibility == "PUBLIC":
-        return True, slug
-    if visibility in {"PRIVATE", "INTERNAL"}:
-        return False, slug
-    return None, slug
+    for remote in dict.fromkeys(remotes):
+        normalized = remote.lower()
+        if normalized.startswith("file://") or re.match(
+            r"^([a-zA-Z]:[\\/]|[./~])", remote
+        ):
+            continue
+        slug = github_repo_slug(remote)
+        if not slug:
+            return None, "unverified non-GitHub destination"
+        visibility = command_runner(
+            [
+                "gh",
+                "repo",
+                "view",
+                slug,
+                "--json",
+                "visibility",
+                "--jq",
+                ".visibility",
+            ],
+            project_dir,
+        ).upper()
+        if visibility == "PUBLIC":
+            return True, slug
+        if visibility not in {"PRIVATE", "INTERNAL"}:
+            return None, slug
+    return False, "approved private destinations"
 
 
 def read_tier_file(path: str) -> dict:
@@ -1959,13 +2048,22 @@ def check(
 
         # ---- git rules ----
         if head == "git":
-            subcommand_index = git_subcommand_index(toks)
-            sub = toks[subcommand_index].lower() if subcommand_index is not None else ""
+            git_toks = [decode_inert_git_token(token) for token in toks]
+            if any("__HARNESS_INVALID_INERT_QUOTED__" in token for token in git_toks):
+                return "deny", "Cannot safely recover an inert quoted Git argument."
+            subcommand_index = git_subcommand_index(git_toks)
+            sub = (
+                git_toks[subcommand_index].lower()
+                if subcommand_index is not None
+                else ""
+            )
             # Args AFTER the subcommand, robust to leading global options
             # (git -C <dir> push --force -> args = [--force, ...], not misaligned).
-            args = toks[subcommand_index + 1 :] if subcommand_index is not None else []
-            inline_configs = git_inline_configs(toks)
-            config_env_keys = git_config_env_keys(toks)
+            args = (
+                git_toks[subcommand_index + 1 :] if subcommand_index is not None else []
+            )
+            inline_configs = git_inline_configs(git_toks)
+            config_env_keys = git_config_env_keys(git_toks)
             if sub == "push" and inline_configs:
                 return (
                     "deny",
@@ -1984,7 +2082,7 @@ def check(
                     "Persisting git aliases or remote push/mirror config is floor-blocked.",
                 )
 
-            alias_expansion = git_inline_alias(toks, sub)
+            alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
                 if alias_expansion.lstrip().startswith("!"):
                     return (
@@ -2078,6 +2176,11 @@ def check(
                         "deny",
                         "Dynamic git-push options/refspecs cannot be inspected safely.",
                     )
+                if any(abbreviated_git_push_value_option(token) for token in args):
+                    return (
+                        "deny",
+                        "An abbreviated value-taking git-push option is floor-blocked.",
+                    )
                 for t in args:
                     dangerous_options = {
                         "--force",
@@ -2160,10 +2263,15 @@ def check(
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
                 if sensitive:
+                    if cwd_uncertain:
+                        return (
+                            "deny",
+                            "sensitive_data repo: cannot verify push destination after an uncertain cwd transition.",
+                        )
                     is_public, remote = remote_resolver(
                         args,
-                        project_dir,
-                        toks[1:subcommand_index],
+                        current_cwd,
+                        git_toks[1:subcommand_index],
                     )
                     if is_public is True:
                         return (
