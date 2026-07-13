@@ -546,6 +546,12 @@ CASES = [
     ("git config --rename-s remote.origin remote.other", 1, {}, "deny"),
     ("git config --remove-section include", 1, {}, "deny"),
     (
+        "git config --show-scope remote.origin.pushurl https://github.com/example/public.git",
+        1,
+        {},
+        "deny",
+    ),
+    (
         "git config --rename-section url.git@github.com:private/repo.git url.https://github.com/public/repo.git",
         1,
         {},
@@ -579,6 +585,12 @@ CASES = [
     ),
     (
         "git config --remove-section remote.origin && git push origin main",
+        1,
+        {"sensitive_data": True},
+        "deny",
+    ),
+    (
+        "git config --show-scope remote.origin.pushurl https://github.com/example/public.git && git push origin main",
         1,
         {"sensitive_data": True},
         "deny",
@@ -700,6 +712,7 @@ CASES = [
         "allow",
     ),
     ("git config --get remote.origin.push", 1, {}, "allow"),
+    ("git config --show-scope --get remote.origin.pushurl", 1, {}, "allow"),
     ("git config --unset alias.p", 1, {}, "allow"),
     ("git config user.name Example", 1, {}, "allow"),
     ("rm -rf node_modules", 1, {}, "allow"),

@@ -1004,8 +1004,6 @@ _GIT_CONFIG_READ_FLAGS = {
     "--get-urlmatch",
     "--list",
     "-l",
-    "--show-origin",
-    "--show-scope",
     "--get-color",
     "--get-colorbool",
 }
