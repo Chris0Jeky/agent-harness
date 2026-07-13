@@ -1008,6 +1008,23 @@ _GIT_CONFIG_READ_FLAGS = {
     "--get-colorbool",
 }
 _GIT_CONFIG_REMOVAL_FLAGS = {"--unset", "--unset-all", "--remove-section"}
+_GIT_CONFIG_WRITE_ACTIONS = {
+    "--add",
+    "--replace-all",
+    "--unset",
+    "--unset-all",
+    "--rename-section",
+    "--remove-section",
+}
+_GIT_CONFIG_VALUE_OPTIONS = {
+    "-f",
+    "--file",
+    "--blob",
+    "-t",
+    "--type",
+    "--default",
+    "--comment",
+}
 
 
 def git_config_option_present(tokens: list[str], option: str) -> bool:
@@ -1015,6 +1032,34 @@ def git_config_option_present(tokens: list[str], option: str) -> bool:
     return any(
         token == option or git_option_abbreviates(token, option) for token in tokens
     )
+
+
+def git_config_argv_roles(args: list[str]) -> tuple[list[str], list[str]]:
+    """Separate parsed options from operands without promoting option values."""
+    lowered = [token.lower() for token in args]
+    options: list[str] = []
+    operands: list[str] = []
+    index = 0
+    while index < len(lowered):
+        token = lowered[index]
+        if token == "--":
+            operands.extend(lowered[index + 1 :])
+            break
+        if not token.startswith("-") or token == "-":
+            # Git's config parser stops option processing at the first operand.
+            operands.extend(lowered[index:])
+            break
+        options.append(token)
+        consumes_next = token in {"-f", "-t"} or (
+            "=" not in token
+            and any(
+                token == option or git_option_abbreviates(token, option)
+                for option in _GIT_CONFIG_VALUE_OPTIONS
+                if option.startswith("--")
+            )
+        )
+        index += 2 if consumes_next and index + 1 < len(lowered) else 1
+    return options, operands
 
 
 def protected_git_config_section(section: str) -> bool:
@@ -1025,30 +1070,16 @@ def protected_git_config_section(section: str) -> bool:
 
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
-    lowered = [token.lower() for token in args]
+    options, operands = git_config_argv_roles(args)
     if any(
-        git_config_option_present(lowered, option) for option in _GIT_CONFIG_READ_FLAGS
-    ):
-        return False
-    for index, token in enumerate(lowered):
-        if (
-            token == "--remove-section"
-            or git_option_abbreviates(token, "--remove-section")
-        ) and any(
-            protected_git_config_section(section) for section in lowered[index + 1 :]
-        ):
-            return True
-        if (
-            token == "--rename-section"
-            or git_option_abbreviates(token, "--rename-section")
-        ) and any(
-            protected_git_config_section(section) for section in lowered[index + 1 :]
-        ):
-            return True
+        git_config_option_present(options, action)
+        for action in {"--remove-section", "--rename-section"}
+    ) and any(protected_git_config_section(section) for section in operands):
+        return True
     protected_index = next(
         (
             index
-            for index, token in enumerate(lowered)
+            for index, token in enumerate(operands)
             if re.fullmatch(r"alias\.[^.]+", token)
             or re.fullmatch(r"remote\.[^.]+\.(?:url|pushurl|push|mirror)", token)
             or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
@@ -1059,17 +1090,23 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
     )
     if protected_index is None:
         return False
-    protected_key = lowered[protected_index]
+    protected_key = operands[protected_index]
     if any(
-        git_config_option_present(lowered, option)
+        git_config_option_present(options, option)
         for option in _GIT_CONFIG_REMOVAL_FLAGS
     ):
         return protected_key.startswith(("remote.", "url.", "include"))
+    if any(
+        git_config_option_present(options, option)
+        for option in _GIT_CONFIG_WRITE_ACTIONS
+    ):
+        return True
+    if any(
+        git_config_option_present(options, option) for option in _GIT_CONFIG_READ_FLAGS
+    ):
+        return False
     # A lone key is the legacy read form (`git config section.key`).
-    return protected_index + 1 < len(args) or any(
-        git_config_option_present(lowered, option)
-        for option in {"--add", "--replace-all", "--rename-section"}
-    )
+    return protected_index + 1 < len(operands)
 
 
 _POWERSHELL_ENV = re.compile(
