@@ -512,6 +512,7 @@ CASES = [
     ("git push --pru origin", 1, {}, "deny"),
     ("git push --push-o /tmp/harmless origin main", 1, {}, "deny"),
     ("git push --rece git-receive-pack public main", 1, {}, "deny"),
+    ("git push --recurse-s check public main", 1, {}, "deny"),
     ("git push --exe helper origin main", 1, {}, "deny"),
     ("git push --rep origin main", 1, {}, "deny"),
     ('git -C "C:/Path With Space/repo" push --force origin main', 1, {}, "deny"),
@@ -616,6 +617,7 @@ CASES = [
     ("git push --all origin", 1, {}, "allow"),
     ("git push --push-option harmless origin main", 1, {}, "allow"),
     ("git push --receive-pack helper origin main", 1, {}, "allow"),
+    ("git push --recurse-submodules check origin main", 1, {}, "allow"),
     ("git push --repo origin main", 1, {}, "allow"),
     ('git -C "C:/Path With Space/repo" push origin main', 1, {}, "allow"),
     (
@@ -1381,6 +1383,20 @@ def main():
                 ],
             ),
         ]
+    )
+    recursive_push_decision, _reason = dispatch_module.check(
+        "git push --recurse-submodules on-demand origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+    )
+    sensitive_remote_cases.append(
+        (
+            "sensitive recursive submodule push has additional destinations",
+            recursive_push_decision,
+            "deny",
+        )
     )
     for label, got, expected in sensitive_remote_cases:
         status = "ok" if got == expected else "FAIL"

@@ -927,6 +927,7 @@ _GIT_PUSH_VALUE_LONG_OPTIONS = {
     "--exec",
     "--push-option",
     "--receive-pack",
+    "--recurse-submodules",
     "--repo",
 }
 
@@ -1391,7 +1392,7 @@ def push_remotes(
 ) -> list[str]:
     """Resolve every effective destination URL for a git push."""
     remote = ""
-    value_options = {"--exec", "--receive-pack", "--push-option", "-o"}
+    value_options = (_GIT_PUSH_VALUE_LONG_OPTIONS - {"--repo"}) | {"-o"}
     i = 0
     while i < len(args):
         arg = args[i]
@@ -2181,6 +2182,17 @@ def check(
                         "deny",
                         "An abbreviated value-taking git-push option is floor-blocked.",
                     )
+                for index, token in enumerate(args):
+                    recurse_mode = ""
+                    if token == "--recurse-submodules" and index + 1 < len(args):
+                        recurse_mode = args[index + 1]
+                    elif token.startswith("--recurse-submodules="):
+                        recurse_mode = token.split("=", 1)[1]
+                    if sensitive and recurse_mode.lower() == "on-demand":
+                        return (
+                            "deny",
+                            "sensitive_data repo: recursive submodule pushes have additional destinations.",
+                        )
                 for t in args:
                     dangerous_options = {
                         "--force",
@@ -2224,13 +2236,7 @@ def check(
                             "Mirroring or deleting remote refs is floor-blocked.",
                         )
 
-                push_value_options = {
-                    "--exec",
-                    "--receive-pack",
-                    "--repo",
-                    "--push-option",
-                    "-o",
-                }
+                push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
                 positionals = []
                 remote_by_option = False
                 index = 0
