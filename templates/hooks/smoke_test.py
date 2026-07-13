@@ -1634,6 +1634,38 @@ def main():
         )
     )
 
+    fake_time = [0.0]
+    original_monotonic = dispatch_module.time.monotonic
+
+    def budgeted_runner(argv, _cwd):
+        fake_time[0] += 1.2
+        if argv[0] == "git":
+            return "\n".join(
+                [
+                    "https://github.com/example/private-one.git",
+                    "https://github.com/example/private-two.git",
+                    "https://github.com/example/private-three.git",
+                ]
+            )
+        return "PRIVATE"
+
+    try:
+        dispatch_module.time.monotonic = lambda: fake_time[0]
+        budgeted_status = dispatch_module.public_remote_status(
+            ["origin", "main"],
+            HERE,
+            command_runner=budgeted_runner,
+        )[0]
+    finally:
+        dispatch_module.time.monotonic = original_monotonic
+    remote_resolution_cases.append(
+        (
+            "multi-pushurl lookup exhausts aggregate budget as unknown",
+            budgeted_status,
+            None,
+        )
+    )
+
     def mixed_unknown_runner(argv, _cwd):
         if argv[0] == "git":
             return (

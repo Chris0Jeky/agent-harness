@@ -32,6 +32,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 
 FLOOR_VERSION = "1.4.1 (2026-07-13)"
 
@@ -1395,14 +1396,14 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def command_output(argv: list[str], cwd: str) -> str:
+def command_output(argv: list[str], cwd: str, timeout: float = 3) -> str:
     try:
         proc = subprocess.run(
             argv,
             cwd=cwd or None,
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1410,11 +1411,34 @@ def command_output(argv: list[str], cwd: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+_REMOTE_RESOLUTION_BUDGET_SECONDS = 3.5
+
+
+def command_output_before_deadline(
+    command_runner,
+    argv: list[str],
+    cwd: str,
+    deadline: float | None,
+) -> str:
+    """Run a resolver command without overrunning the hook's aggregate budget."""
+    if deadline is None:
+        return command_runner(argv, cwd)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return ""
+    if command_runner is command_output:
+        output = command_runner(argv, cwd, timeout=min(3, remaining))
+    else:
+        output = command_runner(argv, cwd)
+    return output if time.monotonic() <= deadline else ""
+
+
 def push_remotes(
     args: list[str],
     project_dir: str,
     git_globals: list[str] | None = None,
     command_runner=command_output,
+    deadline: float | None = None,
 ) -> list[str]:
     """Resolve every effective destination URL for a git push."""
     remote = ""
@@ -1453,7 +1477,8 @@ def push_remotes(
         return []
     if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
         return [remote]
-    output = command_runner(
+    output = command_output_before_deadline(
+        command_runner,
         [
             "git",
             *(git_globals or []),
@@ -1464,6 +1489,7 @@ def push_remotes(
             remote,
         ],
         project_dir,
+        deadline,
     )
     return [line.strip() for line in output.splitlines() if line.strip()]
 
@@ -1497,7 +1523,14 @@ def public_remote_status(
     command_runner=command_output,
 ) -> tuple[bool | None, str]:
     """Classify every push destination; unknown is fail-closed to the caller."""
-    remotes = push_remotes(args, project_dir, git_globals, command_runner)
+    deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    remotes = push_remotes(
+        args,
+        project_dir,
+        git_globals,
+        command_runner,
+        deadline,
+    )
     if not remotes:
         return None, "unresolved push remote"
     for remote in dict.fromkeys(remotes):
@@ -1509,7 +1542,8 @@ def public_remote_status(
         slug = github_repo_slug(remote)
         if not slug:
             return None, "unverified non-GitHub destination"
-        visibility = command_runner(
+        visibility = command_output_before_deadline(
+            command_runner,
             [
                 "gh",
                 "repo",
@@ -1521,6 +1555,7 @@ def public_remote_status(
                 ".visibility",
             ],
             project_dir,
+            deadline,
         ).upper()
         if visibility == "PUBLIC":
             return True, slug
