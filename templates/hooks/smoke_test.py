@@ -83,6 +83,13 @@ def write_tier(project: str, tier: int, flags: dict | None = None):
         json.dump({"tier": tier, "flags": flags or {}}, fh)
 
 
+def write_agent_tier(project: str, tier: int, flags: dict | None = None):
+    cfg_dir = os.path.join(project, ".agent-harness")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
+        json.dump({"tier": tier, "flags": flags or {}}, fh)
+
+
 def write_raw_tier(project: str, content: str):
     cfg_dir = os.path.join(project, ".claude")
     os.makedirs(cfg_dir, exist_ok=True)
@@ -190,13 +197,14 @@ CASES = [
     ("rm -rf /", 1, {}, "deny"),
     ("rm -rf ~", 1, {}, "deny"),
     ("rm -rf C:/", 1, {}, "deny"),
-    ("rm -rf C:/Users/jekyt", 1, {}, "deny"),
+    ("rm -rf C:/Users/example", 1, {}, "deny"),
     (
-        "rm -rf C:/Users/jekyt/other-project/src",
+        "rm -rf C:/Users/example/other-project/src",
         1,
         {},
         "deny",
     ),  # absolute, outside project
+    ("rm -rf /tmp/../../", 1, {}, "deny"),
     ("rm -rf *", 1, {}, "deny"),
     ("Get-ChildItem *.log | Remove-Item", 1, {}, "deny"),
     ("ls old/ | del", 1, {}, "deny"),
@@ -1129,7 +1137,11 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     stale_boundary_cases = []
-    with tempfile.TemporaryDirectory(dir=HERE) as boundary_fixture:
+    # Keep this fixture outside both the repository authority and the OS temp
+    # carveout, either of which would legitimately allow the sibling target.
+    with tempfile.TemporaryDirectory(
+        prefix="deny-floor-boundary-", dir=os.path.expanduser("~")
+    ) as boundary_fixture:
         payload_project = os.path.join(boundary_fixture, "payload")
         env_project = os.path.join(boundary_fixture, "environment")
         os.makedirs(payload_project)
@@ -1237,6 +1249,109 @@ def main():
             else:
                 os.rmdir(link)
 
+    sensitive_remote_cases = []
+    sensitive_cfg = {"tier": 2, "flags": {"sensitive_data": True}}
+    for expected, resolver, label in (
+        ("deny", lambda _args, _cwd: (True, "public"), "sensitive public push"),
+        ("allow", lambda _args, _cwd: (False, "private"), "sensitive private push"),
+        ("deny", lambda _args, _cwd: (None, "unknown"), "sensitive unknown push"),
+    ):
+        got, _reason = dispatch_module.check(
+            "git push origin main",
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=resolver,
+        )
+        sensitive_remote_cases.append((label, got, expected))
+    for label, got, expected in sensitive_remote_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 2, sensitive_cfg["flags"], expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    remote_resolution_cases = [
+        (
+            "HTTPS credentials are omitted from the visibility label",
+            dispatch_module.github_repo_slug(
+                "https://token-value@github.com/example/private-repo.git"
+            ),
+            "example/private-repo",
+        ),
+        (
+            "scp-like GitHub remote resolves to a slug",
+            dispatch_module.github_repo_slug("git@github.com:example/private-repo.git"),
+            "example/private-repo",
+        ),
+        (
+            "non-GitHub remote has no provider slug",
+            dispatch_module.github_repo_slug("https://gitlab.example/example/repo.git"),
+            "",
+        ),
+    ]
+    with tempfile.TemporaryDirectory(dir=HERE) as remote_project:
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=remote_project,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/example/fetch.git"],
+            cwd=remote_project,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "git@github.com:example/push.git",
+            ],
+            cwd=remote_project,
+            check=True,
+            capture_output=True,
+        )
+        remote_resolution_cases.append(
+            (
+                "named remote uses pushurl",
+                dispatch_module.push_remote(["origin", "main"], remote_project),
+                "git@github.com:example/push.git",
+            )
+        )
+    for label, got, expected in remote_resolution_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 2, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    runtime_neutral_cases = []
+    with tempfile.TemporaryDirectory(dir=HERE) as project:
+        write_tier(project, 1, {})
+        write_agent_tier(project, 4, {"sensitive_data": True})
+        runtime_neutral_cases.extend(
+            [
+                (
+                    "runtime-neutral tier takes precedence",
+                    invoke_case("git reset --hard HEAD~1", project),
+                    "deny",
+                ),
+                (
+                    "runtime-neutral overlay takes precedence",
+                    invoke_case("gh repo create leak --public", project),
+                    "deny",
+                ),
+            ]
+        )
+    for label, got, expected in runtime_neutral_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 4, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
     total = (
         len(CASES)
         + 1
@@ -1253,6 +1368,9 @@ def main():
         + len(stale_boundary_cases)
         + len(boundary_hardening_cases)
         + symlink_authority_count
+        + len(sensitive_remote_cases)
+        + len(remote_resolution_cases)
+        + len(runtime_neutral_cases)
     )
     print(f"\n{total - len(failures)}/{total} passed")
     if failures:

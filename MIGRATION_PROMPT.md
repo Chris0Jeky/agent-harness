@@ -12,12 +12,12 @@ Re-work this repo's agent harness to conform to the estate-wide tiered blueprint
 top routed model: do the judgment work yourself (tier reasoning, region maps, law collapses,
 anything irreversible); delegate only mechanical sweeps.
 
-RESOURCES (read in this order, nothing else up front):
-1. C:/Users/jekyt/source/agent-harness/BLUEPRINT.md   — the tier ladder and ten laws
-2. C:/Users/jekyt/source/agent-harness/SPECS.md       — schemas, budgets, hook wiring, skeletons
-3. C:/Users/jekyt/.claude/ESTATE.md                   — this repo's assigned tier + flags
+RESOURCES (read in this order, nothing else up front; discover paths, do not assume a user profile):
+1. <agent-harness-root>/BLUEPRINT.md   — the tier ladder and ten laws
+2. <agent-harness-root>/SPECS.md       — schemas, budgets, hook wiring, skeletons
+3. <config-root>/ESTATE.md             — this repo's assigned tier + flags, when current for this machine
 4. The per-repo appendix pasted below this prompt     — priorities and cautions for THIS repo
-(C:/Users/jekyt/source/agent-harness/BOOK.md holds the reasoning behind the laws — consult it
+(<agent-harness-root>/BOOK.md holds the reasoning behind the laws — consult it
 when a law seems wrong for this repo, before overriding it.)
 
 GROUND RULES:
@@ -38,7 +38,7 @@ DO, IN ORDER:
    if any. Produce a one-screen gap table: current vs the tier profile in BLUEPRINT §1.
 2. FLOOR: copy agent-harness/templates/hooks/{dispatch.py,smoke_test.py} into .claude/hooks/,
    wire per SPECS §5 ($CLAUDE_PROJECT_DIR-relative, one dispatcher per event), write
-   .claude/tier.json (tier/flags/authority from the appendix; note any intentional
+   `.agent-harness/tier.json` (tier/flags/authority from the appendix; note any intentional
    stricter-local-floor layering in a "notes" field). Run smoke_test.py — must be green.
    Retire superseded old hooks in the same PR (don't double-spawn processes per Bash call).
 3. SETTINGS HYGIENE: committed settings.json gets defaultMode acceptEdits + the repo's stack

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Harness dispatcher — the deny floor (PreToolUse) for all tiers.
+"""Harness dispatcher — the shared Claude/Codex deny floor for all tiers.
 
 Canonical copy: agent-harness/templates/hooks/dispatch.py
-Deployed copies: ~/.claude/hooks/dispatch.py (global) and per-repo .claude/hooks/.
+Deployed copies: ~/.claude/hooks/dispatch.py and ~/.codex/hooks/dispatch.py.
 `harness audit` diffs deployed copies against the canonical one.
 
 Contract (BLUEPRINT §2, SPECS §5-6):
@@ -29,10 +29,11 @@ import ntpath
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 
-FLOOR_VERSION = "1.3.3 (2026-07-13)"
+FLOOR_VERSION = "1.4.1 (2026-07-13)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1288,13 +1289,15 @@ def declared_project_dirs(start_dir: str) -> list[str]:
     current = os.path.abspath(start_dir)
     declared = []
     while True:
-        tier_path = os.path.join(current, ".claude", "tier.json")
-        try:
-            os.lstat(tier_path)
-        except FileNotFoundError:
-            pass
-        else:
-            declared.append(current)
+        for authority_dir in (".agent-harness", ".claude"):
+            tier_path = os.path.join(current, authority_dir, "tier.json")
+            try:
+                os.lstat(tier_path)
+            except FileNotFoundError:
+                continue
+            else:
+                declared.append(current)
+                break
         parent = os.path.dirname(current)
         if parent == current:
             return declared
@@ -1310,19 +1313,112 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def command_output(argv: list[str], cwd: str) -> str:
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def push_remote(args: list[str], project_dir: str) -> str:
+    """Resolve the destination token/remote URL for a git push."""
+    remote = ""
+    value_options = {"--exec", "--receive-pack", "--push-option", "-o"}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--repo" and i + 1 < len(args):
+            remote = args[i + 1]
+            break
+        if arg.startswith("--repo="):
+            remote = arg.split("=", 1)[1]
+            break
+        if arg == "--":
+            remote = args[i + 1] if i + 1 < len(args) else ""
+            break
+        if arg in value_options:
+            i += 2
+            continue
+        if arg.startswith(("--exec=", "--receive-pack=", "--push-option=")) or (
+            arg.startswith("-o") and len(arg) > 2
+        ):
+            i += 1
+            continue
+        if not arg.startswith("-"):
+            remote = arg
+            break
+        i += 1
+    if not remote:
+        return ""
+    if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
+        return remote
+    return command_output(["git", "remote", "get-url", "--push", remote], project_dir)
+
+
+def github_repo_slug(remote: str) -> str:
+    """Return owner/repo for a github.com remote without credentials."""
+    patterns = (
+        r"^(?:https?|git)://(?:[^/@]+@)?github\.com/([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?github\.com[:/]([^/?#]+/[^/?#]+)",
+        r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, remote.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).removesuffix(".git")
+    return ""
+
+
+def public_remote_status(args: list[str], project_dir: str) -> tuple[bool | None, str]:
+    """Return (is_public, label); None means privacy could not be established."""
+    remote = push_remote(args, project_dir)
+    if not remote:
+        return None, "unresolved push remote"
+    normalized = remote.lower()
+    if normalized.startswith("file://") or re.match(r"^([a-zA-Z]:[\\/]|[./~])", remote):
+        return False, "local destination"
+    slug = github_repo_slug(remote)
+    if not slug:
+        return None, "unverified non-GitHub destination"
+    visibility = command_output(
+        ["gh", "repo", "view", slug, "--json", "visibility", "--jq", ".visibility"],
+        project_dir,
+    ).upper()
+    if visibility == "PUBLIC":
+        return True, slug
+    if visibility in {"PRIVATE", "INTERNAL"}:
+        return False, slug
+    return None, slug
+
+
 def load_tier(project_dir: str) -> dict:
     """Read and validate tier authority; absent -> sandbox defaults.
 
     A present but unreadable or invalid declaration is a safety failure and must
-    propagate to the PRE-path fail-closed handler.
+    propagate to the PRE-path fail-closed handler. The runtime-neutral location
+    takes precedence over the legacy Claude-specific location.
     """
     cfg = {"tier": 1, "flags": {}}
     if not project_dir:
         return cfg
-    path = os.path.join(project_dir, ".claude", "tier.json")
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
+    path = None
+    for authority_dir in (".agent-harness", ".claude"):
+        candidate = os.path.join(project_dir, authority_dir, "tier.json")
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        path = candidate
+        break
+    if path is None:
         return cfg
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh, object_pairs_hook=reject_duplicate_keys)
@@ -1515,6 +1611,7 @@ def check(
     _depth: int = 0,
     _cwd_uncertain: bool = False,
     _cwd_changed: bool = False,
+    remote_resolver=public_remote_status,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _depth > 4:
@@ -1539,6 +1636,7 @@ def check(
             _depth + 1,
             _cwd_uncertain,
             _cwd_changed,
+            remote_resolver,
         )
     call_normalized = normalize_literal_call_operators(command)
     if re.search(
@@ -1690,6 +1788,7 @@ def check(
                     _depth + 1,
                     cwd_uncertain,
                     cwd_changed,
+                    remote_resolver,
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -1715,6 +1814,7 @@ def check(
                 _depth + 1,
                 cwd_uncertain,
                 cwd_changed,
+                remote_resolver,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -1831,6 +1931,7 @@ def check(
                 _depth + 1,
                 cwd_uncertain,
                 cwd_changed,
+                remote_resolver,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -1881,6 +1982,7 @@ def check(
                     _depth + 1,
                     cwd_uncertain,
                     cwd_changed,
+                    remote_resolver,
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -2035,6 +2137,18 @@ def check(
                         "deny",
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
+                if sensitive:
+                    is_public, remote = remote_resolver(args, project_dir)
+                    if is_public is True:
+                        return (
+                            "deny",
+                            f"sensitive_data repo: refusing a push to public remote {remote}.",
+                        )
+                    if is_public is None:
+                        return (
+                            "deny",
+                            f"sensitive_data repo: could not verify push remote privacy ({remote}).",
+                        )
 
             if sub == "reset" and "--hard" in args:
                 if strict:
@@ -2381,6 +2495,13 @@ def main():
     if event != "pre":
         sys.exit(0)  # global layer wires only the floor; other events are repo-tier
 
+    runtime = "claude"
+    if "--runtime" in sys.argv:
+        try:
+            runtime = sys.argv[sys.argv.index("--runtime") + 1].lower()
+        except IndexError:
+            pass
+
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -2443,7 +2564,8 @@ def main():
     except Exception as exc:  # fail CLOSED after a Bash payload is identified
         respond(
             "deny",
-            f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix ~/.claude/hooks before proceeding.",
+            f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix the installed dispatcher before proceeding.",
+            runtime,
         )
         return
     respond(decision, reason, runtime)
