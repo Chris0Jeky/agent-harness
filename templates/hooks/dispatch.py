@@ -945,6 +945,21 @@ def abbreviated_git_push_value_option(token: str) -> bool:
     return len(matches) == 1
 
 
+def git_push_short_option_shape(token: str) -> tuple[str, bool]:
+    """Return (flag prefix, consumes-next) for a push short-option token.
+
+    Git permits clusters such as ``-vo value``. The value-taking ``o`` ends
+    option parsing for that token; characters after it are the option value.
+    """
+    if len(token) < 2 or not token.startswith("-") or token.startswith("--"):
+        return "", False
+    cluster = token[1:]
+    value_index = cluster.find("o")
+    if value_index < 0:
+        return cluster, False
+    return cluster[:value_index], value_index == len(cluster) - 1
+
+
 _GIT_CONFIG_READ_FLAGS = {
     "--get",
     "--get-all",
@@ -1407,6 +1422,10 @@ def push_remotes(
         if arg == "--":
             remote = args[i + 1] if i + 1 < len(args) else ""
             break
+        _short_flags, short_consumes_next = git_push_short_option_shape(arg)
+        if short_consumes_next:
+            i += 2
+            continue
         if arg in value_options:
             i += 2
             continue
@@ -2194,6 +2213,7 @@ def check(
                             "sensitive_data repo: recursive submodule pushes have additional destinations.",
                         )
                 for t in args:
+                    short_flags, _short_consumes_next = git_push_short_option_shape(t)
                     dangerous_options = {
                         "--force",
                         "--force-with-lease",
@@ -2221,7 +2241,7 @@ def check(
                                 "T4/wave: no force variants at all — other work rides on these refs.",
                             )
                         continue
-                    if re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", t):
+                    if "f" in short_flags:
                         return (
                             "deny",
                             "git push -f is a force-push. Use --force-with-lease on your own branch, or merge instead.",
@@ -2230,7 +2250,7 @@ def check(
                         return "deny", "A +refspec is a forced update in disguise."
                     if t.startswith(":") and len(t) > 1:
                         return "deny", "A :refspec deletes a remote ref."
-                    if t in {"--mirror", "--prune", "--delete", "-d"}:
+                    if t in {"--mirror", "--prune", "--delete"} or ("d" in short_flags):
                         return (
                             "deny",
                             "Mirroring or deleting remote refs is floor-blocked.",
@@ -2253,6 +2273,12 @@ def check(
                     if token.startswith("--repo="):
                         remote_by_option = True
                         index += 1
+                        continue
+                    _short_flags, short_consumes_next = git_push_short_option_shape(
+                        token
+                    )
+                    if short_consumes_next:
+                        index += 2
                         continue
                     if token.startswith("--") or (
                         token.startswith("-") and len(token) > 1

@@ -515,6 +515,7 @@ CASES = [
     ("git push --recurse-s check public main", 1, {}, "deny"),
     ("git push --exe helper origin main", 1, {}, "deny"),
     ("git push --rep origin main", 1, {}, "deny"),
+    ("git push -do harmless origin main", 1, {}, "deny"),
     ('git -C "C:/Path With Space/repo" push --force origin main', 1, {}, "deny"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push --force origin main',
@@ -619,6 +620,8 @@ CASES = [
     ("git push --receive-pack helper origin main", 1, {}, "allow"),
     ("git push --recurse-submodules check origin main", 1, {}, "allow"),
     ("git push --repo origin main", 1, {}, "allow"),
+    ("git push -vo harmless origin main", 1, {}, "allow"),
+    ("git push -od origin main", 1, {}, "allow"),
     ('git -C "C:/Path With Space/repo" push origin main', 1, {}, "allow"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push origin main',
@@ -1395,6 +1398,33 @@ def main():
         (
             "sensitive recursive submodule push has additional destinations",
             recursive_push_decision,
+            "deny",
+        )
+    )
+
+    def clustered_public_runner(argv, _cwd):
+        if argv[0] == "git":
+            return "https://github.com/example/public.git"
+        return "PUBLIC"
+
+    clustered_public_decision, _reason = dispatch_module.check(
+        "git push -vo harmless origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda args, cwd, git_globals: (
+            dispatch_module.public_remote_status(
+                args,
+                cwd,
+                git_globals,
+                command_runner=clustered_public_runner,
+            )
+        ),
+    )
+    sensitive_remote_cases.append(
+        (
+            "sensitive clustered push-option preserves public destination",
+            clustered_public_decision,
             "deny",
         )
     )
