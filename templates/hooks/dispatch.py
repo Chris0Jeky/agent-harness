@@ -1593,9 +1593,11 @@ def public_remote_status(
     project_dir: str,
     git_globals: list[str] | None = None,
     command_runner=command_output,
+    deadline: float | None = None,
 ) -> tuple[bool | None, str]:
     """Classify every push destination; unknown is fail-closed to the caller."""
-    deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
     recurse_mode = git_push_recurse_mode(args)
     if recurse_mode is None:
         recurse_mode = command_output_before_deadline(
@@ -1879,10 +1881,13 @@ def check(
     _cwd_changed: bool = False,
     remote_resolver=public_remote_status,
     _remote_cache: dict | None = None,
+    _remote_deadline: float | None = None,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _remote_cache is None:
         _remote_cache = {}
+    if _remote_deadline is None:
+        _remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
     if _depth > 4:
         return "deny", "Nested shell depth exceeds the deny-floor inspection limit."
     tier = tier_cfg.get("tier", 1)
@@ -1907,6 +1912,7 @@ def check(
             _cwd_changed,
             remote_resolver,
             _remote_cache,
+            _remote_deadline,
         )
     call_normalized = normalize_literal_call_operators(command)
     if re.search(
@@ -2060,6 +2066,7 @@ def check(
                     cwd_changed,
                     remote_resolver,
                     _remote_cache,
+                    _remote_deadline,
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -2087,6 +2094,7 @@ def check(
                 cwd_changed,
                 remote_resolver,
                 _remote_cache,
+                _remote_deadline,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -2205,6 +2213,7 @@ def check(
                 cwd_changed,
                 remote_resolver,
                 _remote_cache,
+                _remote_deadline,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -2270,6 +2279,7 @@ def check(
                     cwd_changed,
                     remote_resolver,
                     _remote_cache,
+                    _remote_deadline,
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -2444,11 +2454,23 @@ def check(
                         tuple(git_toks[1:subcommand_index]),
                     )
                     if resolver_key not in _remote_cache:
-                        _remote_cache[resolver_key] = remote_resolver(
+                        resolver_args = (
                             args,
                             current_cwd,
                             git_toks[1:subcommand_index],
                         )
+                        if (
+                            getattr(remote_resolver, "func", remote_resolver)
+                            is public_remote_status
+                        ):
+                            _remote_cache[resolver_key] = remote_resolver(
+                                *resolver_args,
+                                deadline=_remote_deadline,
+                            )
+                        else:
+                            _remote_cache[resolver_key] = remote_resolver(
+                                *resolver_args
+                            )
                     is_public, remote = _remote_cache[resolver_key]
                     if is_public is True:
                         return (

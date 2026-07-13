@@ -3,6 +3,7 @@
 Every change to dispatch.py must keep this green. Exit 0 = all pass."""
 
 import base64
+import functools
 import json
 import importlib.util
 import os
@@ -1580,6 +1581,47 @@ def main():
                 "identical private destination resolves once per check",
                 len(plain_private_calls),
                 1,
+            ),
+        ]
+    )
+    whole_check_time = [0.0]
+    whole_check_calls = []
+    original_monotonic = dispatch_module.time.monotonic
+
+    def whole_check_budget_runner(argv, _cwd):
+        whole_check_calls.append(list(argv))
+        whole_check_time[0] += 0.7
+        if argv[0] == "git" and "config" in argv:
+            return "no"
+        if argv[0] == "git":
+            return "https://github.com/example/private.git"
+        return "PRIVATE"
+
+    try:
+        dispatch_module.time.monotonic = lambda: whole_check_time[0]
+        whole_check_budget_decision, _reason = dispatch_module.check(
+            "git push origin main && git push origin feature",
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=functools.partial(
+                dispatch_module.public_remote_status,
+                command_runner=whole_check_budget_runner,
+            ),
+        )
+    finally:
+        dispatch_module.time.monotonic = original_monotonic
+    sensitive_remote_cases.extend(
+        [
+            (
+                "distinct sensitive pushes share one resolver deadline",
+                whole_check_budget_decision,
+                "deny",
+            ),
+            (
+                "whole-check resolver deadline stops later subprocesses",
+                len(whole_check_calls),
+                5,
             ),
         ]
     )
