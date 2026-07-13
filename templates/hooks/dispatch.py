@@ -1013,24 +1013,27 @@ _GIT_CONFIG_REMOVAL_FLAGS = {"--unset", "--unset-all", "--remove-section"}
 
 
 def dangerous_git_config_mutation(args: list[str]) -> bool:
-    """Reject writes that can persist force/mirror behavior behind a later push."""
+    """Reject writes/removals that can change a later push's behavior."""
     lowered = [token.lower() for token in args]
     if any(token in _GIT_CONFIG_READ_FLAGS for token in lowered):
-        return False
-    if any(token in _GIT_CONFIG_REMOVAL_FLAGS for token in lowered):
         return False
     protected_index = next(
         (
             index
             for index, token in enumerate(lowered)
             if re.fullmatch(r"alias\.[^.]+", token)
-            or re.fullmatch(r"remote\.[^.]+\.(?:push|mirror)", token)
+            or re.fullmatch(r"remote\.[^.]+\.(?:url|pushurl|push|mirror)", token)
+            or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
+            or re.fullmatch(r"include(?:if)?\..+", token)
             or token == "push.recursesubmodules"
         ),
         None,
     )
     if protected_index is None:
         return False
+    protected_key = lowered[protected_index]
+    if any(token in _GIT_CONFIG_REMOVAL_FLAGS for token in lowered):
+        return protected_key.startswith(("remote.", "url.", "include"))
     # A lone key is the legacy read form (`git config section.key`).
     return protected_index + 1 < len(args) or any(
         token in {"--add", "--replace-all", "--rename-section"} for token in lowered
@@ -1523,6 +1526,12 @@ def push_remotes(
         deadline,
     )
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def dangerous_git_remote_mutation(args: list[str]) -> bool:
+    """Reject remote-name or URL changes that can retarget a later push."""
+    action = next((token.lower() for token in args if not token.startswith("-")), "")
+    return action in {"add", "rename", "remove", "rm", "set-url"}
 
 
 def push_remote(
@@ -2203,8 +2212,10 @@ def check(
             if sub == "config" and dangerous_git_config_mutation(args):
                 return (
                     "deny",
-                    "Persisting git aliases or remote push/mirror config is floor-blocked.",
+                    "Git alias or push-destination config mutation is floor-blocked.",
                 )
+            if sub == "remote" and dangerous_git_remote_mutation(args):
+                return "deny", "Git remote destination mutation is floor-blocked."
 
             alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
