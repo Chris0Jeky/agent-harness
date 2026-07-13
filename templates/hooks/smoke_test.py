@@ -1421,12 +1421,9 @@ def main():
                     "allow",
                 ),
                 (
-                    f"sensitive {quote_style[:2]} context survives both passes",
+                    f"sensitive {quote_style[:2]} context is cached across passes",
                     structural_contexts,
-                    [
-                        (HERE, ["-C", "child repo"]),
-                        (HERE, ["-C", "child repo"]),
-                    ],
+                    [(HERE, ["-C", "child repo"])],
                 ),
             ]
         )
@@ -1451,12 +1448,36 @@ def main():
                 "allow",
             ),
             (
-                "sensitive quoted git -C survives every inspection pass",
+                "sensitive quoted git -C is cached across inspection passes",
                 quoted_contexts,
-                [
-                    (HERE, ["-C", "child repo"]),
-                    (HERE, ["-C", "child repo"]),
-                ],
+                [(HERE, ["-C", "child repo"])],
+            ),
+        ]
+    )
+    plain_private_calls = []
+
+    def counted_private_resolver(args, cwd, git_globals):
+        plain_private_calls.append((list(args), cwd, list(git_globals)))
+        return (False, "private")
+
+    cached_private_decision, _reason = dispatch_module.check(
+        "git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=counted_private_resolver,
+    )
+    sensitive_remote_cases.extend(
+        [
+            (
+                "cached private destination remains allowed",
+                cached_private_decision,
+                "allow",
+            ),
+            (
+                "identical private destination resolves once per check",
+                len(plain_private_calls),
+                1,
             ),
         ]
     )

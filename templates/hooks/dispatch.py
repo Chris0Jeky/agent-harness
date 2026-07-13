@@ -1837,8 +1837,11 @@ def check(
     _cwd_uncertain: bool = False,
     _cwd_changed: bool = False,
     remote_resolver=public_remote_status,
+    _remote_cache: dict | None = None,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
+    if _remote_cache is None:
+        _remote_cache = {}
     if _depth > 4:
         return "deny", "Nested shell depth exceeds the deny-floor inspection limit."
     tier = tier_cfg.get("tier", 1)
@@ -1862,6 +1865,7 @@ def check(
             _cwd_uncertain,
             _cwd_changed,
             remote_resolver,
+            _remote_cache,
         )
     call_normalized = normalize_literal_call_operators(command)
     if re.search(
@@ -2014,6 +2018,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    _remote_cache,
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -2040,6 +2045,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                _remote_cache,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -2157,6 +2163,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                _remote_cache,
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -2219,6 +2226,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    _remote_cache,
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -2387,11 +2395,18 @@ def check(
                             "deny",
                             "sensitive_data repo: cannot verify push destination after an uncertain cwd transition.",
                         )
-                    is_public, remote = remote_resolver(
-                        args,
+                    resolver_key = (
+                        tuple(args),
                         current_cwd,
-                        git_toks[1:subcommand_index],
+                        tuple(git_toks[1:subcommand_index]),
                     )
+                    if resolver_key not in _remote_cache:
+                        _remote_cache[resolver_key] = remote_resolver(
+                            args,
+                            current_cwd,
+                            git_toks[1:subcommand_index],
+                        )
+                    is_public, remote = _remote_cache[resolver_key]
                     if is_public is True:
                         return (
                             "deny",
