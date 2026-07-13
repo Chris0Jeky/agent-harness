@@ -2,6 +2,7 @@
 """Deny-floor smoke tests (SPECS §6 matrix). Run: python smoke_test.py
 Every change to dispatch.py must keep this green. Exit 0 = all pass."""
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,7 +12,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
 
 
-def run_case(command: str, tier: int = 1, flags: dict | None = None, project: str | None = None):
+def load_dispatch():
+    spec = importlib.util.spec_from_file_location("harness_dispatch", DISPATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_case(command: str, tier: int = 1, flags: dict | None = None, project: str | None = None,
+             runtime: str = "claude"):
     """Invoke dispatch.py as the harness would; return decision string."""
     tmp = None
     env = dict(os.environ)
@@ -24,12 +34,13 @@ def run_case(command: str, tier: int = 1, flags: dict | None = None, project: st
         json.dump({"tier": tier, "flags": flags or {}}, fh)
     env["CLAUDE_PROJECT_DIR"] = project
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project})
-    proc = subprocess.run([sys.executable, DISPATCH, "--event", "pre"],
+    proc = subprocess.run([sys.executable, DISPATCH, "--event", "pre", "--runtime", runtime],
                           input=payload, capture_output=True, text=True, env=env, timeout=10)
     decision = "allow"
     if proc.stdout.strip():
         try:
-            decision = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
+            output = json.loads(proc.stdout)["hookSpecificOutput"]
+            decision = output.get("permissionDecision", "warn" if output.get("additionalContext") else "allow")
         except (ValueError, KeyError):
             decision = f"BAD-OUTPUT: {proc.stdout[:120]}"
     if tmp:
@@ -48,8 +59,9 @@ CASES = [
     ("rm -rf /", 1, {}, "deny"),
     ("rm -rf ~", 1, {}, "deny"),
     ("rm -rf C:/", 1, {}, "deny"),
-    ("rm -rf C:/Users/jekyt", 1, {}, "deny"),
-    ("rm -rf C:/Users/jekyt/other-project/src", 1, {}, "deny"),  # absolute, outside project
+    ("rm -rf C:/Users/example", 1, {}, "deny"),
+    ("rm -rf C:/Users/example/other-project/src", 1, {}, "deny"),  # absolute, outside project
+    ("rm -rf /tmp/../../", 1, {}, "deny"),
     ("rm -rf *", 1, {}, "deny"),
     ("Get-ChildItem *.log | Remove-Item", 1, {}, "deny"),
     ("ls old/ | del", 1, {}, "deny"),
@@ -150,7 +162,35 @@ def main():
             failures.append(("rm -rf <inside-project-abs>", 1, {}, "allow", got))
         print(f"  [{status}] tier=1 expected=allow got={got}  rm -rf <inside-project-absolute>")
 
-    print(f"\n{len(CASES) + 1 - len(failures)}/{len(CASES) + 1} passed")
+    # Codex does not currently support permissionDecision=ask. T3 work-loss
+    # guards must become a visible warning without causing a hook failure.
+    got = run_case("git reset --hard HEAD~1", tier=3, runtime="codex")
+    status = "ok" if got == "warn" else "FAIL"
+    if got != "warn":
+        failures.append(("codex T3 warning adapter", 3, {}, "warn", got))
+    print(f"  [{status}] runtime=codex tier=3 expected=warn got={got}  git reset --hard HEAD~1")
+
+    dispatch = load_dispatch()
+    got, _ = dispatch.check("rm -rf C:/repo-evil", {"tier": 1, "flags": {}}, "C:/repo")
+    status = "ok" if got == "deny" else "FAIL"
+    if got != "deny":
+        failures.append(("rm -rf <project-prefix-sibling>", 1, {}, "deny", got))
+    print(f"  [{status}] tier=1 expected=deny got={got}  rm -rf <project-prefix-sibling>")
+
+    sensitive_cfg = {"tier": 2, "flags": {"sensitive_data": True}}
+    for expected, resolver, label in (
+        ("deny", lambda _args, _cwd: (True, "public"), "sensitive public push"),
+        ("allow", lambda _args, _cwd: (False, "private"), "sensitive private push"),
+        ("deny", lambda _args, _cwd: (None, "unknown"), "sensitive unknown push"),
+    ):
+        got, _ = dispatch.check("git push origin main", sensitive_cfg, HERE, resolver)
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 2, sensitive_cfg["flags"], expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    total = len(CASES) + 6
+    print(f"\n{total - len(failures)}/{total} passed")
     if failures:
         print("FAILURES:")
         for f in failures:

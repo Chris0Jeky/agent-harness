@@ -1,6 +1,6 @@
 # Agent Harness Blueprint
 
-Last Updated: 2026-07-06 · Applies to: every repo, every machine, every model tier
+Last Updated: 2026-07-13 · Applies to: every repo, every machine, every model tier
 Concrete schemas, skeletons, and literal file drafts live in [SPECS.md](./SPECS.md).
 
 **Thesis.** A repo's harness is defined by its **blast radius** — what can irreversibly break
@@ -45,7 +45,7 @@ half-worked. Nothing is speculative.
    scheduled consumer degrades into noise (314/314 failure-ledger entries unclassified after
    8 weeks; nightly lane red 5/5 days unnoticed). The Gardener (§4) is that consumer.
 8. **Authority is declared, not negotiated.** Push/merge autonomy is a written per-repo setting
-   in `tier.json` — the same developer currently runs opposite git postures in different repos,
+   in `.agent-harness/tier.json` — the same developer currently runs opposite git postures in different repos,
    discoverable only by tripping hooks.
 9. **Tracked-issue-or-it-doesn't-exist.** Plans living only in prose lose to tracked issues
    every time (Taskdeck's only archive plan sat in a gitignored file while agents worked the
@@ -162,8 +162,8 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 ## 2. The Floor (the only thing that never varies)
 
-One global, argv-aware PreToolUse deny hook (dispatcher spec in SPECS §5), identical at every
-tier, protecting only the IRREVERSIBLE:
+One global, argv-aware PreToolUse deny hook (dispatcher spec in SPECS §5), identical policy at
+every tier and adapted explicitly to each runtime's hook contract, protecting only the IRREVERSIBLE:
 
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
@@ -379,9 +379,9 @@ create a parallel plan (law 9).
 5. **hq-private → T1 + `sensitive_data`**: add tier line + privacy denies; rename to
    HUMAN_TODO.md convention or record alias. Verify it has a private remote (irreplaceable
    content). Nothing else — it already conforms.
-6. ★ **Build the seed/bootstrapper CLI** (SPECS §9): `harness seed --tier N`, `harness
-   tier-up`, `harness audit`. Write-once germ; REFUSES to overwrite evolved files — the
-   bootstrap-*.ps1 scripts failed precisely by snapshotting evolved files.
+6. **Seed/bootstrapper CLI shipped (2026-07-13)** (SPECS §9): `harness.py seed`, `audit`,
+   `sync-global`, and `doctor`; the germ refuses overwrite. `tier-up` and estate-wide mutation
+   remain deferred until repeated use earns them.
 7. **Taskdeck → T3 diet, via its own tracked issues**: #1138 (STATUS → ≤150-line head +
    rotation), #1275/ARCHIVE-07 (CI right-sizing: drop dual-OS matrix, path-filter, DELETE the
    5/5-red nightly perf + 4/4-red mutation lanes under the red-lane law), #1276/ARCHIVE-08

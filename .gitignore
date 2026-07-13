@@ -1,2 +1,5 @@
 /.idea
 /.worktrees
+__pycache__/
+*.py[cod]
+
