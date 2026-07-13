@@ -1,7 +1,8 @@
 # agent-harness
 
-The reusable, tiered blueprint for how AI agents (Claude Code first, any vendor second) are
-configured across every repo and machine Chris works on.
+The reusable, tiered blueprint and portable tooling for how AI agents are configured across
+every repo and machine Chris works on. Codex and Claude share policy; runtime adapters remain
+explicit where their hook/config contracts differ.
 
 | File | What it is |
 |---|---|
@@ -9,15 +10,31 @@ configured across every repo and machine Chris works on.
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
-| `templates/hooks/` | Canonical `dispatch.py` (argv-aware deny floor) + `smoke_test.py` (49-case matrix). Deployed copies live in `~/.claude/hooks/` and per-repo `.claude/hooks/`; `harness audit` diffs them against these |
+| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up Codex global sync |
+| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting bypass matrix (89 cases at this revision) |
+| `templates/codex/` | Codex lifecycle-hook wiring; install paths are rendered at sync time |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
-Status (2026-07-06): global layer SHIPPED (`~/.claude/CLAUDE.md` laws, deny floor live and
-smoke-tested, ESTATE.md, MACHINE.md, agents/, settings diet; `~/.claude` versioned as private
-repo `claude-config`). Dead estate tombstoned. Taskdeck declared T3 (PR #1292 + issue #1291).
-Next: run MIGRATION_PROMPT.md sessions in olb (FIRST — production hotfix), wealthlens-hq,
-extract-api, hq-private, NavSentinel; then the bootstrapper CLI (SPECS §9) and the weekly
-Gardener rhythm.
+## Use
+
+```powershell
+# Inspect first; installation is never implicit.
+py -3 .\harness.py doctor
+py -3 .\harness.py audit C:\path\to\repo
+py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
+
+# Diff, then install the versioned Codex global layer with backups.
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
+```
+
+`seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
+up changed global guidance/hooks and managed skill folders before replacing them. After a hook
+change, review and trust its hash with `/hooks` in a new Codex session.
+
+Status (2026-07-13): the blueprint, shared 89-case deny floor, Codex adapter, portable CLI, and
+versioned global Codex layer are implemented. Gardener scheduling remains intentionally deferred
+until the bootstrap/audit loop has earned trust through real use.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own

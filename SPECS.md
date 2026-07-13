@@ -1,6 +1,6 @@
 # Harness Specs
 
-Last Updated: 2026-07-06 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
+Last Updated: 2026-07-13 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
 ## §1 Global `~/.claude/CLAUDE.md` — literal draft (~40 lines)
 
@@ -26,21 +26,21 @@ Last Updated: 2026-07-06 · Concrete schemas and drafts referenced from [BLUEPRI
 8. Structure arrives with the second item. Don't build speculative scaffolding; when a lesson
    recurs, promote it up the enforcement ladder (memory→CLAUDE.md→skill→hook→CI→structure)
    to the cheapest layer that actually enforces it.
-9. Before working in an unfamiliar repo: check ~/.claude/ESTATE.md (junk wrappers and frozen
-   snapshots exist) and the repo's .claude/tier.json — authority is declared, not negotiated.
+9. Before working in an unfamiliar repo: check the estate registry (junk wrappers and frozen
+   snapshots exist) and the repo's `.agent-harness/tier.json` — authority is declared, not negotiated.
 10. Weak-model rails: if you are not the top routed model, never merge, never edit canonical
     docs, the deny floor, or gates. Open PRs.
 
 ## Tier ladder (blast radius)
 T0 tombstone · T1 sandbox · T2 daily driver · T3 workshop · T4 live wire
-Details: C:/Users/jekyt/source/agent-harness/BLUEPRINT.md
+Details: the active `agent-harness/BLUEPRINT.md` checkout
 ```
 
 Ship in the same commit that deletes the graduated per-repo memory duplicates
 (feedback_never_merge_failing_ci, feedback_review_fix_everything, feedback_always_check_pr_comments,
 zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR memories, …).
 
-## §2 `.claude/tier.json` schema
+## §2 `.agent-harness/tier.json` schema
 
 ```json
 {
@@ -62,7 +62,8 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
-- Read by: dispatcher hook, Gardener, bootstrapper, CI templates.
+- Read by: dispatcher hook, Gardener, bootstrapper, CI templates. The dispatcher also reads
+  legacy `.claude/tier.json` files so existing estates can migrate without a flag day.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
   the budget script fails if they disagree.
@@ -119,7 +120,9 @@ here.` / `Live successor: <path or "none">`.
 
 ## §5 Dispatcher hook wiring
 
-One script per EVENT, not stacked matchers (kills the double-process spawn per Bash call):
+One script per EVENT, not stacked matchers (kills the double-process spawn per shell call).
+Claude uses its native wiring below; Codex uses `templates/codex/hooks.json`, rendered with an
+absolute dispatcher path by `harness.py sync-global`.
 
 ```json
 {
@@ -146,6 +149,8 @@ One script per EVENT, not stacked matchers (kills the double-process spawn per B
   copy at seed time; `harness audit` diffs copies against the template (bootstrap-drift guard).
 - Self-tested: `python .claude/hooks/smoke_test.py` (or `make test-hooks`) runs the §6 matrix
   + one allow-case per event. A floor/dispatcher change is T4-class work in any repo.
+- Codex 0.144 does not support `permissionDecision: "ask"`; the runtime adapter converts T3
+  work-loss asks into model-visible warnings while preserving hard denies.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 
@@ -199,13 +204,17 @@ detail so it updates without a SPECS edit.
 
 ## §9 Bootstrapper CLI + ESTATE.md
 
-Home: this repo. Commands (PowerShell/Python, single implementation, no .sh/.ps1 twins):
-- `harness seed --tier N <path>` — writes the write-once germ for tier N (germ only: CLAUDE.md,
-  tier.json, hooks copy, settings skeleton). REFUSES to overwrite any existing evolved file
-  (the bootstrap-*.ps1 drift lesson: a generator that snapshots evolved files is negative value).
-- `harness tier-up <path>` — adds the delta artifacts for the next tier in one reviewed commit.
-- `harness audit [<path>|--all]` — regenerates CLAUDE.md tier lines from tier.json, diffs
-  hook copies vs templates, runs check-budgets, updates ESTATE.md, flags tier/reality mismatch.
+Home: this repo. Implemented in the dependency-free `harness.py` (one implementation, no
+`.sh`/`.ps1` twins):
+- `harness.py seed <path> --tier N` — writes only the runtime-neutral tier germ and refuses
+  overwrite. Repo instructions remain judgment work and are not generated blindly.
+- `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
+  stale user-profile paths.
+- `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs the
+  Codex global guidance, hook, and skills with timestamped backups.
+- `harness.py doctor` — checks the live Codex installation and core executables.
+
+Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
 Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `templates/skills/`.
 
