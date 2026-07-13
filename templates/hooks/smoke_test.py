@@ -542,8 +542,21 @@ CASES = [
     ("git config --unset include.path", 1, {}, "deny"),
     ("git config --remove-section remote.origin", 1, {}, "deny"),
     ("git config --remove-s remote.origin", 1, {}, "deny"),
+    ("git config --remove-section --local remote.origin", 1, {}, "deny"),
+    (
+        "git config --remove-section --file C:/tmp/config remote.origin",
+        1,
+        {},
+        "deny",
+    ),
     ("git config --rename-section remote.origin remote.other", 1, {}, "deny"),
     ("git config --rename-s remote.origin remote.other", 1, {}, "deny"),
+    (
+        "git config --rename-section --file C:/tmp/config remote.origin remote.other",
+        1,
+        {},
+        "deny",
+    ),
     ("git config --remove-section include", 1, {}, "deny"),
     (
         "git config --show-scope remote.origin.pushurl https://github.com/example/public.git",

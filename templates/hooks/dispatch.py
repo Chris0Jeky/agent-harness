@@ -1032,15 +1032,15 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
         if (
             token == "--remove-section"
             or git_option_abbreviates(token, "--remove-section")
-        ) and index + 1 < len(lowered):
-            if protected_git_config_section(lowered[index + 1]):
-                return True
+        ) and any(
+            protected_git_config_section(section) for section in lowered[index + 1 :]
+        ):
+            return True
         if (
             token == "--rename-section"
             or git_option_abbreviates(token, "--rename-section")
         ) and any(
-            protected_git_config_section(section)
-            for section in lowered[index + 1 : index + 3]
+            protected_git_config_section(section) for section in lowered[index + 1 :]
         ):
             return True
     protected_index = next(
