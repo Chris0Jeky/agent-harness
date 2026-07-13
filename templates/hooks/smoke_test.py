@@ -11,7 +11,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
 
 
-def run_case(command: str, tier: int = 1, flags: dict | None = None, project: str | None = None):
+def parse_decision(proc: subprocess.CompletedProcess[str]):
+    if proc.returncode != 0:
+        return f"BAD-EXIT:{proc.returncode}: {proc.stderr[:120]}"
+    if not proc.stdout.strip():
+        return "allow"
+    try:
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
+    except (ValueError, KeyError, TypeError):
+        return f"BAD-OUTPUT: {proc.stdout[:120]}"
+
+
+def dispatch_argv(runtime: str | None = None):
+    argv = [sys.executable, DISPATCH, "--event", "pre"]
+    if runtime:
+        argv.extend(["--runtime", runtime])
+    return argv
+
+
+def run_case(
+    command: str,
+    tier: int = 1,
+    flags: dict | None = None,
+    project: str | None = None,
+    runtime: str | None = None,
+):
     """Invoke dispatch.py as the harness would; return decision string."""
     tmp = None
     env = dict(os.environ)
@@ -24,17 +48,92 @@ def run_case(command: str, tier: int = 1, flags: dict | None = None, project: st
         json.dump({"tier": tier, "flags": flags or {}}, fh)
     env["CLAUDE_PROJECT_DIR"] = project
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project})
-    proc = subprocess.run([sys.executable, DISPATCH, "--event", "pre"],
+    proc = subprocess.run(dispatch_argv(runtime),
                           input=payload, capture_output=True, text=True, env=env, timeout=10)
-    decision = "allow"
-    if proc.stdout.strip():
-        try:
-            decision = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
-        except (ValueError, KeyError):
-            decision = f"BAD-OUTPUT: {proc.stdout[:120]}"
+    decision = parse_decision(proc)
     if tmp:
         tmp.cleanup()
     return decision
+
+
+def write_tier(project: str, tier: int, flags: dict | None = None):
+    cfg_dir = os.path.join(project, ".claude")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
+        json.dump({"tier": tier, "flags": flags or {}}, fh)
+
+
+def write_raw_tier(project: str, content: str):
+    cfg_dir = os.path.join(project, ".claude")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
+def invoke_payload(
+    payload: object,
+    cwd: str,
+    env_project: str | None = None,
+    runtime: str | None = None,
+):
+    env = dict(os.environ)
+    if env_project is None:
+        env.pop("CLAUDE_PROJECT_DIR", None)
+    else:
+        env["CLAUDE_PROJECT_DIR"] = env_project
+    proc = subprocess.run(
+        dispatch_argv(runtime),
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+        timeout=10,
+    )
+    return parse_decision(proc)
+
+
+def invoke_case(
+    command: str,
+    cwd: str,
+    env_project: str | None = None,
+    runtime: str | None = None,
+):
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
+    return invoke_payload(payload, cwd, env_project, runtime)
+
+
+def run_synthetic_project_case(
+    command: str,
+    project: str,
+    env_extra: dict[str, str] | None = None,
+):
+    """Exercise path containment without the floor's explicit temp-path allowance."""
+    env = dict(os.environ)
+    env["CLAUDE_PROJECT_DIR"] = project
+    env.update(env_extra or {})
+    payload = json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project}
+    )
+    proc = subprocess.run(
+        dispatch_argv(),
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    return parse_decision(proc)
+
+
+def run_nested_case(command: str, tier: int, flags: dict | None = None):
+    """Invoke without CLAUDE_PROJECT_DIR from below the declared project root."""
+    with tempfile.TemporaryDirectory() as project:
+        nested_dir = os.path.join(project, "backend", "app")
+        os.makedirs(nested_dir, exist_ok=True)
+        write_tier(project, tier, flags)
+        command = command.replace("{project}", project.replace("\\", "/"))
+        return invoke_case(command, nested_dir)
 
 
 CASES = [
@@ -108,7 +207,7 @@ CASES = [
     ("rm -rf ${HOME}", 1, {}, "deny"),
     ('rm -rf "$HOME"', 1, {}, "deny"),
     ("rm -rf $HOME/", 1, {}, "deny"),
-    ("rm -rf $HOME/build", 1, {}, "allow"),                  # subpath, like rm -rf ~/build
+    ("rm -rf $HOME/build", 1, {}, "deny"),                   # env-expanded absolute outside project
     # --- v1.3.0: wrapper / path / .exe head normalization ---
     ("git.exe push --force", 1, {}, "deny"),
     ("/usr/bin/git push --force origin main", 1, {}, "deny"),
@@ -116,10 +215,52 @@ CASES = [
     ("sudo.exe apt-get install x", 1, {}, "deny"),
     ("FOO=bar git push --force", 1, {}, "deny"),
     ("env FOO=bar git push --force", 1, {}, "deny"),
+    # --- v1.3.1: quoted argv remains executable argv, not inert message text ---
+    ('git push "--force" origin main', 1, {}, "deny"),
+    ("git push origin '+main'", 1, {}, "deny"),
+    ('git reset "--hard" HEAD~1', 4, {}, "deny"),
+    ('gh repo create leak "--public"', 1, {"sensitive_data": True}, "deny"),
+    ('Remove-Item -Recurse -Force "C:/critical/outside path"', 1, {}, "deny"),
+    ("Remove-Item -Recurse -Force 'C:/critical/outside path'", 1, {}, "deny"),
+    ('rm -rf build "C:/critical/outside path"', 1, {}, "deny"),
+    ("rm -rf build 'C:/critical/outside path'", 1, {}, "deny"),
+    # --- v1.3.1: relative/env/provider paths and PowerShell aliases ---
+    ("rm -rf ../../outside", 1, {}, "deny"),
+    ("Remove-Item -Recurse ../../outside", 1, {}, "deny"),
+    ("Remove-Item -Rec -Force C:/critical/outside", 1, {}, "deny"),
+    ("ri -R C:/critical/outside", 1, {}, "deny"),
+    ("rm -Recurse -Force C:/critical/outside", 1, {}, "deny"),
+    ("del -Recurse -Force C:/critical/outside", 1, {}, "deny"),
+    ("erase -Recur C:/critical/outside", 1, {}, "deny"),
+    ("rd /s /q C:/critical/outside", 1, {}, "deny"),
+    ("rmdir /s /q C:/critical/outside", 1, {}, "deny"),
+    ("Remove-Item -R FileSystem::C:/critical/outside", 1, {}, "deny"),
+    (
+        "Remove-Item -R Microsoft.PowerShell.Core\\FileSystem::C:/critical/outside",
+        1,
+        {},
+        "deny",
+    ),
+    ("Remove-Item -R HKCU:\\Software\\Danger", 1, {}, "deny"),
+    ("cd ../../outside && rm -rf build", 1, {}, "deny"),
+    ("Set-Location C:/critical/outside; Remove-Item -Recurse build", 1, {}, "deny"),
+    ("Push-Location C:/critical/outside; Remove-Item -Recurse build", 1, {}, "deny"),
+    ("Pop-Location; Remove-Item -Recurse build", 1, {}, "deny"),
+    ('rm -rf "$(realpath ../../outside)"', 1, {}, "deny"),
+    ('Remove-Item -Recurse "$(Resolve-Path ../../outside)"', 1, {}, "deny"),
+    ("rm -rf {build,../../outside}", 1, {}, "deny"),
+    ('cmd /c "rd /s /q C:\\critical\\outside"', 1, {}, "deny"),
+    ('powershell -Command "Remove-Item -Recurse C:/critical/outside"', 1, {}, "deny"),
+    ("bash -c 'rm -rf /critical/outside'", 1, {}, "deny"),
+    ("sh -c 'git push --force origin main'", 1, {}, "deny"),
+    ("bash -lc 'git push --force origin main'", 1, {}, "deny"),
+    ('rm -rf "${HOME%/jekyt}/outside"', 1, {}, "deny"),
+    ("Remove-Item -Recurse @(C:/critical/outside)", 1, {}, "deny"),
     # --- MUST ALLOW: false-positive regression tests ---
     ('git commit -m "block rm -rf / in the hook"', 1, {}, "allow"),
     ('git commit -m "prevent git push --force everywhere"', 4, {}, "allow"),
     ('gh pr create --title "fix" --body-file body.md', 1, {}, "allow"),
+    ('echo ">" .env', 1, {}, "allow"),
     ("git push origin main", 1, {}, "allow"),
     ("git push -u origin feature", 1, {}, "allow"),
     ("rm -rf node_modules", 1, {}, "allow"),
@@ -130,6 +271,7 @@ CASES = [
     ("git restore --staged .", 4, {}, "allow"),
     ("curl https://api.example.com/data -o data.json", 1, {}, "allow"),
     ("dotnet test backend/Taskdeck.sln", 1, {}, "allow"),
+    ("bash -c 'git status'", 1, {}, "allow"),
 ]
 
 
@@ -150,7 +292,365 @@ def main():
             failures.append(("rm -rf <inside-project-abs>", 1, {}, "allow", got))
         print(f"  [{status}] tier=1 expected=allow got={got}  rm -rf <inside-project-absolute>")
 
-    print(f"\n{len(CASES) + 1 - len(failures)}/{len(CASES) + 1} passed")
+    synthetic_project = "C:/srv/repo" if os.name == "nt" else "/srv/repo"
+    sibling = synthetic_project + "-archive"
+    sibling_cases = [
+        (f"rm -rf {sibling}", "rm -rf sibling-prefix path"),
+        (f"Remove-Item -Recurse -Force {sibling}", "Remove-Item sibling-prefix path"),
+        (
+            f"rm -rf {synthetic_project}/build/../../outside",
+            "rm -rf dot-dot escape",
+        ),
+        (
+            "rm -rf C:/critical/temp/records" if os.name == "nt"
+            else "rm -rf /critical/temp/records",
+            "arbitrary temp-named component is not scratch",
+        ),
+        (
+            "rm -rf C:/tmpx/records" if os.name == "nt" else "rm -rf /tmpx/records",
+            "tmp-prefix sibling is not scratch",
+        ),
+    ]
+    for command, label in sibling_cases:
+        got = run_synthetic_project_case(command, synthetic_project)
+        status = "ok" if got == "deny" else "FAIL"
+        if got != "deny":
+            failures.append((label, 1, {}, "deny", got))
+        print(f"  [{status}] tier=1 expected=deny got={got}  {label}")
+
+    escape_root = "C:/srv/outside" if os.name == "nt" else "/srv/outside"
+    resolution_cases = [
+        ("rm -rf $ESCAPE_ROOT/data", {"ESCAPE_ROOT": escape_root}, "deny", "POSIX env escape"),
+        (
+            "Remove-Item -Rec $env:ESCAPE_ROOT/data",
+            {"ESCAPE_ROOT": escape_root},
+            "deny",
+            "PowerShell env escape",
+        ),
+        (
+            "Remove-Item -Rec %ESCAPE_ROOT%/data",
+            {"ESCAPE_ROOT": escape_root},
+            "deny",
+            "cmd env escape",
+        ),
+        ("Remove-Item -Rec C:..\\outside", {}, "deny", "drive-relative escape"),
+        (
+            f"Remove-Item -Rec FileSystem::{synthetic_project}/build",
+            {},
+            "allow",
+            "FileSystem provider inside project",
+        ),
+    ]
+    if os.name == "nt":
+        resolution_cases.extend(
+            [
+                (
+                    "Remove-Item -Rec /mnt/c/srv/repo/build",
+                    {},
+                    "deny",
+                    "ambiguous WSL path fails closed under PowerShell",
+                ),
+                (
+                    "Remove-Item -Rec /c/srv/repo/build",
+                    {},
+                    "deny",
+                    "ambiguous MSYS path fails closed under PowerShell",
+                ),
+            ]
+        )
+    for command, env_extra, expected, label in resolution_cases:
+        got = run_synthetic_project_case(command, synthetic_project, env_extra)
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 1, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    nested_cases = [
+        ("git reset --hard HEAD~1", 4, {}, "deny", "nested cwd inherits T4"),
+        (
+            "gh repo create leak --public",
+            1,
+            {"sensitive_data": True},
+            "deny",
+            "nested cwd inherits sensitive_data",
+        ),
+        (
+            "rm -rf {project}/build",
+            1,
+            {},
+            "allow",
+            "nested cwd keeps project-root deletion boundary",
+        ),
+    ]
+    for command, tier, flags, expected, label in nested_cases:
+        got = run_nested_case(command, tier, flags)
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, tier, flags, expected, got))
+        print(f"  [{status}] tier={tier} expected={expected} got={got}  {label}")
+
+    temp_target = os.path.join(tempfile.gettempdir(), "deny-floor-scratch").replace("\\", "/")
+    got = run_synthetic_project_case(f"rm -rf {temp_target}", synthetic_project)
+    temp_case_count = 1
+    status = "ok" if got == "allow" else "FAIL"
+    if got != "allow":
+        failures.append(("actual OS temp child", 1, {}, "allow", got))
+    print(f"  [{status}] expected=allow got={got}  actual OS temp child")
+    temp_root = tempfile.gettempdir().replace("\\", "/")
+    temp_root_cases = [
+        (f"rm -rf {temp_root}", "rm refuses shared OS temp root"),
+        (
+            f"Remove-Item -Recurse -Force {temp_root}",
+            "Remove-Item refuses shared OS temp root",
+        ),
+    ]
+    for command, label in temp_root_cases:
+        got = run_synthetic_project_case(command, synthetic_project)
+        status = "ok" if got == "deny" else "FAIL"
+        if got != "deny":
+            failures.append((label, 1, {}, "deny", got))
+        print(f"  [{status}] expected=deny got={got}  {label}")
+    temp_case_count += len(temp_root_cases)
+
+    symlink_case_count = 1
+    windows_junction = "C:/Users/ALLUSE~1"
+    if os.name == "nt" and os.path.exists(windows_junction):
+        got = run_synthetic_project_case(f"rm -rf {windows_junction}", "C:/Users")
+        status = "ok" if got == "deny" else "FAIL"
+        if got != "deny":
+            failures.append(("junction escape", 1, {}, "deny", got))
+        print(f"  [{status}] expected=deny got={got}  junction escape")
+    else:
+        with tempfile.TemporaryDirectory(dir=HERE) as link_fixture:
+            project = os.path.join(link_fixture, "project")
+            outside = os.path.join(link_fixture, "outside")
+            link = os.path.join(project, "escape")
+            os.makedirs(project)
+            os.makedirs(outside)
+            write_tier(project, 1, {})
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except OSError as exc:
+                got = f"fixture-error:{exc.__class__.__name__}"
+                failures.append(("symlink escape", 1, {}, "deny", got))
+                print(f"  [FAIL] symlink fixture unavailable: {exc.__class__.__name__}")
+            else:
+                link_target = link.replace("\\", "/")
+                got = invoke_case(f"rm -rf {link_target}", project)
+                status = "ok" if got == "deny" else "FAIL"
+                if got != "deny":
+                    failures.append(("symlink escape", 1, {}, "deny", got))
+                print(f"  [{status}] expected=deny got={got}  symlink escape")
+
+    schema_cases = [
+        (
+            "parsed non-object hook payload",
+            invoke_payload([], HERE),
+            "deny",
+        ),
+        (
+            "non-string cwd",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": 42},
+                HERE,
+            ),
+            "deny",
+        ),
+        (
+            "falsey non-string cwd",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": 0},
+                HERE,
+            ),
+            "deny",
+        ),
+        (
+            "falsey non-string Bash command",
+            invoke_payload({"tool_name": "Bash", "tool_input": {"command": []}, "cwd": HERE}, HERE),
+            "deny",
+        ),
+        (
+            "missing authority cwd",
+            invoke_payload({"tool_name": "Bash", "tool_input": {"command": "git status"}}, HERE),
+            "deny",
+        ),
+        (
+            "empty authority cwd",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": ""},
+                HERE,
+            ),
+            "deny",
+        ),
+        (
+            "non-object Bash tool_input",
+            invoke_payload({"tool_name": "Bash", "tool_input": "git status", "cwd": HERE}, HERE),
+            "deny",
+        ),
+    ]
+    for label, got, expected in schema_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 1, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    authority_cases = []
+    with tempfile.TemporaryDirectory(dir=HERE) as project:
+        invalid_authorities = [
+            ("malformed tier JSON", "{"),
+            ("non-object tier declaration", "[]"),
+            ("string tier", json.dumps({"tier": "4", "flags": {}})),
+            (
+                "non-boolean flag",
+                json.dumps({"tier": 4, "flags": {"sensitive_data": "yes"}}),
+            ),
+            (
+                "duplicate tier key",
+                '{"tier":4,"tier":1,"flags":{}}',
+            ),
+            (
+                "duplicate overlay key",
+                '{"tier":1,"flags":{"sensitive_data":true,"sensitive_data":false}}',
+            ),
+        ]
+        for label, content in invalid_authorities:
+            write_raw_tier(project, content)
+            authority_cases.append((label, invoke_case("git status", project), "deny"))
+    for label, got, expected in authority_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 1, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    runtime_cases = [
+        (
+            "Codex translates unsupported ask to deny",
+            run_case("git reset --hard HEAD~1", 3, {}, runtime="codex"),
+            "deny",
+        ),
+        (
+            "Codex runtime still allows safe command",
+            run_case("git status", 3, {}, runtime="codex"),
+            "allow",
+        ),
+    ]
+    for label, got, expected in runtime_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 3, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    context_cases = []
+    with tempfile.TemporaryDirectory() as outer, tempfile.TemporaryDirectory() as stale:
+        with tempfile.TemporaryDirectory() as unrelated:
+            inner = os.path.join(outer, "backend")
+            cwd = os.path.join(inner, "app")
+            os.makedirs(cwd, exist_ok=True)
+            write_tier(outer, 4, {"sensitive_data": True})
+            write_tier(inner, 1, {})
+            write_tier(unrelated, 1, {})
+            write_tier(stale, 1, {"wave_mode": True})
+
+            context_cases = [
+                (
+                    "outer T4 cannot be downgraded by inner T1",
+                    invoke_case("git reset --hard HEAD~1", cwd),
+                    "deny",
+                ),
+                (
+                    "outer sensitive_data cannot be downgraded by inner T1",
+                    invoke_case("gh repo create leak --public", cwd),
+                    "deny",
+                ),
+                (
+                    "stale env cannot override payload T4",
+                    invoke_case("git reset --hard HEAD~1", cwd, stale),
+                    "deny",
+                ),
+                (
+                    "unrelated T1 env cannot override payload T4",
+                    invoke_case("git reset --hard HEAD~1", cwd, unrelated),
+                    "deny",
+                ),
+                (
+                    "unrelated env T4 tightens payload T1",
+                    invoke_case("git reset --hard HEAD~1", unrelated, outer),
+                    "deny",
+                ),
+                (
+                    "wave_mode is ORed across declarations",
+                    invoke_case("git reset --hard HEAD~1", unrelated, stale),
+                    "deny",
+                ),
+            ]
+            for label, got, expected in context_cases:
+                status = "ok" if got == expected else "FAIL"
+                if got != expected:
+                    failures.append((label, 4, {}, expected, got))
+                print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    merge_policy_cases = []
+    with tempfile.TemporaryDirectory() as payload_project, tempfile.TemporaryDirectory() as env_project:
+        write_tier(payload_project, 3, {"relaxed_work_loss_guards": True})
+        write_tier(env_project, 3, {"relaxed_work_loss_guards": False})
+        merge_policy_cases.append(
+            (
+                "relaxed guard requires every declaration",
+                invoke_case("git reset --hard HEAD~1", payload_project, env_project),
+                "ask",
+            )
+        )
+        write_raw_tier(env_project, '{"tier":4,"flags":')
+        merge_policy_cases.append(
+            (
+                "invalid environment authority fails closed",
+                invoke_case("git status", payload_project, env_project),
+                "deny",
+            )
+        )
+    for label, got, expected in merge_policy_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 3, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    stale_boundary_cases = []
+    with tempfile.TemporaryDirectory(dir=HERE) as boundary_fixture:
+        payload_project = os.path.join(boundary_fixture, "payload")
+        env_project = os.path.join(boundary_fixture, "environment")
+        os.makedirs(payload_project)
+        os.makedirs(env_project)
+        write_tier(env_project, 1, {})
+        target = os.path.join(env_project, "build").replace("\\", "/")
+        stale_boundary_cases.append(
+            (
+                "unrelated env declaration cannot widen payload deletion scope",
+                invoke_case(f"rm -rf {target}", payload_project, env_project),
+                "deny",
+            )
+        )
+    for label, got, expected in stale_boundary_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 1, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
+    total = (
+        len(CASES)
+        + 1
+        + len(sibling_cases)
+        + len(resolution_cases)
+        + len(nested_cases)
+        + temp_case_count
+        + symlink_case_count
+        + len(schema_cases)
+        + len(authority_cases)
+        + len(runtime_cases)
+        + len(context_cases)
+        + len(merge_policy_cases)
+        + len(stale_boundary_cases)
+    )
+    print(f"\n{total - len(failures)}/{total} passed")
     if failures:
         print("FAILURES:")
         for f in failures:

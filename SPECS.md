@@ -1,6 +1,6 @@
 # Harness Specs
 
-Last Updated: 2026-07-06 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
+Last Updated: 2026-07-13 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
 ## §1 Global `~/.claude/CLAUDE.md` — literal draft (~40 lines)
 
@@ -138,7 +138,24 @@ One script per EVENT, not stacked matchers (kills the double-process spawn per B
 }
 ```
 
-- `dispatch.py` reads `tier.json` once and applies tier-appropriate deny/nudge/Stop rules.
+- For PRE safety decisions, `dispatch.py` anchors absolute-delete containment to the nearest
+  declared project above the hook payload's `cwd` (or to `cwd` itself when undeclared). The
+  environment project is a fallback only when the payload has no `cwd`; a stale or unrelated
+  environment value can tighten policy but cannot widen the payload's deletion scope.
+- Every declared payload/environment ancestor contributes authority conservatively: the highest
+  tier wins, boolean tightening flags are ORed, and `relaxed_work_loss_guards` applies only when
+  every applicable declaration enables it. This prevents an inner T1 or stale environment from
+  downgrading an outer T4/overlay.
+- A present `tier.json` must be a readable JSON object with integer `tier` 0-4 and boolean flag
+  values. Invalid authority fails closed on PRE; only an absent declaration receives T1 defaults.
+- Recursive-delete operands are quote-aware, environment-expanded, and resolved from payload
+  `cwd` before canonical containment. Unresolved dynamic/provider paths and relative deletes after
+  a location change fail closed; only strict descendants of the native OS temp root are scratch.
+  On Windows, ambiguous MSYS/WSL `/c/...` and `/mnt/c/...` spellings fail closed because the same
+  text has different PowerShell filesystem semantics.
+- Codex hook commands must pass `--runtime codex`. Codex 0.144.1 does not support the Claude
+  `ask` decision, so the dispatcher conservatively translates `ask` to `deny`; Claude wiring
+  omits the flag and retains interactive `ask` behavior.
 - **Fail-closed contract**: an unhandled exception in the PRE path returns deny-with-message
   ("dispatcher error — floor unavailable, fix hooks before proceeding"); POST/session paths
   fail open with a warning (nudges are not safety).

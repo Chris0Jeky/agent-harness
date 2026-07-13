@@ -9,12 +9,14 @@ configured across every repo and machine Chris works on.
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
-| `templates/hooks/` | Canonical `dispatch.py` (argv-aware deny floor) + `smoke_test.py` (49-case matrix). Deployed copies live in `~/.claude/hooks/` and per-repo `.claude/hooks/`; `harness audit` diffs them against these |
+| `templates/hooks/` | Canonical `dispatch.py` (argv-aware deny floor) + `smoke_test.py` (162-case matrix). Deployed copies live in `~/.claude/hooks/` and per-repo `.claude/hooks/`; `harness audit` diffs them against these |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
-Status (2026-07-06): global layer SHIPPED (`~/.claude/CLAUDE.md` laws, deny floor live and
+Status (2026-07-13): global layer SHIPPED (`~/.claude/CLAUDE.md` laws, deny floor live and
 smoke-tested, ESTATE.md, MACHINE.md, agents/, settings diet; `~/.claude` versioned as private
-repo `claude-config`). Dead estate tombstoned. Taskdeck declared T3 (PR #1292 + issue #1291).
+repo `claude-config`). Canonical floor v1.3.1 adds ancestor-aware tier resolution, strict
+authority validation, and canonical deletion containment. Dead estate tombstoned. Taskdeck
+declared T3 (PR #1292 + issue #1291).
 Next: run MIGRATION_PROMPT.md sessions in olb (FIRST — production hotfix), wealthlens-hq,
 extract-api, hq-private, NavSentinel; then the bootstrapper CLI (SPECS §9) and the weekly
 Gardener rhythm.
