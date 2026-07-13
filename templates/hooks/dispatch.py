@@ -1026,7 +1026,9 @@ def protected_git_config_section(section: str) -> bool:
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
     lowered = [token.lower() for token in args]
-    if any(token in _GIT_CONFIG_READ_FLAGS for token in lowered):
+    if any(
+        git_config_option_present(lowered, option) for option in _GIT_CONFIG_READ_FLAGS
+    ):
         return False
     for index, token in enumerate(lowered):
         if (
