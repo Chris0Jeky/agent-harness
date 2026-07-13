@@ -972,6 +972,18 @@ def git_push_short_option_shape(token: str) -> tuple[str, bool]:
     return cluster[:value_index], value_index == len(cluster) - 1
 
 
+def git_push_recurse_mode(args: list[str]) -> str | None:
+    """Return an explicit push recurse-submodules mode, if present."""
+    for index, token in enumerate(args):
+        if token == "--no-recurse-submodules":
+            return "no"
+        if token == "--recurse-submodules" and index + 1 < len(args):
+            return args[index + 1].lower()
+        if token.startswith("--recurse-submodules="):
+            return token.split("=", 1)[1].lower()
+    return None
+
+
 _GIT_CONFIG_READ_FLAGS = {
     "--get",
     "--get-all",
@@ -1000,6 +1012,7 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
             for index, token in enumerate(lowered)
             if re.fullmatch(r"alias\.[^.]+", token)
             or re.fullmatch(r"remote\.[^.]+\.(?:push|mirror)", token)
+            or token == "push.recursesubmodules"
         ),
         None,
     )
@@ -1524,6 +1537,24 @@ def public_remote_status(
 ) -> tuple[bool | None, str]:
     """Classify every push destination; unknown is fail-closed to the caller."""
     deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    recurse_mode = git_push_recurse_mode(args)
+    if recurse_mode is None:
+        recurse_mode = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "config",
+                "--get",
+                "--default",
+                "no",
+                "push.recurseSubmodules",
+            ],
+            project_dir,
+            deadline,
+        ).lower()
+    if recurse_mode not in {"no", "check"}:
+        return None, "unverified recursive-submodule push destinations"
     remotes = push_remotes(
         args,
         project_dir,
@@ -2249,17 +2280,12 @@ def check(
                         "deny",
                         "An abbreviated value-taking git-push option is floor-blocked.",
                     )
-                for index, token in enumerate(args):
-                    recurse_mode = ""
-                    if token == "--recurse-submodules" and index + 1 < len(args):
-                        recurse_mode = args[index + 1]
-                    elif token.startswith("--recurse-submodules="):
-                        recurse_mode = token.split("=", 1)[1]
-                    if sensitive and recurse_mode.lower() in {"on-demand", "only"}:
-                        return (
-                            "deny",
-                            "sensitive_data repo: recursive submodule pushes have additional destinations.",
-                        )
+                recurse_mode = git_push_recurse_mode(args)
+                if sensitive and recurse_mode in {"on-demand", "only"}:
+                    return (
+                        "deny",
+                        "sensitive_data repo: recursive submodule pushes have additional destinations.",
+                    )
                 for t in args:
                     short_flags, _short_consumes_next = git_push_short_option_shape(t)
                     dangerous_options = {

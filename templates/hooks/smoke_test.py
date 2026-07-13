@@ -516,6 +516,13 @@ CASES = [
     ("git push --exe helper origin main", 1, {}, "deny"),
     ("git push --rep origin main", 1, {}, "deny"),
     ("git push -do harmless origin main", 1, {}, "deny"),
+    ("git config push.recurseSubmodules on-demand", 1, {}, "deny"),
+    (
+        "git config push.recurseSubmodules only && git push private main",
+        1,
+        {},
+        "deny",
+    ),
     ('git -C "C:/Path With Space/repo" push --force origin main', 1, {}, "deny"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push --force origin main',
@@ -1362,6 +1369,8 @@ def main():
     forged_remote = "__HARNESS_INERT_QUOTED_31C7_cHJpdmF0ZQ"
 
     def forged_public_runner(argv, _cwd):
+        if argv[0] == "git" and "config" in argv:
+            return "no"
         if argv[0] == "git":
             return "https://github.com/example/public.git"
         return "PUBLIC"
@@ -1464,6 +1473,8 @@ def main():
     )
 
     def clustered_public_runner(argv, _cwd):
+        if argv[0] == "git" and "config" in argv:
+            return "no"
         if argv[0] == "git":
             return "https://github.com/example/public.git"
         return "PUBLIC"
@@ -1615,6 +1626,8 @@ def main():
         )
 
     def mixed_visibility_runner(argv, _cwd):
+        if argv[0] == "git" and "config" in argv:
+            return "no"
         if argv[0] == "git":
             return (
                 "https://github.com/example/private.git\n"
@@ -1657,6 +1670,8 @@ def main():
 
     def budgeted_runner(argv, _cwd):
         fake_time[0] += 1.2
+        if argv[0] == "git" and "config" in argv:
+            return "no"
         if argv[0] == "git":
             return "\n".join(
                 [
@@ -1685,6 +1700,8 @@ def main():
     )
 
     def mixed_unknown_runner(argv, _cwd):
+        if argv[0] == "git" and "config" in argv:
+            return "no"
         if argv[0] == "git":
             return (
                 "https://github.com/example/private.git\n"
@@ -1699,6 +1716,25 @@ def main():
                 ["origin", "main"],
                 HERE,
                 command_runner=mixed_unknown_runner,
+            )[0],
+            None,
+        )
+    )
+
+    def configured_recursive_runner(argv, _cwd):
+        if argv[0] == "git" and "config" in argv:
+            return "only"
+        if argv[0] == "git":
+            return "https://github.com/example/private.git"
+        return "PRIVATE"
+
+    remote_resolution_cases.append(
+        (
+            "configured recursive push destinations are unverified",
+            dispatch_module.public_remote_status(
+                ["private", "main"],
+                HERE,
+                command_runner=configured_recursive_runner,
             )[0],
             None,
         )
