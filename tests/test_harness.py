@@ -88,6 +88,10 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(result["hooks"]["PreToolUse"]), 1)
         self.assertIn("new dispatch.py", result["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
 
+    def test_missing_command_is_reported_not_raised(self) -> None:
+        result = harness.run(["definitely-not-a-real-harness-command"])
+        self.assertEqual(result.returncode, 127)
+
 
 if __name__ == "__main__":
     unittest.main()

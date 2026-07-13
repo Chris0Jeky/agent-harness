@@ -36,7 +36,10 @@ class HarnessError(RuntimeError):
 
 
 def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
 def git_root(path: Path) -> Path:
@@ -309,7 +312,9 @@ def doctor(args: argparse.Namespace) -> int:
     codex_home = Path(args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
     checks = []
-    for label, command in (("python", [sys.executable, "--version"]), ("codex", ["codex", "--version"]), ("git", ["git", "--version"])):
+    codex_command = (["powershell", "-NoProfile", "-Command", "codex --version"]
+                     if os.name == "nt" else ["codex", "--version"])
+    for label, command in (("python", [sys.executable, "--version"]), ("codex", codex_command), ("git", ["git", "--version"])):
         result = run(command)
         checks.append((label, result.returncode == 0, (result.stdout or result.stderr).strip()))
     checks.extend(
