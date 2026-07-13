@@ -622,6 +622,8 @@ CASES = [
     ("git push --repo origin main", 1, {}, "allow"),
     ("git push -vo harmless origin main", 1, {}, "allow"),
     ("git push -od origin main", 1, {}, "allow"),
+    ("git 'pu''sh' origin main", 1, {}, "allow"),
+    ("git p'u'sh origin main", 1, {}, "allow"),
     ('git -C "C:/Path With Space/repo" push origin main', 1, {}, "allow"),
     (
         'git --git-dir "C:/Path With Space/repo/.git" push origin main',
@@ -1357,6 +1359,65 @@ def main():
             "deny",
         )
     )
+    forged_remote = "__HARNESS_INERT_QUOTED_31C7_cHJpdmF0ZQ"
+
+    def forged_public_runner(argv, _cwd):
+        if argv[0] == "git":
+            return "https://github.com/example/public.git"
+        return "PUBLIC"
+
+    forged_public_decision, _reason = dispatch_module.check(
+        f"git push {forged_remote} main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda args, cwd, git_globals: (
+            dispatch_module.public_remote_status(
+                args,
+                cwd,
+                git_globals,
+                command_runner=forged_public_runner,
+            )
+        ),
+    )
+    sensitive_remote_cases.append(
+        (
+            "literal inert-marker remote retains its public identity",
+            forged_public_decision,
+            "deny",
+        )
+    )
+    for quote_style in ("$'child repo'", '$"child repo"'):
+        structural_contexts = []
+
+        def structural_private_resolver(_args, cwd, git_globals):
+            structural_contexts.append((cwd, list(git_globals)))
+            return (False, "private-child")
+
+        structural_decision, _reason = dispatch_module.check(
+            f"git -C {quote_style} push origin main",
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=structural_private_resolver,
+        )
+        sensitive_remote_cases.extend(
+            [
+                (
+                    f"sensitive {quote_style[:2]} structural quote stays private",
+                    structural_decision,
+                    "allow",
+                ),
+                (
+                    f"sensitive {quote_style[:2]} context survives both passes",
+                    structural_contexts,
+                    [
+                        (HERE, ["-C", "child repo"]),
+                        (HERE, ["-C", "child repo"]),
+                    ],
+                ),
+            ]
+        )
     quoted_contexts = []
 
     def quoted_private_resolver(_args, cwd, git_globals):

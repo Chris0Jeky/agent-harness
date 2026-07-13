@@ -37,8 +37,6 @@ FLOOR_VERSION = "1.4.1 (2026-07-13)"
 
 # --- helpers ---------------------------------------------------------------
 
-_SINGLE_Q = re.compile(r"'[^']*'")
-_DOUBLE_Q = re.compile(r'"(?:\\.|[^"\\])*"')
 _QUOTED = re.compile(
     r"\$'(?:\\.|[^'\\])*'|\$\"(?:\\.|[^\"\\])*\"|'[^']*'|\"(?:\\.|[^\"\\])*\""
 )
@@ -49,56 +47,69 @@ _CWD_REFERENCE = re.compile(
 )
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
+_INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 
 
-def encode_inert_quoted(match: "re.Match[str]") -> str:
-    """Hide inert quoted text while preserving a reversible structural token."""
-    value = match.group(0)[1:-1]
-    encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
-    return _INERT_QUOTED_PREFIX + encoded.rstrip("=")
-
-
-def decode_inert_quoted(token: str) -> str:
-    """Recover an inert quoted token for command-specific structural parsing."""
-    if not token.startswith(_INERT_QUOTED_PREFIX):
-        return token
-    encoded = token[len(_INERT_QUOTED_PREFIX) :]
+def inert_quoted_value(token: str) -> str | None:
+    """Return an inert quote's shell value; None means expansion stays visible."""
+    if token.startswith("$'"):
+        try:
+            return codecs.decode(token[2:-1], "unicode_escape")
+        except (UnicodeDecodeError, ValueError):
+            return _INVALID_INERT_QUOTED
+    if token.startswith('$"'):
+        if re.search(r"(?<!\\)[$`]", token[2:-1]):
+            return None
+        token = token[1:]
+    elif token.startswith('"') and re.search(r"(?<!\\)[$`]", token[1:-1]):
+        return None
+    if token.startswith("'"):
+        return token[1:-1]
     try:
-        padding = "=" * (-len(encoded) % 4)
-        return base64.b64decode(
-            encoded + padding,
-            altchars=b"-_",
-            validate=True,
-        ).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
-        return "__HARNESS_INVALID_INERT_QUOTED__"
+        return shlex.split(token, posix=True)[0]
+    except (IndexError, ValueError):
+        return _INVALID_INERT_QUOTED
 
 
-def decode_inert_git_token(token: str) -> str:
-    """Recover quoted Git structural values without exposing them globally."""
-    if "=" in token:
-        name, value = token.split("=", 1)
-        return f"{name}={decode_inert_quoted(value)}"
-    return decode_inert_quoted(token)
+def inert_placeholder_prefix(text: str) -> str:
+    """Choose a deterministic placeholder namespace absent from original input."""
+    index = 0
+    while True:
+        candidate = f"{_INERT_QUOTED_PREFIX}{index}_"
+        if candidate not in text:
+            return candidate
+        index += 1
 
 
-def strip_quotes(text: str) -> str:
+def decode_inert_git_token(token: str, placeholders: dict[str, str]) -> str:
+    """Recover only placeholders proven to originate in this inspection pass."""
+    for placeholder, value in placeholders.items():
+        token = token.replace(placeholder, value)
+    return token
+
+
+def strip_quotes(text: str) -> tuple[str, dict[str, str]]:
     """Remove INERT quoted substrings so message/body text can never trip a rule.
 
-    Single-quoted text never expands -> always stripped. Double-quoted text is
-    stripped only when it contains no unescaped $ or backtick; if it does, the
-    shell EXECUTES the substitution, so the text must stay visible for scanning.
+    Each replacement is recorded in a per-call namespace absent from the original
+    command. Git structural parsing can therefore recover adjacent/mixed quoted
+    fragments without treating attacker-supplied marker text as provenance.
+    Double/locale-quoted text with expansion stays visible for safety scanning.
     (Semantics ported from wealthlens-hq's earned pre_tool_use hardening: the
     naive strip-all-quotes let `git commit -m "wip $(rm -rf /)"` fail open.)
     """
-    text = _SINGLE_Q.sub(encode_inert_quoted, text)
+    prefix = inert_placeholder_prefix(text)
+    placeholders: dict[str, str] = {}
 
-    def _dq(m: "re.Match[str]") -> str:
-        if re.search(r"(?<!\\)[$`]", m.group(0)):
-            return m.group(0)
-        return encode_inert_quoted(m)
+    def replace(match: "re.Match[str]") -> str:
+        value = inert_quoted_value(match.group(0))
+        if value is None:
+            return match.group(0)
+        placeholder = f"{prefix}{len(placeholders)}__"
+        placeholders[placeholder] = value
+        return placeholder
 
-    return _DOUBLE_Q.sub(_dq, text)
+    return _QUOTED.sub(replace, text), placeholders
 
 
 def remove_shell_line_continuations(text: str) -> str:
@@ -1774,7 +1785,7 @@ def check(
         call_normalized,
     ):
         return "deny", "A dynamic call-operator target cannot be inspected safely."
-    sanitized = strip_quotes(command)
+    sanitized, inert_placeholders = strip_quotes(command)
     for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}\|?\s*(\S+)", sanitized):
         redirect_target = full_redirect.group(1).strip("'\"")
         if is_dynamic_value(redirect_target) or redirect_target.startswith("("):
@@ -2068,8 +2079,10 @@ def check(
 
         # ---- git rules ----
         if head == "git":
-            git_toks = [decode_inert_git_token(token) for token in toks]
-            if any("__HARNESS_INVALID_INERT_QUOTED__" in token for token in git_toks):
+            git_toks = [
+                decode_inert_git_token(token, inert_placeholders) for token in toks
+            ]
+            if any(_INVALID_INERT_QUOTED in token for token in git_toks):
                 return "deny", "Cannot safely recover an inert quoted Git argument."
             subcommand_index = git_subcommand_index(git_toks)
             sub = (
