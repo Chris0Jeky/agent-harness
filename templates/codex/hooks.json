@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "C:\\Windows\\py.exe -3 \"{{DISPATCH_PY}}\" --event pre --runtime codex",
+            "command": "python3 \"{{DISPATCH_PY}}\" --event pre --runtime codex",
+            "timeout": 5,
+            "statusMessage": "Checking irreversible-command policy"
+          }
+        ]
+      }
+    ]
+  }
+}

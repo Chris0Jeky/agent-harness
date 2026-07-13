@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Harness dispatcher — the deny floor (PreToolUse) for all tiers.
+"""Harness dispatcher — the shared Claude/Codex deny floor for all tiers.
 
 Canonical copy: agent-harness/templates/hooks/dispatch.py
-Deployed copies: ~/.claude/hooks/dispatch.py (global) and per-repo .claude/hooks/.
+Deployed copies: ~/.claude/hooks/dispatch.py and ~/.codex/hooks/dispatch.py.
 `harness audit` diffs deployed copies against the canonical one.
 
 Contract (BLUEPRINT §2, SPECS §5-6):
@@ -22,9 +22,11 @@ A change here must keep `smoke_test.py` green: python smoke_test.py
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
-FLOOR_VERSION = "1.3.0 (2026-07-06)"
+FLOOR_VERSION = "1.4.0 (2026-07-13)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -55,6 +57,34 @@ def norm_path(p: str) -> str:
 
 def is_absolute(p: str) -> bool:
     return bool(re.match(r"^([a-zA-Z]:[\\/]|[\\/]|~)", p))
+
+
+def resolved_path(path: str, base: str) -> str:
+    """Resolve traversal and env/home spellings without requiring the target to exist."""
+    expanded = path.replace("$env:USERPROFILE", os.environ.get("USERPROFILE", ""))
+    expanded = os.path.expanduser(os.path.expandvars(expanded))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(base or os.getcwd(), expanded)
+    return os.path.normcase(os.path.realpath(os.path.abspath(expanded)))
+
+
+def within(candidate: str, root: str) -> bool:
+    """Return true only for a real path-component containment relationship."""
+    try:
+        return os.path.commonpath((candidate, root)) == root
+    except ValueError:  # different Windows drives
+        return False
+
+
+def allowed_recursive_delete(target: str, project_dir: str) -> bool:
+    candidate = resolved_path(target, project_dir)
+    roots = []
+    if project_dir:
+        roots.append(resolved_path(project_dir, project_dir))
+    roots.append(resolved_path(tempfile.gettempdir(), project_dir))
+    if os.name != "nt":
+        roots.append(resolved_path("/tmp", project_dir))
+    return any(within(candidate, root) for root in roots)
 
 
 DANGEROUS_ROOTS = re.compile(r"^(/|~|~/|[a-zA-Z]:/?|/c/users/[^/]+|c:/users/[^/]+)$")
@@ -115,19 +145,80 @@ def git_subcommand(toks):
     return ""
 
 
+def command_output(argv: list[str], cwd: str) -> str:
+    try:
+        proc = subprocess.run(argv, cwd=cwd or None, capture_output=True, text=True, timeout=3,
+                              check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def push_remote(args: list[str], project_dir: str) -> str:
+    """Resolve the destination token/remote URL for a git push."""
+    remote = ""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--repo" and i + 1 < len(args):
+            remote = args[i + 1]
+            break
+        if arg.startswith("--repo="):
+            remote = arg.split("=", 1)[1]
+            break
+        if not arg.startswith("-"):
+            remote = arg
+            break
+        i += 1
+    if not remote:
+        branch = command_output(["git", "branch", "--show-current"], project_dir)
+        if branch:
+            remote = command_output(["git", "config", f"branch.{branch}.remote"], project_dir)
+        remote = remote or "origin"
+    if re.match(r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])", remote):
+        return remote
+    return command_output(["git", "remote", "get-url", remote], project_dir)
+
+
+def public_remote_status(args: list[str], project_dir: str) -> tuple[bool | None, str]:
+    """Return (is_public, label); None means privacy could not be established."""
+    remote = push_remote(args, project_dir)
+    if not remote:
+        return None, "unresolved push remote"
+    normalized = remote.lower()
+    if normalized.startswith("file://") or re.match(r"^([a-zA-Z]:[\\/]|[./~])", remote):
+        return False, remote
+    if "github.com" not in normalized:
+        return None, remote
+    visibility = command_output(
+        ["gh", "repo", "view", remote, "--json", "visibility", "--jq", ".visibility"],
+        project_dir,
+    ).upper()
+    if visibility == "PUBLIC":
+        return True, remote
+    if visibility in {"PRIVATE", "INTERNAL"}:
+        return False, remote
+    return None, remote
+
+
 def load_tier(project_dir: str) -> dict:
-    """Read .claude/tier.json if present; absent -> sandbox-like defaults (floor only)."""
+    """Read the runtime-neutral tier file, then the legacy Claude location."""
     cfg = {"tier": 1, "flags": {}}
     if not project_dir:
         return cfg
-    path = os.path.join(project_dir, ".claude", "tier.json")
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        cfg["tier"] = int(data.get("tier", 1))
-        cfg["flags"] = data.get("flags", {}) or {}
-    except (OSError, ValueError):
-        pass
+    paths = (
+        os.path.join(project_dir, ".agent-harness", "tier.json"),
+        os.path.join(project_dir, ".claude", "tier.json"),
+    )
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            cfg["tier"] = int(data.get("tier", 1))
+            cfg["flags"] = data.get("flags", {}) or {}
+            break
+        except (OSError, ValueError):
+            continue
     return cfg
 
 
@@ -148,7 +239,7 @@ def tokens(segment: str):
 # --- rules ------------------------------------------------------------------
 
 
-def check(command: str, tier_cfg: dict, project_dir: str):
+def check(command: str, tier_cfg: dict, project_dir: str, remote_resolver=public_remote_status):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     tier = tier_cfg.get("tier", 1)
     flags = tier_cfg.get("flags", {})
@@ -200,6 +291,12 @@ def check(command: str, tier_cfg: dict, project_dir: str):
                         return "deny", "git push -f is a force-push. Use --force-with-lease on your own branch, or merge instead."
                     if t.startswith("+") and len(t) > 1:
                         return "deny", "A +refspec is a forced update in disguise."
+                if sensitive:
+                    is_public, remote = remote_resolver(args, project_dir)
+                    if is_public is True:
+                        return "deny", f"sensitive_data repo: refusing a push to public remote {remote}."
+                    if is_public is None:
+                        return "deny", f"sensitive_data repo: could not verify push remote privacy ({remote})."
 
             if sub == "reset" and "--hard" in args:
                 if strict:
@@ -240,10 +337,9 @@ def check(command: str, tier_cfg: dict, project_dir: str):
                         return "deny", "rm -rf * is a floor rule: enumerate and delete explicitly."
                     if DANGEROUS_ROOTS.match(nt) or ENV_ROOTS.match(nt):
                         return "deny", f"rm -rf {target}: refusing a filesystem/home root."
-                    if is_absolute(target):
-                        proj = norm_path(project_dir) if project_dir else ""
-                        tmp_ok = "/temp/" in nt or "/tmp/" in nt or nt.startswith("/tmp")
-                        if not ((proj and nt.startswith(proj)) or tmp_ok):
+                    expanded = os.path.expanduser(os.path.expandvars(target))
+                    if is_absolute(target) or os.path.isabs(expanded):
+                        if not allowed_recursive_delete(target, project_dir):
                             return "deny", f"rm -rf on an absolute path outside the project: {target}"
 
         # ---- PowerShell explicit recursive delete on outside-project absolute path ----
@@ -251,11 +347,9 @@ def check(command: str, tier_cfg: dict, project_dir: str):
             if any(re.match(r"^-recurse", t, re.IGNORECASE) for t in toks[1:]):
                 for target in (t for t in toks[1:] if not t.startswith("-")):
                     nt = norm_path(target)
-                    proj = norm_path(project_dir) if project_dir else ""
-                    if is_absolute(target) and not (proj and nt.startswith(proj)) \
-                            and "/temp/" not in nt and DANGEROUS_ROOTS.match(nt):
+                    if is_absolute(target) and DANGEROUS_ROOTS.match(nt):
                         return "deny", f"Recursive Remove-Item on {target}: refusing a root."
-                    if is_absolute(target) and proj and not nt.startswith(proj) and "/temp/" not in nt:
+                    if is_absolute(target) and not allowed_recursive_delete(target, project_dir):
                         return "deny", f"Recursive Remove-Item outside the project: {target}"
 
         # ---- secret-file mutation ----
@@ -281,8 +375,18 @@ def check(command: str, tier_cfg: dict, project_dir: str):
 # --- entry ------------------------------------------------------------------
 
 
-def respond(decision: str, reason: str):
+def respond(decision: str, reason: str, runtime: str = "claude"):
     if decision == "allow":
+        sys.exit(0)
+    if decision == "ask" and runtime == "codex":
+        # Codex 0.144 parses permissionDecision=ask but currently treats it as a
+        # hook failure and continues. Emit supported model-visible context instead.
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": f"[floor {FLOOR_VERSION}] WARNING: {reason}",
+            }
+        }))
         sys.exit(0)
     print(json.dumps({
         "hookSpecificOutput": {
@@ -304,6 +408,13 @@ def main():
     if event != "pre":
         sys.exit(0)  # global layer wires only the floor; other events are repo-tier
 
+    runtime = "claude"
+    if "--runtime" in sys.argv:
+        try:
+            runtime = sys.argv[sys.argv.index("--runtime") + 1].lower()
+        except IndexError:
+            pass
+
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -321,9 +432,9 @@ def main():
     try:
         decision, reason = check(command, load_tier(project_dir), project_dir)
     except Exception as exc:  # fail CLOSED during rule evaluation
-        respond("deny", f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix ~/.claude/hooks before proceeding.")
+        respond("deny", f"dispatcher error ({exc.__class__.__name__}) — floor unavailable; fix the installed dispatcher before proceeding.", runtime)
         return
-    respond(decision, reason)
+    respond(decision, reason, runtime)
 
 
 if __name__ == "__main__":
