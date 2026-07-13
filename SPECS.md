@@ -138,14 +138,17 @@ One script per EVENT, not stacked matchers (kills the double-process spawn per B
 }
 ```
 
-- For PRE safety decisions, `dispatch.py` anchors absolute-delete containment to the nearest
-  declared project above the hook payload's `cwd` (or to `cwd` itself when undeclared). The
-  environment project is a fallback only when the payload has no `cwd`; a stale or unrelated
-  environment value can tighten policy but cannot widen the payload's deletion scope.
-- Every declared payload/environment ancestor contributes authority conservatively: the highest
-  tier wins, boolean tightening flags are ORed, and `relaxed_work_loss_guards` applies only when
-  every applicable declaration enables it. This prevents an inner T1 or stale environment from
-  downgrading an outer T4/overlay.
+- For PRE safety decisions with a hook payload `cwd`, deletion containment uses the nearest
+  declared ancestor on the payload chain. If that chain is undeclared, an environment
+  `CLAUDE_PROJECT_DIR` that lexically encloses `cwd` becomes the boundary even when undeclared;
+  otherwise `cwd` itself is the boundary. When the payload omits `cwd`, the nearest declaration
+  above `CLAUDE_PROJECT_DIR` (or that directory itself when undeclared) is the boundary.
+- Every declaration on both the payload and environment ancestor chains contributes authority,
+  even when the chains are unrelated: the highest tier wins, boolean tightening flags are ORed,
+  and `relaxed_work_loss_guards` applies only when every applicable declaration enables it.
+  Thus a stale or unrelated environment value can tighten policy but cannot widen containment;
+  an enclosing environment project intentionally defines the boundary for an undeclared nested
+  `cwd`.
 - A present `tier.json` must be a readable JSON object with integer `tier` 0-4 and boolean flag
   values. Invalid authority fails closed on PRE; only an absent declaration receives T1 defaults.
 - Recursive-delete operands are quote-aware, environment-expanded, and resolved from payload
@@ -163,6 +166,9 @@ One script per EVENT, not stacked matchers (kills the double-process spawn per B
   copy at seed time; `harness audit` diffs copies against the template (bootstrap-drift guard).
 - Self-tested: `python .claude/hooks/smoke_test.py` (or `make test-hooks`) runs the §6 matrix
   + one allow-case per event. A floor/dispatcher change is T4-class work in any repo.
+  The matrix defines a bounded parser contract, not exhaustive shell-language coverage. The
+  dispatcher is a defense-in-depth tripwire, not a shell sandbox or a substitute for runtime/OS
+  permissions, restricted toolsets, and branch protection.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 

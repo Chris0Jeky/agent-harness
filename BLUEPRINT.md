@@ -180,9 +180,10 @@ T4/wave_mode — the flag is ignored where guards are walls.
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
 gitleaks' job (diff-scoped); command safety is the argv parser's job.
 
-The floor is a tripwire by law 5 — the walls at T3+ are branch protection and restricted
-toolsets. The floor ships with a bypass test matrix (SPECS §6) and `make test-hooks`; a change
-to the floor is T4-class work (top model + review) no matter which repo it runs in.
+The floor is a defense-in-depth tripwire by law 5, not an exhaustive shell sandbox. Its bounded
+parser and bypass matrix cover the explicitly tested command forms; the walls at T3+ remain
+branch protection and restricted toolsets. A change to the floor is T4-class work (top model +
+review) no matter which repo it runs in.
 
 ---
 
@@ -418,8 +419,10 @@ create a parallel plan (law 9).
   ≤500 lines at T3; the blueprint is subject to the one-home rule and Gardener pruning like
   everything else. If the quarterly demotion review gets skipped, ceremony calcifies — same
   disease, better names.
-- **The dispatcher is a single point of failure.** One bug drops the floor everywhere. It
-  fails CLOSED, ships with tests, and changes to it are always T4-class work.
+- **The dispatcher is a single point of failure.** One parser bug—or a runtime's fail-open hook
+  launch/output behavior—can drop the floor. Rule-evaluation exceptions fail closed after a Bash
+  command is identified, but wiring still requires audit, smoke tests, and live canaries; changes
+  are always T4-class work.
 - **Caps degrade content instead of curating it.** The budget checker must emit ROTATE
   instructions, never "trim to pass"; rotation is the Gardener's job, not inline deletion
   under CI pressure.
