@@ -2,6 +2,7 @@
 """Deny-floor smoke tests (SPECS §6 matrix). Run: python smoke_test.py
 Every change to dispatch.py must keep this green. Exit 0 = all pass."""
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -9,6 +10,15 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
+
+
+def load_dispatch_module():
+    spec = importlib.util.spec_from_file_location("deny_floor_dispatch", DISPATCH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load dispatch module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def parse_decision(proc: subprocess.CompletedProcess[str]):
@@ -221,6 +231,7 @@ CASES = [
     ('git reset "--hard" HEAD~1', 4, {}, "deny"),
     ('gh repo create leak "--public"', 1, {"sensitive_data": True}, "deny"),
     ('Remove-Item -Recurse -Force "C:/critical/outside path"', 1, {}, "deny"),
+    ('Remove-Item -Recurse -Force "C:\\critical\\outside path"', 1, {}, "deny"),
     ("Remove-Item -Recurse -Force 'C:/critical/outside path'", 1, {}, "deny"),
     ('rm -rf build "C:/critical/outside path"', 1, {}, "deny"),
     ("rm -rf build 'C:/critical/outside path'", 1, {}, "deny"),
@@ -265,6 +276,7 @@ CASES = [
     ("git push -u origin feature", 1, {}, "allow"),
     ("rm -rf node_modules", 1, {}, "allow"),
     ("rm -rf ./dist build/out", 1, {}, "allow"),
+    ("rm --force notes.txt", 1, {}, "allow"),
     ("cat .env", 1, {}, "allow"),
     ("git status && git log --oneline -5", 1, {}, "allow"),
     ("git checkout -- src/app.ts", 4, {}, "allow"),  # targeted restore is fine
@@ -412,6 +424,25 @@ def main():
         print(f"  [{status}] expected=deny got={got}  {label}")
     temp_case_count += len(temp_root_cases)
 
+    dispatch_module = load_dispatch_module()
+    original_tempdir = dispatch_module.tempfile.tempdir
+    dangerous_temp_cases = [
+        (os.path.abspath(os.sep), "filesystem root cannot become trusted temp"),
+        (os.path.expanduser("~"), "home cannot become trusted temp"),
+    ]
+    try:
+        for dangerous_temp, label in dangerous_temp_cases:
+            dispatch_module.tempfile.tempdir = dangerous_temp
+            target = os.path.join(dangerous_temp, "deny-floor-scratch")
+            got = dispatch_module.is_within_temp(target)
+            status = "ok" if not got else "FAIL"
+            if got:
+                failures.append((label, 1, {}, False, got))
+            print(f"  [{status}] expected=False got={got}  {label}")
+    finally:
+        dispatch_module.tempfile.tempdir = original_tempdir
+    temp_case_count += len(dangerous_temp_cases)
+
     symlink_case_count = 1
     windows_junction = "C:/Users/ALLUSE~1"
     if os.name == "nt" and os.path.exists(windows_junction):
@@ -485,6 +516,31 @@ def main():
         (
             "non-object Bash tool_input",
             invoke_payload({"tool_name": "Bash", "tool_input": "git status", "cwd": HERE}, HERE),
+            "deny",
+        ),
+        (
+            "relative payload cwd",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": "."},
+                HERE,
+            ),
+            "deny",
+        ),
+        (
+            "relative environment project",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": HERE},
+                HERE,
+                ".",
+            ),
+            "deny",
+        ),
+        (
+            "file path cannot be authority cwd",
+            invoke_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": DISPATCH},
+                HERE,
+            ),
             "deny",
         ),
     ]

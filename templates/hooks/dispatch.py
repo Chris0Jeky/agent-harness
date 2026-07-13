@@ -27,7 +27,7 @@ import shlex
 import sys
 import tempfile
 
-FLOOR_VERSION = "1.3.1 (2026-07-13)"
+FLOOR_VERSION = "1.3.2 (2026-07-13)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -154,14 +154,24 @@ def is_within_project(target: str, project_dir: str) -> bool:
 
 
 def is_within_temp(target: str) -> bool:
-    if not is_within_path(target, tempfile.gettempdir()):
-        return False
+    temp_dir = tempfile.gettempdir()
     try:
         target_flavor, canonical_target = canonical_path(target)
-        root_flavor, canonical_root = canonical_path(tempfile.gettempdir())
+        root_flavor, canonical_root = canonical_path(temp_dir)
+        home_flavor, canonical_home = canonical_path(os.path.expanduser("~"))
     except (OSError, ValueError):
         return False
-    return target_flavor == root_flavor and canonical_target != canonical_root
+    if DANGEROUS_ROOTS.match(norm_path(canonical_root)):
+        return False
+    if root_flavor == home_flavor and canonical_root == canonical_home:
+        return False
+    if target_flavor != root_flavor or canonical_target == canonical_root:
+        return False
+    path_module = ntpath if target_flavor == "windows" else os.path
+    try:
+        return path_module.commonpath([canonical_target, canonical_root]) == canonical_root
+    except ValueError:
+        return False
 
 
 DANGEROUS_ROOTS = re.compile(r"^(/|~|~/|[a-zA-Z]:/?|/c/users/[^/]+|c:/users/[^/]+)$")
@@ -329,9 +339,23 @@ def recursive_delete_decision(
 ) -> tuple[str, str] | None:
     """Check POSIX, PowerShell, and cmd recursive-delete spellings."""
     if head == "rm":
-        flags_str = "".join(t.lstrip("-") for t in toks[1:] if t.startswith("-"))
+        def has_short_flag(token: str, flag: str) -> bool:
+            return (
+                token.startswith("-")
+                and not token.startswith("--")
+                and flag in token[1:].lower()
+            )
+
+        is_recursive = any(
+            token.lower() == "--recursive" or has_short_flag(token, "r")
+            for token in toks[1:]
+        )
+        is_force = any(
+            token.lower() == "--force" or has_short_flag(token, "f")
+            for token in toks[1:]
+        )
         targets = [t for t in toks[1:] if not t.startswith("-")]
-        if "r" in flags_str.lower() and "f" in flags_str.lower():
+        if is_recursive and is_force:
             if not targets:
                 return "deny", "rm -rf with no clear target."
             decision = check_delete_targets(
@@ -760,6 +784,22 @@ def main():
         if not command.strip():
             sys.exit(0)
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+        if payload_cwd and not os.path.isabs(payload_cwd):
+            raise ValueError("hook cwd must be an absolute path")
+        if env_project_dir and not os.path.isabs(env_project_dir):
+            raise ValueError("CLAUDE_PROJECT_DIR must be an absolute path")
+        if (
+            payload_cwd
+            and os.path.exists(payload_cwd)
+            and not os.path.isdir(payload_cwd)
+        ):
+            raise ValueError("hook cwd must be a directory")
+        if (
+            env_project_dir
+            and os.path.exists(env_project_dir)
+            and not os.path.isdir(env_project_dir)
+        ):
+            raise ValueError("CLAUDE_PROJECT_DIR must be a directory")
         if runtime not in ("claude", "codex"):
             raise ValueError("unsupported hook runtime")
         if not payload_cwd and not env_project_dir:
