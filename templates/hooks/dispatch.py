@@ -2302,6 +2302,13 @@ def check(
         call_normalized,
     ):
         return "deny", "A dynamic call-operator target cannot be inspected safely."
+    if re.search(
+        r"(?:^|[;|{}\n])\s*\$\{?(?:env:)?[A-Za-z_][A-Za-z0-9_:]*\}?"
+        r"\.(?:Invoke|InvokeReturnAsIs)\s*\(",
+        call_normalized,
+        re.IGNORECASE,
+    ):
+        return "deny", "A dynamic scriptblock invocation cannot be inspected safely."
     sanitized, inert_placeholders = strip_quotes(command)
     for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
         redirect_target = full_redirect.group(1).strip("'\"")
