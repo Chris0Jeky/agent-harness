@@ -28,6 +28,10 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 ```
 
+Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
+The same unit, smoke, Ruff, Black, and compile gates run on Windows and Linux for every pull
+request and push to `main`; workflow actions are pinned to immutable commit SHAs.
+
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
