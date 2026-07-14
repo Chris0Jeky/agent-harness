@@ -2186,6 +2186,15 @@ def powershell_provider_copy_or_rename(
     source = None
     destination = None
     positional = []
+    opaque_parameter = False
+    value_parameters = _POWERSHELL_PROVIDER_VALUE_PARAMETERS | {
+        "fromsession",
+        "tosession",
+    }
+    switch_parameters = _POWERSHELL_PROVIDER_SWITCH_PARAMETERS | {
+        "container",
+        "recurse",
+    }
     index = 1
     while index < len(raw):
         token = raw[index]
@@ -2213,6 +2222,19 @@ def powershell_provider_copy_or_rename(
                     destination = value
                 index += 1 if separator else 2
                 continue
+            matching_values = [
+                name for name in value_parameters if name.startswith(parameter)
+            ]
+            matching_switches = [
+                name for name in switch_parameters if name.startswith(parameter)
+            ]
+            if len(matching_values) == 1 and not matching_switches:
+                index += 1 if separator else 2
+                continue
+            if len(matching_switches) == 1 and not matching_values:
+                index += 1
+                continue
+            opaque_parameter = True
             index += 1
             continue
         positional.append(token)
@@ -2221,7 +2243,15 @@ def powershell_provider_copy_or_rename(
         source = positional.pop(0)
     if destination is None and positional:
         destination = positional[0]
+    if opaque_parameter:
+        destination = "$HARNESS_OPAQUE_POWERSHELL_PROVIDER_DESTINATION"
     return operation, source or "", destination or ""
+
+
+def powershell_environment_provider_path(value: str) -> bool:
+    """Return whether a path names PowerShell's Environment provider."""
+    lowered = restore_quoted_literal_markers(value).lower().strip("'\"")
+    return lowered.startswith(("env:", "environment::"))
 
 
 def dotnet_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
@@ -2769,7 +2799,7 @@ def git_repository_environment_mutations(raw: list[str]) -> set[str]:
     if provider_copy is not None:
         operation, source, destination = provider_copy
         destination_name = git_repository_environment_name(destination)
-        source_is_environment = source.lower().strip("'\"").startswith("env:")
+        source_is_environment = powershell_environment_provider_path(source)
         if operation == "copy":
             if has_dynamic_shell_token(destination):
                 mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
@@ -2816,7 +2846,7 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
             has_dynamic_shell_token(source) or has_dynamic_shell_token(destination)
         ):
             return True
-        if source_is_environment or destination.lower().strip("'\"").startswith("env:"):
+        if source_is_environment or powershell_environment_provider_path(destination):
             return is_git_config_environment_name(destination)
     if any(
         is_git_config_environment_name(name)
