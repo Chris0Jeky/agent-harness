@@ -191,6 +191,25 @@ def cmd_unescape(text: str) -> str:
     return re.sub(r"\^(.)", r"\1", text, flags=re.DOTALL)
 
 
+_CMD_NESTED_COMMAND = re.compile(
+    r"^(?:/(?:d|q|a|u|s|e:(?:on|off)|f:(?:on|off)|v:(?:on|off)|"
+    r"t:[0-9a-f]{2}))*/(?P<mode>[ck])(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+
+
+def cmd_nested_script(toks: list[str]) -> tuple[bool, str | None]:
+    """Decode cmd.exe setup-switch clusters ending in /c or /k."""
+    for index, token in enumerate(toks[1:], start=1):
+        match = _CMD_NESTED_COMMAND.fullmatch(token)
+        if match is None:
+            continue
+        tail = match.group("tail")
+        parts = ([tail] if tail else []) + toks[index + 1 :]
+        return True, " ".join(parts) or None
+    return False, None
+
+
 _LITERAL_CALL_OPERATOR = re.compile(
     r"(?:^|(?<=[;|{}\n]))\s*[&.]\s*\(\s*(['\"])([A-Za-z0-9_.\\/-]+)\1\s*\)"
 )
@@ -2419,17 +2438,7 @@ def check(
         nested_script = None
         nested_command_requested = False
         if head == "cmd":
-            for index, token in enumerate(toks[1:], start=1):
-                lowered = token.lower()
-                if lowered in {"/c", "/k"}:
-                    nested_command_requested = True
-                    if index + 1 < len(toks):
-                        nested_script = " ".join(toks[index + 1 :])
-                    break
-                if lowered.startswith(("/c", "/k")):
-                    nested_command_requested = True
-                    nested_script = " ".join([token[2:], *toks[index + 1 :]])
-                    break
+            nested_command_requested, nested_script = cmd_nested_script(toks)
         elif head in _POSIX_SHELL_HEADS | {"pwsh", "powershell"}:
             if head in _POSIX_SHELL_HEADS and has_opaque_posix_shell_input(toks):
                 return (
