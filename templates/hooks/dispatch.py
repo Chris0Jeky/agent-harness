@@ -2940,6 +2940,18 @@ def check(
                 if alias_decision[0] != "allow":
                     return alias_decision
 
+            if sub == "lfs":
+                lfs_args = [token.lower() for token in args]
+                if lfs_args and lfs_args[0] == "status" and all(
+                    token in {"--help", "--json", "--porcelain", "-h"}
+                    for token in lfs_args[1:]
+                ):
+                    continue
+                return (
+                    "deny",
+                    "Only the read-only git lfs status command is admitted through the floor.",
+                )
+
             known_git_subcommands = {
                 "",
                 "add",

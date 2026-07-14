@@ -566,6 +566,9 @@ CASES = [
         "deny",
     ),
     ("git p", 1, {}, "deny"),
+    ("git lfs push origin main", 1, {}, "deny"),
+    ("git lfs prune", 1, {}, "deny"),
+    ("git lfs migrate import", 1, {}, "deny"),
     ("git push origin", 1, {}, "deny"),
     ("git push origin :main", 1, {}, "deny"),
     ("git push origin :refs/heads/main", 1, {}, "deny"),
@@ -1015,6 +1018,8 @@ CASES = [
     ("rm --force notes.txt", 1, {}, "allow"),
     ("cat .env", 1, {}, "allow"),
     ("git status && git log --oneline -5", 1, {}, "allow"),
+    ("git lfs status", 1, {}, "allow"),
+    ("git lfs status --json", 1, {}, "allow"),
     ("git checkout -- src/app.ts", 4, {}, "allow"),  # targeted restore is fine
     ("git restore --staged .", 4, {}, "allow"),
     ("git restore --stag .", 4, {}, "allow"),
