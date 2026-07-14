@@ -1386,6 +1386,7 @@ _GIT_CONFIG_VALUE_OPTIONS = {
     "--type",
     "--default",
     "--comment",
+    "--value",
 }
 
 

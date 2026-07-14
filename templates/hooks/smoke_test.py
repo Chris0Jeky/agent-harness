@@ -556,6 +556,8 @@ CASES = [
     ("git config filter.demo.clean helper", 1, {}, "deny"),
     ("git config rename-section harmless core", 1, {}, "deny"),
     ("git config set core.sshCommand helper", 1, {}, "deny"),
+    ("git config set --value old core.sshCommand helper", 1, {}, "deny"),
+    ("git config set --value=old core.sshCommand helper", 1, {}, "deny"),
     (
         "git -c core.sshCommand=helper ls-remote ssh://example.invalid/repo",
         1,
