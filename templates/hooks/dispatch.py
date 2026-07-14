@@ -625,15 +625,130 @@ _CURL_SIDE_OUTPUT_OPTIONS = frozenset(
     }
 )
 _CURL_OUTPUT_GLOB = re.compile(r"#(?:\d+|<[A-Za-z0-9]+>)")
+_CURL_URL_BRACE_GLOB = re.compile(
+    r"\{(?:<(?P<name>[A-Za-z0-9]+)>)?(?P<values>[^{}]*,[^{}]*)\}"
+)
+_CURL_URL_RANGE_GLOB = re.compile(
+    r"\[(?:<(?P<name>[A-Za-z0-9]+)>)?"
+    r"(?P<start>[A-Za-z]|\d+)-(?P<end>[A-Za-z]|\d+)"
+    r"(?::(?P<step>\d+))?\]"
+)
 
 
-def curl_remote_name_mentions_secret(url: str) -> bool:
+def curl_url_range_values(match: "re.Match[str]") -> list[str] | None:
+    """Expand one bounded curl alpha/numeric URL range."""
+    start_text = match.group("start")
+    end_text = match.group("end")
+    if start_text.isalpha() != end_text.isalpha():
+        return None
+    supplied_step = int(match.group("step") or "1")
+    if supplied_step < 1:
+        return None
+    start = ord(start_text) if start_text.isalpha() else int(start_text)
+    end = ord(end_text) if end_text.isalpha() else int(end_text)
+    step = supplied_step if start <= end else -supplied_step
+    values = list(range(start, end + (1 if step > 0 else -1), step))
+    if len(values) > 64:
+        return None
+    if start_text.isalpha():
+        return [chr(value) for value in values]
+    width = max(len(start_text), len(end_text))
+    zero_padded = start_text.startswith("0") or end_text.startswith("0")
+    return [f"{value:0{width}d}" if zero_padded else str(value) for value in values]
+
+
+def curl_url_glob_variants(
+    url: str,
+) -> list[tuple[str, dict[str, str]]] | None:
+    """Expand bounded curl URL globs and retain output-template captures."""
+    completed: list[tuple[str, dict[str, str]]] = []
+
+    def expand(value: str, captures: dict[str, str], component: int) -> bool:
+        matches = [
+            match
+            for match in (
+                _CURL_URL_BRACE_GLOB.search(value),
+                _CURL_URL_RANGE_GLOB.search(value),
+            )
+            if match is not None
+        ]
+        if not matches:
+            completed.append((value, captures))
+            return len(completed) <= 64
+        match = min(matches, key=lambda candidate: candidate.start())
+        if match.re is _CURL_URL_BRACE_GLOB:
+            alternatives = match.group("values").split(",")
+        else:
+            alternatives = curl_url_range_values(match)
+        if alternatives is None or not alternatives or len(alternatives) > 64:
+            return False
+        name = match.group("name")
+        for alternative in alternatives:
+            next_captures = dict(captures)
+            next_captures[str(component)] = alternative
+            if name:
+                next_captures[name] = alternative
+            next_value = value[: match.start()] + alternative + value[match.end() :]
+            if not expand(next_value, next_captures, component + 1):
+                return False
+        return True
+
+    restored = restore_quoted_literal_markers(url)
+    return completed if expand(restored, {}, 1) else None
+
+
+def curl_literal_path_mentions_secret(target: str) -> bool:
+    """Match a curl-resolved literal path without reapplying shell glob rules."""
+    normalized = restore_quoted_literal_markers(target).replace("\\", "/")
+    return bool(_SECRET_PATH.search(normalized))
+
+
+def curl_output_glob_targets(
+    target: str,
+    url: str | None,
+    globbing: bool,
+) -> list[str] | None:
+    """Resolve curl #N/#<name> output templates for one URL."""
+    restored = restore_quoted_literal_markers(target)
+    if not globbing or not _CURL_OUTPUT_GLOB.search(restored):
+        return [restored]
+    if url is None:
+        return None
+    variants = curl_url_glob_variants(url)
+    if variants is None:
+        return None
+    results = []
+    for _expanded_url, captures in variants:
+        results.append(
+            _CURL_OUTPUT_GLOB.sub(
+                lambda match: captures.get(
+                    (
+                        match.group(0)[2:-1]
+                        if match.group(0).startswith("#<")
+                        else match.group(0)[1:]
+                    ),
+                    match.group(0),
+                ),
+                restored,
+            )
+        )
+    return results
+
+
+def curl_remote_name_mentions_secret(url: str, globbing: bool) -> bool:
     """Apply curl's URL-derived filename rules before secret-path matching."""
-    without_fragment = url.split("#", 1)[0]
-    without_query = without_fragment.split("?", 1)[0]
-    path = without_query.rstrip("/\\")
-    basename = re.split(r"[/\\]", path)[-1]
-    return token_mentions_secret_path(basename)
+    variants = curl_url_glob_variants(url) if globbing else [(url, {})]
+    if variants is None:
+        return True
+    for expanded_url, _captures in variants:
+        restored = restore_quoted_literal_markers(expanded_url)
+        without_fragment = restored.split("#", 1)[0]
+        without_query = without_fragment.split("?", 1)[0]
+        path = without_query.rstrip("/\\")
+        basename = re.split(r"[/\\]", path)[-1]
+        if curl_literal_path_mentions_secret(basename):
+            return True
+    return False
 
 
 def curl_write_out_risk(format_value: str | None) -> str:
@@ -733,17 +848,19 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                     )
                 if url is None:
                     return "A dynamic curl URL has an opaque remote-name destination."
-                if curl_remote_name_mentions_secret(url):
+                if curl_remote_name_mentions_secret(url, globbing):
                     return "A remote-name download would create a secret-looking file."
                 continue
             if selector == "file" and target is not None:
-                if (
-                    is_dynamic_value(target)
-                    or re.match(r"^[<>]?\(", target)
-                    or (globbing and _CURL_OUTPUT_GLOB.search(target))
-                ):
+                if is_dynamic_value(target) or re.match(r"^[<>]?\(", target):
                     return "A dynamic download destination cannot be inspected safely."
-                if token_mentions_secret_path(target):
+                resolved_targets = curl_output_glob_targets(target, url, globbing)
+                if resolved_targets is None:
+                    return "A curl output glob cannot be inspected safely."
+                if any(
+                    token_mentions_secret_path(resolved_target)
+                    for resolved_target in resolved_targets
+                ):
                     return "Downloading into a secret-looking file is floor-blocked."
         return ""
 
@@ -837,12 +954,18 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             continue
         if canonical_option == "--url":
             target, index = next_value(index, bound_value)
-            if expanded or target is None or is_dynamic_value(target):
-                urls.append(None)
-            elif target.startswith("@"):
+            restored_target = (
+                restore_quoted_literal_markers(target) if target is not None else ""
+            )
+            if (
+                target is None
+                or is_dynamic_value(target)
+                or (expanded and re.search(r"(?<!\\)\{\{", restored_target))
+            ):
+                return "A dynamic curl URL may activate opaque URL-file output."
+            if restored_target.startswith("@"):
                 return "A curl URL file has opaque remote-name destinations."
-            else:
-                urls.append(target)
+            urls.append(target)
             index += 1
             continue
         if canonical_option == "--write-out":

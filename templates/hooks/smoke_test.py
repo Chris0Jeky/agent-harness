@@ -1053,6 +1053,15 @@ CASES = [
     ),
     ("curl -q -OJ https://example.invalid/report.txt", 1, {}, "deny"),
     ("curl -q --url @urls.txt", 1, {}, "deny"),
+    ("curl -q --expand-url @urls.txt", 1, {}, "deny"),
+    ("curl -q --expand-url=@urls.txt", 1, {}, "deny"),
+    ("curl -q --url $URL", 1, {}, "deny"),
+    (
+        'curl -q --variable target=@urls.txt --expand-url "{{target}}"',
+        1,
+        {},
+        "deny",
+    ),
     (
         "curl -q --tls-earlydata -O https://example.invalid/.env",
         1,
@@ -1116,7 +1125,37 @@ CASES = [
     ("curl -q -O 'https://example.invalid/.env#fragment'", 1, {}, "deny"),
     ("curl -q -O https://example.invalid/.env/", 1, {}, "deny"),
     (
+        'curl -q -O "https://example.invalid/{.env,report.txt}"',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q -O https://example.invalid/{.env/,safe/}",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        'curl -q -O "https://example.invalid/{<kind>.env,report.txt}"',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        'curl -q -O "https://example.invalid/.[a-z]nv"',
+        1,
+        {},
+        "deny",
+    ),
+    (
         'curl -q "https://example.invalid/{env,txt}" -o ".#1"',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        'curl -q "https://example.invalid/{<kind>env,txt}" ' '-o ".#<kind>"',
         1,
         {},
         "deny",
@@ -1549,6 +1588,7 @@ CASES = [
     ),
     ("curl -q -O https://example.invalid/report.txt", 1, {}, "allow"),
     ("curl -q https://example.invalid/.env", 1, {}, "allow"),
+    ("curl -q --expand-url https://example.invalid/.env", 1, {}, "allow"),
     (
         "curl -q --user-agent=-O https://example.invalid/.env",
         1,
@@ -1615,6 +1655,31 @@ CASES = [
     ),
     (
         'curl -q -g "https://example.invalid/{env,txt}" -o ".#1"',
+        1,
+        {},
+        "allow",
+    ),
+    (
+        'curl -q "https://example.invalid/{one,two}.txt" ' '-o "report-#1.txt"',
+        1,
+        {},
+        "allow",
+    ),
+    (
+        'curl -q "https://example.invalid/{<kind>one,two}.txt" '
+        '-o "report-#<kind>.txt"',
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q -g -O https://example.invalid/.[a-z]nv",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        'curl -q -O "https://example.invalid/{report,notes}.txt"',
         1,
         {},
         "allow",
