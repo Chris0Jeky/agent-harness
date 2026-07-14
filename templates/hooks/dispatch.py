@@ -5127,7 +5127,8 @@ def check(
                         "--mirror",
                         "--prune",
                     }
-                    if t not in dangerous_options and any(
+                    option_name = t.split("=", 1)[0]
+                    if option_name not in dangerous_options and any(
                         git_option_abbreviates(t, dangerous)
                         for dangerous in dangerous_options
                     ):
