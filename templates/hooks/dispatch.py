@@ -3285,13 +3285,23 @@ def check(
             )
             if nested_decision[0] != "allow":
                 return nested_decision
-        if head == "find" and any(
-            token in {"-exec", "-execdir", "-delete"} for token in toks[1:]
-        ):
-            return (
-                "deny",
-                "find execution/deletion actions are opaque to the deny floor. Enumerate first.",
-            )
+        if head == "find":
+            if any(token in {"-exec", "-execdir", "-delete"} for token in toks[1:]):
+                return (
+                    "deny",
+                    "find execution/deletion actions are opaque to the deny floor. Enumerate first.",
+                )
+            for index, token in enumerate(toks[1:], start=1):
+                if token not in {"-fprint", "-fprint0", "-fprintf", "-fls"}:
+                    continue
+                target = toks[index + 1] if index + 1 < len(toks) else ""
+                if not target or has_dynamic_shell_token(target):
+                    return "deny", "A find output target cannot be inspected safely."
+                if token_mentions_secret_path(target):
+                    return (
+                        "deny",
+                        "find output to a secret-looking file is floor-blocked.",
+                    )
 
         if head in {
             "cd",
@@ -3507,6 +3517,18 @@ def check(
             launcher_reason = dangerous_git_process_launcher(sub, args)
             if launcher_reason:
                 return "deny", launcher_reason
+            if sub == "archive":
+                archive_outputs = git_option_values(args, "--output", {"-o"})
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in archive_outputs
+                ):
+                    return (
+                        "deny",
+                        "Git archive output to an opaque or secret-looking file is floor-blocked.",
+                    )
 
             alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
@@ -3934,6 +3956,15 @@ def check(
                 value_parameters.update(
                     {"value", "inputobject", "encoding", "filter", "include", "exclude"}
                 )
+            if head in {
+                "set-content",
+                "sc",
+                "add-content",
+                "ac",
+                "clear-content",
+                "clc",
+            }:
+                value_parameters.add("stream")
             if head == "out-file":
                 value_parameters.add("width")
             while index < len(toks):
