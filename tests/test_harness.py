@@ -79,14 +79,70 @@ class HarnessTests(unittest.TestCase):
         result = harness.audit_repo(repo)
         self.assertTrue(any("stale jekyt-profile" in issue for issue in result["issues"]))
 
-    def test_merge_hooks_preserves_unrelated_and_replaces_managed(self) -> None:
+    def test_remove_managed_floor_preserves_unrelated_hooks(self) -> None:
         current = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": "keep"}]}],
                                          "PreToolUse": [{"hooks": [{"command": "old dispatch.py --event pre --runtime codex"}]}]}})
-        managed = json.dumps({"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"command": "new dispatch.py --event pre --runtime codex"}]}]}})
-        result = json.loads(harness.merge_hooks(current, managed))
+        result = json.loads(harness.remove_managed_codex_floor(current))
         self.assertEqual(result["hooks"]["SessionStart"][0]["hooks"][0]["command"], "keep")
-        self.assertEqual(len(result["hooks"]["PreToolUse"]), 1)
-        self.assertIn("new dispatch.py", result["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        self.assertNotIn("PreToolUse", result["hooks"])
+
+    def test_remove_managed_floor_deletes_empty_document(self) -> None:
+        current = json.dumps({
+            "hooks": {
+                "PreToolUse": [{
+                    "hooks": [{
+                        "command": "python dispatch.py --event pre --runtime codex"
+                    }]
+                }]
+            }
+        })
+        self.assertEqual(harness.remove_managed_codex_floor(current), "")
+
+    def test_sync_global_keeps_floor_project_local(self) -> None:
+        root = Path(self.temp.name)
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        (codex_source / "skills" / "sample").mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        (codex_source / "skills" / "sample" / "SKILL.md").write_text(
+            "# sample\n", encoding="utf-8"
+        )
+        codex_home = root / "codex-home"
+        claude_home = root / "claude-home"
+        skills_home = root / "skills-home"
+        codex_home.mkdir()
+        (codex_home / "hooks.json").write_text(
+            json.dumps({
+                "hooks": {
+                    "SessionStart": [{"hooks": [{"command": "keep"}]}],
+                    "PreToolUse": [{
+                        "hooks": [{
+                            "command": "python dispatch.py --event pre --runtime codex"
+                        }]
+                    }],
+                }
+            }),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        self.assertEqual(harness.sync_global(args), 0)
+        hooks = json.loads((codex_home / "hooks.json").read_text(encoding="utf-8"))
+        self.assertIn("SessionStart", hooks["hooks"])
+        self.assertNotIn("PreToolUse", hooks["hooks"])
+        harness_root = Path(harness.__file__).resolve().parent
+        self.assertTrue(
+            harness.same_file(
+                harness_root / "templates" / "hooks" / "dispatch.py",
+                claude_home / "hooks" / "dispatch.py",
+            )
+        )
+        self.assertFalse((codex_home / "hooks" / "dispatch.py").exists())
 
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])

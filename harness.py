@@ -215,24 +215,15 @@ def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
     return "updated" if (backup_root / target.name).exists() else "created"
 
 
-def rendered_hooks(template: Path, dispatch_target: Path) -> str:
-    escaped = json.dumps(str(dispatch_target))[1:-1]
-    text = template.read_text(encoding="utf-8").replace("{{DISPATCH_PY}}", escaped)
-    json.loads(text)
-    return text
-
-
-def merge_hooks(current: str, managed: str) -> str:
+def managed_codex_floor_groups(current: str) -> list[Any]:
     try:
         current_data = json.loads(current) if current.strip() else {"hooks": {}}
-        managed_data = json.loads(managed)
     except json.JSONDecodeError as exc:
-        raise HarnessError(f"refusing to replace invalid existing hooks.json: {exc}") from exc
-    hooks = current_data.setdefault("hooks", {})
+        raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
+    hooks = current_data.get("hooks", {})
     if not isinstance(hooks, dict):
         raise HarnessError("existing hooks.json has a non-object hooks field")
-    managed_group = managed_data["hooks"]["PreToolUse"][0]
-    existing_groups = hooks.setdefault("PreToolUse", [])
+    existing_groups = hooks.get("PreToolUse", [])
     if not isinstance(existing_groups, list):
         raise HarnessError("existing hooks.PreToolUse must be an array")
 
@@ -247,7 +238,37 @@ def merge_hooks(current: str, managed: str) -> str:
                 return True
         return False
 
-    hooks["PreToolUse"] = [group for group in existing_groups if not is_managed(group)] + [managed_group]
+    return [group for group in existing_groups if is_managed(group)]
+
+
+def remove_managed_codex_floor(current: str) -> str:
+    """Remove the obsolete global Codex floor while preserving unrelated hooks."""
+    if not current.strip():
+        return ""
+    try:
+        current_data = json.loads(current)
+    except json.JSONDecodeError as exc:
+        raise HarnessError(
+            f"refusing to modify invalid existing hooks.json: {exc}"
+        ) from exc
+    hooks = current_data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise HarnessError("existing hooks.json has a non-object hooks field")
+    existing_groups = hooks.get("PreToolUse", [])
+    if not isinstance(existing_groups, list):
+        raise HarnessError("existing hooks.PreToolUse must be an array")
+    managed = managed_codex_floor_groups(current)
+    if not managed:
+        return current
+    retained = [group for group in existing_groups if group not in managed]
+    if retained:
+        hooks["PreToolUse"] = retained
+    else:
+        hooks.pop("PreToolUse", None)
+    if not hooks:
+        current_data.pop("hooks", None)
+    if not current_data:
+        return ""
     return json.dumps(current_data, indent=2) + "\n"
 
 
@@ -256,26 +277,41 @@ def sync_global(args: argparse.Namespace) -> int:
     codex_source = config_root / "codex"
     harness_root = Path(__file__).resolve().parent
     codex_home = Path(args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+    claude_home = Path(args.claude_home or Path.home() / ".claude").resolve()
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
-    required = [codex_source / "AGENTS.md", harness_root / "templates" / "hooks" / "dispatch.py", harness_root / "templates" / "codex" / "hooks.json"]
+    required = [
+        codex_source / "AGENTS.md",
+        harness_root / "templates" / "hooks" / "dispatch.py",
+        harness_root / "templates" / "hooks" / "smoke_test.py",
+    ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise HarnessError("missing sync sources: " + ", ".join(missing))
     actions = [
         (codex_source / "AGENTS.md", codex_home / "AGENTS.md"),
-        (harness_root / "templates" / "hooks" / "dispatch.py", codex_home / "hooks" / "dispatch.py"),
+        (
+            harness_root / "templates" / "hooks" / "dispatch.py",
+            claude_home / "hooks" / "dispatch.py",
+        ),
+        (
+            harness_root / "templates" / "hooks" / "smoke_test.py",
+            claude_home / "hooks" / "smoke_test.py",
+        ),
     ]
     if (codex_source / "REPOS.md").is_file():
         actions.append((codex_source / "REPOS.md", codex_home / "REPOS.md"))
     skill_actions = [(skill, skills_home / skill.name) for skill in sorted((codex_source / "skills").iterdir()) if (skill / "SKILL.md").is_file()]
-    managed_hook_text = rendered_hooks(harness_root / "templates" / "codex" / "hooks.json", codex_home / "hooks" / "dispatch.py")
     print(f"Codex home: {codex_home}")
+    print(f"Claude home: {claude_home}")
     print(f"Skills home: {skills_home}")
     for source, target in actions:
         print(f"{'=' if same_file(source, target) else '->'} {target}")
     current_hooks = (codex_home / "hooks.json").read_text(encoding="utf-8") if (codex_home / "hooks.json").is_file() else ""
-    hook_text = merge_hooks(current_hooks, managed_hook_text)
-    print(f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}")
+    hook_text = remove_managed_codex_floor(current_hooks)
+    print(
+        f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}"
+        " (no global Codex deny floor)"
+    )
     for source, target in skill_actions:
         equal = tree_digest(source) == tree_digest(target)
         print(f"{'=' if equal else '->'} {target}")
@@ -291,8 +327,11 @@ def sync_global(args: argparse.Namespace) -> int:
         if hooks_target.exists():
             backup_root.mkdir(parents=True, exist_ok=True)
             shutil.copy2(hooks_target, backup_root / "hooks.json")
-        hooks_target.parent.mkdir(parents=True, exist_ok=True)
-        hooks_target.write_text(hook_text, encoding="utf-8")
+        if hook_text:
+            hooks_target.parent.mkdir(parents=True, exist_ok=True)
+            hooks_target.write_text(hook_text, encoding="utf-8")
+        else:
+            hooks_target.unlink(missing_ok=True)
     skill_backup = skills_home / ".harness-backups" / stamp
     for source, target in skill_actions:
         if target.exists():
@@ -304,27 +343,74 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.rmtree(target)
         shutil.copytree(source, target)
     print(f"installed Codex global layer; backups: {backup_root}")
-    print("Open /hooks in a new Codex session and trust the reviewed global hook hash.")
+    print("Codex deny-floor trust remains project-local; review each repo's .codex/hooks.json in /hooks.")
     return 0
 
 
 def doctor(args: argparse.Namespace) -> int:
     codex_home = Path(args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+    claude_home = Path(args.claude_home or Path.home() / ".claude").resolve()
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+    harness_root = Path(__file__).resolve().parent
     checks = []
     codex_command = (["powershell", "-NoProfile", "-Command", "codex --version"]
                      if os.name == "nt" else ["codex", "--version"])
     for label, command in (("python", [sys.executable, "--version"]), ("codex", codex_command), ("git", ["git", "--version"])):
         result = run(command)
         checks.append((label, result.returncode == 0, (result.stdout or result.stderr).strip()))
+    hooks_path = codex_home / "hooks.json"
+    try:
+        global_floor_count = len(
+            managed_codex_floor_groups(
+                hooks_path.read_text(encoding="utf-8") if hooks_path.is_file() else ""
+            )
+        )
+        global_floor_detail = f"{global_floor_count} managed global floor group(s)"
+    except HarnessError as exc:
+        global_floor_count = -1
+        global_floor_detail = str(exc)
     checks.extend(
         [
             ("global AGENTS", (codex_home / "AGENTS.md").is_file() and (codex_home / "AGENTS.md").stat().st_size > 0, str(codex_home / "AGENTS.md")),
-            ("global hooks", (codex_home / "hooks.json").is_file(), str(codex_home / "hooks.json")),
-            ("dispatcher", (codex_home / "hooks" / "dispatch.py").is_file(), str(codex_home / "hooks" / "dispatch.py")),
+            ("no global Codex floor", global_floor_count == 0, global_floor_detail),
+            (
+                "shared dispatcher",
+                same_file(
+                    harness_root / "templates" / "hooks" / "dispatch.py",
+                    claude_home / "hooks" / "dispatch.py",
+                ),
+                str(claude_home / "hooks" / "dispatch.py"),
+            ),
+            (
+                "shared smoke matrix",
+                same_file(
+                    harness_root / "templates" / "hooks" / "smoke_test.py",
+                    claude_home / "hooks" / "smoke_test.py",
+                ),
+                str(claude_home / "hooks" / "smoke_test.py"),
+            ),
             ("user skills", skills_home.is_dir() and any(skills_home.glob("*/SKILL.md")), str(skills_home)),
         ]
     )
+    if args.repo:
+        repo_hooks = Path(args.repo).resolve() / ".codex" / "hooks.json"
+        try:
+            project_floor_count = len(
+                managed_codex_floor_groups(
+                    repo_hooks.read_text(encoding="utf-8")
+                    if repo_hooks.is_file()
+                    else ""
+                )
+            )
+            project_detail = (
+                f"{project_floor_count} project floor group(s); trust is checked manually in /hooks"
+            )
+        except HarnessError as exc:
+            project_floor_count = -1
+            project_detail = str(exc)
+        checks.append(
+            ("project Codex floor", project_floor_count == 1, project_detail)
+        )
     for label, ok, detail in checks:
         print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1
@@ -368,13 +454,16 @@ def parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync-global", help="diff or install the versioned Codex global layer")
     sync.add_argument("--config-root", required=True, help="path to the claude-config checkout")
     sync.add_argument("--codex-home")
+    sync.add_argument("--claude-home")
     sync.add_argument("--skills-home")
     sync.add_argument("--apply", action="store_true")
     sync.set_defaults(func=sync_global)
 
     check = sub.add_parser("doctor", help="check the live Codex global installation")
     check.add_argument("--codex-home")
+    check.add_argument("--claude-home")
     check.add_argument("--skills-home")
+    check.add_argument("--repo", help="also verify one repo-local Codex floor definition")
     check.set_defaults(func=doctor)
     return root
 
