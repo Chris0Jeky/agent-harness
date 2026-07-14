@@ -458,42 +458,271 @@ def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | 
     return None, None
 
 
-def looks_like_curl_url(token: str) -> bool:
-    """Recognize URL-shaped positional curl arguments without treating all values as URLs."""
-    return bool(
-        "://" in token
-        or re.match(
-            r"(?i)^(?:www\.|localhost(?::\d+)?/|[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?/)",
-            token,
-        )
-    )
+_CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--abstract-unix-socket",
+        "--alt-svc",
+        "--aws-sigv4",
+        "--cacert",
+        "--capath",
+        "--cert",
+        "--cert-type",
+        "--ciphers",
+        "--config",
+        "--connect-timeout",
+        "--connect-to",
+        "--continue-at",
+        "--cookie",
+        "--cookie-jar",
+        "--create-file-mode",
+        "--crlfile",
+        "--curves",
+        "--data",
+        "--data-ascii",
+        "--data-binary",
+        "--data-raw",
+        "--data-urlencode",
+        "--delegation",
+        "--dns-interface",
+        "--dns-ipv4-addr",
+        "--dns-ipv6-addr",
+        "--dns-servers",
+        "--doh-url",
+        "--dump-header",
+        "--ech",
+        "--egd-file",
+        "--engine",
+        "--etag-compare",
+        "--etag-save",
+        "--expect100-timeout",
+        "--form",
+        "--form-string",
+        "--ftp-account",
+        "--ftp-alternative-to-user",
+        "--ftp-method",
+        "--ftp-port",
+        "--ftp-ssl-ccc-mode",
+        "--happy-eyeballs-timeout-ms",
+        "--haproxy-clientip",
+        "--header",
+        "--help",
+        "--hostpubmd5",
+        "--hostpubsha256",
+        "--hsts",
+        "--interface",
+        "--ip-tos",
+        "--ipfs-gateway",
+        "--json",
+        "--keepalive-cnt",
+        "--keepalive-time",
+        "--key",
+        "--key-type",
+        "--krb",
+        "--libcurl",
+        "--limit-rate",
+        "--local-port",
+        "--login-options",
+        "--mail-auth",
+        "--mail-from",
+        "--mail-rcpt",
+        "--max-filesize",
+        "--max-redirs",
+        "--max-time",
+        "--netrc-file",
+        "--noproxy",
+        "--oauth2-bearer",
+        "--output",
+        "--output-dir",
+        "--parallel-max",
+        "--parallel-max-host",
+        "--pass",
+        "--pinnedpubkey",
+        "--preproxy",
+        "--proto",
+        "--proto-default",
+        "--proto-redir",
+        "--proxy",
+        "--proxy-cacert",
+        "--proxy-capath",
+        "--proxy-cert",
+        "--proxy-cert-type",
+        "--proxy-ciphers",
+        "--proxy-crlfile",
+        "--proxy-header",
+        "--proxy-key",
+        "--proxy-key-type",
+        "--proxy-pass",
+        "--proxy-pinnedpubkey",
+        "--proxy-service-name",
+        "--proxy-tls13-ciphers",
+        "--proxy-tlsauthtype",
+        "--proxy-tlspassword",
+        "--proxy-tlsuser",
+        "--proxy-user",
+        "--proxy1.0",
+        "--pubkey",
+        "--quote",
+        "--random-file",
+        "--range",
+        "--rate",
+        "--referer",
+        "--request",
+        "--request-target",
+        "--resolve",
+        "--retry",
+        "--retry-delay",
+        "--retry-max-time",
+        "--sasl-authzid",
+        "--service-name",
+        "--socks4",
+        "--socks4a",
+        "--socks5",
+        "--socks5-gssapi-service",
+        "--socks5-hostname",
+        "--speed-limit",
+        "--speed-time",
+        "--ssl-sessions",
+        "--stderr",
+        "--telnet-option",
+        "--tftp-blksize",
+        "--time-cond",
+        "--tls-earlydata",
+        "--tls-max",
+        "--tls13-ciphers",
+        "--tlsauthtype",
+        "--tlspassword",
+        "--tlsuser",
+        "--trace",
+        "--trace-ascii",
+        "--trace-config",
+        "--unix-socket",
+        "--upload-file",
+        "--upload-flags",
+        "--url",
+        "--url-query",
+        "--user",
+        "--user-agent",
+        "--variable",
+        "--vlan-priority",
+        "--write-out",
+    }
+)
+_CURL_SHORT_OPTIONS_WITH_VALUE = frozenset("AEKCbcdDFHhmoPQreTtUuwXxyYz")
+_CURL_SIDE_OUTPUT_OPTIONS = frozenset(
+    {
+        "--alt-svc",
+        "--cookie-jar",
+        "--dump-header",
+        "--etag-save",
+        "--hsts",
+        "--libcurl",
+        "--ssl-sessions",
+        "--stderr",
+        "--trace",
+        "--trace-ascii",
+    }
+)
+_CURL_OUTPUT_GLOB = re.compile(r"#(?:\d+|<[A-Za-z0-9]+>)")
+
+
+def curl_remote_name_mentions_secret(url: str) -> bool:
+    """Apply curl's URL-derived filename rules before secret-path matching."""
+    without_fragment = url.split("#", 1)[0]
+    without_query = without_fragment.split("?", 1)[0]
+    path = without_query.rstrip("/\\")
+    basename = re.split(r"[/\\]", path)[-1]
+    return token_mentions_secret_path(basename)
+
+
+def curl_write_out_risk(format_value: str | None) -> str:
+    """Inspect curl write-out file switches without misreading escaped percent signs."""
+    if format_value is None:
+        return ""
+    format_value = restore_quoted_literal_markers(format_value)
+    if is_dynamic_value(format_value) or format_value.startswith("@"):
+        return "A dynamic curl write-out format cannot be inspected safely."
+    index = 0
+    while index < len(format_value):
+        if format_value[index] != "%":
+            index += 1
+            continue
+        if index + 1 < len(format_value) and format_value[index + 1] == "%":
+            index += 2
+            continue
+        marker = "%output{"
+        if not format_value.startswith(marker, index):
+            index += 1
+            continue
+        end = format_value.find("}", index + len(marker))
+        if end < 0:
+            return (
+                "An incomplete curl write-out output target cannot be inspected safely."
+            )
+        target = format_value[index + len(marker) : end]
+        if target.startswith(">>"):
+            target = target[2:]
+        if (
+            is_dynamic_value(target)
+            or _CURL_OUTPUT_GLOB.search(target)
+            or token_mentions_secret_path(target)
+        ):
+            return (
+                "curl write-out to an opaque or secret-looking file is floor-blocked."
+            )
+        index = end + 1
+    return ""
+
+
+def curl_side_output_risk(option: str, target: str | None) -> str:
+    """Inspect a curl cache/log/code-generation output target."""
+    if target is None or target in {"", "-", "%"}:
+        return ""
+    if is_dynamic_value(target) or re.match(r"^[<>]?\(", target):
+        return f"A dynamic curl {option} destination cannot be inspected safely."
+    if token_mentions_secret_path(target):
+        return f"curl {option} output to a secret-looking file is floor-blocked."
+    return ""
 
 
 def curl_secret_output_risk(toks: list[str]) -> str:
-    """Return a deny reason when curl can write an opaque or secret-looking path.
-
-    curl associates -o/-O/--no-remote-name selectors with URLs by selector
-    order, independently of where the selectors appear on the command line.
-    Model that bounded contract so disabling remote-name output for one URL
-    does not accidentally disable it for every later URL.
-    """
+    """Return a deny reason when native curl can write an unproven path."""
 
     args = toks[1:]
-    default_config_disabled = bool(args and args[0].lower() in {"-q", "--disable"})
+    if not args or not (
+        args[0].lower() == "--disable"
+        or (args[0].startswith("-q") and not args[0].startswith("--"))
+    ):
+        return (
+            "curl may load an ambient config with opaque output sinks; use "
+            "-q/--disable as the first argument (and curl.exe in Windows PowerShell)."
+        )
 
     selectors: list[tuple[str, str | None]] = []
     urls: list[str | None] = []
     remote_name_all = False
-    remote_name_all_explicit = False
     remote_header_name = False
+    output_dir: str | None = None
+    output_dir_dynamic = False
+    globbing = True
 
     def inspect_group() -> str:
-        for index, url in enumerate(urls):
+        for url_index, url in enumerate(urls):
             selector, target = (
-                selectors[index]
-                if index < len(selectors)
+                selectors[url_index]
+                if url_index < len(selectors)
                 else ("remote" if remote_name_all else "stdout", None)
             )
+            writes_file = selector == "remote" or (
+                selector == "file" and target is not None
+            )
+            if writes_file and output_dir is not None:
+                if (
+                    output_dir_dynamic
+                    or is_dynamic_value(output_dir)
+                    or re.match(r"^[<>]?\(", output_dir)
+                    or token_mentions_secret_path(output_dir)
+                ):
+                    return "A curl output directory cannot be inspected safely."
             if selector == "remote":
                 if remote_header_name:
                     return (
@@ -502,28 +731,37 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                     )
                 if url is None:
                     return "A dynamic curl URL has an opaque remote-name destination."
-                if token_mentions_secret_path(url):
+                if curl_remote_name_mentions_secret(url):
                     return "A remote-name download would create a secret-looking file."
                 continue
             if selector == "file" and target is not None:
-                if is_dynamic_value(target) or re.match(r"^[<>]?\(", target):
+                if (
+                    is_dynamic_value(target)
+                    or re.match(r"^[<>]?\(", target)
+                    or (globbing and _CURL_OUTPUT_GLOB.search(target))
+                ):
                     return "A dynamic download destination cannot be inspected safely."
                 if token_mentions_secret_path(target):
                     return "Downloading into a secret-looking file is floor-blocked."
-                continue
-            if (
-                selector == "stdout"
-                and url is not None
-                and token_mentions_secret_path(url)
-                and index >= len(selectors)
-                and not default_config_disabled
-                and not (remote_name_all_explicit and not remote_name_all)
-            ):
-                return (
-                    "curl's ambient config can make a secret-looking URL write by "
-                    "remote name; use -q/--disable as the first argument."
-                )
         return ""
+
+    def next_value(index: int, attached: str) -> tuple[str | None, int]:
+        if attached:
+            return attached, index
+        if index + 1 < len(args):
+            return args[index + 1], index + 1
+        return None, index
+
+    def reset_group():
+        nonlocal selectors, urls, remote_name_all
+        nonlocal remote_header_name, output_dir, output_dir_dynamic, globbing
+        selectors = []
+        urls = []
+        remote_name_all = False
+        remote_header_name = False
+        output_dir = None
+        output_dir_dynamic = False
+        globbing = True
 
     index = 0
     options_ended = False
@@ -532,8 +770,7 @@ def curl_secret_output_risk(toks: list[str]) -> str:
         lowered = token.lower()
 
         if options_ended:
-            if looks_like_curl_url(token):
-                urls.append(token)
+            urls.append(None if is_dynamic_value(token) else token)
             index += 1
             continue
         if token == "--":
@@ -544,81 +781,92 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             reason = inspect_group()
             if reason:
                 return reason
-            selectors = []
-            urls = []
-            remote_name_all = False
-            remote_name_all_explicit = False
-            remote_header_name = False
+            reset_group()
             index += 1
             continue
 
-        option, separator, bound_value = lowered.partition("=")
-        if option in {"--config", "--expand-config"}:
+        raw_option, separator, raw_bound_value = token.partition("=")
+        option = raw_option.lower()
+        expanded = option.startswith("--expand-")
+        canonical_option = "--" + option[len("--expand-") :] if expanded else option
+        bound_value = raw_bound_value if separator else ""
+
+        if canonical_option == "--config":
             return "curl config files are opaque to the deny floor."
-        if option in {"--remote-name-all", "--no-remote-name-all"}:
-            remote_name_all = option == "--remote-name-all"
-            remote_name_all_explicit = True
+        if canonical_option in {"--remote-name-all", "--no-remote-name-all"}:
+            remote_name_all = canonical_option == "--remote-name-all"
             index += 1
             continue
-        if option in {"--remote-name", "--no-remote-name"}:
+        if canonical_option in {"--remote-name", "--no-remote-name"}:
             selectors.append(
-                ("remote" if option == "--remote-name" else "stdout", None)
+                (
+                    "remote" if canonical_option == "--remote-name" else "stdout",
+                    None,
+                )
             )
             index += 1
             continue
-        if option in {"--remote-header-name", "--no-remote-header-name"}:
-            remote_header_name = option == "--remote-header-name"
+        if canonical_option in {
+            "--remote-header-name",
+            "--no-remote-header-name",
+        }:
+            remote_header_name = canonical_option == "--remote-header-name"
             index += 1
             continue
-        if option == "--out-null":
+        if canonical_option in {"--globoff", "--no-globoff"}:
+            globbing = canonical_option == "--no-globoff"
+            index += 1
+            continue
+        if canonical_option == "--out-null":
             selectors.append(("stdout", None))
             index += 1
             continue
-        if option in {"--output", "--expand-output"}:
-            if option == "--expand-output":
+        if canonical_option == "--output":
+            if expanded:
                 return "An expanded curl output destination cannot be inspected safely."
-            target = (
-                bound_value
-                if separator
-                else (args[index + 1] if index + 1 < len(args) else None)
-            )
-            if not separator and target is not None:
-                index += 1
+            target, index = next_value(index, bound_value)
             selectors.append(("stdout", None) if target == "-" else ("file", target))
             index += 1
             continue
-        if option in {"--output-dir", "--expand-output-dir"}:
-            if option == "--expand-output-dir":
-                return "An expanded curl output directory cannot be inspected safely."
-            target = (
-                bound_value
-                if separator
-                else (args[index + 1] if index + 1 < len(args) else None)
-            )
-            if not separator and target is not None:
-                index += 1
-            if target is not None and (
-                is_dynamic_value(target)
-                or re.match(r"^[<>]?\(", target)
-                or token_mentions_secret_path(target)
-            ):
-                return "A curl output directory cannot be inspected safely."
+        if canonical_option == "--output-dir":
+            output_dir, index = next_value(index, bound_value)
+            output_dir_dynamic = expanded
             index += 1
             continue
-        if option in {"--url", "--expand-url"}:
-            target = (
-                bound_value
-                if separator
-                else (args[index + 1] if index + 1 < len(args) else None)
-            )
-            if not separator and target is not None:
-                index += 1
-            if option == "--expand-url" or target is None:
+        if canonical_option == "--url":
+            target, index = next_value(index, bound_value)
+            if expanded or target is None or is_dynamic_value(target):
                 urls.append(None)
             elif target.startswith("@"):
                 return "A curl URL file has opaque remote-name destinations."
             else:
                 urls.append(target)
+            index += 1
+            continue
+        if canonical_option == "--write-out":
+            target, index = next_value(index, bound_value)
+            if expanded:
+                return "An expanded curl write-out format cannot be inspected safely."
+            reason = curl_write_out_risk(target)
+            if reason:
+                return reason
+            index += 1
+            continue
+        if canonical_option in _CURL_SIDE_OUTPUT_OPTIONS:
+            target, index = next_value(index, bound_value)
+            if expanded:
+                return f"An expanded curl {canonical_option} target is opaque."
+            reason = curl_side_output_risk(canonical_option, target)
+            if reason:
+                return reason
+            index += 1
+            continue
+        if canonical_option in _CURL_LONG_OPTIONS_WITH_VALUE:
+            _target, index = next_value(index, bound_value)
+            index += 1
+            continue
+
+        if token.startswith("--"):
             index += 1
             continue
 
@@ -627,6 +875,13 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             offset = 0
             while offset < len(body):
                 marker = body[offset]
+                if marker == ":":
+                    reason = inspect_group()
+                    if reason:
+                        return reason
+                    reset_group()
+                    offset += 1
+                    continue
                 if marker == "K":
                     return "curl config files are opaque to the deny floor."
                 if marker == "O":
@@ -637,24 +892,30 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                     remote_header_name = True
                     offset += 1
                     continue
-                if marker == "o":
-                    target = body[offset + 1 :] or (
-                        args[index + 1] if index + 1 < len(args) else None
-                    )
-                    if not body[offset + 1 :] and target is not None:
-                        index += 1
-                    selectors.append(
-                        ("stdout", None) if target == "-" else ("file", target)
-                    )
-                    break
-                if marker not in _DOWNLOADER_CLUSTER_PREFIXES["curl"]:
+                if marker == "g":
+                    globbing = False
+                    offset += 1
+                    continue
+                if marker in _CURL_SHORT_OPTIONS_WITH_VALUE:
+                    target, index = next_value(index, body[offset + 1 :])
+                    if marker == "o":
+                        selectors.append(
+                            ("stdout", None) if target == "-" else ("file", target)
+                        )
+                    elif marker in {"c", "D"}:
+                        reason = curl_side_output_risk(f"-{marker}", target)
+                        if reason:
+                            return reason
+                    elif marker == "w":
+                        reason = curl_write_out_risk(target)
+                        if reason:
+                            return reason
                     break
                 offset += 1
             index += 1
             continue
 
-        if looks_like_curl_url(token):
-            urls.append(token)
+        urls.append(None if is_dynamic_value(token) else token)
         index += 1
 
     return inspect_group()
@@ -4915,7 +5176,8 @@ def check(
             }
             explicit_output = False
             remote_name_output = head == "wget"
-            for index, token in enumerate(toks[1:], start=1):
+            output_tokens = [] if head == "curl" else toks[1:]
+            for index, token in enumerate(output_tokens, start=1):
                 lowered = token.lower()
                 attached_target = None
                 clustered_marker, clustered_target = downloader_output_binding(
