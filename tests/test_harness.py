@@ -497,7 +497,7 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertEqual(harness.repo_codex_floor_groups(current), [])
 
-    def test_repo_floor_counts_handlers_and_rejects_cross_handler_pin(self) -> None:
+    def test_repo_floor_requires_single_handler_group_and_pin(self) -> None:
         pin = "c" * 64
         valid = {
             "type": "command",
@@ -516,12 +516,12 @@ class HarnessTests(unittest.TestCase):
         }
         group = {"matcher": "^Bash$", "hooks": [valid, pin_only]}
         current = json.dumps({"hooks": {"PreToolUse": [group]}})
-        self.assertEqual(harness.repo_codex_floor_groups(current), [group])
+        self.assertEqual(harness.repo_codex_floor_groups(current), [])
         self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
 
         duplicate = {"matcher": "^Bash$", "hooks": [valid, dict(valid)]}
         duplicate_text = json.dumps({"hooks": {"PreToolUse": [duplicate]}})
-        self.assertEqual(len(harness.repo_codex_floor_groups(duplicate_text)), 2)
+        self.assertEqual(harness.repo_codex_floor_groups(duplicate_text), [])
         self.assertEqual(len(harness.repo_codex_floor_candidates(duplicate_text)), 2)
 
         broken = {
@@ -531,8 +531,36 @@ class HarnessTests(unittest.TestCase):
         }
         mixed = {"matcher": "^Bash$", "hooks": [valid, broken]}
         mixed_text = json.dumps({"hooks": {"PreToolUse": [mixed]}})
-        self.assertEqual(len(harness.repo_codex_floor_groups(mixed_text)), 1)
+        self.assertEqual(harness.repo_codex_floor_groups(mixed_text), [])
         self.assertEqual(len(harness.repo_codex_floor_candidates(mixed_text)), 2)
+
+    def test_repo_floor_rejects_non_floor_sibling_handler(self) -> None:
+        pin = "7" * 64
+        floor = {
+            "type": "command",
+            "command": (
+                f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex"
+            ),
+            "commandWindows": (
+                f"$expected='{pin}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex"
+            ),
+        }
+        single = {"matcher": "^Bash$", "hooks": [floor]}
+        single_text = json.dumps({"hooks": {"PreToolUse": [single]}})
+        self.assertEqual(harness.repo_codex_floor_groups(single_text, pin), [single])
+
+        sibling = {
+            "type": "command",
+            "command": "python .codex/audit_command.py",
+            "commandWindows": "py -3 .codex/audit_command.py",
+        }
+        combined = {"matcher": "^Bash$", "hooks": [floor, sibling]}
+        combined_text = json.dumps({"hooks": {"PreToolUse": [combined]}})
+        self.assertEqual(len(harness.repo_codex_floor_candidates(combined_text)), 1)
+        self.assertEqual(harness.repo_codex_floor_groups(combined_text, pin), [])
 
     def test_repo_floor_rejects_data_only_markers(self) -> None:
         pin = "d" * 64

@@ -795,19 +795,20 @@ def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> li
     for group in groups:
         if not matcher_targets_bash(group.get("matcher", "")):
             continue
-        for handler in group.get("hooks", []):
-            if handler.get("type") != "command":
-                continue
-            command = handler.get("command", "")
-            windows_command = decode_windows_hook_command(
-                handler.get("commandWindows", "")
-            )
-            if platform_project_floor_command(
-                command, expected_pin
-            ) and platform_project_floor_command(
-                windows_command, expected_pin, windows=True
-            ):
-                result.append(group)
+        handlers = group.get("hooks", [])
+        if len(handlers) != 1:
+            continue
+        handler = handlers[0]
+        if handler.get("type") != "command":
+            continue
+        command = handler.get("command", "")
+        windows_command = decode_windows_hook_command(handler.get("commandWindows", ""))
+        if platform_project_floor_command(
+            command, expected_pin
+        ) and platform_project_floor_command(
+            windows_command, expected_pin, windows=True
+        ):
+            result.append(group)
     return result
 
 
