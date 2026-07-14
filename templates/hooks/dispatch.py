@@ -1082,8 +1082,8 @@ def command_head(toks):
             i += 1
             continue
         base = _EXE_SUFFIX.sub("", executable.replace("\\", "/").split("/")[-1]).lower()
-        if base == "git-push":
-            return "git", ["git", "push", *toks[i + 1 :]]
+        if base.startswith("git-") and len(base) > len("git-"):
+            return "git", ["git", base[len("git-") :], *toks[i + 1 :]]
         if base.startswith("microsoft.powershell."):
             for qualified_head in (
                 "remove-item",
@@ -1128,6 +1128,96 @@ def git_subcommand(toks):
     """Return the normalized git subcommand after global options."""
     index = git_subcommand_index(toks)
     return toks[index].lower() if index is not None else ""
+
+
+def git_option_values(
+    args: list[str], long_option: str, short_options: set[str] | None = None
+) -> list[str | None]:
+    """Return values for a Git option, including attached/abbreviated spellings."""
+    short_options = short_options or set()
+    values: list[str | None] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        lowered = token.lower()
+        if token == "--":
+            break
+        option_name, separator, attached = lowered.partition("=")
+        if option_name == long_option or git_option_abbreviates(
+            option_name, long_option
+        ):
+            if separator:
+                values.append(attached)
+                index += 1
+            else:
+                values.append(args[index + 1] if index + 1 < len(args) else None)
+                index += 2
+            continue
+        matched_short = next(
+            (short for short in short_options if lowered.startswith(short)), None
+        )
+        if matched_short is None:
+            index += 1
+            continue
+        if lowered == matched_short:
+            values.append(args[index + 1] if index + 1 < len(args) else None)
+            index += 2
+        else:
+            values.append(token[len(matched_short) :].lstrip("=") or None)
+            index += 1
+    return values
+
+
+def git_option_is_present(
+    args: list[str], long_option: str, short_options: set[str] | None = None
+) -> bool:
+    return bool(git_option_values(args, long_option, short_options))
+
+
+_BUILTIN_GIT_MERGE_STRATEGIES = {
+    "octopus",
+    "ort",
+    "ours",
+    "recursive",
+    "resolve",
+    "subtree",
+}
+
+
+def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
+    """Return a reason when Git argv can select an arbitrary child process."""
+    if subcommand in {"clone", "fetch", "ls-remote", "pull"} and (
+        git_option_is_present(
+            args,
+            "--upload-pack",
+            {"-u"} if subcommand == "clone" else None,
+        )
+    ):
+        return "A custom git upload-pack program can execute outside floor inspection."
+    if subcommand == "archive" and git_option_is_present(args, "--exec"):
+        return "A custom git archive program can execute outside floor inspection."
+    if subcommand == "rebase" and git_option_is_present(args, "--exec", {"-x"}):
+        return "A git rebase exec command is opaque to floor inspection."
+    if subcommand == "bisect" and args and args[0].lower() == "run":
+        return "A git bisect run command is opaque to floor inspection."
+    if subcommand == "submodule" and args:
+        action = args[0].lower()
+        if action == "foreach":
+            return "A git submodule foreach command is opaque to floor inspection."
+        if action == "set-url":
+            return "Git submodule destination mutation is floor-blocked."
+    if subcommand in {"merge", "rebase"}:
+        strategies = git_option_values(args, "--strategy", {"-s"})
+        if any(
+            strategy is None or strategy.lower() not in _BUILTIN_GIT_MERGE_STRATEGIES
+            for strategy in strategies
+        ):
+            return "A custom Git merge strategy can execute outside floor inspection."
+    if subcommand in {"diff", "log", "show", "whatchanged"} and any(
+        token.lower() == "--ext-diff" for token in args
+    ):
+        return "Git external-diff execution is floor-blocked."
+    return None
 
 
 def git_inline_alias(toks: list[str], subcommand: str) -> str | None:
@@ -3075,6 +3165,16 @@ def check(
             )
             inline_configs = git_inline_configs(git_toks)
             config_env_keys = git_config_env_keys(git_toks)
+            if subcommand_index is not None and any(
+                token.lower().split("=", 1)[0] == "--exec-path"
+                or git_option_abbreviates(token.lower().split("=", 1)[0], "--exec-path")
+                for token in git_toks[1:subcommand_index]
+                if "=" in token
+            ):
+                return (
+                    "deny",
+                    "A custom Git executable path can launch uninspected programs.",
+                )
             if any(protected_git_config_key(key) for key in inline_configs):
                 return (
                     "deny",
@@ -3111,6 +3211,9 @@ def check(
                 )
             if sub == "remote" and dangerous_git_remote_mutation(args):
                 return "deny", "Git remote destination mutation is floor-blocked."
+            launcher_reason = dangerous_git_process_launcher(sub, args)
+            if launcher_reason:
+                return "deny", launcher_reason
 
             alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
