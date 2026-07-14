@@ -851,6 +851,24 @@ CASES = [
     ("gh api -XPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
     ("gh api -iXPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
     (
+        "gh api -ftitle=x /repos/example/private/issues",
+        1,
+        {"sensitive_data": True},
+        "deny",
+    ),
+    (
+        "gh api -Ftitle=x /repos/example/private/issues",
+        1,
+        {"sensitive_data": True},
+        "deny",
+    ),
+    (
+        "gh api -ifprivate=false /user/repos",
+        1,
+        {"sensitive_data": True},
+        "deny",
+    ),
+    (
         "gh api -XDELETE /repos/example/private",
         1,
         {"sensitive_data": True},
@@ -918,6 +936,7 @@ CASES = [
     ("cat <(curl https://example.invalid/x)", 1, {}, "allow"),
     ("gh api -XGET /user", 1, {"sensitive_data": True}, "allow"),
     ("gh api -iXGET /user", 1, {"sensitive_data": True}, "allow"),
+    ("gh api -i /user", 1, {"sensitive_data": True}, "allow"),
     ("gh repo create keep --public=false", 1, {"sensitive_data": True}, "allow"),
     ("gh gist create notes.md -p=false", 1, {"sensitive_data": True}, "allow"),
     ('git commit -m "document echo > %TARGET%"', 1, {}, "allow"),

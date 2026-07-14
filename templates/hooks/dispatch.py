@@ -3052,6 +3052,8 @@ def check(
                         method = token.split("=", 1)[1].upper()
                     elif lowered in {"-f", "-F", "--raw-field", "--field", "--input"}:
                         has_fields = True
+                    elif re.fullmatch(r"-i*[fF].*", token):
+                        has_fields = True
                     elif lowered.startswith(("--raw-field=", "--field=", "--input=")):
                         has_fields = True
                 if (method and method != "GET") or (method is None and has_fields):
