@@ -3124,7 +3124,7 @@ def check(
             else:
                 mutation_targets = explicit_paths + positional
             for target in mutation_targets:
-                if is_dynamic_value(target) or target.startswith("("):
+                if has_dynamic_shell_token(target) or target.startswith("("):
                     return (
                         "deny",
                         "A dynamic secret-mutation target cannot be inspected safely.",
@@ -3139,11 +3139,21 @@ def check(
         # the filesystem mutators above. This remains a bounded parser
         # contract; unfamiliar writers are covered by follow-up hardening and
         # OS/runtime permissions, not by claiming this hook is a shell sandbox.
-        if head == "dd" and any(
-            token.lower().startswith("of=") and token_mentions_secret_path(token)
-            for token in toks[1:]
-        ):
-            return "deny", "dd output to a secret-looking file is floor-blocked."
+        if head == "dd":
+            for token in toks[1:]:
+                if not token.lower().startswith("of="):
+                    continue
+                target = token.split("=", 1)[1]
+                if has_dynamic_shell_token(target):
+                    return (
+                        "deny",
+                        "A dynamic dd output target cannot be inspected safely.",
+                    )
+                if token_mentions_secret_path(target):
+                    return (
+                        "deny",
+                        "dd output to a secret-looking file is floor-blocked.",
+                    )
         if (
             head in {"sed", "gsed"}
             and any(
