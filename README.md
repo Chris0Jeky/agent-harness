@@ -11,7 +11,7 @@ explicit where their hook/config contracts differ.
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
 | `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up Codex global sync |
-| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.3 bypass matrix. Codex global drift/install is explicit through `harness.py sync-global`; project adapter wiring remains repo-owned |
+| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.4 bypass matrix. Codex global drift/install is explicit through `harness.py sync-global`; project adapter wiring remains repo-owned |
 | `templates/codex/` | Codex lifecycle-hook wiring; install paths are rendered at sync time |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
@@ -32,7 +32,7 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 up changed global guidance/hooks and managed skill folders before replacing them. After a hook
 change, review and trust its hash with `/hooks` in a new Codex session.
 
-Status (2026-07-14): the blueprint, shared v1.4.3 deny floor, Codex adapter, portable CLI, and
+Status (2026-07-14): the blueprint, shared v1.4.4 deny floor, Codex adapter, portable CLI, and
 versioned global Codex layer are implemented. The bounded matrix hardens supported Bash,
 PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
 pipelines, git push safety, and secret-file mutations. It remains a defense-in-depth tripwire,
