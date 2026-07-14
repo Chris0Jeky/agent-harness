@@ -120,12 +120,12 @@ here.` / `Live successor: <path or "none">`.
 
 ## §5 Dispatcher hook wiring
 
-The shared dispatcher owns exactly one event: the global `PreToolUse(Bash)` deny floor. Claude
-and Codex each wire that event once through their native hook contract; Codex uses
-`templates/codex/hooks.json`, rendered with an absolute dispatcher path by `harness.py
-sync-global`. Repo-tier lifecycle hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`,
-and `Stop`) are separate, repo-owned executables when a tier actually implements them. Never
-route those events through the floor dispatcher or stack a second floor matcher.
+The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
+globally. Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
+the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. Repo-tier lifecycle
+hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`, and `Stop`) are separate, repo-owned
+executables when a tier actually implements them. Never route those events through the floor
+dispatcher or stack global and project floor matchers.
 
 ```json
 {
@@ -161,12 +161,13 @@ route those events through the floor dispatcher or stack a second floor matcher.
   unhandled PRE rule-evaluation error returns deny-with-message ("dispatcher error — floor
   unavailable, fix hooks before proceeding"). Unparseable stdin cannot identify a tool or
   command and therefore exits without a decision; installation checks and live canaries must
-  detect that wiring failure. Non-PRE events exit immediately because this dispatcher does not
-  own lifecycle nudges.
+  detect that wiring failure. Unsupported, missing, or duplicate event/runtime wiring fails
+  closed after Bash identification. No non-PRE hook may invoke this dispatcher.
 - The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`). `harness.py seed`
-  writes only the runtime-neutral tier declaration. `harness.py sync-global` reports Codex global
-  drift in dry-run mode and installs reviewed copies only with explicit `--apply`; project hook
-  adapters remain repo-owned.
+  writes only the runtime-neutral tier declaration. `harness.py sync-global` previews or installs
+  global guidance, managed skills, and the shared Claude-home dispatcher/smoke bytes only with
+  explicit `--apply`; it prunes the obsolete managed global Codex matcher. Project hook adapters
+  remain repo-owned and trust-gated.
 - Self-tested: `python templates/hooks/smoke_test.py` runs the §6 allow/deny matrix plus payload,
   authority, runtime-adapter, and remote-resolution regressions for the PRE event. A
   floor/dispatcher change is T4-class work in any repo.
@@ -233,9 +234,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   overwrite. Repo instructions remain judgment work and are not generated blindly.
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
   stale user-profile paths.
-- `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs the
-  Codex global guidance, hook, and skills with timestamped backups.
-- `harness.py doctor` — checks the live Codex installation and core executables.
+- `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
+  Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
+  removes only the obsolete managed global Codex matcher.
+- `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
+  executables, and optionally one repo-local Codex floor definition.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 

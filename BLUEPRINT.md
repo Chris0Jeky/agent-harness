@@ -162,8 +162,10 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 ## 2. The Floor (the only thing that never varies)
 
-One global, argv-aware PreToolUse deny hook (dispatcher spec in SPECS §5), identical policy at
-every tier and adapted explicitly to each runtime's hook contract, protecting only the IRREVERSIBLE:
+One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
+at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE. Claude wires the
+shared dispatcher globally; each active Codex repo owns one pinned project adapter. Never stack a
+global and project Codex floor:
 
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
@@ -296,6 +298,9 @@ from gone.
   live path → wrapper warnings → HUMAN_TODO alias. Covers ALL roots; doubles as the
   promotion-audit worksheet. New-repo intake: `harness seed --tier 1` at creation; human
   assigns tier.
+- **Codex mirror and floor topology**: global Codex guidance mirrors the universal laws, but the
+  Codex floor hook is project-local. Each active repo pins the shared `~/.claude/hooks/dispatch.py`
+  from one `.codex/hooks.json`; global Codex floor wiring is removed to prevent double dispatch.
 - **Machine layer, `MACHINE.md` + bootstrap** (distinct from repo tiers and global laws):
   front-load `C:\Program Files\Git\cmd` in PATH permanently (Cygwin git), commit vitest
   `maxWorkers` config where it OOMs, scheduled `gh auth` refresh, `DISABLE_AUTOUPDATER`

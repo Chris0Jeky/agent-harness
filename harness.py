@@ -342,7 +342,7 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copytree(target, backup)
             shutil.rmtree(target)
         shutil.copytree(source, target)
-    print(f"installed Codex global layer; backups: {backup_root}")
+    print(f"installed shared guidance and dispatcher layer; backups: {backup_root}")
     print("Codex deny-floor trust remains project-local; review each repo's .codex/hooks.json in /hooks.")
     return 0
 
@@ -451,7 +451,7 @@ def parser() -> argparse.ArgumentParser:
     seed.add_argument("--dry-run", action="store_true")
     seed.set_defaults(func=seed_repo)
 
-    sync = sub.add_parser("sync-global", help="diff or install the versioned Codex global layer")
+    sync = sub.add_parser("sync-global", help="diff or install shared global guidance and floor bytes")
     sync.add_argument("--config-root", required=True, help="path to the claude-config checkout")
     sync.add_argument("--codex-home")
     sync.add_argument("--claude-home")
@@ -459,7 +459,7 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--apply", action="store_true")
     sync.set_defaults(func=sync_global)
 
-    check = sub.add_parser("doctor", help="check the live Codex global installation")
+    check = sub.add_parser("doctor", help="check live global guidance and floor topology")
     check.add_argument("--codex-home")
     check.add_argument("--claude-home")
     check.add_argument("--skills-home")
