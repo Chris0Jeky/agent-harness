@@ -2580,6 +2580,26 @@ def main():
             "deny",
         ),
         (
+            "inherited editor applies to abbreviated add edit",
+            run_case(
+                "git add --edi report.txt",
+                3,
+                {},
+                env_extra={"GIT_EDITOR": "helper"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited editor ignores non-edit add options",
+            run_case(
+                "git add --intent-to-add report.txt",
+                3,
+                {},
+                env_extra={"GIT_EDITOR": "helper"},
+            ),
+            "allow",
+        ),
+        (
             "inherited editor applies to branch description edits",
             run_case(
                 "git branch --edit-description",

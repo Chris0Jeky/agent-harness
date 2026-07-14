@@ -2495,9 +2495,15 @@ def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
     """Return whether Git can launch the editor selected by GIT_EDITOR."""
     lowered = [token.lower().split("=", 1)[0] for token in args]
     if subcommand == "add":
-        return any(token in {"-e", "--edit"} for token in lowered)
+        return any(
+            token == "-e" or git_option_abbreviates(token, "--edit")
+            for token in lowered
+        )
     if subcommand == "config":
-        return any(token in {"-e", "--edit"} for token in lowered)
+        return any(
+            token == "-e" or git_option_abbreviates(token, "--edit")
+            for token in lowered
+        )
     if subcommand == "branch":
         return any(
             git_option_abbreviates(token, "--edit-description") for token in lowered
