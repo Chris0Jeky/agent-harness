@@ -203,7 +203,7 @@ _QUOTED_HEREDOC = re.compile(
 def inert_heredoc_receiver(prefix: str, suffix: str) -> bool:
     """Return whether a quoted heredoc is data for a known non-executing sink."""
     suffix_flow = quote_aware_segments_with_operators("true " + suffix)
-    if suffix_flow and suffix_flow[0][1] == "|":
+    if suffix_flow and suffix_flow[0][1] in {"|", "|&"}:
         return False
     parsed = quote_aware_segments(prefix)
     if not parsed:
@@ -1937,6 +1937,26 @@ def has_download_pipe_to_shell(command: str) -> bool:
     return False
 
 
+_POSIX_SHELL_HEADS = {"ash", "bash", "dash", "ksh", "sh", "zsh"}
+
+
+def has_opaque_posix_shell_input(toks: list[str]) -> bool:
+    """Reject shell program text supplied through opaque stdin/file expansion."""
+    for index, token in enumerate(toks[1:], start=1):
+        if token == "<<<":
+            return True
+        if token != "<" or index + 1 >= len(toks):
+            continue
+        candidate_index = index + 1
+        if toks[candidate_index] == "<":
+            candidate_index += 1
+        if candidate_index < len(toks) and toks[candidate_index].lstrip().startswith(
+            "("
+        ):
+            return True
+    return False
+
+
 def has_pipe_to_delete(command: str) -> bool:
     """Recognize direct or shell-wrapped pipeline deletion sinks."""
     delete_heads = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"}
@@ -2222,12 +2242,25 @@ def check(
             cwd_changed = True
 
         nested_script = None
+        nested_command_requested = False
         if head == "cmd":
             for index, token in enumerate(toks[1:], start=1):
-                if token.lower() in ("/c", "/k") and index + 1 < len(toks):
-                    nested_script = " ".join(toks[index + 1 :])
+                lowered = token.lower()
+                if lowered in {"/c", "/k"}:
+                    nested_command_requested = True
+                    if index + 1 < len(toks):
+                        nested_script = " ".join(toks[index + 1 :])
                     break
-        elif head in {"bash", "sh", "zsh", "pwsh", "powershell"}:
+                if lowered.startswith(("/c", "/k")):
+                    nested_command_requested = True
+                    nested_script = " ".join([token[2:], *toks[index + 1 :]])
+                    break
+        elif head in _POSIX_SHELL_HEADS | {"pwsh", "powershell"}:
+            if head in _POSIX_SHELL_HEADS and has_opaque_posix_shell_input(toks):
+                return (
+                    "deny",
+                    "Shell program text from an opaque input source cannot be inspected safely.",
+                )
             for index, token in enumerate(toks[1:], start=1):
                 option_text = token.lstrip("-/")
                 option, separator, bound_value = option_text.partition(":")
@@ -2254,7 +2287,7 @@ def check(
                 is_command = (
                     token == "-c"
                     or (
-                        head in {"bash", "sh", "zsh"}
+                        head in _POSIX_SHELL_HEADS
                         and bool(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token))
                     )
                     or (
@@ -2269,16 +2302,16 @@ def check(
                     and (option == "cwa" or "commandwithargs".startswith(option))
                 )
                 if is_command or is_command_with_args:
+                    nested_command_requested = True
                     if separator:
                         nested_script = bound_value
                     elif index + 1 < len(toks):
-                        if head in {"bash", "sh", "zsh"}:
+                        if head in _POSIX_SHELL_HEADS:
                             script_index = index + 1
-                            if toks[script_index] == "--" and script_index + 1 < len(
-                                toks
-                            ):
+                            if toks[script_index] == "--":
                                 script_index += 1
-                            nested_script = toks[script_index]
+                            if script_index < len(toks):
+                                nested_script = toks[script_index]
                         elif is_command_with_args:
                             nested_script = toks[index + 1]
                         else:
@@ -2288,6 +2321,11 @@ def check(
                 default_script = " ".join(toks[1:]).strip()
                 if re.match(r"^(?:[&.]\s*)?\{", default_script):
                     nested_script = default_script
+        if nested_command_requested and not nested_script:
+            return (
+                "deny",
+                "A nested-shell command without inline program text cannot be inspected safely.",
+            )
         if nested_script:
             if is_dynamic_value(nested_script):
                 return (

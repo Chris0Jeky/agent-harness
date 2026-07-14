@@ -742,6 +742,7 @@ CASES = [
     # --- quoted heredoc bodies are inert only for positively-known data sinks ---
     ("bash <<'EOF'\nrm -rf /critical/outside\nEOF", 1, {}, "deny"),
     ("cat <<'EOF' | sh\nrm -rf /critical/outside\nEOF", 1, {}, "deny"),
+    ("cat <<'EOF' |& bash\nrm -rf /critical/outside\nEOF", 1, {}, "deny"),
     (
         "cat <<'EOF' > script.sh\nrm -rf /critical/outside\nEOF\nsh script.sh",
         1,
@@ -830,6 +831,14 @@ CASES = [
         "deny",
     ),
     ("bash -c -- 'git push --force origin main'", 1, {}, "deny"),
+    ('cmd /c"git push --force origin main"', 1, {}, "deny"),
+    ('cmd /k"rm -rf /critical/outside"', 1, {}, "deny"),
+    ("printf 'git push --force origin main' | xargs -n1 sh -c", 1, {}, "deny"),
+    ("bash <<<'git push --force origin main'", 1, {}, "deny"),
+    ("sh <<<'rm -rf /critical/outside'", 1, {}, "deny"),
+    ("bash < <(printf 'git push --force origin main')", 1, {}, "deny"),
+    ("bash <(printf 'rm -rf /critical/outside')", 1, {}, "deny"),
+    ("dash -c 'git push --force origin main'", 1, {}, "deny"),
     (
         "git config --remove-section --file --get-a remote.origin",
         1,
@@ -865,6 +874,8 @@ CASES = [
     ("dotnet test backend/Taskdeck.sln", 1, {}, "allow"),
     ("bash -c 'git status'", 1, {}, "allow"),
     ("bash -c -- 'git status'", 1, {}, "allow"),
+    ('cmd /c"git status"', 1, {}, "allow"),
+    ("dash -c 'git status'", 1, {}, "allow"),
     ("gh api -XGET /user", 1, {"sensitive_data": True}, "allow"),
     ("export PATH", 1, {}, "allow"),
     ("cd src && rm -rf build", 1, {}, "allow"),
