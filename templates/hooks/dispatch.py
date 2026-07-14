@@ -47,9 +47,20 @@ _CWD_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
+_LITERAL_OPEN_BRACE = "__HARNESS_LITERAL_OPEN_BRACE_2D91__"
+_LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
+
+
+def restore_quoted_literal_markers(value: str) -> str:
+    """Restore punctuation protected from shell expansion analysis."""
+    return (
+        value.replace(_LITERAL_COMMA, ",")
+        .replace(_LITERAL_OPEN_BRACE, "{")
+        .replace(_LITERAL_CLOSE_BRACE, "}")
+    )
 
 
 def has_shell_expansion_marker(value: str) -> bool:
@@ -345,7 +356,9 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
         return matches[0], attached if separator else None
 
     def argument_parts(value: str) -> list[str] | None:
-        parts = [part.replace(_LITERAL_COMMA, ",") for part in value.split(",") if part]
+        parts = [
+            restore_quoted_literal_markers(part) for part in value.split(",") if part
+        ]
         if any(re.search(r"\s", part) for part in parts):
             return None
         return parts
@@ -543,7 +556,11 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 value = token[1:-1]
         if len(value) >= 2 and (value[0], value[-1]) in {("(", ")"), ("{", "}")}:
             value = f"{_QUOTED_GROUP_LITERAL_PREFIX}{value}"
-        value = value.replace(",", _LITERAL_COMMA)
+        value = (
+            value.replace(",", _LITERAL_COMMA)
+            .replace("{", _LITERAL_OPEN_BRACE)
+            .replace("}", _LITERAL_CLOSE_BRACE)
+        )
         quoted[placeholder] = value
         return placeholder
 
@@ -733,28 +750,70 @@ _SECRET_GLOB_PROBES = {
 
 
 def is_secret_path(target: str) -> bool:
-    normalized = target.replace(_LITERAL_COMMA, ",").replace("\\", "/")
+    normalized = restore_quoted_literal_markers(target).replace("\\", "/")
     if _SECRET_PATH.search(normalized):
         return True
     basename = normalized.rsplit("/", 1)[-1].lower()
     return any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES)
 
 
+_BRACE_SEQUENCE = re.compile(
+    r"\{(?P<start>[A-Za-z]|-?\d+)\.\.(?P<end>[A-Za-z]|-?\d+)"
+    r"(?:\.\.(?P<step>-?\d+))?\}"
+)
+
+
+def brace_sequence_alternatives(match: "re.Match[str]") -> list[str] | None:
+    """Expand one bounded Bash alpha/numeric sequence; None means fail closed."""
+    start_text = match.group("start")
+    end_text = match.group("end")
+    if start_text.isalpha() != end_text.isalpha():
+        return []
+    supplied_step = int(match.group("step") or "1")
+    if supplied_step == 0:
+        return None
+    start = ord(start_text) if start_text.isalpha() else int(start_text)
+    end = ord(end_text) if end_text.isalpha() else int(end_text)
+    step = abs(supplied_step) if start <= end else -abs(supplied_step)
+    stop = end + (1 if step > 0 else -1)
+    values = list(range(start, stop, step))
+    if len(values) > 64:
+        return None
+    if start_text.isalpha():
+        return [chr(value) for value in values]
+    width = max(len(start_text.lstrip("-")), len(end_text.lstrip("-")))
+    zero_padded = start_text.lstrip("-").startswith("0") or end_text.lstrip(
+        "-"
+    ).startswith("0")
+    if not zero_padded:
+        return [str(value) for value in values]
+    return [f"{value:0{width}d}" for value in values]
+
+
 def brace_expansion_mentions_secret_path(token: str) -> bool:
-    """Expand bounded, unquoted Bash comma braces before checking destinations."""
+    """Expand bounded, unquoted Bash comma/sequence braces on destinations."""
     variants = [token]
     expanded = False
     while True:
         next_variants = []
         changed = False
         for variant in variants:
-            match = re.search(r"\{([^{}]*,[^{}]*)\}", variant)
-            if match is None:
+            comma_match = re.search(r"\{([^{}]*,[^{}]*)\}", variant)
+            sequence_match = _BRACE_SEQUENCE.search(variant)
+            matches = [match for match in (comma_match, sequence_match) if match]
+            if not matches:
                 next_variants.append(variant)
                 continue
+            match = min(matches, key=lambda candidate: candidate.start())
             changed = True
             expanded = True
-            alternatives = match.group(1).split(",")
+            alternatives = (
+                match.group(1).split(",")
+                if match is comma_match
+                else brace_sequence_alternatives(match)
+            )
+            if alternatives is None:
+                return True
             if len(next_variants) + len(alternatives) > 64:
                 return True
             next_variants.extend(
@@ -777,7 +836,7 @@ def token_mentions_secret_path(token: str) -> bool:
     if brace_expansion_mentions_secret_path(token):
         return True
     literal_comma = _LITERAL_COMMA in token
-    normalized = token.replace(_LITERAL_COMMA, ",")
+    normalized = restore_quoted_literal_markers(token)
     candidates = [normalized]
     wrapper_pattern = r"[=:()]" if literal_comma else r"[=,:()]"
     candidates.extend(
@@ -1892,7 +1951,7 @@ def resolve_delete_operand(
     cwd_changed: bool,
 ) -> str | None:
     """Resolve a recursive-delete operand for canonical containment checks."""
-    raw = target.replace(_LITERAL_COMMA, ",")
+    raw = restore_quoted_literal_markers(target)
     if cwd_changed and _CWD_REFERENCE.search(raw):
         return None
     if re.search(r"\$\(|@\(|`|[<>]\(|\{[^{}]*(?:,|\.\.)[^{}]*\}", raw):
@@ -2947,7 +3006,7 @@ def check(
             ):
                 evaluated_args.pop(0)
             if evaluated_args:
-                evaluated = " ".join(evaluated_args)
+                evaluated = restore_quoted_literal_markers(" ".join(evaluated_args))
                 if is_dynamic_value(evaluated):
                     return (
                         "deny",
@@ -3001,7 +3060,7 @@ def check(
             if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
                 return "deny", "A dynamic cmd call target cannot be inspected safely."
             nested_decision = check(
-                " ".join(toks[1:]),
+                restore_quoted_literal_markers(" ".join(toks[1:])),
                 tier_cfg,
                 project_dir,
                 current_cwd,
@@ -3129,6 +3188,7 @@ def check(
                 "A nested-shell command without inline program text cannot be inspected safely.",
             )
         if nested_script:
+            nested_script = restore_quoted_literal_markers(nested_script)
             if is_dynamic_value(nested_script):
                 return (
                     "deny",
