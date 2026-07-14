@@ -1338,6 +1338,8 @@ _GIT_PROCESS_ENVIRONMENT = {
     "GIT_SEQUENCE_EDITOR",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
+    "GIT_TEMPLATE_DIR",
+    "GIT_WEB_BROWSER",
     "SSH_ASKPASS",
 }
 _GIT_PROCESS_COMMAND_ENVIRONMENT = _GIT_PROCESS_ENVIRONMENT | {
@@ -1363,31 +1365,36 @@ def has_git_process_environment(raw: list[str]) -> bool:
     return False
 
 
-def is_git_process_environment_mutation(raw: list[str]) -> bool:
-    """Detect persistent shell mutations of process-launching Git variables."""
+def git_process_environment_mutations(raw: list[str]) -> set[str]:
+    """Return process-launching Git variables mutated by one shell segment."""
     if not raw:
-        return False
+        return set()
+    mutations: set[str] = set()
     first = raw[0].lower()
     if (
         _ASSIGN.match(raw[0])
-        and git_environment_name(raw[0]) in _GIT_PROCESS_ENVIRONMENT
+        and git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
     ):
-        return True
+        mutations.add(git_environment_name(raw[0]))
     if (
-        git_environment_name(raw[0]) in _GIT_PROCESS_ENVIRONMENT
+        git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         and ("=" in raw[0] or (len(raw) > 1 and raw[1] == "="))
         and first.startswith(("$env:", "${env:", "env:", "environment::"))
     ):
-        return True
+        mutations.add(git_environment_name(raw[0]))
     if first in {"export", "set", "setx"}:
-        return any(
-            git_environment_name(token) in _GIT_PROCESS_ENVIRONMENT for token in raw[1:]
+        mutations.update(
+            name
+            for token in raw[1:]
+            if (name := git_environment_name(token)) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         )
     if first in {"set-item", "new-item", "si", "ni"}:
-        return any(
-            git_environment_name(token) in _GIT_PROCESS_ENVIRONMENT for token in raw[1:]
+        mutations.update(
+            name
+            for token in raw[1:]
+            if (name := git_environment_name(token)) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         )
-    return False
+    return mutations
 
 
 def is_git_config_environment_mutation(raw: list[str]) -> bool:
@@ -2836,6 +2843,7 @@ def check(
     cwd_uncertain = _cwd_uncertain
     cwd_changed = _cwd_changed
     cwd_conditionally_changed = False
+    active_git_process_environment: set[str] = set()
     previous_pass = None
     for (
         raw,
@@ -2850,6 +2858,7 @@ def check(
             cwd_uncertain = _cwd_uncertain
             cwd_changed = _cwd_changed
             cwd_conditionally_changed = False
+            active_git_process_environment = set()
         previous_pass = current_pass
         if not raw:
             continue
@@ -2861,11 +2870,13 @@ def check(
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
-        if is_git_process_environment_mutation(raw):
+        process_environment_mutations = git_process_environment_mutations(raw)
+        if process_environment_mutations & _GIT_PROCESS_ENVIRONMENT:
             return (
                 "deny",
                 "Mutating a process-launching Git environment variable is floor-blocked.",
             )
+        active_git_process_environment.update(process_environment_mutations)
         assignment_rhs = powershell_assignment_rhs(raw)
         if assignment_rhs is not None:
             if current_pass == 0 and segment_index < len(assignment_segments):
@@ -3196,6 +3207,11 @@ def check(
                 return (
                     "deny",
                     "Git process-launch environment overrides are opaque to floor inspection.",
+                )
+            if active_git_process_environment:
+                return (
+                    "deny",
+                    "A prior editor or pager environment mutation can alter Git execution.",
                 )
             if sub == "push" and inline_configs:
                 return (
