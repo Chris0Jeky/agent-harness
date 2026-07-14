@@ -1096,7 +1096,11 @@ def git_config_env_keys(toks: list[str]) -> list[str] | None:
 
 def has_git_config_environment(raw: list[str]) -> bool:
     """Detect per-command or inherited Git config environment injection."""
-    if any(name.upper().startswith("GIT_CONFIG") for name in os.environ):
+    def is_injection_name(name: str) -> bool:
+        upper = name.upper()
+        return upper.startswith("GIT_CONFIG") and upper != "GIT_CONFIG_NOSYSTEM"
+
+    if any(is_injection_name(name) for name in os.environ):
         return True
     for token in raw:
         base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
@@ -1105,7 +1109,7 @@ def has_git_config_environment(raw: list[str]) -> bool:
         assignment = _ASSIGN.match(token)
         if assignment:
             name = token.split("=", 1)[0]
-            if name.upper().startswith("GIT_CONFIG"):
+            if is_injection_name(name):
                 return True
     return False
 
@@ -1317,6 +1321,64 @@ def protected_git_config_section(section: str) -> bool:
     return lowered.startswith(("remote.", "url.", "includeif.")) or lowered == "include"
 
 
+def executable_git_config_section(section: str) -> bool:
+    """Return whether renaming into a section can create an executable config key."""
+    root = section.lower().split(".", 1)[0]
+    return root in {
+        "browser",
+        "core",
+        "credential",
+        "diff",
+        "difftool",
+        "filter",
+        "gpg",
+        "interactive",
+        "man",
+        "merge",
+        "mergetool",
+        "pager",
+        "protocol",
+        "remote",
+        "sequence",
+        "submodule",
+        "tar",
+    }
+
+
+def executable_git_config_key(token: str) -> bool:
+    """Return whether a config key can launch a later process."""
+    lowered = token.lower()
+    return bool(
+        lowered
+        in {
+            "core.askpass",
+            "core.editor",
+            "core.fsmonitor",
+            "core.gitproxy",
+            "core.hookspath",
+            "core.pager",
+            "core.sshcommand",
+            "credential.helper",
+            "diff.external",
+            "gpg.program",
+            "gpg.ssh.program",
+            "interactive.difffilter",
+            "sequence.editor",
+            "web.browser",
+        }
+        or re.fullmatch(r"credential\..+\.helper", lowered)
+        or re.fullmatch(r"diff\..+\.(?:command|textconv)", lowered)
+        or re.fullmatch(r"filter\..+\.(?:clean|process|smudge)", lowered)
+        or re.fullmatch(r"merge\..+\.driver", lowered)
+        or re.fullmatch(r"(?:diff|merge)tool\..+\.(?:cmd|path)", lowered)
+        or re.fullmatch(r"(?:browser|man|pager)\..+\.(?:cmd|path)", lowered)
+        or re.fullmatch(r"protocol\..+\.allow", lowered)
+        or re.fullmatch(r"remote\..+\.(?:proxy|receivepack|uploadpack|vcs)", lowered)
+        or re.fullmatch(r"submodule\..+\.update", lowered)
+        or re.fullmatch(r"tar\..+\.command", lowered)
+    )
+
+
 def protected_git_config_key(token: str) -> bool:
     """Return whether a config key can affect execution or push destinations."""
     return bool(
@@ -1325,6 +1387,7 @@ def protected_git_config_key(token: str) -> bool:
         or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
         or re.fullmatch(r"include(?:if)?\..+", token)
         or token == "push.recursesubmodules"
+        or executable_git_config_key(token)
     )
 
 
@@ -1360,6 +1423,9 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
             )
         return any(
             protected_git_config_section(section) for section in command_operands[:2]
+        ) or bool(
+            len(command_operands) > 1
+            and executable_git_config_section(command_operands[1])
         )
 
     options, operands = git_config_argv_roles(args)
@@ -1367,6 +1433,10 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
         git_config_option_present(options, action)
         for action in {"--remove-section", "--rename-section"}
     ) and any(protected_git_config_section(section) for section in operands):
+        return True
+    if git_config_option_present(options, "--rename-section") and any(
+        executable_git_config_section(section) for section in operands[1:2]
+    ):
         return True
     protected_index = next(
         (
@@ -2702,6 +2772,23 @@ def check(
             )
             inline_configs = git_inline_configs(git_toks)
             config_env_keys = git_config_env_keys(git_toks)
+            if any(executable_git_config_key(key) for key in inline_configs):
+                return (
+                    "deny",
+                    "Inline Git config can launch a process outside floor inspection.",
+                )
+            if config_env_keys and any(
+                executable_git_config_key(key) for key in config_env_keys
+            ):
+                return (
+                    "deny",
+                    "Git --config-env can inject a process-launching config key.",
+                )
+            if has_git_config_environment(raw):
+                return (
+                    "deny",
+                    "Git config environment injection is opaque to floor inspection.",
+                )
             if sub == "push" and inline_configs:
                 return (
                     "deny",
@@ -2709,15 +2796,10 @@ def check(
                 )
             if sub == "push" and (config_env_keys is None or config_env_keys):
                 return "deny", "Git --config-env is opaque during a push."
-            if sub == "push" and has_git_config_environment(raw):
-                return (
-                    "deny",
-                    "Git config environment injection is opaque during a push.",
-                )
             if sub == "config" and dangerous_git_config_mutation(args):
                 return (
                     "deny",
-                    "Git alias or push-destination config mutation is floor-blocked.",
+                    "Git execution or push-destination config mutation is floor-blocked.",
                 )
             if sub == "remote" and dangerous_git_remote_mutation(args):
                 return "deny", "Git remote destination mutation is floor-blocked."
