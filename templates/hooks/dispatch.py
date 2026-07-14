@@ -2,8 +2,8 @@
 """Harness dispatcher — the shared Claude/Codex deny floor for all tiers.
 
 Canonical copy: agent-harness/templates/hooks/dispatch.py
-Runtime copies are installed through explicit runtime-specific sync commands or
-repo-owned adapters. `harness sync-global` reports drift for the global Codex copy.
+Runtime copies are installed through explicit sync commands or repo-owned adapters.
+`harness sync-global` installs the shared bytes; Codex wiring remains project-local.
 
 Contract (BLUEPRINT §2, SPECS §5-6):
 - Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.4.5 (2026-07-14)"
+FLOOR_VERSION = "1.4.6 (2026-07-14)"
 
 # --- helpers ---------------------------------------------------------------
 
