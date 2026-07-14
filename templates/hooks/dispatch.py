@@ -458,16 +458,206 @@ def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | 
     return None, None
 
 
-def curl_uses_remote_name(token: str) -> bool:
-    """Return whether a curl option enables remote-name output."""
-    if not token.startswith("-") or token.startswith("--"):
-        return token in {"--remote-name", "--remote-name-all"}
-    for character in token[1:]:
-        if character == "O":
-            return True
-        if character not in _DOWNLOADER_CLUSTER_PREFIXES["curl"]:
-            return False
-    return False
+def looks_like_curl_url(token: str) -> bool:
+    """Recognize URL-shaped positional curl arguments without treating all values as URLs."""
+    return bool(
+        "://" in token
+        or re.match(
+            r"(?i)^(?:www\.|localhost(?::\d+)?/|[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?/)",
+            token,
+        )
+    )
+
+
+def curl_secret_output_risk(toks: list[str]) -> str:
+    """Return a deny reason when curl can write an opaque or secret-looking path.
+
+    curl associates -o/-O/--no-remote-name selectors with URLs by selector
+    order, independently of where the selectors appear on the command line.
+    Model that bounded contract so disabling remote-name output for one URL
+    does not accidentally disable it for every later URL.
+    """
+
+    args = toks[1:]
+    default_config_disabled = bool(args and args[0].lower() in {"-q", "--disable"})
+
+    selectors: list[tuple[str, str | None]] = []
+    urls: list[str | None] = []
+    remote_name_all = False
+    remote_name_all_explicit = False
+    remote_header_name = False
+
+    def inspect_group() -> str:
+        for index, url in enumerate(urls):
+            selector, target = (
+                selectors[index]
+                if index < len(selectors)
+                else ("remote" if remote_name_all else "stdout", None)
+            )
+            if selector == "remote":
+                if remote_header_name:
+                    return (
+                        "curl remote-header output has a server-controlled filename "
+                        "that cannot be inspected safely."
+                    )
+                if url is None:
+                    return "A dynamic curl URL has an opaque remote-name destination."
+                if token_mentions_secret_path(url):
+                    return "A remote-name download would create a secret-looking file."
+                continue
+            if selector == "file" and target is not None:
+                if is_dynamic_value(target) or re.match(r"^[<>]?\(", target):
+                    return "A dynamic download destination cannot be inspected safely."
+                if token_mentions_secret_path(target):
+                    return "Downloading into a secret-looking file is floor-blocked."
+                continue
+            if (
+                selector == "stdout"
+                and url is not None
+                and token_mentions_secret_path(url)
+                and index >= len(selectors)
+                and not default_config_disabled
+                and not (remote_name_all_explicit and not remote_name_all)
+            ):
+                return (
+                    "curl's ambient config can make a secret-looking URL write by "
+                    "remote name; use -q/--disable as the first argument."
+                )
+        return ""
+
+    index = 0
+    options_ended = False
+    while index < len(args):
+        token = args[index]
+        lowered = token.lower()
+
+        if options_ended:
+            if looks_like_curl_url(token):
+                urls.append(token)
+            index += 1
+            continue
+        if token == "--":
+            options_ended = True
+            index += 1
+            continue
+        if lowered == "--next":
+            reason = inspect_group()
+            if reason:
+                return reason
+            selectors = []
+            urls = []
+            remote_name_all = False
+            remote_name_all_explicit = False
+            remote_header_name = False
+            index += 1
+            continue
+
+        option, separator, bound_value = lowered.partition("=")
+        if option in {"--config", "--expand-config"}:
+            return "curl config files are opaque to the deny floor."
+        if option in {"--remote-name-all", "--no-remote-name-all"}:
+            remote_name_all = option == "--remote-name-all"
+            remote_name_all_explicit = True
+            index += 1
+            continue
+        if option in {"--remote-name", "--no-remote-name"}:
+            selectors.append(
+                ("remote" if option == "--remote-name" else "stdout", None)
+            )
+            index += 1
+            continue
+        if option in {"--remote-header-name", "--no-remote-header-name"}:
+            remote_header_name = option == "--remote-header-name"
+            index += 1
+            continue
+        if option == "--out-null":
+            selectors.append(("stdout", None))
+            index += 1
+            continue
+        if option in {"--output", "--expand-output"}:
+            if option == "--expand-output":
+                return "An expanded curl output destination cannot be inspected safely."
+            target = (
+                bound_value
+                if separator
+                else (args[index + 1] if index + 1 < len(args) else None)
+            )
+            if not separator and target is not None:
+                index += 1
+            selectors.append(("stdout", None) if target == "-" else ("file", target))
+            index += 1
+            continue
+        if option in {"--output-dir", "--expand-output-dir"}:
+            if option == "--expand-output-dir":
+                return "An expanded curl output directory cannot be inspected safely."
+            target = (
+                bound_value
+                if separator
+                else (args[index + 1] if index + 1 < len(args) else None)
+            )
+            if not separator and target is not None:
+                index += 1
+            if target is not None and (
+                is_dynamic_value(target)
+                or re.match(r"^[<>]?\(", target)
+                or token_mentions_secret_path(target)
+            ):
+                return "A curl output directory cannot be inspected safely."
+            index += 1
+            continue
+        if option in {"--url", "--expand-url"}:
+            target = (
+                bound_value
+                if separator
+                else (args[index + 1] if index + 1 < len(args) else None)
+            )
+            if not separator and target is not None:
+                index += 1
+            if option == "--expand-url" or target is None:
+                urls.append(None)
+            elif target.startswith("@"):
+                return "A curl URL file has opaque remote-name destinations."
+            else:
+                urls.append(target)
+            index += 1
+            continue
+
+        if token.startswith("-") and not token.startswith("--"):
+            body = token[1:]
+            offset = 0
+            while offset < len(body):
+                marker = body[offset]
+                if marker == "K":
+                    return "curl config files are opaque to the deny floor."
+                if marker == "O":
+                    selectors.append(("remote", None))
+                    offset += 1
+                    continue
+                if marker == "J":
+                    remote_header_name = True
+                    offset += 1
+                    continue
+                if marker == "o":
+                    target = body[offset + 1 :] or (
+                        args[index + 1] if index + 1 < len(args) else None
+                    )
+                    if not body[offset + 1 :] and target is not None:
+                        index += 1
+                    selectors.append(
+                        ("stdout", None) if target == "-" else ("file", target)
+                    )
+                    break
+                if marker not in _DOWNLOADER_CLUSTER_PREFIXES["curl"]:
+                    break
+                offset += 1
+            index += 1
+            continue
+
+        if looks_like_curl_url(token):
+            urls.append(token)
+        index += 1
+
+    return inspect_group()
 
 
 _QUOTED_HEREDOC = re.compile(
@@ -4706,6 +4896,10 @@ def check(
             "invoke-webrequest",
             "invoke-restmethod",
         }:
+            if head == "curl":
+                curl_risk = curl_secret_output_risk(toks)
+                if curl_risk:
+                    return "deny", curl_risk
             long_output_flags = {
                 "--output",
                 "--output-document",
@@ -4729,8 +4923,6 @@ def check(
                     token,
                 )
                 clustered_output = clustered_marker is not None
-                if head == "curl" and curl_uses_remote_name(token):
-                    remote_name_output = True
                 matched_long = next(
                     (
                         option
