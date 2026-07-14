@@ -441,21 +441,21 @@ _DOWNLOADER_CLUSTER_PREFIXES = {
 }
 
 
-def downloader_output_binding(head: str, token: str) -> tuple[bool, str | None]:
+def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | None]:
     """Return a clustered downloader output switch and its attached value."""
     if not token.startswith("-") or token.startswith("--"):
-        return False, None
-    markers = {"o"} if head == "curl" else {"o", "O"}
+        return None, None
+    markers = {"o", "c", "D"} if head == "curl" else {"o", "O", "a"}
     prefix_flags = _DOWNLOADER_CLUSTER_PREFIXES.get(head)
     if prefix_flags is None:
-        return False, None
+        return None, None
     body = token[1:]
     for index, character in enumerate(body):
         if character in markers:
-            return True, body[index + 1 :] or None
+            return character, body[index + 1 :] or None
         if character not in prefix_flags:
-            return False, None
-    return False, None
+            return None, None
+    return None, None
 
 
 def curl_uses_remote_name(token: str) -> bool:
@@ -4045,36 +4045,61 @@ def check(
             "invoke-webrequest",
             "invoke-restmethod",
         }:
-            output_flags = {
-                "-o",
+            long_output_flags = {
                 "--output",
                 "--output-document",
-                "-outfile",
-                "outfile",
+                "--output-file",
+                "--append-output",
+                "--cookie-jar",
+                "--dump-header",
+                "--trace",
+                "--trace-ascii",
+                "--stderr",
+                "--libcurl",
+                "--etag-save",
             }
             explicit_output = False
             remote_name_output = head == "wget"
             for index, token in enumerate(toks[1:], start=1):
                 lowered = token.lower()
                 attached_target = None
-                clustered_output, clustered_target = downloader_output_binding(
+                clustered_marker, clustered_target = downloader_output_binding(
                     head,
                     token,
                 )
+                clustered_output = clustered_marker is not None
                 if head == "curl" and curl_uses_remote_name(token):
                     remote_name_output = True
-                if lowered.startswith(("--output=", "--output-document=")):
+                matched_long = next(
+                    (
+                        option
+                        for option in long_output_flags
+                        if lowered == option or lowered.startswith(option + "=")
+                    ),
+                    None,
+                )
+                powershell_parameter = lowered.lstrip("-").split(":", 1)[0]
+                powershell_outfile = (
+                    head in {"iwr", "irm", "invoke-webrequest", "invoke-restmethod"}
+                    and len(powershell_parameter) >= 4
+                    and "outfile".startswith(powershell_parameter)
+                )
+                if matched_long and "=" in token:
                     attached_target = token.split("=", 1)[1]
-                elif lowered.startswith("-outfile:"):
+                elif powershell_outfile and ":" in token:
                     attached_target = token.split(":", 1)[1]
                 elif clustered_output and clustered_target is not None:
                     attached_target = clustered_target
                 if attached_target is not None or clustered_output:
-                    explicit_output = True
+                    explicit_output = explicit_output or bool(
+                        head != "wget"
+                        or clustered_marker == "O"
+                        or matched_long == "--output-document"
+                    )
                 if attached_target is not None:
-                    if has_dynamic_shell_token(
-                        attached_target
-                    ) or attached_target.startswith("("):
+                    if has_dynamic_shell_token(attached_target) or re.match(
+                        r"^[<>]?\(", attached_target
+                    ):
                         return (
                             "deny",
                             "A dynamic download destination cannot be inspected safely.",
@@ -4085,12 +4110,13 @@ def check(
                             "Downloading into a secret-looking file is floor-blocked.",
                         )
                 if (
-                    (lowered in output_flags or clustered_output)
+                    (matched_long is not None or powershell_outfile or clustered_output)
+                    and attached_target is None
                     and clustered_target is None
                     and index + 1 < len(toks)
                 ):
                     target = toks[index + 1]
-                    if is_dynamic_value(target) or target.startswith("("):
+                    if is_dynamic_value(target) or re.match(r"^[<>]?\(", target):
                         return (
                             "deny",
                             "A dynamic download destination cannot be inspected safely.",
