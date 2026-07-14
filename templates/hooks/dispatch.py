@@ -1435,6 +1435,36 @@ _POWERSHELL_PROVIDER_WRITERS = {
     "set-item",
     "si",
 }
+_POWERSHELL_PROVIDER_VALUE_PARAMETERS = {
+    "credential",
+    "encoding",
+    "erroraction",
+    "errorvariable",
+    "exclude",
+    "filter",
+    "include",
+    "informationaction",
+    "informationvariable",
+    "itemtype",
+    "name",
+    "outbuffer",
+    "outvariable",
+    "pipelinevariable",
+    "progressaction",
+    "stream",
+    "warningaction",
+    "warningvariable",
+}
+_POWERSHELL_PROVIDER_SWITCH_PARAMETERS = {
+    "asbytestream",
+    "confirm",
+    "debug",
+    "force",
+    "nonewline",
+    "passthru",
+    "verbose",
+    "whatif",
+}
 
 
 def powershell_provider_assignment(raw: list[str]) -> tuple[str, str] | None:
@@ -1444,6 +1474,7 @@ def powershell_provider_assignment(raw: list[str]) -> tuple[str, str] | None:
     path_value = None
     assigned_value = None
     positional = []
+    opaque_parameter = False
     index = 1
     while index < len(raw):
         token = raw[index]
@@ -1469,6 +1500,23 @@ def powershell_provider_assignment(raw: list[str]) -> tuple[str, str] | None:
                     assigned_value = value
                 index += 1 if separator else 2
                 continue
+            value_parameters = [
+                name
+                for name in _POWERSHELL_PROVIDER_VALUE_PARAMETERS
+                if name.startswith(parameter)
+            ]
+            switch_parameters = [
+                name
+                for name in _POWERSHELL_PROVIDER_SWITCH_PARAMETERS
+                if name.startswith(parameter)
+            ]
+            if len(value_parameters) == 1 and not switch_parameters:
+                index += 1 if separator else 2
+                continue
+            if len(switch_parameters) == 1 and not value_parameters:
+                index += 1
+                continue
+            opaque_parameter = True
             index += 1
             continue
         positional.append(token)
@@ -1477,6 +1525,8 @@ def powershell_provider_assignment(raw: list[str]) -> tuple[str, str] | None:
         path_value = positional.pop(0)
     if assigned_value is None and positional:
         assigned_value = positional[0]
+    if opaque_parameter:
+        path_value = "$HARNESS_OPAQUE_POWERSHELL_PROVIDER_PATH"
     return path_value or "", assigned_value or ""
 
 
@@ -1699,6 +1749,23 @@ _GIT_REPOSITORY_COMMAND_ENVIRONMENT = (
     _GIT_REPOSITORY_ENVIRONMENT | _GIT_REPOSITORY_CONTEXT_ENVIRONMENT
 )
 _UNKNOWN_GIT_REPOSITORY_ENVIRONMENT = "<UNKNOWN_REPOSITORY_ENVIRONMENT>"
+_POSIX_ASSIGNMENT_PERSISTING_BUILTINS = {
+    ".",
+    ":",
+    "break",
+    "continue",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "readonly",
+    "return",
+    "set",
+    "shift",
+    "times",
+    "trap",
+    "unset",
+}
 
 _GIT_EDITOR_SUBCOMMANDS = {
     "am",
@@ -1968,6 +2035,8 @@ def git_repository_environment_mutations(raw: list[str]) -> set[str]:
         return set()
     mutations = set()
     first = raw[0].lower()
+    if command_head(raw)[0] in _POSIX_ASSIGNMENT_PERSISTING_BUILTINS:
+        mutations.update(command_scoped_repository_environment(raw))
 
     if first in {".", "source"} and len(raw) > 1:
         mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)

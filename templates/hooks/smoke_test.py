@@ -2362,6 +2362,9 @@ def main():
             "New-Item -Value repo -LiteralPath Env:GIT_WORK_TREE; "
             "git push origin main"
         ),
+        "PowerShell common-parameter repository environment override": (
+            "Set-Item -ErrorAction Stop Env:GIT_DIR repo/.git; " "git push origin main"
+        ),
         "PowerShell slash-provider repository environment override": (
             "Set-Item -Path Env:/GIT_DIR -Value repo/.git; git push origin main"
         ),
@@ -2427,6 +2430,9 @@ def main():
         ),
         "nested bash repository environment override": (
             "env GIT_DIR=repo/.git bash -lc 'git push origin main'"
+        ),
+        "POSIX special-builtin repository environment override": (
+            "bash --posix -c 'GIT_DIR=repo/.git :; git push origin main'"
         ),
         "nested PowerShell repository environment override": (
             "env GIT_DIR=repo/.git pwsh -Command 'git push origin main'"
@@ -2533,6 +2539,16 @@ def main():
         HERE,
         remote_resolver=scoped_then_push_resolver,
     )
+    ordinary_builtin_then_push_calls = []
+    ordinary_builtin_then_push_decision, _reason = dispatch_module.check(
+        "GIT_DIR=repo/.git true; git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *args: (
+            ordinary_builtin_then_push_calls.append(args) or (False, "private")
+        ),
+    )
     explicit_repository_globals = []
 
     def explicit_repository_resolver(_args, _cwd, git_globals):
@@ -2561,6 +2577,14 @@ def main():
             (
                 "command-scoped repository environment does not leak to later push",
                 (scoped_then_push_decision, len(scoped_then_push_calls)),
+                ("allow", 1),
+            ),
+            (
+                "ordinary builtin assignment does not leak to later push",
+                (
+                    ordinary_builtin_then_push_decision,
+                    len(ordinary_builtin_then_push_calls),
+                ),
                 ("allow", 1),
             ),
             (
