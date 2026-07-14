@@ -1205,8 +1205,51 @@ def protected_git_config_section(section: str) -> bool:
     return lowered.startswith(("remote.", "url.", "includeif.")) or lowered == "include"
 
 
+def protected_git_config_key(token: str) -> bool:
+    """Return whether a config key can affect execution or push destinations."""
+    return bool(
+        re.fullmatch(r"alias\.[^.]+", token)
+        or re.fullmatch(r"remote\..+\.(?:url|pushurl|push|mirror)", token)
+        or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
+        or re.fullmatch(r"include(?:if)?\..+", token)
+        or token == "push.recursesubmodules"
+    )
+
+
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
+    command_action = args[0].lower() if args else ""
+    if command_action in {
+        "edit",
+        "get",
+        "list",
+        "remove-section",
+        "rename-section",
+        "set",
+        "unset",
+    }:
+        _command_options, command_operands = git_config_argv_roles(args[1:])
+        if command_action in {"get", "list"}:
+            return False
+        if command_action == "edit":
+            return True
+        if command_action == "set":
+            return bool(
+                command_operands and protected_git_config_key(command_operands[0])
+            )
+        if command_action == "unset":
+            return bool(
+                command_operands
+                and command_operands[0].startswith(("remote.", "url.", "include"))
+            )
+        if command_action == "remove-section":
+            return bool(
+                command_operands and protected_git_config_section(command_operands[0])
+            )
+        return any(
+            protected_git_config_section(section) for section in command_operands[:2]
+        )
+
     options, operands = git_config_argv_roles(args)
     if any(
         git_config_option_present(options, action)
@@ -1217,11 +1260,7 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
         (
             index
             for index, token in enumerate(operands)
-            if re.fullmatch(r"alias\.[^.]+", token)
-            or re.fullmatch(r"remote\..+\.(?:url|pushurl|push|mirror)", token)
-            or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
-            or re.fullmatch(r"include(?:if)?\..+", token)
-            or token == "push.recursesubmodules"
+            if protected_git_config_key(token)
         ),
         None,
     )
@@ -3058,8 +3097,10 @@ def check(
                             "Downloading into a secret-looking file is floor-blocked.",
                         )
                 if (
-                    lowered in output_flags or clustered_output
-                ) and clustered_target is None and index + 1 < len(toks):
+                    (lowered in output_flags or clustered_output)
+                    and clustered_target is None
+                    and index + 1 < len(toks)
+                ):
                     target = toks[index + 1]
                     if is_dynamic_value(target) or target.startswith("("):
                         return (
@@ -3109,10 +3150,7 @@ def check(
         # ---- sensitive_data overlay ----
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":
-                if any(
-                    boolean_flag_is_true(t, {"--public", "-p"})
-                    for t in toks
-                ):
+                if any(boolean_flag_is_true(t, {"--public", "-p"}) for t in toks):
                     return (
                         "deny",
                         "sensitive_data repo: creating PUBLIC repos/gists is blocked.",
