@@ -2187,10 +2187,14 @@ def powershell_provider_copy_or_rename(
     destination = None
     positional = []
     opaque_parameter = False
-    value_parameters = _POWERSHELL_PROVIDER_VALUE_PARAMETERS | {
-        "fromsession",
-        "tosession",
-    }
+    value_parameters = (
+        _POWERSHELL_PROVIDER_VALUE_PARAMETERS
+        | _POWERSHELL_COMMON_VALUE_PARAMETERS
+        | {
+            "fromsession",
+            "tosession",
+        }
+    )
     switch_parameters = _POWERSHELL_PROVIDER_SWITCH_PARAMETERS | {
         "container",
         "recurse",
@@ -2203,7 +2207,7 @@ def powershell_provider_copy_or_rename(
             parameter = parameter.lower()
             role = None
             if parameter and any(
-                name.startswith(parameter) for name in {"path", "literalpath"}
+                name.startswith(parameter) for name in {"path", "literalpath", "pspath"}
             ):
                 role = "source"
             elif parameter and any(
@@ -2824,7 +2828,10 @@ def git_repository_environment_mutations(raw: list[str]) -> set[str]:
     return mutations
 
 
-def is_git_config_environment_mutation(raw: list[str]) -> bool:
+def is_git_config_environment_mutation(
+    raw: list[str],
+    environment_provider_context: bool = False,
+) -> bool:
     """Detect shell commands that establish Git config injection state."""
     if not raw:
         return False
@@ -2842,6 +2849,11 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
     if provider_copy is not None:
         _operation, source, destination = provider_copy
         source_is_environment = powershell_environment_provider_path(source)
+        if environment_provider_context and (
+            has_dynamic_shell_token(destination)
+            or is_git_config_environment_name(destination)
+        ):
+            return True
         if source_is_environment and (
             has_dynamic_shell_token(source) or has_dynamic_shell_token(destination)
         ):
@@ -3482,19 +3494,7 @@ def location_transition(
         "set-location",
         "sl",
     }
-    target = None
-    for token in toks[1:]:
-        is_bound_path, bound_path = powershell_bound_value(
-            token,
-            {"path", "literalpath"},
-        )
-        if is_bound_path:
-            target = bound_path
-            break
-        if token in {"--", "/d"} or token.startswith("-"):
-            continue
-        target = token
-        break
+    target = powershell_location_target(toks)
     if (
         not target
         or re.fullmatch(r"@[A-Za-z_][A-Za-z0-9_]*", target)
@@ -3516,6 +3516,24 @@ def location_transition(
     if resolved is None:
         return command_cwd, True
     return resolved, False
+
+
+def powershell_location_target(toks: list[str]) -> str | None:
+    """Return a statically named PowerShell location operand when present."""
+    target = None
+    for token in toks[1:]:
+        is_bound_path, bound_path = powershell_bound_value(
+            token,
+            {"path", "literalpath"},
+        )
+        if is_bound_path:
+            target = bound_path
+            break
+        if token in {"--", "/d"} or token.startswith("-"):
+            continue
+        target = token
+        break
+    return target
 
 
 def decode_powershell_command(value: str) -> str:
@@ -4361,6 +4379,7 @@ def check(
     cwd_uncertain = _cwd_uncertain
     cwd_changed = _cwd_changed
     cwd_conditionally_changed = False
+    environment_provider_context = False
     active_git_process_environment: set[str] = set()
     active_git_repository_environment = set(repository_environment_seed)
     previous_pass = None
@@ -4377,6 +4396,7 @@ def check(
             cwd_uncertain = _cwd_uncertain
             cwd_changed = _cwd_changed
             cwd_conditionally_changed = False
+            environment_provider_context = False
             active_git_process_environment = set()
             active_git_repository_environment = set(repository_environment_seed)
         previous_pass = current_pass
@@ -4390,7 +4410,7 @@ def check(
                 "deny",
                 "Git trace settings cannot write to or disclose secret material.",
             )
-        if is_git_config_environment_mutation(raw):
+        if is_git_config_environment_mutation(raw, environment_provider_context):
             return (
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
@@ -4587,6 +4607,16 @@ def check(
         }:
             if not quote_aware:
                 continue
+            # A saved provider is not visible to the floor, so Pop-Location
+            # conservatively preserves any possible Environment context.
+            if head not in {"popd", "pop-location"}:
+                location_target = powershell_location_target(toks)
+                if location_target is None or has_dynamic_shell_token(location_target):
+                    environment_provider_context = True
+                elif powershell_environment_provider_path(location_target):
+                    environment_provider_context = True
+                elif operator_after == "&&":
+                    environment_provider_context = False
             if segment_index == 0 and operator_after == "&&":
                 current_cwd, cwd_uncertain = location_transition(
                     head,
