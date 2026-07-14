@@ -19,6 +19,7 @@ explicit where their hook/config contracts differ.
 ```powershell
 # Inspect first; installation is never implicit.
 py -3 .\harness.py doctor
+py -3 .\harness.py doctor --repo C:\path\to\repo
 py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
 
@@ -32,6 +33,9 @@ up changed global guidance, shared Claude-home hook bytes, and managed skill fol
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
+`doctor --repo` statically requires one project-floor candidate whose POSIX and Windows commands
+are independently valid and carry the current normalized dispatcher hash. It does not execute the
+hook or grant trust, so a new-session `/hooks` review and live safe/deny canary remain mandatory.
 
 Status (2026-07-14): the blueprint, shared v1.4.6 deny floor, project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,

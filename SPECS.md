@@ -127,6 +127,8 @@ hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`, and `Stop`) are sepa
 executables when a tier actually implements them. Never route those events through the floor
 dispatcher or stack global and project floor matchers.
 
+Claude global adapter schematic (Codex project adapters must use the stricter contract below):
+
 ```json
 {
   "hooks": {
@@ -154,15 +156,25 @@ dispatcher or stack global and project floor matchers.
   a location change fail closed; only strict descendants of the native OS temp root are scratch.
   On Windows, ambiguous MSYS/WSL `/c/...` and `/mnt/c/...` spellings fail closed because the same
   text has different PowerShell filesystem semantics.
-- Codex hook commands must pass `--runtime codex`. Codex 0.144.1 does not support the Claude
-  `ask` decision, so the dispatcher conservatively translates `ask` to `deny`; Claude wiring
-  omits the flag and retains interactive `ask` behavior.
+- Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
+  wrapper that binds both values. The POSIX and Windows commands must independently invoke the
+  shared dispatcher or that wrapper, carry the normalized dispatcher hash pin, and use a matcher
+  that positively includes Bash. `doctor --repo` requires exactly one candidate, one structurally
+  valid handler, and one current pin. This is static topology/token validation: it does not execute
+  the hook, prove OS-level integrity, or grant Codex trust. Review the adapter and activate it with
+  `/hooks` in a new Codex session, then run a live safe/deny canary.
+- Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively
+  translates `ask` to `deny`. The historical Claude global adapter still omits `--runtime` and
+  therefore selects the Claude default, retaining interactive `ask` behavior; it still passes
+  `--event pre` explicitly.
 - **Fail-closed contract**: after a Bash payload and authority context are identified, an
   unhandled PRE rule-evaluation error returns deny-with-message ("dispatcher error — floor
   unavailable, fix hooks before proceeding"). Unparseable stdin cannot identify a tool or
   command and therefore exits without a decision; installation checks and live canaries must
-  detect that wiring failure. Unsupported, missing, or duplicate event/runtime wiring fails
-  closed after Bash identification. No non-PRE hook may invoke this dispatcher.
+  detect that wiring failure. Unsupported, missing, or duplicate event wiring fails closed after
+  Bash identification. A supplied empty, unsupported, or duplicate runtime also fails closed;
+  runtime omission selects Claude only for the historical global adapter. Codex wiring must name
+  `--runtime codex` explicitly. No non-PRE hook may invoke this dispatcher.
 - The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`). `harness.py seed`
   writes only the runtime-neutral tier declaration. `harness.py sync-global` previews or installs
   global guidance, managed skills, and the shared Claude-home dispatcher/smoke bytes only with
