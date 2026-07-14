@@ -3951,6 +3951,22 @@ def check(
                             "Cannot safely decode PowerShell -EncodedCommand.",
                         )
                     break
+                is_file = (
+                    head in {"pwsh", "powershell"}
+                    and bool(option)
+                    and "file".startswith(option)
+                )
+                if is_file:
+                    file_value = (
+                        bound_value
+                        if separator
+                        else (toks[index + 1] if index + 1 < len(toks) else "")
+                    )
+                    if file_value == "-":
+                        return (
+                            "deny",
+                            "PowerShell -File - reads opaque program text from stdin.",
+                        )
                 is_command = (
                     token == "-c"
                     or (
@@ -3971,6 +3987,18 @@ def check(
                 )
                 if is_command or is_command_with_args:
                     nested_command_requested = True
+                    if head in {"pwsh", "powershell"} and (
+                        (separator and bound_value == "-")
+                        or (
+                            not separator
+                            and index + 1 < len(toks)
+                            and toks[index + 1] == "-"
+                        )
+                    ):
+                        return (
+                            "deny",
+                            "PowerShell -Command - reads opaque program text from stdin.",
+                        )
                     if separator:
                         nested_script = bound_value
                     elif index + 1 < len(toks):
