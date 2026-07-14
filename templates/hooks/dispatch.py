@@ -1373,6 +1373,9 @@ def git_environment_name(token: str) -> str:
     for prefix in ("$env:", "${env:", "env:", "environment::"):
         if lowered.startswith(prefix):
             candidate = candidate[len(prefix) :]
+            candidate = candidate.lstrip("\\/")
+            if re.match(r"(?i)^\.(?:[\\/])?GIT_", candidate):
+                candidate = re.sub(r"^\.(?:[\\/])?", "", candidate, count=1)
             break
     return candidate.rstrip("}").upper()
 
@@ -1418,6 +1421,131 @@ def dangerous_git_trace_setting(name: str, value: str) -> bool:
     if normalized_name == "GIT_TRACE_REDACT":
         return normalized_value.lower() in {"0", "false", "no", "off"}
     return False
+
+
+_POWERSHELL_PROVIDER_WRITERS = {
+    "ac",
+    "add-content",
+    "clear-content",
+    "clc",
+    "new-item",
+    "ni",
+    "sc",
+    "set-content",
+    "set-item",
+    "si",
+}
+
+
+def powershell_provider_assignment(raw: list[str]) -> tuple[str, str] | None:
+    """Return the path/value written by a PowerShell provider cmdlet."""
+    if not raw or raw[0].lower() not in _POWERSHELL_PROVIDER_WRITERS:
+        return None
+    path_value = None
+    assigned_value = None
+    positional = []
+    index = 1
+    while index < len(raw):
+        token = raw[index]
+        if token.startswith("-"):
+            parameter, separator, bound = token.lstrip("-").partition(":")
+            parameter = parameter.lower()
+            role = None
+            if parameter and any(
+                name.startswith(parameter) for name in {"path", "literalpath"}
+            ):
+                role = "path"
+            elif parameter and "value".startswith(parameter):
+                role = "value"
+            if role:
+                value = (
+                    bound
+                    if separator
+                    else (raw[index + 1] if index + 1 < len(raw) else "")
+                )
+                if role == "path":
+                    path_value = value
+                else:
+                    assigned_value = value
+                index += 1 if separator else 2
+                continue
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    if path_value is None and positional:
+        path_value = positional.pop(0)
+    if assigned_value is None and positional:
+        assigned_value = positional[0]
+    return path_value or "", assigned_value or ""
+
+
+def powershell_provider_copy_or_rename(
+    raw: list[str],
+) -> tuple[str, str, str] | None:
+    """Return operation/source/destination for PowerShell copy or rename."""
+    if not raw:
+        return None
+    first = raw[0].lower()
+    if first in {"copy-item", "copy", "cp", "cpi"}:
+        operation = "copy"
+        destination_parameters = {"destination"}
+    elif first in {"rename-item", "ren", "rni"}:
+        operation = "rename"
+        destination_parameters = {"newname"}
+    else:
+        return None
+    source = None
+    destination = None
+    positional = []
+    index = 1
+    while index < len(raw):
+        token = raw[index]
+        if token.startswith("-"):
+            parameter, separator, bound = token.lstrip("-").partition(":")
+            parameter = parameter.lower()
+            role = None
+            if parameter and any(
+                name.startswith(parameter) for name in {"path", "literalpath"}
+            ):
+                role = "source"
+            elif parameter and any(
+                name.startswith(parameter) for name in destination_parameters
+            ):
+                role = "destination"
+            if role:
+                value = (
+                    bound
+                    if separator
+                    else (raw[index + 1] if index + 1 < len(raw) else "")
+                )
+                if role == "source":
+                    source = value
+                else:
+                    destination = value
+                index += 1 if separator else 2
+                continue
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    if source is None and positional:
+        source = positional.pop(0)
+    if destination is None and positional:
+        destination = positional[0]
+    return operation, source or "", destination or ""
+
+
+def dotnet_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
+    """Return every .NET environment setter name/value pair in a segment."""
+    return [
+        (match.group(1), match.group(2))
+        for match in re.finditer(
+            r"(?i)(?:\[(?:system\.)?environment\])::setenvironmentvariable\("
+            r"\s*([^,]+)\s*,\s*([^,)]+)",
+            restore_quoted_literal_markers(" ".join(raw)),
+        )
+    ]
 
 
 def git_trace_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
@@ -1482,57 +1610,18 @@ def git_trace_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
             mutations.append((name, value))
         return mutations
 
-    if first in {"set-item", "new-item", "si", "ni"}:
-        path_value = None
-        assigned_value = None
-        positional = []
-        index = 1
-        while index < len(raw):
-            token = raw[index]
-            if token.startswith("-"):
-                parameter, separator, bound = token.lstrip("-").partition(":")
-                parameter = parameter.lower()
-                role = None
-                if parameter and any(
-                    name.startswith(parameter) for name in {"path", "literalpath"}
-                ):
-                    role = "path"
-                elif parameter and "value".startswith(parameter):
-                    role = "value"
-                if role:
-                    value = (
-                        bound
-                        if separator
-                        else (raw[index + 1] if index + 1 < len(raw) else "")
-                    )
-                    if role == "path":
-                        path_value = value
-                    else:
-                        assigned_value = value
-                    index += 1 if separator else 2
-                    continue
-                index += 1
-                continue
-            positional.append(token)
-            index += 1
-        if path_value is None and positional:
-            path_value = positional.pop(0)
-        if assigned_value is None and positional:
-            assigned_value = positional[0]
-        name = git_environment_name(path_value or "")
+    provider_assignment = powershell_provider_assignment(raw)
+    if provider_assignment is not None:
+        path_value, assigned_value = provider_assignment
+        name = git_environment_name(path_value)
         if name in _GIT_TRACE_ENVIRONMENT:
-            mutations.append((name, assigned_value or ""))
+            mutations.append((name, assigned_value))
         return mutations
 
-    environment_call = re.search(
-        r"(?i)(?:\[(?:system\.)?environment\])::setenvironmentvariable\("
-        r"\s*([^,]+)\s*,\s*([^,)]+)",
-        restore_quoted_literal_markers(" ".join(raw)),
-    )
-    if environment_call:
-        name = git_environment_name(environment_call.group(1))
+    for name_token, value in dotnet_environment_mutations(raw):
+        name = git_environment_name(name_token)
         if name in _GIT_TRACE_ENVIRONMENT:
-            mutations.append((name, environment_call.group(2)))
+            mutations.append((name, value))
     return mutations
 
 
@@ -1597,6 +1686,19 @@ _GIT_PROCESS_COMMAND_ENVIRONMENT = _GIT_PROCESS_ENVIRONMENT | {
     "PAGER",
     "VISUAL",
 }
+_GIT_REPOSITORY_ENVIRONMENT = {"GIT_COMMON_DIR", "GIT_DIR", "GIT_WORK_TREE"}
+_GIT_REPOSITORY_CONTEXT_ENVIRONMENT = {
+    "GIT_CONFIG_NOSYSTEM",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERPROFILE",
+    "XDG_CONFIG_HOME",
+}
+_GIT_REPOSITORY_COMMAND_ENVIRONMENT = (
+    _GIT_REPOSITORY_ENVIRONMENT | _GIT_REPOSITORY_CONTEXT_ENVIRONMENT
+)
+_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT = "<UNKNOWN_REPOSITORY_ENVIRONMENT>"
 
 _GIT_EDITOR_SUBCOMMANDS = {
     "am",
@@ -1805,12 +1907,173 @@ def git_process_environment_mutations(raw: list[str]) -> set[str]:
             for token in raw[1:]
             if (name := git_environment_name(token)) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         )
-    if first in {"set-item", "new-item", "si", "ni"}:
+    provider_assignment = powershell_provider_assignment(raw)
+    if provider_assignment is not None:
+        name = git_environment_name(provider_assignment[0])
+        if name in _GIT_PROCESS_COMMAND_ENVIRONMENT:
+            mutations.add(name)
+    mutations.update(
+        name
+        for name_token, _value in dotnet_environment_mutations(raw)
+        if (name := git_environment_name(name_token))
+        in _GIT_PROCESS_COMMAND_ENVIRONMENT
+    )
+    return mutations
+
+
+def git_repository_environment_name(token: str) -> str:
+    """Normalize shell and PowerShell-provider repository selector names."""
+    return git_environment_name(token).lstrip("\\/")
+
+
+def dynamic_environment_name_operand(token: str) -> bool:
+    """Return whether a mutation's variable-name operand is shell-derived."""
+    candidate = restore_quoted_literal_markers(token).split("=", 1)[0]
+    return has_dynamic_shell_token(candidate)
+
+
+def command_scoped_repository_environment(raw: list[str]) -> set[str]:
+    """Return repository selectors scoped to this command and its children."""
+    selections = set()
+    index = 0
+    while index < len(raw):
+        token = raw[index]
+        if _ASSIGN.match(token):
+            name = git_repository_environment_name(token)
+            if name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+                selections.add(name)
+            index += 1
+            continue
+        executable = token.lstrip("({").rstrip(")}")
+        base = _EXE_SUFFIX.sub("", executable.replace("\\", "/").split("/")[-1]).lower()
+        if base not in _WRAPPERS:
+            break
+        next_index = wrapper_command_index(base, raw, index)
+        if next_index is None:
+            break
+        for prefix_token in raw[index + 1 : next_index]:
+            if _ASSIGN.match(prefix_token):
+                name = git_repository_environment_name(prefix_token)
+                if name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+                    selections.add(name)
+            elif "=" in prefix_token and dynamic_environment_name_operand(prefix_token):
+                selections.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+        index = next_index
+    return selections
+
+
+def git_repository_environment_mutations(raw: list[str]) -> set[str]:
+    """Return persistent repository selectors established by one shell segment."""
+    if not raw:
+        return set()
+    mutations = set()
+    first = raw[0].lower()
+
+    if first in {".", "source"} and len(raw) > 1:
+        mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+    script_token = raw[1] if first == "call" and len(raw) > 1 else raw[0]
+    script_path = restore_quoted_literal_markers(script_token).strip("'\"").lower()
+    if script_path.endswith((".bat", ".cmd", ".ps1")):
+        mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+
+    if command_head(raw)[0] == "":
+        mutations.update(
+            name
+            for token in raw
+            if _ASSIGN.match(token)
+            and (name := git_repository_environment_name(token))
+            in _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+        )
+
+    if first in {"declare", "readonly", "typeset"} and any(
+        token == "--export" or (token.startswith("-") and "x" in token.lstrip("-"))
+        for token in raw[1:]
+    ):
         mutations.update(
             name
             for token in raw[1:]
-            if (name := git_environment_name(token)) in _GIT_PROCESS_COMMAND_ENVIRONMENT
+            if (name := git_repository_environment_name(token))
+            in _GIT_REPOSITORY_COMMAND_ENVIRONMENT
         )
+        if any(
+            dynamic_environment_name_operand(token)
+            for token in raw[1:]
+            if not token.startswith("-")
+        ):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+
+    if first == "setenv":
+        mutations.update(
+            name
+            for token in raw[1:]
+            if (name := git_repository_environment_name(token))
+            in _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+        )
+        name_operand = next(
+            (token for token in raw[1:] if not token.startswith("-")), ""
+        )
+        if dynamic_environment_name_operand(name_operand):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+
+    if first.startswith(("$env:", "${env:")) and (
+        "=" in raw[0] or (len(raw) > 1 and raw[1] == "=")
+    ):
+        if dynamic_environment_name_operand(raw[0]):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+        name = git_repository_environment_name(raw[0])
+        if name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+            mutations.add(name)
+
+    if first in {"export", "set", "setx"}:
+        mutations.update(
+            name
+            for token in raw[1:]
+            if (name := git_repository_environment_name(token))
+            in _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+        )
+        name_operands = (
+            [token for token in raw[1:] if not token.startswith("-")]
+            if first == "export"
+            else [next((token for token in raw[1:] if not token.startswith("-")), "")]
+        )
+        if any(dynamic_environment_name_operand(token) for token in name_operands):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+
+    provider_assignment = powershell_provider_assignment(raw)
+    if provider_assignment is not None:
+        path_value, _value = provider_assignment
+        if has_dynamic_shell_token(path_value):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+        name = git_repository_environment_name(path_value)
+        if name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+            mutations.add(name)
+
+    provider_copy = powershell_provider_copy_or_rename(raw)
+    if provider_copy is not None:
+        operation, source, destination = provider_copy
+        destination_name = git_repository_environment_name(destination)
+        source_is_environment = source.lower().strip("'\"").startswith("env:")
+        if operation == "copy":
+            if has_dynamic_shell_token(destination):
+                mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+            if destination_name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+                mutations.add(destination_name)
+        elif (
+            source_is_environment
+            and destination_name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+        ):
+            mutations.add(destination_name)
+        elif has_dynamic_shell_token(source) or (
+            source_is_environment and has_dynamic_shell_token(destination)
+        ):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+
+    for name_token, _value in dotnet_environment_mutations(raw):
+        if has_dynamic_shell_token(name_token):
+            mutations.add(_UNKNOWN_GIT_REPOSITORY_ENVIRONMENT)
+        name = git_repository_environment_name(name_token)
+        if name in _GIT_REPOSITORY_COMMAND_ENVIRONMENT:
+            mutations.add(name)
     return mutations
 
 
@@ -1825,8 +2088,14 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
         return True
     if first in {"export", "set", "setx"}:
         return any(is_git_config_environment_name(token) for token in raw[1:])
-    if first in {"set-item", "new-item", "si", "ni"}:
-        return any(is_git_config_environment_name(token) for token in raw[1:])
+    provider_assignment = powershell_provider_assignment(raw)
+    if provider_assignment is not None:
+        return is_git_config_environment_name(provider_assignment[0])
+    if any(
+        is_git_config_environment_name(name)
+        for name, _value in dotnet_environment_mutations(raw)
+    ):
+        return True
     return False
 
 
@@ -3231,12 +3500,14 @@ def check(
     remote_resolver=public_remote_status,
     _remote_cache: dict | None = None,
     _remote_deadline: float | None = None,
+    _git_repository_environment: frozenset[str] | None = None,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _remote_cache is None:
         _remote_cache = {}
     if _remote_deadline is None:
         _remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    repository_environment_seed = set(_git_repository_environment or ())
     if _depth > 4:
         return "deny", "Nested shell depth exceeds the deny-floor inspection limit."
     tier = tier_cfg.get("tier", 1)
@@ -3263,6 +3534,7 @@ def check(
             remote_resolver,
             _remote_cache,
             _remote_deadline,
+            frozenset(repository_environment_seed),
         )
     call_normalized = normalize_literal_call_operators(command)
     if re.search(
@@ -3333,6 +3605,7 @@ def check(
     cwd_changed = _cwd_changed
     cwd_conditionally_changed = False
     active_git_process_environment: set[str] = set()
+    active_git_repository_environment = set(repository_environment_seed)
     previous_pass = None
     for (
         raw,
@@ -3348,6 +3621,7 @@ def check(
             cwd_changed = _cwd_changed
             cwd_conditionally_changed = False
             active_git_process_environment = set()
+            active_git_repository_environment = set(repository_environment_seed)
         previous_pass = current_pass
         if not raw:
             continue
@@ -3371,6 +3645,13 @@ def check(
                 "Mutating a process-launching Git environment variable is floor-blocked.",
             )
         active_git_process_environment.update(process_environment_mutations)
+        active_git_repository_environment.update(
+            git_repository_environment_mutations(raw)
+        )
+        effective_git_repository_environment = (
+            active_git_repository_environment
+            | command_scoped_repository_environment(raw)
+        )
         assignment_rhs = powershell_assignment_rhs(raw)
         if assignment_rhs is not None:
             if current_pass == 0 and segment_index < len(assignment_segments):
@@ -3394,6 +3675,7 @@ def check(
                         remote_resolver,
                         _remote_cache,
                         _remote_deadline,
+                        frozenset(effective_git_repository_environment),
                     )
                     if assignment_decision[0] != "allow":
                         return assignment_decision
@@ -3465,6 +3747,7 @@ def check(
                     remote_resolver,
                     _remote_cache,
                     _remote_deadline,
+                    frozenset(effective_git_repository_environment),
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -3489,6 +3772,7 @@ def check(
                 remote_resolver,
                 _remote_cache,
                 _remote_deadline,
+                frozenset(effective_git_repository_environment),
             )
             if child_decision[0] != "allow":
                 return child_decision
@@ -3512,6 +3796,7 @@ def check(
                 remote_resolver,
                 _remote_cache,
                 _remote_deadline,
+                frozenset(effective_git_repository_environment),
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -3661,6 +3946,7 @@ def check(
                 remote_resolver,
                 _remote_cache,
                 _remote_deadline,
+                frozenset(effective_git_repository_environment),
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -3787,6 +4073,7 @@ def check(
                     remote_resolver,
                     _remote_cache,
                     _remote_deadline,
+                    frozenset(effective_git_repository_environment),
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -4008,6 +4295,16 @@ def check(
                         "Force-with-lease is allowed only for an explicit non-shared feature branch.",
                     )
                 if sensitive:
+                    repository_environment = effective_git_repository_environment | {
+                        name.upper()
+                        for name in os.environ
+                        if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
+                    }
+                    if repository_environment:
+                        return (
+                            "deny",
+                            "sensitive_data repo: repository environment overrides make push destination inspection unreliable.",
+                        )
                     if cwd_uncertain:
                         return (
                             "deny",

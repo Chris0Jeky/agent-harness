@@ -15,7 +15,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
 GIT_HELPER_ENVIRONMENT = {
     "GIT_ASKPASS",
+    "GIT_COMMON_DIR",
     "GIT_EDITOR",
+    "GIT_DIR",
     "GIT_EXEC_PATH",
     "GIT_EXTERNAL_DIFF",
     "GIT_PAGER",
@@ -25,6 +27,7 @@ GIT_HELPER_ENVIRONMENT = {
     "GIT_SSH_COMMAND",
     "GIT_TEMPLATE_DIR",
     "GIT_WEB_BROWSER",
+    "GIT_WORK_TREE",
     "SSH_ASKPASS",
 }
 
@@ -2279,6 +2282,276 @@ def main():
             remote_resolver=resolver,
         )
         sensitive_remote_cases.append((label, got, expected))
+
+    repository_override_commands = {
+        "direct repository environment overrides": (
+            "GIT_DIR=repo/.git GIT_WORK_TREE=repo git push origin main"
+        ),
+        "direct common repository environment override": (
+            "GIT_COMMON_DIR=repo/.git git push origin main"
+        ),
+        "direct home config-context override": (
+            "HOME=C:/other-home git push origin main"
+        ),
+        "direct XDG config-context override": (
+            "XDG_CONFIG_HOME=C:/other-config git push origin main"
+        ),
+        "direct system-config context override": (
+            "GIT_CONFIG_NOSYSTEM=1 git push origin main"
+        ),
+        "exported Windows home config-context override": (
+            "export USERPROFILE=C:/other-home; git push origin main"
+        ),
+        "cmd Windows home config-context override": (
+            "set HOMEDRIVE=Z: && set HOMEPATH=\\other && git push origin main"
+        ),
+        "env-wrapped repository environment overrides": (
+            "env GIT_DIR=repo/.git GIT_WORK_TREE=repo git push origin main"
+        ),
+        "exported repository environment overrides": (
+            "export GIT_DIR=repo/.git GIT_WORK_TREE=repo; git push origin main"
+        ),
+        "declared repository environment override": (
+            "declare -x GIT_DIR=repo/.git; git push origin main"
+        ),
+        "typeset repository environment override": (
+            "typeset -gx GIT_WORK_TREE=repo; git push origin main"
+        ),
+        "readonly repository environment override": (
+            "readonly -x GIT_DIR=repo/.git; git push origin main"
+        ),
+        "csh repository environment override": (
+            "setenv GIT_DIR repo/.git; git push origin main"
+        ),
+        "standalone repository environment overrides": (
+            "GIT_DIR=repo/.git; GIT_WORK_TREE=repo; git push origin main"
+        ),
+        "cmd repository environment overrides": (
+            "set GIT_DIR=repo/.git && set GIT_WORK_TREE=repo && git push origin main"
+        ),
+        "persistent setx repository environment override": (
+            "setx GIT_DIR repo/.git /m; git push origin main"
+        ),
+        "PowerShell repository environment overrides": (
+            "$env:GIT_DIR='repo/.git'; $env:GIT_WORK_TREE='repo'; "
+            "git push origin main"
+        ),
+        "PowerShell item repository environment overrides": (
+            "Set-Item -Value repo/.git -Path Env:GIT_DIR; "
+            "New-Item -Value repo -LiteralPath Env:GIT_WORK_TREE; "
+            "git push origin main"
+        ),
+        "PowerShell slash-provider repository environment override": (
+            "Set-Item -Path Env:/GIT_DIR -Value repo/.git; git push origin main"
+        ),
+        "PowerShell backslash-provider repository environment override": (
+            "Set-Item -Path Env:\\GIT_WORK_TREE -Value repo; git push origin main"
+        ),
+        "PowerShell dot-slash provider repository environment override": (
+            "Set-Item Env:./GIT_DIR repo/.git; git push origin main"
+        ),
+        "PowerShell collapsed-dot provider repository environment override": (
+            "Set-Item Env:.GIT_DIR repo/.git; git push origin main"
+        ),
+        "PowerShell content repository environment override": (
+            "Set-Content Env:GIT_DIR repo/.git; git push origin main"
+        ),
+        "PowerShell content alias repository environment override": (
+            "sc Env:GIT_DIR repo/.git; git push origin main"
+        ),
+        "PowerShell add-content repository environment override": (
+            "Add-Content Env:GIT_DIR repo/.git; git push origin main"
+        ),
+        "PowerShell dynamic provider repository environment override": (
+            "$p='Env:GIT_DIR'; Set-Item $p repo/.git; git push origin main"
+        ),
+        "PowerShell dynamic provider-name repository environment override": (
+            "$n='GIT_DIR'; Set-Item \"Env:$n\" repo/.git; git push origin main"
+        ),
+        ".NET repository environment override": (
+            "[Environment]::SetEnvironmentVariable('GIT_DIR','repo/.git'); "
+            "git push origin main"
+        ),
+        ".NET benign-first repository environment override": (
+            "[Environment]::SetEnvironmentVariable('FOO','x'), "
+            "[Environment]::SetEnvironmentVariable('GIT_DIR','repo/.git'); "
+            "git push origin main"
+        ),
+        ".NET dynamic-name repository environment override": (
+            "$n='GIT_DIR'; [Environment]::SetEnvironmentVariable($n,'repo/.git'); "
+            "git push origin main"
+        ),
+        "PowerShell copied repository environment override": (
+            "Set-Item Env:TMP_REPO repo/.git; "
+            "Copy-Item Env:TMP_REPO Env:GIT_DIR; git push origin main"
+        ),
+        "PowerShell renamed repository environment override": (
+            "Set-Item Env:TMP_REPO repo/.git; "
+            "Rename-Item Env:TMP_REPO GIT_DIR; git push origin main"
+        ),
+        "dynamic exported repository environment override": (
+            "n=GIT_DIR; export $n=repo/.git; git push origin main"
+        ),
+        "dynamic declared repository environment override": (
+            "n=GIT_DIR; declare -x $n=repo/.git; git push origin main"
+        ),
+        "dynamic cmd repository environment override": (
+            "set N=GIT_DIR & set %N%=repo/.git & git push origin main"
+        ),
+        "dynamic delayed cmd repository environment override": (
+            "set N=GIT_DIR & set !N!=repo/.git & git push origin main"
+        ),
+        "nested sh repository environment override": (
+            "GIT_DIR=repo/.git GIT_WORK_TREE=repo sh -c 'git push origin main'"
+        ),
+        "nested bash repository environment override": (
+            "env GIT_DIR=repo/.git bash -lc 'git push origin main'"
+        ),
+        "nested PowerShell repository environment override": (
+            "env GIT_DIR=repo/.git pwsh -Command 'git push origin main'"
+        ),
+        "evaluated repository environment override": (
+            "export GIT_DIR=repo/.git; eval 'git push origin main'"
+        ),
+        "PowerShell evaluated repository environment override": (
+            "$env:GIT_DIR='repo/.git'; Invoke-Expression 'git push origin main'"
+        ),
+        "sourced repository environment uncertainty": (
+            "source ./set-git-env.sh; git push origin main"
+        ),
+        "dot-sourced repository environment uncertainty": (
+            ". ./set-git-env.sh; git push origin main"
+        ),
+        "PowerShell script repository environment uncertainty": (
+            "& ./set-git-env.ps1; git push origin main"
+        ),
+    }
+    for label, command in repository_override_commands.items():
+        override_resolver_calls = []
+
+        def override_private_resolver(args, cwd, git_globals):
+            override_resolver_calls.append((list(args), cwd, list(git_globals)))
+            return False, "private"
+
+        decision, reason = dispatch_module.check(
+            command,
+            sensitive_cfg,
+            HERE,
+            HERE,
+            remote_resolver=override_private_resolver,
+        )
+        sensitive_remote_cases.append(
+            (
+                label,
+                (
+                    decision,
+                    len(override_resolver_calls),
+                    "repository environment overrides" in reason,
+                ),
+                ("deny", 0, True),
+            )
+        )
+
+    for inherited_name in ("GIT_DIR", "GIT_COMMON_DIR"):
+        inherited_override_calls = []
+        inherited_original = os.environ.get(inherited_name)
+        os.environ[inherited_name] = "repo/.git"
+        try:
+            inherited_override_decision, inherited_override_reason = (
+                dispatch_module.check(
+                    "git push origin main",
+                    sensitive_cfg,
+                    HERE,
+                    HERE,
+                    remote_resolver=lambda *args: (
+                        inherited_override_calls.append(args) or (False, "private")
+                    ),
+                )
+            )
+        finally:
+            if inherited_original is None:
+                os.environ.pop(inherited_name, None)
+            else:
+                os.environ[inherited_name] = inherited_original
+        sensitive_remote_cases.append(
+            (
+                f"inherited {inherited_name} repository environment override",
+                (
+                    inherited_override_decision,
+                    len(inherited_override_calls),
+                    "repository environment overrides" in inherited_override_reason,
+                ),
+                ("deny", 0, True),
+            )
+        )
+
+    scoped_status_decision, _reason = dispatch_module.check(
+        "GIT_DIR=repo/.git git status",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+    )
+    nested_scoped_status_decision, _reason = dispatch_module.check(
+        "GIT_DIR=repo/.git sh -c 'git status'",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+    )
+    scoped_then_push_calls = []
+
+    def scoped_then_push_resolver(args, cwd, git_globals):
+        scoped_then_push_calls.append((list(args), cwd, list(git_globals)))
+        return False, "private"
+
+    scoped_then_push_decision, _reason = dispatch_module.check(
+        "GIT_DIR=repo/.git git status; git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=scoped_then_push_resolver,
+    )
+    explicit_repository_globals = []
+
+    def explicit_repository_resolver(_args, _cwd, git_globals):
+        explicit_repository_globals.extend(git_globals)
+        return False, "private"
+
+    explicit_repository_decision, _reason = dispatch_module.check(
+        "git --git-dir repo/.git --work-tree repo push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=explicit_repository_resolver,
+    )
+    sensitive_remote_cases.extend(
+        [
+            (
+                "command-scoped repository environment remains safe for status",
+                scoped_status_decision,
+                "allow",
+            ),
+            (
+                "nested command-scoped repository environment remains safe for status",
+                nested_scoped_status_decision,
+                "allow",
+            ),
+            (
+                "command-scoped repository environment does not leak to later push",
+                (scoped_then_push_decision, len(scoped_then_push_calls)),
+                ("allow", 1),
+            ),
+            (
+                "explicit Git repository globals remain resolver-visible",
+                (explicit_repository_decision, explicit_repository_globals),
+                (
+                    "allow",
+                    ["--git-dir", "repo/.git", "--work-tree", "repo"],
+                ),
+            ),
+        ]
+    )
     observed_git_globals = []
     observed_git_cwds = []
 
