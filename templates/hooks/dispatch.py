@@ -2841,7 +2841,7 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
     provider_copy = powershell_provider_copy_or_rename(raw)
     if provider_copy is not None:
         _operation, source, destination = provider_copy
-        source_is_environment = source.lower().strip("'\"").startswith("env:")
+        source_is_environment = powershell_environment_provider_path(source)
         if source_is_environment and (
             has_dynamic_shell_token(source) or has_dynamic_shell_token(destination)
         ):
