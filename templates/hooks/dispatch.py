@@ -4599,6 +4599,73 @@ def check(
                         "deny",
                         "Git archive output to an opaque or secret-looking file is floor-blocked.",
                     )
+            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
+                diff_outputs = git_option_values(args, "--output")
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in diff_outputs
+                ):
+                    return (
+                        "deny",
+                        "Git diff output to an opaque or secret-looking file is floor-blocked.",
+                    )
+            if sub == "bundle":
+                action_index = next(
+                    (
+                        index
+                        for index, token in enumerate(args)
+                        if not token.startswith("-")
+                    ),
+                    None,
+                )
+                if action_index is not None and args[action_index].lower() == "create":
+                    bundle_target = next(
+                        (
+                            token
+                            for token in args[action_index + 1 :]
+                            if token == "-" or not token.startswith("-")
+                        ),
+                        None,
+                    )
+                    if (
+                        bundle_target is None
+                        or has_dynamic_shell_token(bundle_target)
+                        or token_mentions_secret_path(bundle_target)
+                    ):
+                        return (
+                            "deny",
+                            "Git bundle output to an opaque or secret-looking file is floor-blocked.",
+                        )
+            if sub == "worktree" and any(token.lower() == "remove" for token in args):
+                return "deny", "Git worktree removal is floor-blocked."
+            if sub == "rm":
+                lowered_rm_args = [token.lower() for token in args]
+                if not any(token in {"-n", "--dry-run"} for token in lowered_rm_args):
+                    if any(
+                        token == "--pathspec-from-file"
+                        or token.startswith("--pathspec-from-file=")
+                        for token in lowered_rm_args
+                    ):
+                        return (
+                            "deny",
+                            "Git rm pathspec files are opaque to the deny floor.",
+                        )
+                    rm_pathspecs = [
+                        token
+                        for token in args
+                        if token != "--" and not token.startswith("-")
+                    ]
+                    if any(
+                        has_dynamic_shell_token(pathspec)
+                        or token_mentions_secret_path(pathspec)
+                        for pathspec in rm_pathspecs
+                    ):
+                        return (
+                            "deny",
+                            "Git rm of an opaque or secret-looking path is floor-blocked.",
+                        )
 
             alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
