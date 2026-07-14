@@ -144,6 +144,42 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertFalse((codex_home / "hooks" / "dispatch.py").exists())
 
+    def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
+        direct = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "command": (
+                        "python $HOME/.claude/hooks/dispatch.py "
+                        "--event pre --runtime codex"
+                    )
+                }
+            ],
+        }
+        wrapped = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "command": (
+                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                        "/bin/sh .codex/invoke_deny_floor.sh"
+                    )
+                }
+            ],
+        }
+        current = json.dumps({"hooks": {"PreToolUse": [direct, wrapped]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current), [direct, wrapped])
+
+    def test_normalized_text_hash_ignores_line_endings(self) -> None:
+        left = Path(self.temp.name) / "left.txt"
+        right = Path(self.temp.name) / "right.txt"
+        left.write_bytes(b"one\r\ntwo\r\n")
+        right.write_bytes(b"one\ntwo\n")
+        self.assertEqual(
+            harness.normalized_text_sha256(left),
+            harness.normalized_text_sha256(right),
+        )
+
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)

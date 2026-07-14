@@ -241,6 +241,45 @@ def managed_codex_floor_groups(current: str) -> list[Any]:
     return [group for group in existing_groups if is_managed(group)]
 
 
+def repo_codex_floor_groups(current: str) -> list[Any]:
+    """Find direct or hardened-wrapper project adapters for the shared floor."""
+    try:
+        current_data = json.loads(current) if current.strip() else {"hooks": {}}
+    except json.JSONDecodeError as exc:
+        raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
+    hooks = current_data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise HarnessError("existing hooks.json has a non-object hooks field")
+    groups = hooks.get("PreToolUse", [])
+    if not isinstance(groups, list):
+        raise HarnessError("existing hooks.PreToolUse must be an array")
+
+    result = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        matcher = group.get("matcher", "")
+        if not isinstance(matcher, str) or (matcher and "bash" not in matcher.lower()):
+            continue
+        for handler in group.get("hooks", []):
+            if not isinstance(handler, dict):
+                continue
+            command = f"{handler.get('command', '')} {handler.get('commandWindows', '')}"
+            normalized = command.lower().replace("\\", "/")
+            points_to_shared = ".claude/hooks/dispatch.py" in normalized
+            direct = "--runtime codex" in normalized and "--event pre" in normalized
+            wrapped = "invoke_deny_floor" in normalized
+            if points_to_shared and (direct or wrapped):
+                result.append(group)
+                break
+    return result
+
+
+def normalized_text_sha256(path: Path) -> str:
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def remove_managed_codex_floor(current: str) -> str:
     """Remove the obsolete global Codex floor while preserving unrelated hooks."""
     if not current.strip():
@@ -395,21 +434,29 @@ def doctor(args: argparse.Namespace) -> int:
     if args.repo:
         repo_hooks = Path(args.repo).resolve() / ".codex" / "hooks.json"
         try:
-            project_floor_count = len(
-                managed_codex_floor_groups(
-                    repo_hooks.read_text(encoding="utf-8")
-                    if repo_hooks.is_file()
-                    else ""
-                )
+            repo_hook_text = repo_hooks.read_text(encoding="utf-8") if repo_hooks.is_file() else ""
+            project_floor_groups = repo_codex_floor_groups(repo_hook_text)
+            project_floor_count = len(project_floor_groups)
+            expected_pin = normalized_text_sha256(
+                harness_root / "templates" / "hooks" / "dispatch.py"
             )
+            handler_text = json.dumps(project_floor_groups).lower()
+            current_pin = expected_pin in handler_text
             project_detail = (
-                f"{project_floor_count} project floor group(s); trust is checked manually in /hooks"
+                f"{project_floor_count} project floor group(s); "
+                f"{'current' if current_pin else 'missing or stale'} dispatcher pin; "
+                "trust is checked manually in /hooks"
             )
         except HarnessError as exc:
             project_floor_count = -1
+            current_pin = False
             project_detail = str(exc)
         checks.append(
-            ("project Codex floor", project_floor_count == 1, project_detail)
+            (
+                "project Codex floor",
+                project_floor_count == 1 and current_pin,
+                project_detail,
+            )
         )
     for label, ok, detail in checks:
         print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
