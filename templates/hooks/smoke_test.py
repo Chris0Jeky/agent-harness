@@ -1501,6 +1501,26 @@ def main():
             ),
             "deny",
         ),
+        (
+            "duplicate event options fail closed",
+            run_case_with_argv("git status", ["--event", "post", "--event", "pre"]),
+            "deny",
+        ),
+        (
+            "unsupported event fails closed",
+            run_case_with_argv("git status", ["--event", "post"]),
+            "deny",
+        ),
+        (
+            "missing event value fails closed",
+            run_case_with_argv("git status", ["--event"]),
+            "deny",
+        ),
+        (
+            "attached pre event remains active",
+            run_case_with_argv("git push --force", ["--event=pre"]),
+            "deny",
+        ),
     ]
     for label, got, expected in runtime_cases:
         status = "ok" if got == expected else "FAIL"

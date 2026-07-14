@@ -3359,11 +3359,20 @@ def respond(decision: str, reason: str, runtime: str = "claude"):
 def main():
     event = "pre"
     runtime = "claude"
-    if "--event" in sys.argv:
+    event_options = [
+        token
+        for token in sys.argv[1:]
+        if token == "--event" or token.startswith("--event=")
+    ]
+    if len(event_options) > 1:
+        event = "invalid"
+    elif event_options and event_options[0].startswith("--event="):
+        event = event_options[0].split("=", 1)[1].lower() or "invalid"
+    elif event_options:
         try:
-            event = sys.argv[sys.argv.index("--event") + 1]
+            event = sys.argv[sys.argv.index("--event") + 1].lower()
         except IndexError:
-            pass
+            event = "invalid"
     runtime_options = [
         token
         for token in sys.argv[1:]
@@ -3378,9 +3387,6 @@ def main():
             runtime = sys.argv[sys.argv.index("--runtime") + 1].lower()
         except IndexError:
             runtime = "invalid"
-    if event != "pre":
-        sys.exit(0)  # global layer wires only the floor; other events are repo-tier
-
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -3428,6 +3434,8 @@ def main():
             raise ValueError("CLAUDE_PROJECT_DIR must be a directory")
         if runtime not in ("claude", "codex"):
             raise ValueError("unsupported hook runtime")
+        if event != "pre":
+            raise ValueError("unsupported or ambiguous hook event")
         if not payload_cwd and not env_project_dir:
             raise ValueError("hook authority context is missing")
         project_dir, tier_cfg = resolve_context(
