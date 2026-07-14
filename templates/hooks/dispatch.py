@@ -61,6 +61,17 @@ def has_cmd_expansion_marker(value: str) -> bool:
     return bool(re.search(r"%[^%]+%|![^!]+!", value))
 
 
+def boolean_flag_is_true(token: str, names: set[str]) -> bool:
+    """Recognize Go/strconv boolean spellings accepted by GitHub CLI flags."""
+    lowered = token.lower()
+    for name in names:
+        if lowered == name:
+            return True
+        if lowered.startswith(f"{name}="):
+            return lowered.split("=", 1)[1] in {"1", "t", "true"}
+    return False
+
+
 def inert_quoted_value(token: str) -> str | None:
     """Return an inert quote's shell value; None means expansion stays visible."""
     if token.startswith("$'"):
@@ -3075,7 +3086,7 @@ def check(
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":
                 if any(
-                    t.lower() in {"--public", "-p", "--public=true", "-p=true"}
+                    boolean_flag_is_true(t, {"--public", "-p"})
                     for t in toks
                 ):
                     return (

@@ -240,7 +240,10 @@ CASES = [
     # --- sensitive_data overlay ---
     ("gh repo create leak --public", 1, {"sensitive_data": True}, "deny"),
     ("gh repo create leak --public=true", 1, {"sensitive_data": True}, "deny"),
+    ("gh repo create leak --public=1", 1, {"sensitive_data": True}, "deny"),
+    ("gh repo create leak --public=t", 1, {"sensitive_data": True}, "deny"),
     ("gh gist create notes.md -p=true", 1, {"sensitive_data": True}, "deny"),
+    ("gh gist create notes.md -p=1", 1, {"sensitive_data": True}, "deny"),
     ("gh gist create notes.md --public", 1, {"sensitive_data": True}, "deny"),
     ("gh repo create keep --private", 1, {"sensitive_data": True}, "allow"),
     # --- work-loss guards: tier-dependent, NOT floor ---
@@ -954,7 +957,10 @@ CASES = [
     ("gh api -iXGET /user", 1, {"sensitive_data": True}, "allow"),
     ("gh api -i /user", 1, {"sensitive_data": True}, "allow"),
     ("gh repo create keep --public=false", 1, {"sensitive_data": True}, "allow"),
+    ("gh repo create keep --public=0", 1, {"sensitive_data": True}, "allow"),
+    ("gh repo create keep --public=f", 1, {"sensitive_data": True}, "allow"),
     ("gh gist create notes.md -p=false", 1, {"sensitive_data": True}, "allow"),
+    ("gh gist create notes.md -p=0", 1, {"sensitive_data": True}, "allow"),
     ('git commit -m "document echo > %TARGET%"', 1, {}, "allow"),
     ('echo safe > "report%20.txt"', 1, {}, "allow"),
     ("export PATH", 1, {}, "allow"),
