@@ -344,6 +344,12 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
             return None, None
         return matches[0], attached if separator else None
 
+    def argument_parts(value: str) -> list[str] | None:
+        parts = [part.replace(_LITERAL_COMMA, ",") for part in value.split(",") if part]
+        if any(re.search(r"\s", part) for part in parts):
+            return None
+        return parts
+
     executable = None
     child_args: list[str] = []
     index = 1
@@ -390,18 +396,24 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
                     return None, "Start-Process has multiple executable paths."
                 executable = attached
             elif kind == "arguments":
-                child_args.extend(
-                    part.replace(_LITERAL_COMMA, ",")
-                    for part in attached.split(",")
-                    if part
-                )
+                parts = argument_parts(attached)
+                if parts is None:
+                    return (
+                        None,
+                        "Whitespace-bearing Start-Process arguments cannot be reconstructed safely.",
+                    )
+                child_args.extend(parts)
             continue
         if executable is None:
             executable = token
         else:
-            child_args.extend(
-                part.replace(_LITERAL_COMMA, ",") for part in token.split(",") if part
-            )
+            parts = argument_parts(token)
+            if parts is None:
+                return (
+                    None,
+                    "Whitespace-bearing Start-Process arguments cannot be reconstructed safely.",
+                )
+            child_args.extend(parts)
         index += 1
     if not executable:
         return None, "Start-Process has no literal executable path."
