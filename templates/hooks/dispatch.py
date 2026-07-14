@@ -1447,6 +1447,7 @@ _GIT_CONFIG_READ_FLAGS = {
     "--get-colorbool",
 }
 _GIT_CONFIG_REMOVAL_FLAGS = {"--unset", "--unset-all", "--remove-section"}
+_GIT_CONFIG_EDIT_FLAGS = {"-e", "--edit"}
 _GIT_CONFIG_WRITE_ACTIONS = {
     "--add",
     "--replace-all",
@@ -1518,7 +1519,15 @@ def executable_git_config_section(section: str) -> bool:
         "diff",
         "difftool",
         "filter",
+        "gc",
         "gpg",
+        "guitool",
+        "help",
+        "hook",
+        "imap",
+        "include",
+        "includeif",
+        "instaweb",
         "interactive",
         "man",
         "merge",
@@ -1527,8 +1536,11 @@ def executable_git_config_section(section: str) -> bool:
         "protocol",
         "remote",
         "sequence",
+        "sendemail",
         "submodule",
         "tar",
+        "trailer",
+        "uploadpack",
     }
 
 
@@ -1539,6 +1551,7 @@ def executable_git_config_key(token: str) -> bool:
         lowered
         in {
             "core.askpass",
+            "core.alternaterefscommand",
             "core.editor",
             "core.fsmonitor",
             "core.gitproxy",
@@ -1549,20 +1562,42 @@ def executable_git_config_key(token: str) -> bool:
             "diff.external",
             "gpg.program",
             "gpg.ssh.program",
+            "gpg.ssh.defaultkeycommand",
+            "gc.recentobjectshook",
+            "help.browser",
+            "imap.tunnel",
+            "include.path",
+            "instaweb.browser",
+            "instaweb.httpd",
             "interactive.difffilter",
+            "man.viewer",
+            "protocol.allow",
+            "sendemail.smtpserver",
             "sequence.editor",
+            "uploadpack.packobjectshook",
             "web.browser",
         }
         or re.fullmatch(r"credential\..+\.helper", lowered)
         or re.fullmatch(r"diff\..+\.(?:command|textconv)", lowered)
         or re.fullmatch(r"filter\..+\.(?:clean|process|smudge)", lowered)
+        or re.fullmatch(r"gpg\..+\.program", lowered)
+        or re.fullmatch(r"guitool\..+\.cmd", lowered)
+        or re.fullmatch(r"hook\..+\.command", lowered)
+        or re.fullmatch(r"includeif\..+\.path", lowered)
         or re.fullmatch(r"merge\..+\.driver", lowered)
         or re.fullmatch(r"(?:diff|merge)tool\..+\.(?:cmd|path)", lowered)
-        or re.fullmatch(r"(?:browser|man|pager)\..+\.(?:cmd|path)", lowered)
+        or re.fullmatch(r"(?:browser|man)\..+\.(?:cmd|path)", lowered)
+        or re.fullmatch(r"pager\..+", lowered)
         or re.fullmatch(r"protocol\..+\.allow", lowered)
         or re.fullmatch(r"remote\..+\.(?:proxy|receivepack|uploadpack|vcs)", lowered)
+        or re.fullmatch(
+            r"sendemail(?:\..+)?\."
+            r"(?:cccmd|headercmd|sendmailcmd|smtpserver|smtpserveroption|tocmd)",
+            lowered,
+        )
         or re.fullmatch(r"submodule\..+\.update", lowered)
         or re.fullmatch(r"tar\..+\.command", lowered)
+        or re.fullmatch(r"trailer\..+\.(?:cmd|command)", lowered)
     )
 
 
@@ -1573,13 +1608,80 @@ def protected_git_config_key(token: str) -> bool:
         or re.fullmatch(r"remote\..+\.(?:url|pushurl|push|mirror)", token)
         or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
         or re.fullmatch(r"include(?:if)?\..+", token)
+        or re.fullmatch(r"submodule\..+\.url", token)
         or token == "push.recursesubmodules"
         or executable_git_config_key(token)
     )
 
 
+def git_config_file_targets(args: list[str]) -> list[str]:
+    """Return explicit config-file operands without losing option provenance."""
+    targets = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        lowered = token.lower()
+        if lowered == "-f":
+            if index + 1 < len(args):
+                targets.append(args[index + 1])
+            index += 2
+            continue
+        if lowered.startswith("-f") and not lowered.startswith("--"):
+            targets.append(token[2:])
+            index += 1
+            continue
+        option, separator, attached = token.partition("=")
+        if option.lower() == "--file" or git_option_abbreviates(
+            option.lower(), "--file"
+        ):
+            if separator:
+                targets.append(attached)
+                index += 1
+            else:
+                if index + 1 < len(args):
+                    targets.append(args[index + 1])
+                index += 2
+            continue
+        index += 1
+    return targets
+
+
+def git_config_operation_is_read_only(args: list[str]) -> bool:
+    """Classify modern command mode and legacy config reads conservatively."""
+    command_action = args[0].lower() if args else ""
+    if command_action in {"get", "list"}:
+        return True
+    if command_action in {
+        "edit",
+        "remove-section",
+        "rename-section",
+        "set",
+        "unset",
+    }:
+        return False
+    options, operands = git_config_argv_roles(args)
+    if any(git_config_option_present(options, flag) for flag in _GIT_CONFIG_EDIT_FLAGS):
+        return False
+    if any(
+        git_config_option_present(options, option) for option in _GIT_CONFIG_READ_FLAGS
+    ):
+        return True
+    if any(
+        git_config_option_present(options, option)
+        for option in _GIT_CONFIG_REMOVAL_FLAGS | _GIT_CONFIG_WRITE_ACTIONS
+    ):
+        return False
+    return len(operands) <= 1
+
+
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
+    if any(git_config_option_present(args, flag) for flag in _GIT_CONFIG_EDIT_FLAGS):
+        return True
+    if not git_config_operation_is_read_only(args) and any(
+        token_mentions_secret_path(target) for target in git_config_file_targets(args)
+    ):
+        return True
     command_action = args[0].lower() if args else ""
     if command_action in {
         "edit",
@@ -1601,28 +1703,29 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
             )
         if command_action == "unset":
             return bool(
-                command_operands
-                and command_operands[0].startswith(("remote.", "url.", "include"))
+                command_operands and protected_git_config_key(command_operands[0])
             )
         if command_action == "remove-section":
             return bool(
-                command_operands and protected_git_config_section(command_operands[0])
+                command_operands
+                and (
+                    protected_git_config_section(command_operands[0])
+                    or executable_git_config_section(command_operands[0])
+                )
             )
         return any(
-            protected_git_config_section(section) for section in command_operands[:2]
-        ) or bool(
-            len(command_operands) > 1
-            and executable_git_config_section(command_operands[1])
+            protected_git_config_section(section)
+            or executable_git_config_section(section)
+            for section in command_operands[:2]
         )
 
     options, operands = git_config_argv_roles(args)
     if any(
         git_config_option_present(options, action)
         for action in {"--remove-section", "--rename-section"}
-    ) and any(protected_git_config_section(section) for section in operands):
-        return True
-    if git_config_option_present(options, "--rename-section") and any(
-        executable_git_config_section(section) for section in operands[1:2]
+    ) and any(
+        protected_git_config_section(section) or executable_git_config_section(section)
+        for section in operands
     ):
         return True
     protected_index = next(
@@ -1635,12 +1738,11 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
     )
     if protected_index is None:
         return False
-    protected_key = operands[protected_index]
     if any(
         git_config_option_present(options, option)
         for option in _GIT_CONFIG_REMOVAL_FLAGS
     ):
-        return protected_key.startswith(("remote.", "url.", "include"))
+        return True
     if any(
         git_config_option_present(options, option)
         for option in _GIT_CONFIG_WRITE_ACTIONS
@@ -2983,17 +3085,17 @@ def check(
             )
             inline_configs = git_inline_configs(git_toks)
             config_env_keys = git_config_env_keys(git_toks)
-            if any(executable_git_config_key(key) for key in inline_configs):
+            if any(protected_git_config_key(key) for key in inline_configs):
                 return (
                     "deny",
-                    "Inline Git config can launch a process outside floor inspection.",
+                    "Inline Git config can change execution or destination semantics.",
                 )
             if config_env_keys and any(
-                executable_git_config_key(key) for key in config_env_keys
+                protected_git_config_key(key) for key in config_env_keys
             ):
                 return (
                     "deny",
-                    "Git --config-env can inject a process-launching config key.",
+                    "Git --config-env can inject execution or destination config.",
                 )
             if has_git_config_environment(raw):
                 return (
