@@ -582,6 +582,139 @@ class HarnessTests(unittest.TestCase):
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
 
+    def test_repo_floor_rejects_posix_invocation_control_operators(self) -> None:
+        pin = "1" * 64
+        invocation = (
+            "python $HOME/.claude/hooks/dispatch.py " "--event pre --runtime codex"
+        )
+        windows = (
+            "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        suffixes = (
+            "< /dev/null",
+            "> /dev/null",
+            ">> /dev/null",
+            "2> /dev/null",
+            "| cat",
+            "&& true",
+            "|| true",
+            "<<< '{}'",
+        )
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"expected={pin}; {invocation} {suffix}",
+                            "commandWindows": f"$expected='{pin}'; {windows}",
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_rejects_windows_invocation_control_operators(self) -> None:
+        pin = "2" * 64
+        posix = "python $HOME/.claude/hooks/dispatch.py " "--event pre --runtime codex"
+        invocation = (
+            "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        suffixes = (
+            "< $null",
+            "> $null",
+            ">> $null",
+            "2> $null",
+            "| Out-Null",
+            "&& exit 0",
+            "|| exit 0",
+            "<<< '{}'",
+            "& Write-Output bypass",
+        )
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"expected={pin}; {posix}",
+                            "commandWindows": (
+                                f"$expected='{pin}'; {invocation} {suffix}"
+                            ),
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_allows_standalone_invocations_with_literal_controls(
+        self,
+    ) -> None:
+        pin = "3" * 64
+        posix = (
+            f"expected='{pin}'\n"
+            "note='< > | && || <<<'\n"
+            "python $HOME/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex # > /dev/null | cat && true"
+        )
+        windows = (
+            f"$expected='{pin}'\n"
+            "$note='< > | && || <<<'\n"
+            "& py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex # > $null | Out-Null && exit 0"
+        )
+        group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": windows,
+                }
+            ],
+        }
+        current = json.dumps({"hooks": {"PreToolUse": [group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current, pin), [group])
+
+    def test_repo_floor_rejects_windows_here_string_and_extra_call_operator(
+        self,
+    ) -> None:
+        pin = "4" * 64
+        posix = (
+            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        invalid_windows = (
+            (
+                f"$expected='{pin}'; & py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex @'payload'@"
+            ),
+            (
+                f"$expected='{pin}'; & & py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex"
+            ),
+        )
+        for command_windows in invalid_windows:
+            with self.subTest(command_windows=command_windows):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": posix,
+                            "commandWindows": command_windows,
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
     def test_repo_floor_requires_bound_pin_and_executable_variable_flow(self) -> None:
         pin = "f" * 64
         posix = (

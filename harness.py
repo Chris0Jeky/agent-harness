@@ -520,6 +520,46 @@ def shell_command_segments(command: str) -> list[str]:
     return segments
 
 
+def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
+    """Require a floor invocation to be an argv-only shell statement."""
+    quote = ""
+    escaped = False
+    saw_non_whitespace = False
+    used_call_operator = False
+    escape_character = "`" if windows else "\\"
+
+    for index, char in enumerate(segment):
+        if escaped:
+            escaped = False
+            continue
+        if quote:
+            if char == escape_character and quote != "'":
+                escaped = True
+                continue
+            if char == quote:
+                quote = ""
+            continue
+        if windows and char == "@" and index + 1 < len(segment):
+            if segment[index + 1] in {"'", '"'}:
+                return False
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char.isspace():
+            continue
+        if char in {"<", ">", "|"}:
+            return False
+        if char == "&":
+            if windows and not saw_non_whitespace and not used_call_operator:
+                used_call_operator = True
+                saw_non_whitespace = True
+                continue
+            return False
+        saw_non_whitespace = True
+
+    return not quote and not escaped
+
+
 def assigned_floor_variables(segments: list[str], marker: str) -> set[str]:
     """Find variables whose assignment statement binds a floor path marker."""
     result: set[str] = set()
@@ -626,7 +666,9 @@ def matcher_targets_bash(matcher: Any) -> bool:
     return isinstance(matcher, str) and matcher in {"", "Bash", "^Bash$"}
 
 
-def platform_project_floor_command(command: str, expected_pin: str | None) -> bool:
+def platform_project_floor_command(
+    command: str, expected_pin: str | None, *, windows: bool = False
+) -> bool:
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
     if ".claude/hooks/dispatch.py" not in normalized:
@@ -638,10 +680,13 @@ def platform_project_floor_command(command: str, expected_pin: str | None) -> bo
     wrapper_variables = assigned_floor_variables(segments, "invoke_deny_floor")
     interpreter_variables = assigned_floor_variables(segments, "py.exe")
     invokes_floor = any(
-        segment_invokes_direct_floor(
-            segment, dispatcher_variables, interpreter_variables
+        is_safe_floor_invocation_segment(segment, windows=windows)
+        and (
+            segment_invokes_direct_floor(
+                segment, dispatcher_variables, interpreter_variables
+            )
+            or segment_invokes_wrapper(segment, wrapper_variables)
         )
-        or segment_invokes_wrapper(segment, wrapper_variables)
         for segment in segments
     )
     return invokes_floor and command_binds_pin(inspected, expected_pin)
@@ -685,7 +730,9 @@ def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> li
             )
             if platform_project_floor_command(
                 command, expected_pin
-            ) and platform_project_floor_command(windows_command, expected_pin):
+            ) and platform_project_floor_command(
+                windows_command, expected_pin, windows=True
+            ):
                 result.append(group)
     return result
 
