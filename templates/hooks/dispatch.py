@@ -1959,7 +1959,14 @@ def has_download_pipe_to_shell(command: str) -> bool:
             "rscript",
         }:
             return True
-        if stage_head in {"curl", "wget", "iwr", "irm"}:
+        if stage_head in {
+            "curl",
+            "wget",
+            "iwr",
+            "irm",
+            "invoke-webrequest",
+            "invoke-restmethod",
+        }:
             download_seen = True
         if operator_after not in {"|", "|&"}:
             download_seen = False
@@ -2908,7 +2915,14 @@ def check(
             token_mentions_secret_path(token) for token in toks[1:]
         ):
             return "deny", "Installing over a secret-looking file is floor-blocked."
-        if head in {"curl", "wget", "iwr", "invoke-webrequest"}:
+        if head in {
+            "curl",
+            "wget",
+            "iwr",
+            "irm",
+            "invoke-webrequest",
+            "invoke-restmethod",
+        }:
             output_flags = {
                 "-o",
                 "--output",
@@ -2918,14 +2932,30 @@ def check(
             }
             for index, token in enumerate(toks[1:], start=1):
                 lowered = token.lower()
-                bound_output = lowered.startswith(
-                    ("--output=", "--output-document=", "-outfile:")
-                ) or (lowered.startswith("-o") and len(token) > 2 and head == "curl")
-                if bound_output and token_mentions_secret_path(token):
-                    return (
-                        "deny",
-                        "Downloading into a secret-looking file is floor-blocked.",
-                    )
+                attached_target = None
+                if lowered.startswith(("--output=", "--output-document=")):
+                    attached_target = token.split("=", 1)[1]
+                elif lowered.startswith("-outfile:"):
+                    attached_target = token.split(":", 1)[1]
+                elif head == "curl" and token.startswith("-o") and len(token) > 2:
+                    attached_target = token[2:]
+                elif (
+                    head == "wget" and token.startswith(("-O", "-o")) and len(token) > 2
+                ):
+                    attached_target = token[2:]
+                if attached_target is not None:
+                    if has_dynamic_shell_token(
+                        attached_target
+                    ) or attached_target.startswith("("):
+                        return (
+                            "deny",
+                            "A dynamic download destination cannot be inspected safely.",
+                        )
+                    if token_mentions_secret_path(attached_target):
+                        return (
+                            "deny",
+                            "Downloading into a secret-looking file is floor-blocked.",
+                        )
                 if lowered in output_flags and index + 1 < len(toks):
                     target = toks[index + 1]
                     if is_dynamic_value(target) or target.startswith("("):
