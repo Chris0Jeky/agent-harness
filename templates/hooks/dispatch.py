@@ -949,6 +949,39 @@ _GIT_PUSH_VALUE_LONG_OPTIONS = {
     "--repo",
 }
 
+_SHARED_BRANCH_NAMES = {
+    "dev",
+    "develop",
+    "development",
+    "main",
+    "master",
+    "prod",
+    "production",
+    "release",
+    "stable",
+    "staging",
+    "trunk",
+}
+
+
+def force_with_lease_targets_shared(refspecs: list[str]) -> bool:
+    """Reject lease updates whose explicit destination is shared or ambiguous."""
+    for refspec in refspecs:
+        candidate = refspec.lstrip("+")
+        if ":" in candidate:
+            _source, target = candidate.rsplit(":", 1)
+        else:
+            target = candidate
+        target = target.removeprefix("refs/heads/").strip("/").lower()
+        if (
+            not target
+            or target in {"@", "head"}
+            or target in _SHARED_BRANCH_NAMES
+            or target.startswith("release/")
+        ):
+            return True
+    return False
+
 
 def abbreviated_git_push_value_option(token: str) -> bool:
     """Return whether token is a unique prefix of a value-taking push option."""
@@ -2408,6 +2441,7 @@ def check(
                         "deny",
                         "sensitive_data repo: recursive submodule pushes have additional destinations.",
                     )
+                lease_requested = False
                 for t in args:
                     short_flags, _short_consumes_next = git_push_short_option_shape(t)
                     dangerous_options = {
@@ -2436,6 +2470,7 @@ def check(
                                 "deny",
                                 "T4/wave: no force variants at all — other work rides on these refs.",
                             )
+                        lease_requested = True
                         continue
                     if "f" in short_flags:
                         return (
@@ -2484,6 +2519,14 @@ def check(
                     return (
                         "deny",
                         "A git push without an explicit refspec can inherit opaque config.",
+                    )
+                if lease_requested and (
+                    explicit_selector
+                    or force_with_lease_targets_shared(positionals[1:])
+                ):
+                    return (
+                        "deny",
+                        "Force-with-lease is allowed only for an explicit non-shared feature branch.",
                     )
                 if sensitive:
                     if cwd_uncertain:
@@ -2865,20 +2908,22 @@ def main():
             event = sys.argv[sys.argv.index("--event") + 1]
         except IndexError:
             pass
-    if "--runtime" in sys.argv:
+    runtime_options = [
+        token
+        for token in sys.argv[1:]
+        if token == "--runtime" or token.startswith("--runtime=")
+    ]
+    if len(runtime_options) > 1:
+        runtime = "invalid"
+    elif runtime_options and runtime_options[0].startswith("--runtime="):
+        runtime = runtime_options[0].split("=", 1)[1].lower() or "invalid"
+    elif runtime_options:
         try:
             runtime = sys.argv[sys.argv.index("--runtime") + 1].lower()
         except IndexError:
             runtime = "invalid"
     if event != "pre":
         sys.exit(0)  # global layer wires only the floor; other events are repo-tier
-
-    runtime = "claude"
-    if "--runtime" in sys.argv:
-        try:
-            runtime = sys.argv[sys.argv.index("--runtime") + 1].lower()
-        except IndexError:
-            pass
 
     try:
         payload = json.load(sys.stdin)

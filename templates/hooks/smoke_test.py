@@ -77,6 +77,26 @@ def run_case(
     return decision
 
 
+def run_case_with_argv(command: str, argv_tail: list[str], tier: int = 3):
+    """Invoke the dispatcher with an exact CLI tail for parser regressions."""
+    with tempfile.TemporaryDirectory() as project:
+        write_tier(project, tier, {})
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = project
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project}
+        )
+        proc = subprocess.run(
+            [sys.executable, DISPATCH, *argv_tail],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        return parse_decision(proc)
+
+
 def write_tier(project: str, tier: int, flags: dict | None = None):
     cfg_dir = os.path.join(project, ".claude")
     os.makedirs(cfg_dir, exist_ok=True)
@@ -232,6 +252,12 @@ CASES = [
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
     ("git push --force-with-lease origin feat", 2, {}, "allow"),
+    ("git push --force-with-lease origin HEAD:feature/topic", 2, {}, "allow"),
+    ("git push --force-with-lease origin HEAD:main", 2, {}, "deny"),
+    ("git push --force-with-lease origin HEAD:refs/heads/main", 2, {}, "deny"),
+    ("git push --force-with-lease origin HEAD:release/1.4", 2, {}, "deny"),
+    ("git push --force-with-lease origin HEAD", 2, {}, "deny"),
+    ("git push --force-with-lease --all origin", 2, {}, "deny"),
     ("git push --force-with-lease origin feat", 4, {}, "deny"),
     # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
@@ -1256,6 +1282,35 @@ def main():
             "Codex runtime still allows safe command",
             run_case("git status", 3, {}, runtime="codex"),
             "allow",
+        ),
+        (
+            "attached Codex runtime translates ask to deny",
+            run_case_with_argv(
+                "git reset --hard HEAD~1", ["--event", "pre", "--runtime=codex"]
+            ),
+            "deny",
+        ),
+        (
+            "missing runtime value fails closed",
+            run_case_with_argv(
+                "git reset --hard HEAD~1", ["--event", "pre", "--runtime"]
+            ),
+            "deny",
+        ),
+        (
+            "duplicate runtime flags fail closed",
+            run_case_with_argv(
+                "git reset --hard HEAD~1",
+                ["--event", "pre", "--runtime", "claude", "--runtime", "codex"],
+            ),
+            "deny",
+        ),
+        (
+            "invalid runtime value fails closed",
+            run_case_with_argv(
+                "git status", ["--event", "pre", "--runtime", "unknown"]
+            ),
+            "deny",
         ),
     ]
     for label, got, expected in runtime_cases:

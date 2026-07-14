@@ -187,8 +187,9 @@ MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git c
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
 (`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`
-on the agent's OWN feature branch at T1–T2, compound commands where the dangerous-looking text
-is inside quotes.
+with an explicit non-shared feature-branch refspec at T1–T2, and compound commands where the
+dangerous-looking text is inside quotes. Lease pushes to shared/default branch names, selectors,
+or ambiguous `HEAD` destinations remain blocked.
 
 Parsing notes: tokenize argv (shlex for POSIX; separate lightweight matcher for PowerShell
 pipe forms — shlex won't parse `| Remove-Item`); split on `;`, `&&`, `|` and check each
