@@ -200,6 +200,23 @@ def is_dynamic_value(text: str) -> bool:
     )
 
 
+def powershell_assignment_rhs(raw: list[str]) -> str | None:
+    """Return a PowerShell assignment RHS; None means this is not an assignment."""
+    if not raw:
+        return None
+    attached = re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=(.*)", raw[0])
+    if attached:
+        parts = [attached.group(1), *raw[1:]]
+        return " ".join(part for part in parts if part)
+    if (
+        len(raw) > 1
+        and raw[1] == "="
+        and re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*", raw[0])
+    ):
+        return " ".join(raw[2:])
+    return None
+
+
 def has_dynamic_shell_token(token: str) -> bool:
     lowered = token.lower()
     if lowered.endswith(":$false") or lowered.endswith(":$true"):
@@ -2075,6 +2092,8 @@ def check(
         if normalized not in inspection_variants:
             inspection_variants.append(normalized)
     execution_segments = []
+    assignment_command = _QUOTED.sub("__HARNESS_ASSIGNMENT_LITERAL__", command)
+    assignment_segments = quote_aware_segments_with_operators(assignment_command)
     pass_id = 0
     for variant in inspection_variants:
         execution_segments.extend(
@@ -2118,16 +2137,28 @@ def check(
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
-        first_token = raw[0]
-        inert_powershell_assignment = bool(
-            re.match(r"^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=", first_token)
-            or (
-                re.match(r"^\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*$", first_token)
-                and len(raw) > 1
-                and raw[1] == "="
-            )
-        )
-        if inert_powershell_assignment:
+        assignment_rhs = powershell_assignment_rhs(raw)
+        if assignment_rhs is not None:
+            if current_pass == 0 and segment_index < len(assignment_segments):
+                assignment_raw = strip_control_prefixes(
+                    assignment_segments[segment_index][0]
+                )
+                masked_rhs = powershell_assignment_rhs(assignment_raw)
+                if masked_rhs and not is_dynamic_value(masked_rhs):
+                    assignment_decision = check(
+                        masked_rhs,
+                        tier_cfg,
+                        project_dir,
+                        current_cwd,
+                        _depth + 1,
+                        cwd_uncertain,
+                        cwd_changed,
+                        remote_resolver,
+                        _remote_cache,
+                        _remote_deadline,
+                    )
+                    if assignment_decision[0] != "allow":
+                        return assignment_decision
             continue
         compact_cmd = re.fullmatch(
             r"(?i)(rd|rmdir|del|erase)((?:/[A-Za-z]){1,4})",
