@@ -1408,7 +1408,11 @@ def dangerous_git_trace_setting(name: str, value: str) -> bool:
     normalized_value = restore_quoted_literal_markers(value).strip("'\"")
     if normalized_name in _GIT_TRACE_TARGET_ENVIRONMENT:
         expanded = expand_environment_references(normalized_value)
-        return expanded is None or token_mentions_secret_path(expanded)
+        return (
+            expanded is None
+            or has_dynamic_shell_token(expanded)
+            or token_mentions_secret_path(expanded)
+        )
     if normalized_name in {"GIT_TRACE2_CONFIG_PARAMS", "GIT_TRACE2_ENV_VARS"}:
         return bool(normalized_value)
     if normalized_name == "GIT_TRACE_REDACT":
@@ -1452,37 +1456,83 @@ def git_trace_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
             break
         return mutations
 
-    if first in {"env", "export", "set", "setx"}:
+    if first in {"env", "export", "set"}:
         index = 1
         while index < len(raw):
             if record_attached(raw[index]):
                 index += 1
                 continue
-            name = git_environment_name(raw[index])
-            if first == "setx" and name in _GIT_TRACE_ENVIRONMENT:
-                value = raw[index + 1] if index + 1 < len(raw) else ""
-                mutations.append((name, value))
-                index += 2
-                continue
             index += 1
         return mutations
 
-    if first in {"set-item", "new-item", "si", "ni"}:
+    if first == "setx":
         for index, token in enumerate(raw[1:], start=1):
-            if record_attached(token):
-                continue
             name = git_environment_name(token)
             if name not in _GIT_TRACE_ENVIRONMENT:
                 continue
-            value_index = index + 1
-            if value_index < len(raw) and raw[value_index].lower() in {
-                "-value",
-                "-val",
-            }:
-                value_index += 1
-            value = raw[value_index] if value_index < len(raw) else ""
+            value = ""
+            for candidate in raw[index + 1 :]:
+                if candidate.lower() == "/m":
+                    continue
+                if candidate.startswith("/"):
+                    value = "$HARNESS_OPAQUE_SETX_VALUE"
+                    break
+                value = candidate
+                break
             mutations.append((name, value))
         return mutations
+
+    if first in {"set-item", "new-item", "si", "ni"}:
+        path_value = None
+        assigned_value = None
+        positional = []
+        index = 1
+        while index < len(raw):
+            token = raw[index]
+            if token.startswith("-"):
+                parameter, separator, bound = token.lstrip("-").partition(":")
+                parameter = parameter.lower()
+                role = None
+                if parameter and any(
+                    name.startswith(parameter) for name in {"path", "literalpath"}
+                ):
+                    role = "path"
+                elif parameter and "value".startswith(parameter):
+                    role = "value"
+                if role:
+                    value = (
+                        bound
+                        if separator
+                        else (raw[index + 1] if index + 1 < len(raw) else "")
+                    )
+                    if role == "path":
+                        path_value = value
+                    else:
+                        assigned_value = value
+                    index += 1 if separator else 2
+                    continue
+                index += 1
+                continue
+            positional.append(token)
+            index += 1
+        if path_value is None and positional:
+            path_value = positional.pop(0)
+        if assigned_value is None and positional:
+            assigned_value = positional[0]
+        name = git_environment_name(path_value or "")
+        if name in _GIT_TRACE_ENVIRONMENT:
+            mutations.append((name, assigned_value or ""))
+        return mutations
+
+    environment_call = re.search(
+        r"(?i)(?:\[(?:system\.)?environment\])::setenvironmentvariable\("
+        r"\s*([^,]+)\s*,\s*([^,)]+)",
+        restore_quoted_literal_markers(" ".join(raw)),
+    )
+    if environment_call:
+        name = git_environment_name(environment_call.group(1))
+        if name in _GIT_TRACE_ENVIRONMENT:
+            mutations.append((name, environment_call.group(2)))
     return mutations
 
 
