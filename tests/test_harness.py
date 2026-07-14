@@ -26,11 +26,19 @@ class HarnessTests(unittest.TestCase):
     def test_seed_creates_runtime_neutral_tier(self) -> None:
         repo = self.make_repo()
         args = SimpleNamespace(
-            path=str(repo), tier=2, push="free", merge="free", human_todo=None,
-            sensitive_data=True, relaxed_work_loss_guards=False, dry_run=False,
+            path=str(repo),
+            tier=2,
+            push="free",
+            merge="free",
+            human_todo=None,
+            sensitive_data=True,
+            relaxed_work_loss_guards=False,
+            dry_run=False,
         )
         self.assertEqual(harness.seed_repo(args), 0)
-        data = json.loads((repo / ".agent-harness" / "tier.json").read_text(encoding="utf-8"))
+        data = json.loads(
+            (repo / ".agent-harness" / "tier.json").read_text(encoding="utf-8")
+        )
         self.assertEqual(data["name"], "daily-driver")
         self.assertTrue(data["flags"]["sensitive_data"])
 
@@ -40,8 +48,14 @@ class HarnessTests(unittest.TestCase):
         target.parent.mkdir()
         target.write_text("{}", encoding="utf-8")
         args = SimpleNamespace(
-            path=str(repo), tier=1, push="free", merge="free", human_todo=None,
-            sensitive_data=False, relaxed_work_loss_guards=False, dry_run=False,
+            path=str(repo),
+            tier=1,
+            push="free",
+            merge="free",
+            human_todo=None,
+            sensitive_data=False,
+            relaxed_work_loss_guards=False,
+            dry_run=False,
         )
         with self.assertRaises(harness.HarnessError):
             harness.seed_repo(args)
@@ -52,8 +66,14 @@ class HarnessTests(unittest.TestCase):
         target.parent.mkdir()
         target.write_text("{}", encoding="utf-8")
         args = SimpleNamespace(
-            path=str(repo), tier=2, push="free", merge="free", human_todo=None,
-            sensitive_data=False, relaxed_work_loss_guards=False, dry_run=False,
+            path=str(repo),
+            tier=2,
+            push="free",
+            merge="free",
+            human_todo=None,
+            sensitive_data=False,
+            relaxed_work_loss_guards=False,
+            dry_run=False,
         )
         with self.assertRaises(harness.HarnessError):
             harness.seed_repo(args)
@@ -75,28 +95,94 @@ class HarnessTests(unittest.TestCase):
 
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
-        (repo / "AGENTS.md").write_text("See C:/Users/jekyt/source/repo\n", encoding="utf-8")
+        (repo / "AGENTS.md").write_text(
+            "See C:/Users/jekyt/source/repo\n", encoding="utf-8"
+        )
         result = harness.audit_repo(repo)
-        self.assertTrue(any("stale jekyt-profile" in issue for issue in result["issues"]))
+        self.assertTrue(
+            any("stale jekyt-profile" in issue for issue in result["issues"])
+        )
 
     def test_remove_managed_floor_preserves_unrelated_hooks(self) -> None:
-        current = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": "keep"}]}],
-                                         "PreToolUse": [{"hooks": [{"command": "old dispatch.py --event pre --runtime codex"}]}]}})
-        result = json.loads(harness.remove_managed_codex_floor(current))
-        self.assertEqual(result["hooks"]["SessionStart"][0]["hooks"][0]["command"], "keep")
-        self.assertNotIn("PreToolUse", result["hooks"])
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        current = json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [{"hooks": [{"command": "keep"}]}],
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "command": f'python "{dispatcher}" --event pre --runtime codex'
+                                },
+                                {"command": "python keep_unrelated.py"},
+                            ]
+                        }
+                    ],
+                }
+            }
+        )
+        result = json.loads(harness.remove_managed_codex_floor(current, dispatcher))
+        self.assertEqual(
+            result["hooks"]["SessionStart"][0]["hooks"][0]["command"], "keep"
+        )
+        self.assertEqual(
+            result["hooks"]["PreToolUse"][0]["hooks"],
+            [{"command": "python keep_unrelated.py"}],
+        )
 
     def test_remove_managed_floor_deletes_empty_document(self) -> None:
-        current = json.dumps({
-            "hooks": {
-                "PreToolUse": [{
-                    "hooks": [{
-                        "command": "python dispatch.py --event pre --runtime codex"
-                    }]
-                }]
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        current = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "command": f"python {dispatcher} --event=pre --runtime=codex"
+                                }
+                            ]
+                        }
+                    ]
+                }
             }
-        })
-        self.assertEqual(harness.remove_managed_codex_floor(current), "")
+        )
+        self.assertEqual(harness.remove_managed_codex_floor(current, dispatcher), "")
+
+    def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
+        managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        current = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "command": "python D:/custom/dispatch.py --event pre --runtime codex"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.managed_codex_floor_groups(current)), 1)
+        self.assertEqual(harness.remove_managed_codex_floor(current, managed), current)
+
+    def test_hooks_helpers_reject_wrong_shapes(self) -> None:
+        for current in ("[]", "null", '"text"', "1"):
+            with self.subTest(current=current):
+                with self.assertRaises(harness.HarnessError):
+                    harness.managed_codex_floor_groups(current)
+                with self.assertRaises(harness.HarnessError):
+                    harness.repo_codex_floor_groups(current)
+                with self.assertRaises(harness.HarnessError):
+                    harness.remove_managed_codex_floor(current)
+        with self.assertRaises(harness.HarnessError):
+            harness.managed_codex_floor_groups(
+                json.dumps({"hooks": {"PreToolUse": [{"hooks": None}]}})
+            )
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
@@ -112,16 +198,25 @@ class HarnessTests(unittest.TestCase):
         skills_home = root / "skills-home"
         codex_home.mkdir()
         (codex_home / "hooks.json").write_text(
-            json.dumps({
-                "hooks": {
-                    "SessionStart": [{"hooks": [{"command": "keep"}]}],
-                    "PreToolUse": [{
-                        "hooks": [{
-                            "command": "python dispatch.py --event pre --runtime codex"
-                        }]
-                    }],
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [{"hooks": [{"command": "keep"}]}],
+                        "PreToolUse": [
+                            {
+                                "hooks": [
+                                    {
+                                        "command": (
+                                            f'python "{codex_home / "hooks" / "dispatch.py"}" '
+                                            "--event pre --runtime codex"
+                                        )
+                                    }
+                                ]
+                            }
+                        ],
+                    }
                 }
-            }),
+            ),
             encoding="utf-8",
         )
         args = SimpleNamespace(
