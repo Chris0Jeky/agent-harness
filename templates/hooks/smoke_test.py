@@ -1042,6 +1042,8 @@ CASES = [
     ("[string]$x = 'git push --force origin main'", 1, {}, "allow"),
     ("$x = { git push --force origin main }", 1, {}, "allow"),
     ("$x = { echo secret > .env }", 1, {}, "allow"),
+    ("'(git)' push --force origin main", 1, {}, "allow"),
+    ("'(rm)' -rf /", 1, {}, "allow"),
     ('git commit -m "note; $x = git push --force origin main"', 1, {}, "allow"),
     ('Remove-Item "notes,.env"', 1, {}, "allow"),
     ("if true; then echo ok; fi", 1, {}, "allow"),

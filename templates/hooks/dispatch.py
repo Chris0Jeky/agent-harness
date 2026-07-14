@@ -49,6 +49,7 @@ _CWD_REFERENCE = re.compile(
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
+_QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
 
 
 def has_shell_expansion_marker(value: str) -> bool:
@@ -430,6 +431,8 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 value = shlex.split(token, posix=True)[0]
             except (IndexError, ValueError):
                 value = token[1:-1]
+        if len(value) >= 2 and (value[0], value[-1]) in {("(", ")"), ("{", "}")}:
+            value = f"{_QUOTED_GROUP_LITERAL_PREFIX}{value}"
         value = value.replace(",", _LITERAL_COMMA)
         quoted[placeholder] = value
         return placeholder
