@@ -923,7 +923,7 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
         return True
     if first in {"export", "set", "setx"}:
         return any(
-            re.match(r'^"?git_config[a-z0-9_]*=', token, re.IGNORECASE)
+            re.fullmatch(r'"?git_config[a-z0-9_]*(?:=.*)?"?', token, re.IGNORECASE)
             for token in raw[1:]
         )
     if first in {"set-item", "new-item", "si", "ni"}:
@@ -2113,10 +2113,10 @@ def check(
                 "deny",
                 "sudo is blocked at the floor. If elevation is truly needed, the human runs it.",
             )
-        if head in {"start-process", "saps"}:
+        if head in {"start", "start-process", "saps"}:
             return (
                 "deny",
-                "Start-Process can conceal an irreversible child command. Run the child directly.",
+                "A process launcher can conceal an irreversible child command. Run the child directly.",
             )
         if head == "call":
             if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
@@ -2220,7 +2220,12 @@ def check(
                         nested_script = bound_value
                     elif index + 1 < len(toks):
                         if head in {"bash", "sh", "zsh"}:
-                            nested_script = toks[index + 1]
+                            script_index = index + 1
+                            if toks[script_index] == "--" and script_index + 1 < len(
+                                toks
+                            ):
+                                script_index += 1
+                            nested_script = toks[script_index]
                         elif is_command_with_args:
                             nested_script = toks[index + 1]
                         else:
@@ -2808,6 +2813,8 @@ def check(
                     lowered = token.lower()
                     if lowered in {"-x", "--method"} and index + 1 < len(toks):
                         method = toks[index + 1].upper()
+                    elif lowered.startswith("-x") and len(token) > 2:
+                        method = token[2:].lstrip("=").upper()
                     elif lowered.startswith("--method="):
                         method = token.split("=", 1)[1].upper()
                     elif lowered in {"-f", "-F", "--raw-field", "--field", "--input"}:

@@ -550,6 +550,14 @@ CASES = [
         {},
         "deny",
     ),
+    (
+        "export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; "
+        "GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=remote.origin.push; "
+        "GIT_CONFIG_VALUE_0=+HEAD:refs/heads/main; git push origin feature",
+        1,
+        {},
+        "deny",
+    ),
     ("git config --rename-section remote.origin remote.other", 1, {}, "deny"),
     ("git config --rename-s remote.origin remote.other", 1, {}, "deny"),
     (
@@ -671,6 +679,7 @@ CASES = [
     ("`echo git` push --force origin main", 1, {}, "deny"),
     ("call git push --force origin main", 1, {}, "deny"),
     ("Start-Process git -ArgumentList 'push','--force','origin','main'", 1, {}, "deny"),
+    ('cmd /c "start /b git push --force origin main"', 1, {}, "deny"),
     ("find . -exec git push --force origin main \\;", 1, {}, "deny"),
     ("find . -exec rm -rf / \\;", 1, {}, "deny"),
     ("find . -delete", 1, {}, "deny"),
@@ -757,6 +766,14 @@ CASES = [
         {},
         "deny",
     ),
+    ("gh api -XPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
+    (
+        "gh api -XDELETE /repos/example/private",
+        1,
+        {"sensitive_data": True},
+        "deny",
+    ),
+    ("bash -c -- 'git push --force origin main'", 1, {}, "deny"),
     (
         "git config --remove-section --file --get-a remote.origin",
         1,
@@ -777,6 +794,9 @@ CASES = [
     ("curl https://api.example.com/data -o data.json", 1, {}, "allow"),
     ("dotnet test backend/Taskdeck.sln", 1, {}, "allow"),
     ("bash -c 'git status'", 1, {}, "allow"),
+    ("bash -c -- 'git status'", 1, {}, "allow"),
+    ("gh api -XGET /user", 1, {"sensitive_data": True}, "allow"),
+    ("export PATH", 1, {}, "allow"),
     ("cd src && rm -rf build", 1, {}, "allow"),
     ("Set-Location src && Remove-Item -Recurse build", 1, {}, "allow"),
     ("cd src && bash -c 'rm -rf build'", 1, {}, "allow"),
