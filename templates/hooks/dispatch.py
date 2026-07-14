@@ -742,8 +742,6 @@ def is_secret_path(target: str) -> bool:
 
 def brace_expansion_mentions_secret_path(token: str) -> bool:
     """Expand bounded, unquoted Bash comma braces before checking destinations."""
-    if _LITERAL_COMMA in token:
-        return False
     variants = [token]
     expanded = False
     while True:
