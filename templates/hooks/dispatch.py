@@ -3896,6 +3896,7 @@ def check(
                 )
                 is_command_with_args = (
                     head in {"pwsh", "powershell"}
+                    and not is_command
                     and bool(option)
                     and (option == "cwa" or "commandwithargs".startswith(option))
                 )
