@@ -1598,10 +1598,177 @@ _GIT_PROCESS_COMMAND_ENVIRONMENT = _GIT_PROCESS_ENVIRONMENT | {
     "VISUAL",
 }
 
+_GIT_EDITOR_SUBCOMMANDS = {
+    "am",
+    "cherry-pick",
+    "commit",
+    "config",
+    "merge",
+    "notes",
+    "rebase",
+    "revert",
+    "tag",
+}
+_GIT_EXTERNAL_DIFF_SUBCOMMANDS = {
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "format-patch",
+    "log",
+    "range-diff",
+    "show",
+    "stash",
+    "whatchanged",
+}
+_GIT_PAGER_SUBCOMMANDS = {
+    "blame",
+    "branch",
+    "diff",
+    "grep",
+    "help",
+    "log",
+    "range-diff",
+    "reflog",
+    "shortlog",
+    "show",
+    "tag",
+    "whatchanged",
+}
 
-def has_git_process_environment(raw: list[str]) -> bool:
+
+def git_pager_is_reachable(
+    subcommand: str, args: list[str], global_args: list[str]
+) -> bool:
+    """Return whether this invocation can launch Git's configured pager."""
+    forced = None
+    index = 0
+    while index < len(global_args):
+        token = global_args[index]
+        lowered = token.lower().split("=", 1)[0]
+        if token == "-P" or lowered == "--no-pager":
+            forced = False
+        elif token == "-p" or lowered == "--paginate":
+            forced = True
+        index += 2 if token in _GIT_VALUE_OPTS else 1
+    if forced is not None:
+        return forced
+    if subcommand == "config":
+        return any(
+            token.lower().split("=", 1)[0]
+            in {"-l", "--list", "--get-all", "--get-regexp", "--get-urlmatch"}
+            for token in args
+        )
+    return subcommand in _GIT_PAGER_SUBCOMMANDS
+
+
+def git_network_helper_is_reachable(subcommand: str, args: list[str]) -> bool:
+    """Return whether Git can use an SSH, proxy, or askpass helper."""
+    if subcommand in {"clone", "fetch", "ls-remote", "pull", "push"}:
+        return True
+    if subcommand == "archive":
+        return git_option_is_present(args, "--remote")
+    if subcommand == "remote":
+        action = next(
+            (token.lower() for token in args if not token.startswith("-")), ""
+        )
+        return action in {"prune", "show", "update"} or (
+            action == "set-head"
+            and any(token.lower() in {"-a", "--auto"} for token in args)
+        )
+    if subcommand == "submodule":
+        action = next(
+            (token.lower() for token in args if not token.startswith("-")), ""
+        )
+        return action in {"add", "update"}
+    return False
+
+
+def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
+    """Return whether Git can launch the editor selected by GIT_EDITOR."""
+    lowered = [token.lower().split("=", 1)[0] for token in args]
+    if subcommand == "add":
+        return any(token in {"-e", "--edit"} for token in lowered)
+    if subcommand == "config":
+        return any(token in {"-e", "--edit"} for token in lowered)
+    return subcommand in _GIT_EDITOR_SUBCOMMANDS
+
+
+def git_template_is_reachable(subcommand: str, args: list[str]) -> bool:
+    """Return whether Git can copy from its configured template directory."""
+    if subcommand in {"clone", "init"}:
+        return True
+    if subcommand != "submodule":
+        return False
+    action = next((token.lower() for token in args if not token.startswith("-")), "")
+    return action in {"add", "update"}
+
+
+def git_external_diff_is_reachable(subcommand: str, args: list[str]) -> bool:
+    """Return whether Git can invoke the helper selected by GIT_EXTERNAL_DIFF."""
+    if subcommand not in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
+        return False
+    enabled = True
+    for token in args:
+        lowered = token.lower()
+        if lowered == "--no-ext-diff":
+            enabled = False
+        elif lowered == "--ext-diff":
+            enabled = True
+    return enabled
+
+
+def inherited_git_process_environment_is_reachable(
+    name: str,
+    subcommand: str,
+    args: list[str],
+    global_args: list[str],
+) -> bool:
+    """Scope inherited Git helper variables to commands that can consume them."""
+    if name == "GIT_EXEC_PATH":
+        return bool(subcommand)
+    if name == "GIT_PAGER":
+        return git_pager_is_reachable(subcommand, args, global_args)
+    if name in {
+        "GIT_ASKPASS",
+        "GIT_PROXY_COMMAND",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "SSH_ASKPASS",
+    }:
+        return git_network_helper_is_reachable(subcommand, args)
+    if name == "GIT_EDITOR":
+        return git_editor_is_reachable(subcommand, args)
+    if name == "GIT_SEQUENCE_EDITOR":
+        return subcommand == "rebase" and any(
+            token.lower() in {"-i", "--interactive"} for token in args
+        )
+    if name == "GIT_EXTERNAL_DIFF":
+        return git_external_diff_is_reachable(subcommand, args)
+    if name == "GIT_TEMPLATE_DIR":
+        return git_template_is_reachable(subcommand, args)
+    if name == "GIT_WEB_BROWSER":
+        return subcommand == "instaweb" or (
+            subcommand == "help"
+            and any(token.lower() in {"-w", "--web"} for token in args)
+        )
+    return False
+
+
+def has_git_process_environment(
+    raw: list[str],
+    subcommand: str,
+    args: list[str],
+    global_args: list[str],
+) -> bool:
     """Detect command-scoped or inherited process-launching Git variables."""
-    if any(name.upper() in _GIT_PROCESS_ENVIRONMENT for name in os.environ):
+    if any(
+        inherited_git_process_environment_is_reachable(
+            name.upper(), subcommand, args, global_args
+        )
+        for name in os.environ
+        if name.upper() in _GIT_PROCESS_ENVIRONMENT
+    ):
         return True
     for token in raw:
         base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
@@ -3548,7 +3715,12 @@ def check(
                     "deny",
                     "Git config environment injection is opaque to floor inspection.",
                 )
-            if has_git_process_environment(raw):
+            if has_git_process_environment(
+                raw,
+                sub,
+                args,
+                git_toks[1:subcommand_index] if subcommand_index is not None else [],
+            ):
                 return (
                     "deny",
                     "Git process-launch environment overrides are opaque to floor inspection.",

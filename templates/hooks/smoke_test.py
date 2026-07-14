@@ -13,6 +13,28 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
+GIT_HELPER_ENVIRONMENT = {
+    "GIT_ASKPASS",
+    "GIT_EDITOR",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "GIT_PROXY_COMMAND",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_TEMPLATE_DIR",
+    "GIT_WEB_BROWSER",
+    "SSH_ASKPASS",
+}
+
+
+def clean_dispatch_environment():
+    """Keep inherited developer Git helpers from changing smoke expectations."""
+    env = dict(os.environ)
+    for name in GIT_HELPER_ENVIRONMENT:
+        env.pop(name, None)
+    return env
 
 
 def load_dispatch_module():
@@ -52,7 +74,7 @@ def run_case(
 ):
     """Invoke dispatch.py as the harness would; return decision string."""
     tmp = None
-    env = dict(os.environ)
+    env = clean_dispatch_environment()
     if project is None:
         tmp = tempfile.TemporaryDirectory()
         project = tmp.name
@@ -84,7 +106,7 @@ def run_case_with_argv(command: str, argv_tail: list[str], tier: int = 3):
     """Invoke the dispatcher with an exact CLI tail for parser regressions."""
     with tempfile.TemporaryDirectory() as project:
         write_tier(project, tier, {})
-        env = dict(os.environ)
+        env = clean_dispatch_environment()
         env["CLAUDE_PROJECT_DIR"] = project
         payload = json.dumps(
             {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project}
@@ -127,7 +149,7 @@ def invoke_payload(
     env_project: str | None = None,
     runtime: str | None = None,
 ):
-    env = dict(os.environ)
+    env = clean_dispatch_environment()
     if env_project is None:
         env.pop("CLAUDE_PROJECT_DIR", None)
     else:
@@ -160,7 +182,7 @@ def run_synthetic_project_case(
     env_extra: dict[str, str] | None = None,
 ):
     """Exercise path containment without the floor's explicit temp-path allowance."""
-    env = dict(os.environ)
+    env = clean_dispatch_environment()
     env["CLAUDE_PROJECT_DIR"] = project
     env.update(env_extra or {})
     payload = json.dumps(
@@ -179,7 +201,7 @@ def run_synthetic_project_case(
 
 def invoke_synthetic_context(command: str, payload_cwd: str, env_project: str):
     """Invoke with synthetic absolute authority paths without chdir-ing to them."""
-    env = dict(os.environ)
+    env = clean_dispatch_environment()
     env["CLAUDE_PROJECT_DIR"] = env_project
     payload = json.dumps(
         {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": payload_cwd}
@@ -1820,6 +1842,166 @@ def main():
                 {},
                 env_extra={"GIT_TRACE2_EVENT": "C:/tmp/.env"},
             ),
+            "deny",
+        ),
+        (
+            "inherited pager does not affect ordinary status",
+            run_case("git status", 3, {}, env_extra={"GIT_PAGER": "cat"}),
+            "allow",
+        ),
+        (
+            "inherited pager applies to log",
+            run_case("git log", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited pager applies when status forces pagination",
+            run_case(
+                "git --paginate status",
+                3,
+                {},
+                env_extra={"GIT_PAGER": "helper"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited pager is disabled by the last no-pager option",
+            run_case(
+                "git --paginate --no-pager log",
+                3,
+                {},
+                env_extra={"GIT_PAGER": "helper"},
+            ),
+            "allow",
+        ),
+        (
+            "inherited pager is enabled by the last paginate option",
+            run_case(
+                "git --no-pager --paginate status",
+                3,
+                {},
+                env_extra={"GIT_PAGER": "helper"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited pager honors the short no-pager option",
+            run_case("git -P log", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "allow",
+        ),
+        (
+            "inherited pager honors the short paginate option",
+            run_case("git -p status", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "deny",
+        ),
+        (
+            "pager-like global option values do not force pagination",
+            run_case(
+                "git -C --paginate status",
+                3,
+                {},
+                env_extra={"GIT_PAGER": "helper"},
+            ),
+            "allow",
+        ),
+        (
+            "inherited pager applies to tag listings",
+            run_case("git tag", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited pager applies to config listings",
+            run_case("git config --list", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited editor does not affect status",
+            run_case("git status", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
+            "allow",
+        ),
+        (
+            "inherited editor applies to commit",
+            run_case("git commit", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited editor applies to add edit",
+            run_case("git add -e", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited editor does not affect config reads",
+            run_case(
+                "git config --get user.name",
+                3,
+                {},
+                env_extra={"GIT_EDITOR": "helper"},
+            ),
+            "allow",
+        ),
+        (
+            "inherited SSH helper does not affect status",
+            run_case("git status", 3, {}, env_extra={"GIT_SSH_COMMAND": "helper"}),
+            "allow",
+        ),
+        (
+            "inherited SSH helper applies to fetch",
+            run_case(
+                "git fetch origin",
+                3,
+                {},
+                env_extra={"GIT_SSH_COMMAND": "helper"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited SSH helper does not affect remote listings",
+            run_case("git remote -v", 3, {}, env_extra={"GIT_SSH_COMMAND": "helper"}),
+            "allow",
+        ),
+        (
+            "inherited SSH helper applies to submodule updates",
+            run_case(
+                "git submodule update",
+                3,
+                {},
+                env_extra={"GIT_SSH_COMMAND": "helper"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited external diff does not affect status",
+            run_case("git status", 3, {}, env_extra={"GIT_EXTERNAL_DIFF": "helper"}),
+            "allow",
+        ),
+        (
+            "inherited external diff applies to diff",
+            run_case("git diff", 3, {}, env_extra={"GIT_EXTERNAL_DIFF": "helper"}),
+            "deny",
+        ),
+        (
+            "no-ext-diff disables the inherited external diff helper",
+            run_case(
+                "git diff --no-ext-diff",
+                3,
+                {},
+                env_extra={"GIT_EXTERNAL_DIFF": "helper"},
+            ),
+            "allow",
+        ),
+        (
+            "inherited template applies to submodule updates",
+            run_case(
+                "git submodule update",
+                3,
+                {},
+                env_extra={"GIT_TEMPLATE_DIR": "templates"},
+            ),
+            "deny",
+        ),
+        (
+            "inherited exec path affects every Git subcommand",
+            run_case("git status", 3, {}, env_extra={"GIT_EXEC_PATH": "helpers"}),
             "deny",
         ),
         (
