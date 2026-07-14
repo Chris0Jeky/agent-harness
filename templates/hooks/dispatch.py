@@ -4857,6 +4857,79 @@ def check(
                             "deny",
                             "Git rm of an opaque or secret-looking path is floor-blocked.",
                         )
+            if sub == "mv" and not any(
+                token == "-n"
+                or token == "--dry-run"
+                or git_option_abbreviates(token, "--dry-run")
+                for token in args
+            ):
+                mv_operands = [
+                    token
+                    for token in args
+                    if token != "--" and not token.startswith("-")
+                ]
+                if any(
+                    has_dynamic_shell_token(operand)
+                    or token_mentions_secret_path(operand)
+                    for operand in mv_operands
+                ):
+                    return (
+                        "deny",
+                        "Git mv of an opaque or secret-looking path is floor-blocked.",
+                    )
+
+            restore_staged = any(
+                token == "--staged"
+                or git_option_abbreviates(token, "--staged")
+                or bool(re.fullmatch(r"-[A-Za-z]*S[A-Za-z]*", token))
+                for token in args
+            )
+            restore_worktree = any(
+                token == "--worktree"
+                or git_option_abbreviates(token, "--worktree", min_prefix=1)
+                or bool(re.fullmatch(r"-[A-Za-z]*W[A-Za-z]*", token))
+                for token in args
+            )
+            restore_mutates_worktree = sub == "restore" and (
+                not restore_staged or restore_worktree
+            )
+            if restore_mutates_worktree:
+                if any(
+                    token == "--pathspec-from-file"
+                    or token.startswith("--pathspec-from-file=")
+                    for token in args
+                ):
+                    return (
+                        "deny",
+                        "Git restore pathspec files are opaque to the deny floor.",
+                    )
+                restore_pathspecs = []
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token == "--":
+                        restore_pathspecs.extend(args[index + 1 :])
+                        break
+                    if token in {"-s", "--source"}:
+                        index += 2
+                        continue
+                    if token.startswith("--source=") or (
+                        token.startswith("-s") and len(token) > 2
+                    ):
+                        index += 1
+                        continue
+                    if not token.startswith("-"):
+                        restore_pathspecs.append(token)
+                    index += 1
+                if any(
+                    has_dynamic_shell_token(pathspec)
+                    or token_mentions_secret_path(pathspec)
+                    for pathspec in restore_pathspecs
+                ):
+                    return (
+                        "deny",
+                        "Git restore of an opaque or secret-looking path is floor-blocked.",
+                    )
 
             alias_expansion = git_inline_alias(git_toks, sub)
             if alias_expansion is not None:
@@ -5196,18 +5269,6 @@ def check(
                             "T3: checkout -- . wipes local modifications. Confirm.",
                         )
 
-            restore_staged = any(
-                token == "--staged"
-                or git_option_abbreviates(token, "--staged")
-                or bool(re.fullmatch(r"-[A-Za-z]*S[A-Za-z]*", token))
-                for token in args
-            )
-            restore_worktree = any(
-                token == "--worktree"
-                or git_option_abbreviates(token, "--worktree", min_prefix=1)
-                or bool(re.fullmatch(r"-[A-Za-z]*W[A-Za-z]*", token))
-                for token in args
-            )
             if (
                 sub == "restore"
                 and "." in args
