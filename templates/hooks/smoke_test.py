@@ -48,6 +48,7 @@ def run_case(
     flags: dict | None = None,
     project: str | None = None,
     runtime: str | None = None,
+    env_extra: dict[str, str] | None = None,
 ):
     """Invoke dispatch.py as the harness would; return decision string."""
     tmp = None
@@ -60,6 +61,8 @@ def run_case(
     with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
         json.dump({"tier": tier, "flags": flags or {}}, fh)
     env["CLAUDE_PROJECT_DIR"] = project
+    if env_extra:
+        env.update(env_extra)
     payload = json.dumps(
         {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": project}
     )
@@ -650,6 +653,19 @@ CASES = [
     ("export VISUAL=helper; git config edit", 1, {}, "deny"),
     ("$env:PAGER='helper'; git log", 1, {}, "deny"),
     ("Set-Item Env:EDITOR helper; git commit", 1, {}, "deny"),
+    ("GIT_TRACE2_EVENT=C:/tmp/.env git status", 1, {}, "deny"),
+    ("HARMLESS=1 GIT_TRACE2_EVENT=.env git status", 1, {}, "deny"),
+    ("env GIT_TRACE_PACKFILE=.env git fetch", 1, {}, "deny"),
+    ("export GIT_TRACE=/tmp/credentials.json; git status", 1, {}, "deny"),
+    ("set GIT_TRACE_CURL=.env && git fetch", 1, {}, "deny"),
+    ("$env:GIT_TRACE_REDACT='false'; git fetch", 1, {}, "deny"),
+    ("Set-Item Env:GIT_TRACE2_PERF -Value .env; git status", 1, {}, "deny"),
+    ("GIT_TRACE2_CONFIG_PARAMS=remote.*.url git status", 1, {}, "deny"),
+    ("GIT_TRACE2_EVENT=$HARNESS_UNKNOWN_TRACE git status", 1, {}, "deny"),
+    ("git config --global trace2.eventTarget C:/tmp/.env", 1, {}, "deny"),
+    ("git config --system trace2.configParams remote.*.url", 1, {}, "deny"),
+    ("git config --global trace2.envVars GITHUB_TOKEN", 1, {}, "deny"),
+    ("git config --global rename-section harmless trace2", 1, {}, "deny"),
     ("git p", 1, {}, "deny"),
     ("git lfs push origin main", 1, {}, "deny"),
     ("git lfs prune", 1, {}, "deny"),
@@ -1042,6 +1058,15 @@ CASES = [
     ("PAGER=less; echo harmless", 1, {}, "allow"),
     ("$env:VISUAL='code'; Write-Output harmless", 1, {}, "allow"),
     ("PAGER=less git --no-pager status", 1, {}, "deny"),
+    ("GIT_TRACE2_EVENT=C:/tmp/trace.json git status", 1, {}, "allow"),
+    ("GIT_TRACE=2 git status", 1, {}, "allow"),
+    ("GIT_TRACE_REDACT=true git fetch", 1, {}, "allow"),
+    ("git config --global trace2.eventTarget C:/tmp/trace.json", 1, {}, "allow"),
+    ("git config --global --unset trace2.eventTarget", 1, {}, "allow"),
+    ("git config --global unset trace2.envVars", 1, {}, "allow"),
+    ("git config --get trace2.eventTarget", 1, {}, "allow"),
+    ("git -c trace2.eventTarget=C:/tmp/.env status", 1, {}, "allow"),
+    ("git config trace2.eventTarget C:/tmp/.env", 1, {}, "allow"),
     (
         "git config --get-a remote.origin.pushurl https://github.com/example/repo",
         1,
@@ -1694,6 +1719,16 @@ def main():
             "Codex runtime still allows safe command",
             run_case("git status", 3, {}, runtime="codex"),
             "allow",
+        ),
+        (
+            "inherited secret trace target fails closed",
+            run_case(
+                "git status",
+                3,
+                {},
+                env_extra={"GIT_TRACE2_EVENT": "C:/tmp/.env"},
+            ),
+            "deny",
         ),
         (
             "attached Codex runtime translates ask to deny",

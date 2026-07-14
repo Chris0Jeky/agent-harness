@@ -1364,6 +1364,134 @@ def git_environment_name(token: str) -> str:
     return candidate.rstrip("}").upper()
 
 
+_GIT_TRACE_TARGET_ENVIRONMENT = {
+    "GIT_TRACE",
+    "GIT_TRACE_FSMONITOR",
+    "GIT_TRACE_PACK_ACCESS",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_PACKFILE",
+    "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_REFS",
+    "GIT_TRACE_SETUP",
+    "GIT_TRACE_SHALLOW",
+    "GIT_TRACE_CURL",
+    "GIT_TRACE2",
+    "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF",
+}
+_GIT_TRACE_DISCLOSURE_ENVIRONMENT = {
+    "GIT_TRACE2_CONFIG_PARAMS",
+    "GIT_TRACE2_ENV_VARS",
+    "GIT_TRACE_REDACT",
+}
+_GIT_TRACE_ENVIRONMENT = (
+    _GIT_TRACE_TARGET_ENVIRONMENT | _GIT_TRACE_DISCLOSURE_ENVIRONMENT
+)
+
+
+def dangerous_git_trace_setting(name: str, value: str) -> bool:
+    """Return whether one Git trace setting can write or disclose secrets."""
+    normalized_name = git_environment_name(name)
+    normalized_value = restore_quoted_literal_markers(value).strip("'\"")
+    if normalized_name in _GIT_TRACE_TARGET_ENVIRONMENT:
+        expanded = expand_environment_references(normalized_value)
+        return expanded is None or token_mentions_secret_path(expanded)
+    if normalized_name in {"GIT_TRACE2_CONFIG_PARAMS", "GIT_TRACE2_ENV_VARS"}:
+        return bool(normalized_value)
+    if normalized_name == "GIT_TRACE_REDACT":
+        return normalized_value.lower() in {"0", "false", "no", "off"}
+    return False
+
+
+def git_trace_environment_mutations(raw: list[str]) -> list[tuple[str, str]]:
+    """Return trace environment name/value mutations from one shell segment."""
+    if not raw:
+        return []
+    mutations: list[tuple[str, str]] = []
+
+    def record_attached(token: str) -> bool:
+        if "=" not in token:
+            return False
+        name_token, value = token.split("=", 1)
+        name = git_environment_name(name_token)
+        if name not in _GIT_TRACE_ENVIRONMENT:
+            return False
+        mutations.append((name, value))
+        return True
+
+    first = raw[0].lower()
+    if _ASSIGN.match(raw[0]) or first.startswith(("$env:", "${env:")):
+        index = 0
+        while index < len(raw):
+            if record_attached(raw[index]):
+                index += 1
+                continue
+            if _ASSIGN.match(raw[index]):
+                index += 1
+                continue
+            name = git_environment_name(raw[index])
+            if (
+                name in _GIT_TRACE_ENVIRONMENT
+                and index + 2 < len(raw)
+                and raw[index + 1] == "="
+            ):
+                mutations.append((name, raw[index + 2]))
+            break
+        return mutations
+
+    if first in {"env", "export", "set", "setx"}:
+        index = 1
+        while index < len(raw):
+            if record_attached(raw[index]):
+                index += 1
+                continue
+            name = git_environment_name(raw[index])
+            if first == "setx" and name in _GIT_TRACE_ENVIRONMENT:
+                value = raw[index + 1] if index + 1 < len(raw) else ""
+                mutations.append((name, value))
+                index += 2
+                continue
+            index += 1
+        return mutations
+
+    if first in {"set-item", "new-item", "si", "ni"}:
+        for index, token in enumerate(raw[1:], start=1):
+            if record_attached(token):
+                continue
+            name = git_environment_name(token)
+            if name not in _GIT_TRACE_ENVIRONMENT:
+                continue
+            value_index = index + 1
+            if value_index < len(raw) and raw[value_index].lower() in {
+                "-value",
+                "-val",
+            }:
+                value_index += 1
+            value = raw[value_index] if value_index < len(raw) else ""
+            mutations.append((name, value))
+        return mutations
+    return mutations
+
+
+def dangerous_git_trace_environment_mutation(raw: list[str]) -> bool:
+    """Return whether a segment establishes an unsafe Git trace setting."""
+    return any(
+        dangerous_git_trace_setting(name, value)
+        for name, value in git_trace_environment_mutations(raw)
+    )
+
+
+def has_dangerous_git_trace_environment(raw: list[str]) -> bool:
+    """Inspect inherited and command-scoped Git trace settings."""
+    if any(
+        dangerous_git_trace_setting(name, value)
+        for name, value in os.environ.items()
+        if name.upper() in _GIT_TRACE_ENVIRONMENT
+    ):
+        return True
+    return dangerous_git_trace_environment_mutation(raw)
+
+
 def is_git_config_environment_name(token: str) -> bool:
     """Return whether a variable can inject arbitrary Git configuration."""
     name = git_environment_name(token)
@@ -1836,12 +1964,57 @@ def git_config_operation_is_read_only(
     return len(operands) <= 1
 
 
+_GIT_TRACE_TARGET_CONFIG = {
+    "trace2.normaltarget": "GIT_TRACE2",
+    "trace2.perftarget": "GIT_TRACE2_PERF",
+    "trace2.eventtarget": "GIT_TRACE2_EVENT",
+}
+_GIT_TRACE_DISCLOSURE_CONFIG = {"trace2.configparams", "trace2.envvars"}
+
+
+def dangerous_git_trace_config_mutation(
+    action: str,
+    options: list[str],
+    operands: list[str],
+    file_targets: list[str],
+) -> bool:
+    """Inspect persistent Trace2 settings without blocking ignored local config."""
+    persistent_scope = bool(file_targets) or any(
+        git_config_option_present(options, scope) for scope in {"--global", "--system"}
+    )
+    if not persistent_scope:
+        return False
+    if action == "rename-section" or git_config_option_present(
+        options, "--rename-section"
+    ):
+        return len(operands) > 1 and operands[1].lower() == "trace2"
+    if action in {"unset", "remove-section"} or any(
+        git_config_option_present(options, option)
+        for option in _GIT_CONFIG_REMOVAL_FLAGS
+    ):
+        return False
+    if git_config_operation_is_read_only(action, options, operands):
+        return False
+    if len(operands) < 2:
+        return False
+    key = operands[0].lower()
+    value = operands[1]
+    trace_environment = _GIT_TRACE_TARGET_CONFIG.get(key)
+    if trace_environment:
+        return dangerous_git_trace_setting(trace_environment, value)
+    if key in _GIT_TRACE_DISCLOSURE_CONFIG:
+        return bool(restore_quoted_literal_markers(value).strip("'\""))
+    return False
+
+
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
     action, options, operands, file_targets = parse_git_config_args(args)
     if action == "edit" or any(
         git_config_option_present(options, flag) for flag in _GIT_CONFIG_EDIT_FLAGS
     ):
+        return True
+    if dangerous_git_trace_config_mutation(action, options, operands, file_targets):
         return True
     if not git_config_operation_is_read_only(action, options, operands) and any(
         token_mentions_secret_path(target) for target in file_targets
@@ -2924,6 +3097,11 @@ def check(
         raw = strip_control_prefixes(raw)
         if not raw:
             continue
+        if dangerous_git_trace_environment_mutation(raw):
+            return (
+                "deny",
+                "Git trace settings cannot write to or disclose secret material.",
+            )
         if is_git_config_environment_mutation(raw):
             return (
                 "deny",
@@ -3267,6 +3445,11 @@ def check(
                 return (
                     "deny",
                     "Git process-launch environment overrides are opaque to floor inspection.",
+                )
+            if has_dangerous_git_trace_environment(raw):
+                return (
+                    "deny",
+                    "Git trace settings cannot write to or disclose secret material.",
                 )
             if active_git_process_environment:
                 return (
