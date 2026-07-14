@@ -560,6 +560,65 @@ def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
     return not quote and not escaped
 
 
+def inert_floor_assignment(segment: str, *, windows: bool) -> tuple[str, str] | None:
+    """Return one side-effect-free setup assignment, if the segment is one."""
+    if not is_safe_floor_invocation_segment(segment, windows=windows):
+        return None
+    pattern = (
+        r"(?is)^\s*\$([a-z_][a-z0-9_]*)\s*=\s*(.+?)\s*$"
+        if windows
+        else r"(?is)^\s*(?:export\s+)?([a-z_][a-z0-9_]*)=(.+?)\s*$"
+    )
+    match = re.fullmatch(pattern, segment)
+    if match is None:
+        return None
+    name, value = match.group(1).lower(), match.group(2)
+    if "$(" in value or (not windows and "`" in value):
+        return None
+    if windows and re.fullmatch(
+        r"(?is)join-path\s+\$env:[a-z_][a-z0-9_]*\s+(['\"])[^'\"]+\1",
+        value,
+    ):
+        return name, value
+
+    quote = ""
+    escaped = False
+    escape_character = "`" if windows else "\\"
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if quote:
+            if char == escape_character and quote != "'":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char.isspace() or (windows and char in "(){}[]"):
+            return None
+    if quote or escaped:
+        return None
+    return name, value
+
+
+def is_inert_floor_setup_segment(
+    segment: str, allowed_variables: set[str], *, windows: bool
+) -> bool:
+    assignment = inert_floor_assignment(segment, windows=windows)
+    if assignment is None:
+        return False
+    name, value = assignment
+    if name in allowed_variables:
+        return True
+    literal = value.strip()
+    if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
+        literal = literal[1:-1]
+    return bool(re.fullmatch(r"(?i)[0-9a-f]{64}", literal))
+
+
 def assigned_floor_variables(segments: list[str], marker: str) -> set[str]:
     """Find variables whose assignment statement binds a floor path marker."""
     result: set[str] = set()
@@ -679,17 +738,32 @@ def platform_project_floor_command(
     )
     wrapper_variables = assigned_floor_variables(segments, "invoke_deny_floor")
     interpreter_variables = assigned_floor_variables(segments, "py.exe")
-    invokes_floor = any(
-        is_safe_floor_invocation_segment(segment, windows=windows)
+    invocation_indexes = [
+        index
+        for index, segment in enumerate(segments)
+        if is_safe_floor_invocation_segment(segment, windows=windows)
         and (
             segment_invokes_direct_floor(
                 segment, dispatcher_variables, interpreter_variables
             )
             or segment_invokes_wrapper(segment, wrapper_variables)
         )
-        for segment in segments
+    ]
+    if len(invocation_indexes) != 1:
+        return False
+    invocation_index = invocation_indexes[0]
+    if invocation_index != len(segments) - 1:
+        return False
+    setup_segments = segments[:invocation_index]
+    allowed_variables = dispatcher_variables | wrapper_variables | interpreter_variables
+    if not all(
+        is_inert_floor_setup_segment(segment, allowed_variables, windows=windows)
+        for segment in setup_segments
+    ):
+        return False
+    return expected_pin is None or any(
+        command_binds_pin(segment, expected_pin) for segment in setup_segments
     )
-    return invokes_floor and command_binds_pin(inspected, expected_pin)
 
 
 def repo_codex_floor_candidates(current: str) -> list[Any]:
