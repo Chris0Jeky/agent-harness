@@ -1696,6 +1696,17 @@ _BUILTIN_GIT_MERGE_STRATEGIES = {
 
 def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
     """Return a reason when Git argv can select an arbitrary child process."""
+    if subcommand == "grep" and any(
+        token == "-O"
+        or token.startswith("-O")
+        or git_option_abbreviates(
+            token.lower().split("=", 1)[0],
+            "--open-files-in-pager",
+        )
+        for token in args
+        if token != "--"
+    ):
+        return "Git grep pager execution is floor-blocked."
     if subcommand in {"clone", "fetch", "ls-remote", "pull"} and (
         git_option_is_present(
             args,
@@ -2311,6 +2322,10 @@ def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
         return any(token in {"-e", "--edit"} for token in lowered)
     if subcommand == "config":
         return any(token in {"-e", "--edit"} for token in lowered)
+    if subcommand == "branch":
+        return any(
+            git_option_abbreviates(token, "--edit-description") for token in lowered
+        )
     return subcommand in _GIT_EDITOR_SUBCOMMANDS
 
 
