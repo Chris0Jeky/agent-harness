@@ -459,9 +459,9 @@ def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | 
 
 
 def curl_uses_remote_name(token: str) -> bool:
-    """Return whether a curl short-option cluster enables remote-name output."""
+    """Return whether a curl option enables remote-name output."""
     if not token.startswith("-") or token.startswith("--"):
-        return token == "--remote-name"
+        return token in {"--remote-name", "--remote-name-all"}
     for character in token[1:]:
         if character == "O":
             return True
