@@ -1696,6 +1696,7 @@ _BUILTIN_GIT_MERGE_STRATEGIES = {
 
 def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
     """Return a reason when Git argv can select an arbitrary child process."""
+    grep_option_args = args[: args.index("--")] if "--" in args else args
     if subcommand == "grep" and any(
         token == "-O"
         or token.startswith("-O")
@@ -1703,8 +1704,7 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             token.lower().split("=", 1)[0],
             "--open-files-in-pager",
         )
-        for token in args
-        if token != "--"
+        for token in grep_option_args
     ):
         return "Git grep pager execution is floor-blocked."
     if subcommand in {"clone", "fetch", "ls-remote", "pull"} and (

@@ -1743,6 +1743,8 @@ CASES = [
     ("git rm --dry-run .env", 1, {}, "allow"),
     ("git grep needle", 1, {}, "allow"),
     ("git grep -n needle", 1, {}, "allow"),
+    ("git grep -- -Osh", 1, {}, "allow"),
+    ("git grep -e needle -- -Osh", 1, {}, "allow"),
     ("New-Item -ItemType File notes.txt -Force", 1, {}, "allow"),
     ("New-Item -Path . -Name notes.txt -ItemType File", 1, {}, "allow"),
     ("Out-File -Width 200 report.txt", 1, {}, "allow"),
