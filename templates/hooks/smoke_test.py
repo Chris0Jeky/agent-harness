@@ -1759,6 +1759,7 @@ def main():
         if got != expected:
             failures.append((label, 2, sensitive_cfg["flags"], expected, got))
         print(f"  [{status}] expected={expected} got={got}  {label}")
+    asserted_sensitive_case_count = len(sensitive_remote_cases)
 
     remote_resolution_cases = [
         (
@@ -2050,6 +2051,24 @@ def main():
             None,
         )
     )
+    late_sensitive_cases = sensitive_remote_cases[asserted_sensitive_case_count:]
+    for label, got, expected in late_sensitive_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 2, sensitive_cfg["flags"], expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+    asserted_sensitive_case_count += len(late_sensitive_cases)
+    if asserted_sensitive_case_count != len(sensitive_remote_cases):
+        failures.append(
+            (
+                "unasserted sensitive remote cases",
+                2,
+                sensitive_cfg["flags"],
+                len(sensitive_remote_cases),
+                asserted_sensitive_case_count,
+            )
+        )
+
     for label, got, expected in remote_resolution_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
