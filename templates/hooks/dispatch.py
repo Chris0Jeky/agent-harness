@@ -2778,6 +2778,15 @@ def check(
                 )
 
             if sub == "push":
+                if any(
+                    token in {"--exec", "--receive-pack"}
+                    or token.startswith(("--exec=", "--receive-pack="))
+                    for token in args
+                ):
+                    return (
+                        "deny",
+                        "A custom git receive-pack program can execute commands outside floor inspection.",
+                    )
                 if not quote_aware and any(
                     re.search(r"[*?\[]", token) for token in raw_args
                 ):
