@@ -310,6 +310,97 @@ def has_dynamic_shell_token(token: str) -> bool:
     return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token))
 
 
+def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
+    """Recover a bounded literal Start-Process child command."""
+    parameters = {
+        "argumentlist": "arguments",
+        "filepath": "path",
+        "loaduserprofile": "switch",
+        "nonewwindow": "switch",
+        "passthru": "switch",
+        "usenewenvironment": "switch",
+        "wait": "switch",
+        "windowstyle": "value",
+    }
+    opaque_parameters = {
+        "credential",
+        "environment",
+        "redirectstandarderror",
+        "redirectstandardinput",
+        "redirectstandardoutput",
+        "verb",
+        "workingdirectory",
+    }
+
+    def parameter_name(token: str) -> tuple[str | None, str | None]:
+        raw = token.lstrip("-")
+        name, separator, attached = raw.partition(":")
+        matches = [
+            candidate
+            for candidate in parameters.keys() | opaque_parameters
+            if candidate.startswith(name.lower())
+        ]
+        if len(matches) != 1:
+            return None, None
+        return matches[0], attached if separator else None
+
+    executable = None
+    child_args: list[str] = []
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if token.startswith("@") or has_dynamic_shell_token(token):
+            return None, "Dynamic or splatted Start-Process arguments cannot be inspected safely."
+        if token.startswith("-"):
+            name, attached = parameter_name(token)
+            if name is None:
+                return None, "An unknown or ambiguous Start-Process parameter is opaque."
+            if name in opaque_parameters:
+                return None, f"Start-Process -{name} changes child execution outside floor inspection."
+            kind = parameters[name]
+            if kind == "switch":
+                if attached not in {None, "true", "false", "$true", "$false"}:
+                    return None, "A bound Start-Process switch value is opaque."
+                index += 1
+                continue
+            if attached is None:
+                if index + 1 >= len(toks):
+                    return None, f"Start-Process -{name} is missing its value."
+                attached = toks[index + 1]
+                index += 2
+            else:
+                index += 1
+            if (
+                not attached
+                or attached.startswith(("@", "("))
+                or has_dynamic_shell_token(attached)
+            ):
+                return None, f"Start-Process -{name} has an opaque value."
+            if kind == "path":
+                if executable is not None:
+                    return None, "Start-Process has multiple executable paths."
+                executable = attached
+            elif kind == "arguments":
+                child_args.extend(
+                    part.replace(_LITERAL_COMMA, ",")
+                    for part in attached.split(",")
+                    if part
+                )
+            continue
+        if executable is None:
+            executable = token
+        else:
+            child_args.extend(
+                part.replace(_LITERAL_COMMA, ",")
+                for part in token.split(",")
+                if part
+            )
+        index += 1
+    if not executable:
+        return None, "Start-Process has no literal executable path."
+    return shlex.join([executable, *child_args]), ""
+
+
 _DOWNLOADER_CLUSTER_PREFIXES = {
     # Short switches in these sets take no value, so a later output switch in
     # the same argv token still owns the remaining suffix.
@@ -2588,7 +2679,26 @@ def check(
                 "deny",
                 "sudo is blocked at the floor. If elevation is truly needed, the human runs it.",
             )
-        if head in {"start", "start-process", "saps"}:
+        if head in {"start-process", "saps"}:
+            child_command, error = powershell_start_process_command(toks)
+            if child_command is None:
+                return "deny", error
+            child_decision = check(
+                child_command,
+                tier_cfg,
+                project_dir,
+                current_cwd,
+                _depth + 1,
+                cwd_uncertain,
+                cwd_changed,
+                remote_resolver,
+                _remote_cache,
+                _remote_deadline,
+            )
+            if child_decision[0] != "allow":
+                return child_decision
+            continue
+        if head == "start":
             return (
                 "deny",
                 "A process launcher can conceal an irreversible child command. Run the child directly.",
