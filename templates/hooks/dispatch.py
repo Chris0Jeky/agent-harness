@@ -224,6 +224,43 @@ def has_dynamic_shell_token(token: str) -> bool:
     return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token))
 
 
+_DOWNLOADER_CLUSTER_PREFIXES = {
+    # Short switches in these sets take no value, so a later output switch in
+    # the same argv token still owns the remaining suffix.
+    "curl": frozenset("aqfGgI0k46jlLMnNZ#pJORSis231BvV"),
+    "wget": frozenset("VhbdqvFncNS46xErkKmpHL"),
+}
+
+
+def downloader_output_binding(head: str, token: str) -> tuple[bool, str | None]:
+    """Return a clustered downloader output switch and its attached value."""
+    if not token.startswith("-") or token.startswith("--"):
+        return False, None
+    markers = {"o"} if head == "curl" else {"o", "O"}
+    prefix_flags = _DOWNLOADER_CLUSTER_PREFIXES.get(head)
+    if prefix_flags is None:
+        return False, None
+    body = token[1:]
+    for index, character in enumerate(body):
+        if character in markers:
+            return True, body[index + 1 :] or None
+        if character not in prefix_flags:
+            return False, None
+    return False, None
+
+
+def curl_uses_remote_name(token: str) -> bool:
+    """Return whether a curl short-option cluster enables remote-name output."""
+    if not token.startswith("-") or token.startswith("--"):
+        return token == "--remote-name"
+    for character in token[1:]:
+        if character == "O":
+            return True
+        if character not in _DOWNLOADER_CLUSTER_PREFIXES["curl"]:
+            return False
+    return False
+
+
 _QUOTED_HEREDOC = re.compile(
     r"<<(?P<tabs>-)?\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")"
 )
@@ -2953,19 +2990,25 @@ def check(
                 "-outfile",
                 "outfile",
             }
+            explicit_output = False
+            remote_name_output = head == "wget"
             for index, token in enumerate(toks[1:], start=1):
                 lowered = token.lower()
                 attached_target = None
+                clustered_output, clustered_target = downloader_output_binding(
+                    head,
+                    token,
+                )
+                if head == "curl" and curl_uses_remote_name(token):
+                    remote_name_output = True
                 if lowered.startswith(("--output=", "--output-document=")):
                     attached_target = token.split("=", 1)[1]
                 elif lowered.startswith("-outfile:"):
                     attached_target = token.split(":", 1)[1]
-                elif head == "curl" and token.startswith("-o") and len(token) > 2:
-                    attached_target = token[2:]
-                elif (
-                    head == "wget" and token.startswith(("-O", "-o")) and len(token) > 2
-                ):
-                    attached_target = token[2:]
+                elif clustered_output and clustered_target is not None:
+                    attached_target = clustered_target
+                if attached_target is not None or clustered_output:
+                    explicit_output = True
                 if attached_target is not None:
                     if has_dynamic_shell_token(
                         attached_target
@@ -2979,7 +3022,9 @@ def check(
                             "deny",
                             "Downloading into a secret-looking file is floor-blocked.",
                         )
-                if lowered in output_flags and index + 1 < len(toks):
+                if (
+                    lowered in output_flags or clustered_output
+                ) and clustered_target is None and index + 1 < len(toks):
                     target = toks[index + 1]
                     if is_dynamic_value(target) or target.startswith("("):
                         return (
@@ -2990,6 +3035,13 @@ def check(
                         return (
                             "deny",
                             "Downloading into a secret-looking file is floor-blocked.",
+                        )
+            if remote_name_output and not (head == "wget" and explicit_output):
+                for token in toks[1:]:
+                    if "://" in token and token_mentions_secret_path(token):
+                        return (
+                            "deny",
+                            "A remote-name download would create a secret-looking file.",
                         )
         if head == "export-clixml" and any(
             token_mentions_secret_path(token) for token in toks[1:]
