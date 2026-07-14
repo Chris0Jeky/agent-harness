@@ -5107,6 +5107,8 @@ def check(
             if head in {"new-item", "ni"}:
                 path_parameters.add("name")
                 value_parameters.update({"itemtype", "type", "value"})
+            if head in {"rename-item", "ren", "rni"}:
+                path_parameters.add("newname")
             if head in {
                 "set-content",
                 "sc",
