@@ -970,10 +970,18 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
     return False
 
 
-def git_option_abbreviates(token: str, dangerous: str) -> bool:
+def git_option_abbreviates(
+    token: str,
+    dangerous: str,
+    min_prefix: int = 2,
+) -> bool:
     """Git accepts unambiguous long-option prefixes; fail closed on them."""
     option = token.split("=", 1)[0]
-    return option.startswith("--") and len(option) >= 4 and dangerous.startswith(option)
+    return (
+        option.startswith("--")
+        and len(option) >= 2 + min_prefix
+        and dangerous.startswith(option)
+    )
 
 
 _GIT_PUSH_VALUE_LONG_OPTIONS = {
@@ -2699,7 +2707,8 @@ def check(
                         )
 
             if sub == "reset" and any(
-                token == "--hard" or git_option_abbreviates(token, "--hard")
+                token == "--hard"
+                or git_option_abbreviates(token, "--hard", min_prefix=1)
                 for token in args
             ):
                 if strict:
@@ -2715,7 +2724,7 @@ def check(
 
             if sub == "clean" and any(
                 t == "--force"
-                or git_option_abbreviates(t, "--force")
+                or git_option_abbreviates(t, "--force", min_prefix=1)
                 or bool(re.match(r"^-[a-zA-Z]*f", t))
                 for t in args
             ):
@@ -2749,7 +2758,7 @@ def check(
             )
             restore_worktree = any(
                 token == "--worktree"
-                or git_option_abbreviates(token, "--worktree")
+                or git_option_abbreviates(token, "--worktree", min_prefix=1)
                 or bool(re.fullmatch(r"-[A-Za-z]*W[A-Za-z]*", token))
                 for token in args
             )
