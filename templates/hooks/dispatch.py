@@ -56,6 +56,11 @@ def has_shell_expansion_marker(value: str) -> bool:
     return any(char in {"$", "`"} for char in value)
 
 
+def has_cmd_expansion_marker(value: str) -> bool:
+    """Return whether cmd.exe can expand an environment reference."""
+    return bool(re.search(r"%[^%]+%|![^!]+!", value))
+
+
 def inert_quoted_value(token: str) -> str | None:
     """Return an inert quote's shell value; None means expansion stays visible."""
     if token.startswith("$'"):
@@ -108,7 +113,14 @@ def strip_quotes(text: str) -> tuple[str, dict[str, str]]:
     placeholders: dict[str, str] = {}
 
     def replace(match: "re.Match[str]") -> str:
-        value = inert_quoted_value(match.group(0))
+        token = match.group(0)
+        if (
+            token.startswith('"')
+            and has_cmd_expansion_marker(token[1:-1])
+            and re.search(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*$", text[: match.start()])
+        ):
+            return token
+        value = inert_quoted_value(token)
         if value is None:
             return match.group(0)
         placeholder = f"{prefix}{len(placeholders)}__"
@@ -2033,7 +2045,7 @@ def check(
     sanitized, inert_placeholders = strip_quotes(command)
     for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
         redirect_target = full_redirect.group(1).strip("'\"")
-        if is_dynamic_value(redirect_target) or redirect_target.startswith("("):
+        if has_dynamic_shell_token(redirect_target) or redirect_target.startswith("("):
             return "deny", "A dynamic redirect target cannot be inspected safely."
         if is_secret_path(redirect_target):
             return (
@@ -2926,7 +2938,10 @@ def check(
         # ---- sensitive_data overlay ----
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":
-                if any(t in ("--public", "-p") for t in toks):
+                if any(
+                    t.lower() in {"--public", "-p", "--public=true", "-p=true"}
+                    for t in toks
+                ):
                     return (
                         "deny",
                         "sensitive_data repo: creating PUBLIC repos/gists is blocked.",
@@ -2950,10 +2965,14 @@ def check(
                 has_fields = False
                 for index, token in enumerate(toks[2:], start=2):
                     lowered = token.lower()
-                    if lowered in {"-x", "--method"} and index + 1 < len(toks):
+                    clustered_method = re.fullmatch(r"-i*[xX](?:=?([A-Za-z]+))?", token)
+                    if clustered_method:
+                        method = (
+                            clustered_method.group(1)
+                            or (toks[index + 1] if index + 1 < len(toks) else "")
+                        ).upper()
+                    elif lowered in {"-x", "--method"} and index + 1 < len(toks):
                         method = toks[index + 1].upper()
-                    elif lowered.startswith("-x") and len(token) > 2:
-                        method = token[2:].lstrip("=").upper()
                     elif lowered.startswith("--method="):
                         method = token.split("=", 1)[1].upper()
                     elif lowered in {"-f", "-F", "--raw-field", "--field", "--input"}:

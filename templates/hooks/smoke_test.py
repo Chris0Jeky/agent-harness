@@ -239,6 +239,8 @@ CASES = [
     ("del C:/keys/id_rsa", 1, {}, "deny"),
     # --- sensitive_data overlay ---
     ("gh repo create leak --public", 1, {"sensitive_data": True}, "deny"),
+    ("gh repo create leak --public=true", 1, {"sensitive_data": True}, "deny"),
+    ("gh gist create notes.md -p=true", 1, {"sensitive_data": True}, "deny"),
     ("gh gist create notes.md --public", 1, {"sensitive_data": True}, "deny"),
     ("gh repo create keep --private", 1, {"sensitive_data": True}, "allow"),
     # --- work-loss guards: tier-dependent, NOT floor ---
@@ -824,6 +826,7 @@ CASES = [
         "deny",
     ),
     ("gh api -XPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
+    ("gh api -iXPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
     (
         "gh api -XDELETE /repos/example/private",
         1,
@@ -839,6 +842,8 @@ CASES = [
     ("bash < <(printf 'git push --force origin main')", 1, {}, "deny"),
     ("bash <(printf 'rm -rf /critical/outside')", 1, {}, "deny"),
     ("dash -c 'git push --force origin main'", 1, {}, "deny"),
+    ('echo secret > "%TARGET%"', 1, {}, "deny"),
+    ('cmd /c "echo secret > %TARGET%"', 1, {}, "deny"),
     (
         "git config --remove-section --file --get-a remote.origin",
         1,
@@ -877,6 +882,11 @@ CASES = [
     ('cmd /c"git status"', 1, {}, "allow"),
     ("dash -c 'git status'", 1, {}, "allow"),
     ("gh api -XGET /user", 1, {"sensitive_data": True}, "allow"),
+    ("gh api -iXGET /user", 1, {"sensitive_data": True}, "allow"),
+    ("gh repo create keep --public=false", 1, {"sensitive_data": True}, "allow"),
+    ("gh gist create notes.md -p=false", 1, {"sensitive_data": True}, "allow"),
+    ('git commit -m "document echo > %TARGET%"', 1, {}, "allow"),
+    ('echo safe > "report%20.txt"', 1, {}, "allow"),
     ("export PATH", 1, {}, "allow"),
     ("cd src && rm -rf build", 1, {}, "allow"),
     ("Set-Location src && Remove-Item -Recurse build", 1, {}, "allow"),
