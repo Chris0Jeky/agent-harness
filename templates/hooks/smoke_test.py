@@ -1169,6 +1169,32 @@ CASES = [
     ("curl -q --alt-svc .env https://example.invalid/report.txt", 1, {}, "deny"),
     ("curl -q --hsts .env https://example.invalid/report.txt", 1, {}, "deny"),
     (
+        "curl -q --trace trace.txt --trace .env " "https://example.invalid/report.txt",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q --cookie-jar cookies.txt --cookie-jar .env "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q --cookie-jar .env https://example.invalid/one "
+        "--next --cookie-jar cookies.txt https://example.invalid/two",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q --trace - --next --trace .env " "https://example.invalid/report.txt",
+        1,
+        {},
+        "deny",
+    ),
+    (
         "curl -q --ssl-sessions .env https://example.invalid/report.txt",
         1,
         {},
@@ -1621,6 +1647,12 @@ CASES = [
         "allow",
     ),
     (
+        "curl -q --no-out-null -O https://example.invalid/.env",
+        1,
+        {},
+        "allow",
+    ),
+    (
         "curl -q -O https://example.invalid/report.txt -o - "
         "https://example.invalid/.env",
         1,
@@ -1692,6 +1724,102 @@ CASES = [
     ),
     (
         "curl -q -w '%%output{.env}' https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --trace .env --trace - https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --trace .env --next --trace - " "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --libcurl .env --libcurl - " "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --stderr .env --stderr - https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --cookie-jar .env --cookie-jar cookies.txt "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --etag-save .env --etag-save etag.txt "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --dump-header .env --dump-header - "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --ssl-sessions .env --ssl-sessions sessions.txt "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --alt-svc .env --alt-svc cache.txt "
+        "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --hsts .env --hsts cache.txt " "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q -c.env -ccookies.txt https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --write-out '%output{.env}' "
+        "--write-out '%{http_code}' https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --expand-output report.txt https://example.invalid/data",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --expand-output-dir out -O " "https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --expand-alt-svc cache.txt " "https://example.invalid/report.txt",
         1,
         {},
         "allow",

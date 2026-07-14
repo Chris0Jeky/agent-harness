@@ -624,6 +624,9 @@ _CURL_SIDE_OUTPUT_OPTIONS = frozenset(
         "--trace-ascii",
     }
 )
+_CURL_GLOBAL_SIDE_OUTPUT_OPTIONS = frozenset(
+    {"--libcurl", "--stderr", "--trace", "--trace-ascii"}
+)
 _CURL_OUTPUT_GLOB = re.compile(r"#(?:\d+|<[A-Za-z0-9]+>)")
 _CURL_URL_BRACE_GLOB = re.compile(
     r"\{(?:<(?P<name>[A-Za-z0-9]+)>)?(?P<values>[^{}]*,[^{}]*)\}"
@@ -801,6 +804,14 @@ def curl_side_output_risk(option: str, target: str | None) -> str:
     return ""
 
 
+def curl_expanded_value_is_dynamic(target: str | None) -> bool:
+    """Return whether a curl --expand-* value has unresolved interpolation."""
+    if target is None:
+        return True
+    restored = restore_quoted_literal_markers(target)
+    return bool(re.search(r"(?<!\\)\{\{", restored))
+
+
 def curl_secret_output_risk(toks: list[str]) -> str:
     """Return a deny reason when native curl can write an unproven path."""
 
@@ -821,8 +832,45 @@ def curl_secret_output_risk(toks: list[str]) -> str:
     output_dir: str | None = None
     output_dir_dynamic = False
     globbing = True
+    side_outputs: dict[str, tuple[str, str | None, bool]] = {}
+    global_side_outputs: dict[str, tuple[str, str | None, bool]] = {}
+    write_out: tuple[str | None, bool] | None = None
+
+    def remember_side_output(
+        option: str,
+        target: str | None,
+        dynamic: bool = False,
+    ) -> None:
+        key = "--trace" if option in {"--trace", "--trace-ascii"} else option
+        outputs = (
+            global_side_outputs
+            if option in _CURL_GLOBAL_SIDE_OUTPUT_OPTIONS
+            else side_outputs
+        )
+        outputs[key] = (option, target, dynamic)
+
+    def inspect_side_outputs(
+        outputs: dict[str, tuple[str, str | None, bool]],
+    ) -> str:
+        for option, target, dynamic in outputs.values():
+            if dynamic:
+                return f"An expanded curl {option} target is opaque."
+            reason = curl_side_output_risk(option, target)
+            if reason:
+                return reason
+        return ""
 
     def inspect_group() -> str:
+        reason = inspect_side_outputs(side_outputs)
+        if reason:
+            return reason
+        if write_out is not None:
+            format_value, dynamic = write_out
+            if dynamic:
+                return "An expanded curl write-out format cannot be inspected safely."
+            reason = curl_write_out_risk(format_value)
+            if reason:
+                return reason
         for url_index, url in enumerate(urls):
             selector, target = (
                 selectors[url_index]
@@ -874,6 +922,7 @@ def curl_secret_output_risk(toks: list[str]) -> str:
     def reset_group():
         nonlocal selectors, urls, remote_name_all
         nonlocal remote_header_name, output_dir, output_dir_dynamic, globbing
+        nonlocal side_outputs, write_out
         selectors = []
         urls = []
         remote_name_all = False
@@ -881,6 +930,8 @@ def curl_secret_output_risk(toks: list[str]) -> str:
         output_dir = None
         output_dir_dynamic = False
         globbing = True
+        side_outputs = {}
+        write_out = None
 
     index = 0
     options_ended = False
@@ -936,20 +987,20 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             globbing = canonical_option == "--no-globoff"
             index += 1
             continue
-        if canonical_option == "--out-null":
+        if canonical_option in {"--out-null", "--no-out-null"}:
             selectors.append(("stdout", None))
             index += 1
             continue
         if canonical_option == "--output":
-            if expanded:
-                return "An expanded curl output destination cannot be inspected safely."
             target, index = next_value(index, bound_value)
+            if expanded and curl_expanded_value_is_dynamic(target):
+                return "An expanded curl output destination cannot be inspected safely."
             selectors.append(("stdout", None) if target == "-" else ("file", target))
             index += 1
             continue
         if canonical_option == "--output-dir":
             output_dir, index = next_value(index, bound_value)
-            output_dir_dynamic = expanded
+            output_dir_dynamic = expanded and curl_expanded_value_is_dynamic(output_dir)
             index += 1
             continue
         if canonical_option == "--url":
@@ -960,7 +1011,7 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             if (
                 target is None
                 or is_dynamic_value(target)
-                or (expanded and re.search(r"(?<!\\)\{\{", restored_target))
+                or (expanded and curl_expanded_value_is_dynamic(restored_target))
             ):
                 return "A dynamic curl URL may activate opaque URL-file output."
             if restored_target.startswith("@"):
@@ -970,20 +1021,19 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             continue
         if canonical_option == "--write-out":
             target, index = next_value(index, bound_value)
-            if expanded:
-                return "An expanded curl write-out format cannot be inspected safely."
-            reason = curl_write_out_risk(target)
-            if reason:
-                return reason
+            write_out = (
+                target,
+                expanded and curl_expanded_value_is_dynamic(target),
+            )
             index += 1
             continue
         if canonical_option in _CURL_SIDE_OUTPUT_OPTIONS:
             target, index = next_value(index, bound_value)
-            if expanded:
-                return f"An expanded curl {canonical_option} target is opaque."
-            reason = curl_side_output_risk(canonical_option, target)
-            if reason:
-                return reason
+            remember_side_output(
+                canonical_option,
+                target,
+                expanded and curl_expanded_value_is_dynamic(target),
+            )
             index += 1
             continue
         if canonical_option in _CURL_LONG_OPTIONS_WITH_VALUE:
@@ -1029,13 +1079,12 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                             ("stdout", None) if target == "-" else ("file", target)
                         )
                     elif marker in {"c", "D"}:
-                        reason = curl_side_output_risk(f"-{marker}", target)
-                        if reason:
-                            return reason
+                        remember_side_output(
+                            "--cookie-jar" if marker == "c" else "--dump-header",
+                            target,
+                        )
                     elif marker == "w":
-                        reason = curl_write_out_risk(target)
-                        if reason:
-                            return reason
+                        write_out = (target, False)
                     break
                 offset += 1
             index += 1
@@ -1044,7 +1093,8 @@ def curl_secret_output_risk(toks: list[str]) -> str:
         urls.append(None if is_dynamic_value(token) else token)
         index += 1
 
-    return inspect_group()
+    reason = inspect_group()
+    return reason or inspect_side_outputs(global_side_outputs)
 
 
 _QUOTED_HEREDOC = re.compile(
