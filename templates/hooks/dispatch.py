@@ -630,6 +630,35 @@ def is_secret_path(target: str) -> bool:
     return any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES)
 
 
+def brace_expansion_mentions_secret_path(token: str) -> bool:
+    """Expand bounded, unquoted Bash comma braces before checking destinations."""
+    if _LITERAL_COMMA in token:
+        return False
+    variants = [token]
+    expanded = False
+    while True:
+        next_variants = []
+        changed = False
+        for variant in variants:
+            match = re.search(r"\{([^{}]*,[^{}]*)\}", variant)
+            if match is None:
+                next_variants.append(variant)
+                continue
+            changed = True
+            expanded = True
+            alternatives = match.group(1).split(",")
+            if len(next_variants) + len(alternatives) > 64:
+                return True
+            next_variants.extend(
+                variant[: match.start()] + alternative + variant[match.end() :]
+                for alternative in alternatives
+            )
+        variants = next_variants
+        if not changed:
+            break
+    return expanded and any(is_secret_path(variant) for variant in variants)
+
+
 def token_mentions_secret_path(token: str) -> bool:
     """Return True when a shell token embeds a secret-looking path.
 
@@ -637,10 +666,16 @@ def token_mentions_secret_path(token: str) -> bool:
     (``of=.env``, ``-OutFile:.env``, ``WriteAllText('.env', ...)``).  Split
     those syntactic wrappers before applying the canonical path predicate.
     """
+    if brace_expansion_mentions_secret_path(token):
+        return True
+    literal_comma = _LITERAL_COMMA in token
     normalized = token.replace(_LITERAL_COMMA, ",")
     candidates = [normalized]
+    wrapper_pattern = r"[=:()]" if literal_comma else r"[=,:()]"
     candidates.extend(
-        part.strip("'\"[]{}() ;") for part in re.split(r"[=,:()]", normalized) if part
+        part.strip("'\"[]{}() ;")
+        for part in re.split(wrapper_pattern, normalized)
+        if part
     )
     return any(candidate and is_secret_path(candidate) for candidate in candidates)
 
@@ -2314,7 +2349,7 @@ def check(
         redirect_target = full_redirect.group(1).strip("'\"")
         if has_dynamic_shell_token(redirect_target) or redirect_target.startswith("("):
             return "deny", "A dynamic redirect target cannot be inspected safely."
-        if is_secret_path(redirect_target):
+        if token_mentions_secret_path(redirect_target):
             return (
                 "deny",
                 f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
@@ -3129,7 +3164,11 @@ def check(
                     index += 1
                     continue
                 if token.lower() not in {"/s", "/q", "/f"}:
-                    positional_groups.append(token.split(","))
+                    positional_groups.append(
+                        [token]
+                        if re.search(r"\{[^{}]*,[^{}]*\}", token)
+                        else token.split(",")
+                    )
                 index += 1
 
             positional = [item for group in positional_groups for item in group]
@@ -3158,7 +3197,7 @@ def check(
                         "deny",
                         "A dynamic secret-mutation target cannot be inspected safely.",
                     )
-                if is_secret_path(target):
+                if token_mentions_secret_path(target):
                     return (
                         "deny",
                         f"Mutating a secret-looking file ({target}) is floor-blocked. The human manages secrets.",
@@ -3281,14 +3320,14 @@ def check(
             return "deny", "A file API write to a secret-looking path is floor-blocked."
         if quote_aware:
             for index, token in enumerate(raw[:-1]):
-                if token in (">", ">>") and is_secret_path(raw[index + 1]):
+                if token in (">", ">>") and token_mentions_secret_path(raw[index + 1]):
                     return (
                         "deny",
                         f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
                     )
         else:
             redir = re.search(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", segment_text)
-            if redir and is_secret_path(redir.group(1)):
+            if redir and token_mentions_secret_path(redir.group(1)):
                 return (
                     "deny",
                     f"Redirecting output into a secret-looking file ({redir.group(1)}) is floor-blocked.",
