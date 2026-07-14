@@ -955,38 +955,50 @@ _GIT_PUSH_VALUE_LONG_OPTIONS = {
     "--repo",
 }
 
-_SHARED_BRANCH_NAMES = {
-    "dev",
-    "develop",
-    "development",
-    "main",
-    "master",
-    "prod",
-    "production",
-    "release",
-    "stable",
-    "staging",
-    "trunk",
+_FEATURE_BRANCH_ROOTS = {
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "feature",
+    "fix",
+    "infra",
+    "perf",
+    "refactor",
+    "security",
+    "test",
+    "tests",
 }
+_AUTOMATION_BRANCH_ROOTS = {"dependabot", "renovate"}
+_SAFE_BRANCH_SUFFIX = re.compile(r"[A-Za-z0-9._@-]+(?:/[A-Za-z0-9._@-]+)*")
 
 
-def force_with_lease_targets_shared(refspecs: list[str]) -> bool:
-    """Reject lease updates whose explicit destination is shared or ambiguous."""
-    for refspec in refspecs:
-        candidate = refspec.lstrip("+")
-        if ":" in candidate:
-            _source, target = candidate.rsplit(":", 1)
-        else:
-            target = candidate
-        target = target.removeprefix("refs/heads/").strip("/").lower()
-        if (
-            not target
-            or target in {"@", "head"}
-            or target in _SHARED_BRANCH_NAMES
-            or target.startswith("release/")
-        ):
-            return True
-    return False
+def force_with_lease_target_is_feature(refspec: str) -> bool:
+    """Allow leases only when the destination is positively a feature ref."""
+    candidate = refspec.lstrip("+")
+    if ":" in candidate:
+        _source, target = candidate.rsplit(":", 1)
+    else:
+        target = candidate
+    if target.startswith("refs/") and not target.startswith("refs/heads/"):
+        return False
+    target = target.removeprefix("refs/heads/").strip("/")
+    root, separator, suffix = target.partition("/")
+    root = root.lower()
+    if root in _FEATURE_BRANCH_ROOTS:
+        return not separator or bool(_SAFE_BRANCH_SUFFIX.fullmatch(suffix))
+    return (
+        root in _AUTOMATION_BRANCH_ROOTS
+        and bool(separator)
+        and bool(_SAFE_BRANCH_SUFFIX.fullmatch(suffix))
+    )
+
+
+def force_with_lease_targets_are_features(refspecs: list[str]) -> bool:
+    """Return whether every explicit lease destination is a feature ref."""
+    return bool(refspecs) and all(
+        force_with_lease_target_is_feature(refspec) for refspec in refspecs
+    )
 
 
 def abbreviated_git_push_value_option(token: str) -> bool:
@@ -1121,7 +1133,7 @@ def dangerous_git_config_mutation(args: list[str]) -> bool:
             index
             for index, token in enumerate(operands)
             if re.fullmatch(r"alias\.[^.]+", token)
-            or re.fullmatch(r"remote\.[^.]+\.(?:url|pushurl|push|mirror)", token)
+            or re.fullmatch(r"remote\..+\.(?:url|pushurl|push|mirror)", token)
             or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
             or re.fullmatch(r"include(?:if)?\..+", token)
             or token == "push.recursesubmodules"
@@ -2432,6 +2444,13 @@ def check(
                 )
 
             if sub == "push":
+                if quote_aware and any(
+                    re.search(r"\{[^{}]*,[^{}]*\}", token) for token in args
+                ):
+                    return (
+                        "deny",
+                        "Brace-expanded git-push arguments cannot be inspected safely.",
+                    )
                 if any(has_dynamic_shell_token(token) for token in args):
                     return (
                         "deny",
@@ -2449,6 +2468,7 @@ def check(
                         "sensitive_data repo: recursive submodule pushes have additional destinations.",
                     )
                 lease_requested = False
+                lease_selectors = []
                 for t in args:
                     short_flags, _short_consumes_next = git_push_short_option_shape(t)
                     dangerous_options = {
@@ -2478,6 +2498,10 @@ def check(
                                 "T4/wave: no force variants at all — other work rides on these refs.",
                             )
                         lease_requested = True
+                        if t.startswith("--force-with-lease="):
+                            selector = t.split("=", 1)[1].split(":", 1)[0]
+                            if selector:
+                                lease_selectors.append(selector)
                         continue
                     if "f" in short_flags:
                         return (
@@ -2529,7 +2553,11 @@ def check(
                     )
                 if lease_requested and (
                     explicit_selector
-                    or force_with_lease_targets_shared(positionals[1:])
+                    or not force_with_lease_targets_are_features(positionals[1:])
+                    or (
+                        lease_selectors
+                        and not force_with_lease_targets_are_features(lease_selectors)
+                    )
                 ):
                     return (
                         "deny",
@@ -2576,7 +2604,10 @@ def check(
                             f"sensitive_data repo: could not verify push remote privacy ({remote}).",
                         )
 
-            if sub == "reset" and "--hard" in args:
+            if sub == "reset" and any(
+                token == "--hard" or git_option_abbreviates(token, "--hard")
+                for token in args
+            ):
                 if strict:
                     return (
                         "deny",
@@ -2589,7 +2620,10 @@ def check(
                     )
 
             if sub == "clean" and any(
-                t == "--force" or bool(re.match(r"^-[a-zA-Z]*f", t)) for t in args
+                t == "--force"
+                or git_option_abbreviates(t, "--force")
+                or bool(re.match(r"^-[a-zA-Z]*f", t))
+                for t in args
             ):
                 if strict:
                     return (
@@ -2613,7 +2647,23 @@ def check(
                             "T3: checkout -- . wipes local modifications. Confirm.",
                         )
 
-            if sub == "restore" and "." in args and "--staged" not in args:
+            restore_staged = any(
+                token == "--staged"
+                or git_option_abbreviates(token, "--staged")
+                or bool(re.fullmatch(r"-[A-Za-z]*S[A-Za-z]*", token))
+                for token in args
+            )
+            restore_worktree = any(
+                token == "--worktree"
+                or git_option_abbreviates(token, "--worktree")
+                or bool(re.fullmatch(r"-[A-Za-z]*W[A-Za-z]*", token))
+                for token in args
+            )
+            if (
+                sub == "restore"
+                and "." in args
+                and (not restore_staged or restore_worktree)
+            ):
                 if strict:
                     return (
                         "deny",
