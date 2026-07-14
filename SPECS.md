@@ -120,23 +120,18 @@ here.` / `Live successor: <path or "none">`.
 
 ## §5 Dispatcher hook wiring
 
-One script per EVENT, not stacked matchers (kills the double-process spawn per shell call).
-Claude uses its native wiring below; Codex uses `templates/codex/hooks.json`, rendered with an
-absolute dispatcher path by `harness.py sync-global`.
+The shared dispatcher owns exactly one event: the global `PreToolUse(Bash)` deny floor. Claude
+and Codex each wire that event once through their native hook contract; Codex uses
+`templates/codex/hooks.json`, rendered with an absolute dispatcher path by `harness.py
+sync-global`. Repo-tier lifecycle hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`,
+and `Stop`) are separate, repo-owned executables when a tier actually implements them. Never
+route those events through the floor dispatcher or stack a second floor matcher.
 
 ```json
 {
   "hooks": {
-    "PreToolUse":         [{ "matcher": "Bash", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event pre",  "timeout": 5 }] }],
-    "PostToolUse":        [{ "matcher": "Bash|Edit|Write", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event post", "timeout": 5 }] }],
-    "PostToolUseFailure": [{ "matcher": "Bash|Edit|Write|mcp__.*", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event failure", "timeout": 10 }] }],
-    "SessionStart":       [{ "matcher": "", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event session-start", "timeout": 5 }] }],
-    "Stop":               [{ "matcher": "", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event stop", "timeout": 15 }] }]
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command",
+      "command": "python \"$HOME/.claude/hooks/dispatch.py\" --event pre", "timeout": 5 }] }]
   }
 }
 ```
@@ -162,15 +157,19 @@ absolute dispatcher path by `harness.py sync-global`.
 - Codex hook commands must pass `--runtime codex`. Codex 0.144.1 does not support the Claude
   `ask` decision, so the dispatcher conservatively translates `ask` to `deny`; Claude wiring
   omits the flag and retains interactive `ask` behavior.
-- **Fail-closed contract**: an unhandled exception in the PRE path returns deny-with-message
-  ("dispatcher error — floor unavailable, fix hooks before proceeding"); POST/session paths
-  fail open with a warning (nudges are not safety).
+- **Fail-closed contract**: after a Bash payload and authority context are identified, an
+  unhandled PRE rule-evaluation error returns deny-with-message ("dispatcher error — floor
+  unavailable, fix hooks before proceeding"). Unparseable stdin cannot identify a tool or
+  command and therefore exits without a decision; installation checks and live canaries must
+  detect that wiring failure. Non-PRE events exit immediately because this dispatcher does not
+  own lifecycle nudges.
 - The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`). `harness.py seed`
   writes only the runtime-neutral tier declaration. `harness.py sync-global` reports Codex global
   drift in dry-run mode and installs reviewed copies only with explicit `--apply`; project hook
   adapters remain repo-owned.
-- Self-tested: `python templates/hooks/smoke_test.py` runs the §6 matrix
-  + one allow-case per event. A floor/dispatcher change is T4-class work in any repo.
+- Self-tested: `python templates/hooks/smoke_test.py` runs the §6 allow/deny matrix plus payload,
+  authority, runtime-adapter, and remote-resolution regressions for the PRE event. A
+  floor/dispatcher change is T4-class work in any repo.
   The matrix defines a bounded parser contract, not exhaustive shell-language coverage. The
   dispatcher is a defense-in-depth tripwire, not a shell sandbox or a substitute for runtime/OS
   permissions, restricted toolsets, and branch protection.
