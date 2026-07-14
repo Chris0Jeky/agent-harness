@@ -2117,11 +2117,40 @@ def strip_control_prefixes(raw: list[str]) -> list[str]:
     return result
 
 
+def compound_pipeline_closer(raw: list[str]) -> str | None:
+    """Return the closer for a compound command that shares pipeline stdin."""
+    if not raw:
+        return None
+    first = raw[0].lower()
+    if first == "{" or first.startswith("{"):
+        return "}"
+    if first.startswith("("):
+        return ")"
+    if first in {"if"}:
+        return "fi"
+    if first in {"for", "select", "until", "while"}:
+        return "done"
+    if first == "case":
+        return "esac"
+    return None
+
+
+def stage_closes_compound(raw: list[str], closer: str) -> bool:
+    if closer in {"}", ")"}:
+        return any(token.endswith(closer) for token in raw)
+    return any(token.lower() == closer for token in raw)
+
+
 def has_download_pipe_to_shell(command: str) -> bool:
     """Recognize pipeline endpoints after path/wrapper normalization."""
     download_seen = False
-    for stage, operator_after in quote_aware_segments_with_operators(command):
-        stage = strip_control_prefixes(stage)
+    compound_closers: list[str] = []
+    for raw_stage, operator_after in quote_aware_segments_with_operators(command):
+        if download_seen:
+            closer = compound_pipeline_closer(raw_stage)
+            if closer is not None:
+                compound_closers.append(closer)
+        stage = strip_control_prefixes(raw_stage)
         assignment_rhs = powershell_assignment_rhs(stage)
         if assignment_rhs is not None and not inert_powershell_scriptblock(
             assignment_rhs
@@ -2166,7 +2195,12 @@ def has_download_pipe_to_shell(command: str) -> bool:
             "invoke-restmethod",
         }:
             download_seen = True
-        if operator_after not in {"|", "|&"}:
+        if compound_closers and stage_closes_compound(
+            raw_stage,
+            compound_closers[-1],
+        ):
+            compound_closers.pop()
+        if operator_after not in {"|", "|&"} and not compound_closers:
             download_seen = False
     return False
 
