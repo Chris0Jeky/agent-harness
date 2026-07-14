@@ -1054,6 +1054,28 @@ CASES = [
     ("curl -q -OJ https://example.invalid/report.txt", 1, {}, "deny"),
     ("curl -q --url @urls.txt", 1, {}, "deny"),
     (
+        "curl -q --tls-earlydata -O https://example.invalid/.env",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q --sigalgs ecdsa_secp256r1_sha256 -O " "https://example.invalid/.env",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "curl -q --knownhosts known_hosts -O sftp://example.invalid/.env",
+        1,
+        {},
+        "deny",
+    ),
+    ("curl -q --krb4 private -O https://example.invalid/.env", 1, {}, "deny"),
+    ("curl -q --user-agent= -O https://example.invalid/.env", 1, {}, "deny"),
+    ("curl -q --alt-svc= -O https://example.invalid/.env", 1, {}, "deny"),
+    ("curl -q --hsts= -O https://example.invalid/.env", 1, {}, "deny"),
+    (
         "curl -q --output-dir .env -O https://example.invalid/report.txt",
         1,
         {},
@@ -1527,6 +1549,18 @@ CASES = [
     ),
     ("curl -q -O https://example.invalid/report.txt", 1, {}, "allow"),
     ("curl -q https://example.invalid/.env", 1, {}, "allow"),
+    (
+        "curl -q --user-agent=-O https://example.invalid/.env",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "curl -q --alt-svc= -O https://example.invalid/report.txt",
+        1,
+        {},
+        "allow",
+    ),
     ("curl --disable https://example.invalid/.env", 1, {}, "allow"),
     (
         "curl -q --remote-name-all --no-remote-name https://example.invalid/.env",

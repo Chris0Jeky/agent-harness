@@ -517,7 +517,9 @@ _CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
         "--keepalive-time",
         "--key",
         "--key-type",
+        "--knownhosts",
         "--krb",
+        "--krb4",
         "--libcurl",
         "--limit-rate",
         "--local-port",
@@ -574,6 +576,7 @@ _CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
         "--retry-max-time",
         "--sasl-authzid",
         "--service-name",
+        "--sigalgs",
         "--socks4",
         "--socks4a",
         "--socks5",
@@ -586,7 +589,6 @@ _CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
         "--telnet-option",
         "--tftp-blksize",
         "--time-cond",
-        "--tls-earlydata",
         "--tls-max",
         "--tls13-ciphers",
         "--tlsauthtype",
@@ -745,8 +747,8 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                     return "Downloading into a secret-looking file is floor-blocked."
         return ""
 
-    def next_value(index: int, attached: str) -> tuple[str | None, int]:
-        if attached:
+    def next_value(index: int, attached: str | None) -> tuple[str | None, int]:
+        if attached is not None:
             return attached, index
         if index + 1 < len(args):
             return args[index + 1], index + 1
@@ -789,7 +791,7 @@ def curl_secret_output_risk(toks: list[str]) -> str:
         option = raw_option.lower()
         expanded = option.startswith("--expand-")
         canonical_option = "--" + option[len("--expand-") :] if expanded else option
-        bound_value = raw_bound_value if separator else ""
+        bound_value = raw_bound_value if separator else None
 
         if canonical_option == "--config":
             return "curl config files are opaque to the deny floor."
@@ -897,7 +899,8 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                     offset += 1
                     continue
                 if marker in _CURL_SHORT_OPTIONS_WITH_VALUE:
-                    target, index = next_value(index, body[offset + 1 :])
+                    attached = body[offset + 1 :] or None
+                    target, index = next_value(index, attached)
                     if marker == "o":
                         selectors.append(
                             ("stdout", None) if target == "-" else ("file", target)
