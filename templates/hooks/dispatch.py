@@ -200,16 +200,17 @@ _QUOTED_HEREDOC = re.compile(
 )
 
 
-def inert_heredoc_receiver(header: str) -> bool:
+def inert_heredoc_receiver(prefix: str, suffix: str) -> bool:
     """Return whether a quoted heredoc is data for a known non-executing sink."""
-    if "|" in header:
+    suffix_flow = quote_aware_segments_with_operators("true " + suffix)
+    if suffix_flow and suffix_flow[0][1] == "|":
         return False
-    parsed = quote_aware_segments(header.split("<<", 1)[0])
+    parsed = quote_aware_segments(prefix)
     if not parsed:
         return False
     head, toks = command_head(parsed[-1])
     if head == "cat":
-        return ">" not in header
+        return ">" not in prefix and ">" not in suffix
     if head == "git" and git_subcommand(toks) == "commit":
         return ("-F" in toks or "--file" in toks) and "-" in toks
     if head == "gh" and len(toks) >= 3 and toks[1:3] == ["pr", "create"]:
@@ -221,29 +222,29 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     """Remove inert bodies whose quoted delimiter disables shell expansion."""
     lines = command.splitlines(keepends=True)
     result = []
-    pending: list[tuple[str, bool]] = []
-    in_body: tuple[str, bool] | None = None
+    pending: list[tuple[str, bool, bool]] = []
+    in_body: tuple[str, bool, bool] | None = None
     for line in lines:
         if in_body:
-            delimiter, strip_tabs = in_body
+            delimiter, strip_tabs, inert = in_body
             candidate = line.rstrip("\r\n")
             if strip_tabs:
                 candidate = candidate.lstrip("\t")
             if candidate == delimiter:
-                result.append("\n")
+                result.append("\n" if inert else line)
                 in_body = pending.pop(0) if pending else None
             else:
-                result.append("\n")
+                result.append("\n" if inert else line)
             continue
         result.append(line)
         for match in _QUOTED_HEREDOC.finditer(line):
-            if inert_heredoc_receiver(line):
-                pending.append(
-                    (
-                        match.group("single") or match.group("double"),
-                        bool(match.group("tabs")),
-                    )
+            pending.append(
+                (
+                    match.group("single") or match.group("double"),
+                    bool(match.group("tabs")),
+                    inert_heredoc_receiver(line[: match.start()], line[match.end() :]),
                 )
+            )
         if pending:
             in_body = pending.pop(0)
     return "".join(result)

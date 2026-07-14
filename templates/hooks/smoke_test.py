@@ -766,6 +766,20 @@ CASES = [
         {},
         "deny",
     ),
+    (
+        "git commit -F - <<'EOF'; bash <<'RUN'\n"
+        "message\nEOF\nrm -rf /critical/outside\nRUN",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "bash <<'RUN'; git commit -F - <<'EOF'\n"
+        "rm -rf /critical/outside\nRUN\nmessage\nEOF",
+        1,
+        {},
+        "deny",
+    ),
     ("gh api -XPOST /user/repos", 1, {"sensitive_data": True}, "deny"),
     (
         "gh api -XDELETE /repos/example/private",
@@ -837,6 +851,13 @@ CASES = [
         "allow",
     ),
     ("cat <<'EOF'\nsudo id\nEOF", 1, {}, "allow"),
+    (
+        "git commit -F - <<'EOF'; gh pr create --body-file - <<'BODY'\n"
+        "git push --force\nEOF\nrm -rf /\nBODY",
+        1,
+        {},
+        "allow",
+    ),
 ]
 
 
