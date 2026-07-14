@@ -2818,6 +2818,24 @@ def check(
             positional_groups = []
             index = 1
             path_parameters = {"path", "literalpath", "filepath", "destination"}
+            value_parameters = set()
+            if head in {"new-item", "ni"}:
+                path_parameters.add("name")
+                value_parameters.update({"itemtype", "type", "value"})
+            if head in {
+                "set-content",
+                "sc",
+                "add-content",
+                "ac",
+                "out-file",
+                "tee",
+                "tee-object",
+            }:
+                value_parameters.update(
+                    {"value", "inputobject", "encoding", "filter", "include", "exclude"}
+                )
+            if head == "out-file":
+                value_parameters.add("width")
             while index < len(toks):
                 token = toks[index]
                 is_bound_path, bound_path = powershell_bound_value(
@@ -2829,7 +2847,10 @@ def check(
                     index += 1
                     continue
                 if token.startswith("-"):
-                    parameter = token.lstrip("-").lower()
+                    parameter, separator, _bound_value = token.lstrip("-").partition(
+                        ":"
+                    )
+                    parameter = parameter.lower()
                     if parameter and any(
                         name.startswith(parameter) for name in path_parameters
                     ):
@@ -2837,23 +2858,10 @@ def check(
                             explicit_paths.append(toks[index + 1])
                             index += 2
                             continue
-                    if head in {
-                        "set-content",
-                        "sc",
-                        "add-content",
-                        "ac",
-                        "out-file",
-                        "tee",
-                        "tee-object",
-                    } and parameter in {
-                        "value",
-                        "inputobject",
-                        "encoding",
-                        "filter",
-                        "include",
-                        "exclude",
-                    }:
-                        index += 2
+                    if parameter and any(
+                        name.startswith(parameter) for name in value_parameters
+                    ):
+                        index += 1 if separator else 2
                         continue
                     index += 1
                     continue
