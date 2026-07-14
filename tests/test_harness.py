@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import tempfile
@@ -105,6 +106,7 @@ class HarnessTests(unittest.TestCase):
 
     def test_remove_managed_floor_preserves_unrelated_hooks(self) -> None:
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
         current = json.dumps(
             {
                 "hooks": {
@@ -112,9 +114,7 @@ class HarnessTests(unittest.TestCase):
                     "PreToolUse": [
                         {
                             "hooks": [
-                                {
-                                    "command": f'python "{dispatcher}" --event pre --runtime codex'
-                                },
+                                managed_handler,
                                 {"command": "python keep_unrelated.py"},
                             ]
                         }
@@ -133,21 +133,8 @@ class HarnessTests(unittest.TestCase):
 
     def test_remove_managed_floor_deletes_empty_document(self) -> None:
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
-        current = json.dumps(
-            {
-                "hooks": {
-                    "PreToolUse": [
-                        {
-                            "hooks": [
-                                {
-                                    "command": f"python {dispatcher} --event=pre --runtime=codex"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        )
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [managed_handler]}]}})
         self.assertEqual(harness.remove_managed_codex_floor(current, dispatcher), "")
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
@@ -170,6 +157,41 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(harness.managed_codex_floor_groups(current)), 1)
         self.assertEqual(harness.remove_managed_codex_floor(current, managed), current)
 
+    def test_remove_managed_floor_retains_partial_or_chained_handler(self) -> None:
+        managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        canonical = harness.canonical_legacy_codex_floor_handler(managed)
+        for handler in (
+            {"command": canonical["command"]},
+            {
+                **canonical,
+                "commandWindows": (
+                    f"{canonical['commandWindows']}; Write-Output custom"
+                ),
+            },
+            {
+                **canonical,
+                "command": (f"echo {managed} --event pre --runtime codex"),
+            },
+        ):
+            with self.subTest(handler=handler):
+                current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
+                self.assertEqual(
+                    harness.remove_managed_codex_floor(current, managed), current
+                )
+
+    def test_global_floor_detection_is_fail_closed(self) -> None:
+        encoded_script = "$d='D:/custom/dispatch.py'; & $d --event pre"
+        encoded = base64.b64encode(encoded_script.encode("utf-16-le")).decode("ascii")
+        for handler in (
+            {"command": "python D:/custom/dispatch.py --event pre"},
+            {"command": "powershell .codex/invoke_deny_floor.ps1"},
+            {"command": "python D:/custom/dispatch.py --event=pre --runtime=codex"},
+            {"commandWindows": f"powershell -EncodedCommand {encoded}"},
+        ):
+            with self.subTest(handler=handler):
+                current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
+                self.assertEqual(len(harness.managed_codex_floor_groups(current)), 1)
+
     def test_hooks_helpers_reject_wrong_shapes(self) -> None:
         for current in ("[]", "null", '"text"', "1"):
             with self.subTest(current=current):
@@ -183,6 +205,19 @@ class HarnessTests(unittest.TestCase):
             harness.managed_codex_floor_groups(
                 json.dumps({"hooks": {"PreToolUse": [{"hooks": None}]}})
             )
+        wrong = (
+            {"hooks": {"PreToolUse": [{}]}},
+            {"hooks": {"PreToolUse": [{"matcher": 7, "hooks": []}]}},
+            {
+                "hooks": {
+                    "PreToolUse": [{"hooks": [{"type": 7, "command": "echo safe"}]}]
+                }
+            },
+        )
+        for document in wrong:
+            with self.subTest(document=document):
+                with self.assertRaises(harness.HarnessError):
+                    harness.repo_codex_floor_groups(json.dumps(document))
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
@@ -205,12 +240,9 @@ class HarnessTests(unittest.TestCase):
                         "PreToolUse": [
                             {
                                 "hooks": [
-                                    {
-                                        "command": (
-                                            f'python "{codex_home / "hooks" / "dispatch.py"}" '
-                                            "--event pre --runtime codex"
-                                        )
-                                    }
+                                    harness.canonical_legacy_codex_floor_handler(
+                                        codex_home / "hooks" / "dispatch.py"
+                                    )
                                 ]
                             }
                         ],
@@ -239,15 +271,62 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertFalse((codex_home / "hooks" / "dispatch.py").exists())
 
+    def test_sync_global_refuses_retained_custom_floor(self) -> None:
+        root = Path(self.temp.name)
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        (codex_source / "skills" / "sample").mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        (codex_source / "skills" / "sample" / "SKILL.md").write_text(
+            "# sample\n", encoding="utf-8"
+        )
+        codex_home = root / "codex-home"
+        codex_home.mkdir()
+        original = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "command": (
+                                        "python D:/custom/dispatch.py --event pre "
+                                        "--runtime codex"
+                                    )
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        hooks_path = codex_home / "hooks.json"
+        hooks_path.write_text(original, encoding="utf-8")
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(root / "skills-home"),
+            apply=True,
+        )
+        with self.assertRaises(harness.HarnessError):
+            harness.sync_global(args)
+        self.assertEqual(hooks_path.read_text(encoding="utf-8"), original)
+
     def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
         direct = {
             "matcher": "^Bash$",
             "hooks": [
                 {
+                    "type": "command",
                     "command": (
                         "python $HOME/.claude/hooks/dispatch.py "
                         "--event pre --runtime codex"
-                    )
+                    ),
+                    "commandWindows": (
+                        "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                        "--event=pre --runtime=codex"
+                    ),
                 }
             ],
         }
@@ -255,15 +334,138 @@ class HarnessTests(unittest.TestCase):
             "matcher": "^Bash$",
             "hooks": [
                 {
+                    "type": "command",
                     "command": (
                         "dispatcher=$HOME/.claude/hooks/dispatch.py; "
                         "/bin/sh .codex/invoke_deny_floor.sh"
-                    )
+                    ),
+                    "commandWindows": (
+                        "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+                        "& .codex/invoke_deny_floor.ps1"
+                    ),
                 }
             ],
         }
         current = json.dumps({"hooks": {"PreToolUse": [direct, wrapped]}})
         self.assertEqual(harness.repo_codex_floor_groups(current), [direct, wrapped])
+
+    def test_repo_floor_decodes_windows_command_and_binds_pin(self) -> None:
+        pin = "a" * 64
+        windows_script = (
+            f"$expected='{pin}';"
+            "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py';"
+            "& .codex/invoke_deny_floor.ps1"
+        )
+        encoded = base64.b64encode(windows_script.encode("utf-16-le")).decode("ascii")
+        group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                        "/bin/sh .codex/invoke_deny_floor.sh"
+                    ),
+                    "commandWindows": f"powershell -EncodedCommand {encoded}",
+                }
+            ],
+        }
+        current = json.dumps({"hooks": {"PreToolUse": [group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current, pin), [group])
+        self.assertEqual(harness.repo_codex_floor_groups(current, "b" * 64), [])
+
+    def test_repo_floor_requires_both_platforms_and_positive_matcher(self) -> None:
+        handler = {
+            "type": "command",
+            "command": (
+                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            ),
+            "commandWindows": "Write-Output floor-disabled",
+        }
+        for matcher in ("^NotBash$", "^(?!Bash$).*$", "bash"):
+            with self.subTest(matcher=matcher):
+                current = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [{"matcher": matcher, "hooks": [handler]}]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(current), [])
+        current = json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [handler]}]}}
+        )
+        self.assertEqual(harness.repo_codex_floor_groups(current), [])
+
+    def test_repo_floor_counts_handlers_and_rejects_cross_handler_pin(self) -> None:
+        pin = "c" * 64
+        valid = {
+            "type": "command",
+            "command": (
+                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            ),
+            "commandWindows": (
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex"
+            ),
+        }
+        pin_only = {
+            "type": "command",
+            "command": f"echo {pin}",
+            "commandWindows": f"Write-Output {pin}",
+        }
+        group = {"matcher": "^Bash$", "hooks": [valid, pin_only]}
+        current = json.dumps({"hooks": {"PreToolUse": [group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current), [group])
+        self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+        duplicate = {"matcher": "^Bash$", "hooks": [valid, dict(valid)]}
+        duplicate_text = json.dumps({"hooks": {"PreToolUse": [duplicate]}})
+        self.assertEqual(len(harness.repo_codex_floor_groups(duplicate_text)), 2)
+        self.assertEqual(len(harness.repo_codex_floor_candidates(duplicate_text)), 2)
+
+        broken = {
+            "type": "command",
+            "command": valid["command"],
+            "commandWindows": "Write-Output disabled",
+        }
+        mixed = {"matcher": "^Bash$", "hooks": [valid, broken]}
+        mixed_text = json.dumps({"hooks": {"PreToolUse": [mixed]}})
+        self.assertEqual(len(harness.repo_codex_floor_groups(mixed_text)), 1)
+        self.assertEqual(len(harness.repo_codex_floor_candidates(mixed_text)), 2)
+
+    def test_repo_floor_rejects_data_only_markers(self) -> None:
+        pin = "d" * 64
+        marker_text = f"{pin} .claude/hooks/dispatch.py invoke_deny_floor"
+        encoded = base64.b64encode(marker_text.encode("utf-16-le")).decode("ascii")
+        group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"echo '{marker_text}'",
+                    "commandWindows": f"echo -EncodedCommand {encoded}",
+                }
+            ],
+        }
+        current = json.dumps({"hooks": {"PreToolUse": [group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_rejects_non_command_handler(self) -> None:
+        handler = {
+            "type": "prompt",
+            "command": (
+                "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+            ),
+            "commandWindows": (
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex"
+            ),
+        }
+        current = json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [handler]}]}}
+        )
+        self.assertEqual(harness.repo_codex_floor_groups(current), [])
 
     def test_normalized_text_hash_ignores_line_endings(self) -> None:
         left = Path(self.temp.name) / "left.txt"

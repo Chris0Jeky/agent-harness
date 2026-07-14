@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import filecmp
 import hashlib
 import json
@@ -281,12 +283,18 @@ def parse_hooks_document(
     for group in groups:
         if not isinstance(group, dict):
             raise HarnessError("existing hooks.PreToolUse entries must be objects")
-        handlers = group.get("hooks", [])
+        if "hooks" not in group:
+            raise HarnessError("existing PreToolUse groups must contain hooks")
+        if "matcher" in group and not isinstance(group["matcher"], str):
+            raise HarnessError("existing PreToolUse group matcher must be a string")
+        handlers = group["hooks"]
         if not isinstance(handlers, list):
             raise HarnessError("existing PreToolUse group hooks must be an array")
         for handler in handlers:
             if not isinstance(handler, dict):
                 raise HarnessError("existing hook handlers must be objects")
+            if "type" in handler and not isinstance(handler["type"], str):
+                raise HarnessError("existing hook handler type must be a string")
             for field in ("command", "commandWindows"):
                 if field in handler and not isinstance(handler[field], str):
                     raise HarnessError(
@@ -339,43 +347,147 @@ def is_direct_codex_floor_handler(
     return False
 
 
+def is_global_floor_handler(handler: dict[str, Any]) -> bool:
+    """Recognize any global dispatcher/wrapper so doctor cannot false-green."""
+    return any(
+        command
+        and (
+            command_points_to_dispatcher(command)
+            or "invoke_deny_floor" in command.lower()
+        )
+        for command in (
+            handler.get("command", ""),
+            decode_windows_hook_command(handler.get("commandWindows", "")),
+        )
+    )
+
+
+def canonical_legacy_codex_floor_handler(managed_dispatcher: Path) -> dict[str, Any]:
+    """Render the exact historical global adapter that sync-global once owned."""
+    dispatcher = str(managed_dispatcher.resolve())
+    return {
+        "type": "command",
+        "commandWindows": (
+            f'C:\\Windows\\py.exe -3 "{dispatcher}" --event pre --runtime codex'
+        ),
+        "command": f'python3 "{dispatcher}" --event pre --runtime codex',
+        "timeout": 5,
+        "statusMessage": "Checking irreversible-command policy",
+    }
+
+
+def is_owned_global_floor_handler(
+    handler: dict[str, Any], managed_dispatcher: Path
+) -> bool:
+    """Match only the exact historical managed handler shape."""
+    return handler == canonical_legacy_codex_floor_handler(managed_dispatcher)
+
+
 def managed_codex_floor_groups(current: str) -> list[Any]:
     """Find every direct global Codex floor, including unowned custom copies."""
     _current_data, _hooks, existing_groups = parse_hooks_document(current)
 
     def is_managed(group: Any) -> bool:
         for handler in group.get("hooks", []):
-            if is_direct_codex_floor_handler(handler):
+            if is_global_floor_handler(handler):
                 return True
         return False
 
     return [group for group in existing_groups if is_managed(group)]
 
 
-def repo_codex_floor_groups(current: str) -> list[Any]:
-    """Find direct or hardened-wrapper project adapters for the shared floor."""
+def decode_windows_hook_command(command: str) -> str:
+    """Expose a PowerShell EncodedCommand payload for topology validation."""
+    if not re.search(r"(?i)-(?:encodedcommand|enc)(?::|\s)", command):
+        return command
+    executable_match = re.match(r'^\s*(?:"([^"]+)"|(\S+))', command)
+    if executable_match is None:
+        return command
+    executable = (executable_match.group(1) or executable_match.group(2)).replace(
+        "\\", "/"
+    )
+    executable = executable.rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if executable not in {"powershell", "pwsh"}:
+        return command
+    match = re.search(
+        r"(?i)(?:^|\s)-(?:encodedcommand|enc)(?::|\s+)"
+        r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)",
+        command,
+    )
+    if match is None:
+        return ""
+    try:
+        payload = base64.b64decode(match.group(1), validate=True)
+        if not payload or len(payload) % 2:
+            return ""
+        return payload.decode("utf-16-le")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return ""
+
+
+def matcher_targets_bash(matcher: Any) -> bool:
+    """Accept only bounded matcher forms whose Bash semantics are unambiguous."""
+    return isinstance(matcher, str) and matcher in {"", "Bash", "^Bash$"}
+
+
+def platform_project_floor_command(command: str, expected_pin: str | None) -> bool:
+    normalized = command.lower().replace("\\", "/")
+    if re.match(r"^\s*(?:echo|printf|write-output)\b", normalized):
+        return False
+    points_to_shared = ".claude/hooks/dispatch.py" in normalized
+    direct = command_has_flag_value(
+        command, "runtime", "codex"
+    ) and command_has_flag_value(command, "event", "pre")
+    wrapped = "invoke_deny_floor" in normalized
+    has_executor = bool(
+        re.search(
+            r"(?i)(?:\b(?:python3?|py)(?:\.exe)?\b|\bstart-process\b|"
+            r"(?:^|[\s;/])(?:/bin/)?(?:ba)?sh\b|&\s*\$)",
+            command,
+        )
+    )
+    has_pin = expected_pin is None or expected_pin.lower() in normalized
+    return points_to_shared and (direct or wrapped) and has_executor and has_pin
+
+
+def repo_codex_floor_candidates(current: str) -> list[Any]:
+    """Return one entry per handler that could create a project floor dispatch."""
+    _current_data, _hooks, groups = parse_hooks_document(current)
+    result = []
+    for group in groups:
+        for handler in group.get("hooks", []):
+            commands = (
+                handler.get("command", ""),
+                decode_windows_hook_command(handler.get("commandWindows", "")),
+            )
+            if any(
+                ".claude/hooks/dispatch.py" in command.lower().replace("\\", "/")
+                or "invoke_deny_floor" in command.lower()
+                for command in commands
+            ):
+                result.append(group)
+    return result
+
+
+def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> list[Any]:
+    """Return one group entry per platform-complete project floor handler."""
     _current_data, _hooks, groups = parse_hooks_document(current)
 
     result = []
     for group in groups:
-        if not isinstance(group, dict):
-            continue
-        matcher = group.get("matcher", "")
-        if not isinstance(matcher, str) or (matcher and "bash" not in matcher.lower()):
+        if not matcher_targets_bash(group.get("matcher", "")):
             continue
         for handler in group.get("hooks", []):
-            if not isinstance(handler, dict):
+            if handler.get("type") != "command":
                 continue
-            command = (
-                f"{handler.get('command', '')} {handler.get('commandWindows', '')}"
+            command = handler.get("command", "")
+            windows_command = decode_windows_hook_command(
+                handler.get("commandWindows", "")
             )
-            normalized = command.lower().replace("\\", "/")
-            points_to_shared = ".claude/hooks/dispatch.py" in normalized
-            direct = "--runtime codex" in normalized and "--event pre" in normalized
-            wrapped = "invoke_deny_floor" in normalized
-            if points_to_shared and (direct or wrapped):
+            if platform_project_floor_command(
+                command, expected_pin
+            ) and platform_project_floor_command(windows_command, expected_pin):
                 result.append(group)
-                break
     return result
 
 
@@ -401,7 +513,7 @@ def remove_managed_codex_floor(
         retained_handlers = [
             handler
             for handler in handlers
-            if not is_direct_codex_floor_handler(handler, managed_dispatcher)
+            if not is_owned_global_floor_handler(handler, managed_dispatcher)
         ]
         if len(retained_handlers) == len(handlers):
             retained.append(group)
@@ -471,6 +583,12 @@ def sync_global(args: argparse.Namespace) -> int:
     hook_text = remove_managed_codex_floor(
         current_hooks, codex_home / "hooks" / "dispatch.py"
     )
+    remaining_global_floors = managed_codex_floor_groups(hook_text)
+    if remaining_global_floors:
+        raise HarnessError(
+            "refusing global sync: an unowned or ambiguous Codex floor remains in "
+            f"{codex_home / 'hooks.json'}"
+        )
     print(
         f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}"
         " (no global Codex deny floor)"
@@ -542,7 +660,7 @@ def doctor(args: argparse.Namespace) -> int:
             )
         )
         global_floor_detail = f"{global_floor_count} managed global floor group(s)"
-    except HarnessError as exc:
+    except (HarnessError, OSError, UnicodeError) as exc:
         global_floor_count = -1
         global_floor_detail = str(exc)
     checks.extend(
@@ -585,24 +703,30 @@ def doctor(args: argparse.Namespace) -> int:
             )
             project_floor_groups = repo_codex_floor_groups(repo_hook_text)
             project_floor_count = len(project_floor_groups)
+            candidate_floor_count = len(repo_codex_floor_candidates(repo_hook_text))
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
-            handler_text = json.dumps(project_floor_groups).lower()
-            current_pin = expected_pin in handler_text
+            current_floor_count = len(
+                repo_codex_floor_groups(repo_hook_text, expected_pin)
+            )
             project_detail = (
-                f"{project_floor_count} project floor group(s); "
-                f"{'current' if current_pin else 'missing or stale'} dispatcher pin; "
+                f"{project_floor_count} project floor handler(s); "
+                f"{candidate_floor_count} candidate handler(s); "
+                f"{current_floor_count} current pinned handler(s); "
                 "trust is checked manually in /hooks"
             )
-        except HarnessError as exc:
+        except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
-            current_pin = False
+            candidate_floor_count = -1
+            current_floor_count = -1
             project_detail = str(exc)
         checks.append(
             (
                 "project Codex floor",
-                project_floor_count == 1 and current_pin,
+                candidate_floor_count == 1
+                and project_floor_count == 1
+                and current_floor_count == 1,
                 project_detail,
             )
         )
