@@ -230,21 +230,76 @@ def is_dynamic_value(text: str) -> bool:
     )
 
 
+_POWERSHELL_TYPE_PREFIX = re.compile(r"^(?:\[[^\[\]\r\n]+\])+")
+
+
 def powershell_assignment_rhs(raw: list[str]) -> str | None:
     """Return a PowerShell assignment RHS; None means this is not an assignment."""
     if not raw:
         return None
-    attached = re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=(.*)", raw[0])
+    parts = list(raw)
+    while parts and re.fullmatch(r"\[[^\[\]\r\n]+\]", parts[0]):
+        parts.pop(0)
+    if not parts:
+        return None
+    parts[0] = _POWERSHELL_TYPE_PREFIX.sub("", parts[0])
+    attached = re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=(.*)", parts[0])
     if attached:
-        parts = [attached.group(1), *raw[1:]]
-        return " ".join(part for part in parts if part)
+        rhs_parts = [attached.group(1), *parts[1:]]
+        return " ".join(part for part in rhs_parts if part)
     if (
-        len(raw) > 1
-        and raw[1] == "="
-        and re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*", raw[0])
+        len(parts) > 1
+        and parts[1] == "="
+        and re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*", parts[0])
     ):
-        return " ".join(raw[2:])
+        return " ".join(parts[2:])
     return None
+
+
+def inert_powershell_scriptblock(value: str) -> bool:
+    """A bare scriptblock assigned as data is not executed by PowerShell."""
+    candidate = value.strip()
+    return candidate.startswith("{") and candidate.endswith("}")
+
+
+_POWERSHELL_SCRIPTBLOCK_ASSIGNMENT = re.compile(
+    r"(?i)(?:\[[^\[\]\r\n]+\]\s*)*" r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*\s*=\s*\{"
+)
+
+
+def mask_inert_powershell_assignment_scriptblocks(command: str) -> str:
+    """Hide assigned scriptblock bodies while retaining later invocations."""
+    result = []
+    cursor = 0
+    while True:
+        match = _POWERSHELL_SCRIPTBLOCK_ASSIGNMENT.search(command, cursor)
+        if match is None:
+            result.append(command[cursor:])
+            break
+        opening = match.end() - 1
+        depth = 1
+        closing = opening + 1
+        while closing < len(command) and depth:
+            if command[closing] == "{":
+                depth += 1
+            elif command[closing] == "}":
+                depth -= 1
+            closing += 1
+        if depth:
+            result.append(command[cursor:])
+            break
+        suffix = closing
+        while suffix < len(command) and command[suffix].isspace():
+            suffix += 1
+        if suffix < len(command) and command[suffix] not in ";|&\r\n":
+            result.append(command[cursor:closing])
+            cursor = closing
+            continue
+        result.append(command[cursor : opening + 1])
+        result.append("__HARNESS_INERT_SCRIPTBLOCK__")
+        result.append("}")
+        cursor = closing
+    return "".join(result)
 
 
 def has_dynamic_shell_token(token: str) -> bool:
@@ -2067,6 +2122,11 @@ def has_download_pipe_to_shell(command: str) -> bool:
     download_seen = False
     for stage, operator_after in quote_aware_segments_with_operators(command):
         stage = strip_control_prefixes(stage)
+        assignment_rhs = powershell_assignment_rhs(stage)
+        if assignment_rhs is not None and not inert_powershell_scriptblock(
+            assignment_rhs
+        ):
+            stage = tokens(assignment_rhs)
         stage_head, _ = command_head(stage)
         if download_seen and stage_head in {
             "sh",
@@ -2184,6 +2244,7 @@ def check(
     relaxed = bool(flags.get("relaxed_work_loss_guards")) and not strict
 
     command = strip_quoted_heredoc_bodies(remove_shell_line_continuations(command))
+    command = mask_inert_powershell_assignment_scriptblocks(command)
     unwrapped = unwrap_powershell_scriptblock(command)
     if unwrapped != command.strip():
         return check(
@@ -2289,7 +2350,11 @@ def check(
                     assignment_segments[segment_index][0]
                 )
                 masked_rhs = powershell_assignment_rhs(assignment_raw)
-                if masked_rhs and not is_dynamic_value(masked_rhs):
+                if (
+                    masked_rhs
+                    and not is_dynamic_value(masked_rhs)
+                    and not inert_powershell_scriptblock(masked_rhs)
+                ):
                     assignment_decision = check(
                         masked_rhs,
                         tier_cfg,
