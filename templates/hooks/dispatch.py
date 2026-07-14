@@ -2652,6 +2652,9 @@ def check(
             args = (
                 git_toks[subcommand_index + 1 :] if subcommand_index is not None else []
             )
+            raw_args = (
+                toks[subcommand_index + 1 :] if subcommand_index is not None else []
+            )
             inline_configs = git_inline_configs(git_toks)
             config_env_keys = git_config_env_keys(git_toks)
             if sub == "push" and inline_configs:
@@ -2765,6 +2768,13 @@ def check(
                 )
 
             if sub == "push":
+                if not quote_aware and any(
+                    re.search(r"[*?\[]", token) for token in raw_args
+                ):
+                    return (
+                        "deny",
+                        "Unquoted git-push pathname expansion cannot be inspected safely.",
+                    )
                 if quote_aware and any(
                     re.search(r"\{[^{}]*,[^{}]*\}", token) for token in args
                 ):
