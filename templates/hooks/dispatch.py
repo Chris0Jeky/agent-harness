@@ -1202,14 +1202,29 @@ def git_config_env_keys(toks: list[str]) -> list[str] | None:
     return keys
 
 
+def git_environment_name(token: str) -> str:
+    """Normalize shell/provider spellings of an environment variable name."""
+    candidate = token.strip("'\"")
+    if "=" in candidate:
+        candidate = candidate.split("=", 1)[0]
+    lowered = candidate.lower()
+    for prefix in ("$env:", "${env:", "env:", "environment::"):
+        if lowered.startswith(prefix):
+            candidate = candidate[len(prefix) :]
+            break
+    return candidate.rstrip("}").upper()
+
+
+def is_git_config_environment_name(token: str) -> bool:
+    """Return whether a variable can inject arbitrary Git configuration."""
+    name = git_environment_name(token)
+    return name.startswith("GIT_CONFIG") and name != "GIT_CONFIG_NOSYSTEM"
+
+
 def has_git_config_environment(raw: list[str]) -> bool:
     """Detect per-command or inherited Git config environment injection."""
 
-    def is_injection_name(name: str) -> bool:
-        upper = name.upper()
-        return upper.startswith("GIT_CONFIG") and upper != "GIT_CONFIG_NOSYSTEM"
-
-    if any(is_injection_name(name) for name in os.environ):
+    if any(is_git_config_environment_name(name) for name in os.environ):
         return True
     for token in raw:
         base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
@@ -1218,7 +1233,7 @@ def has_git_config_environment(raw: list[str]) -> bool:
         assignment = _ASSIGN.match(token)
         if assignment:
             name = token.split("=", 1)[0]
-            if is_injection_name(name):
+            if is_git_config_environment_name(name):
                 return True
     return False
 
@@ -1240,19 +1255,6 @@ _GIT_PROCESS_COMMAND_ENVIRONMENT = _GIT_PROCESS_ENVIRONMENT | {
     "PAGER",
     "VISUAL",
 }
-
-
-def git_environment_name(token: str) -> str:
-    """Normalize shell/provider spellings of an environment variable name."""
-    candidate = token.strip("'\"")
-    if "=" in candidate:
-        candidate = candidate.split("=", 1)[0]
-    lowered = candidate.lower()
-    for prefix in ("$env:", "${env:", "env:", "environment::"):
-        if lowered.startswith(prefix):
-            candidate = candidate[len(prefix) :]
-            break
-    return candidate.rstrip("}").upper()
 
 
 def has_git_process_environment(raw: list[str]) -> bool:
@@ -1303,20 +1305,14 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
     if not raw:
         return False
     first = raw[0].lower()
-    if _ASSIGN.match(raw[0]) and first.startswith("git_config"):
-        return first.split("=", 1)[0] != "git_config_nosystem"
-    if re.match(r"^\$env:git_config[a-z0-9_]*=", first, re.IGNORECASE):
+    if _ASSIGN.match(raw[0]) and is_git_config_environment_name(raw[0]):
+        return True
+    if first.startswith(("$env:", "${env:")) and is_git_config_environment_name(raw[0]):
         return True
     if first in {"export", "set", "setx"}:
-        return any(
-            re.fullmatch(r'"?git_config[a-z0-9_]*(?:=.*)?"?', token, re.IGNORECASE)
-            for token in raw[1:]
-        )
+        return any(is_git_config_environment_name(token) for token in raw[1:])
     if first in {"set-item", "new-item", "si", "ni"}:
-        return any(
-            re.match(r"^(?:env:|environment::)git_config", token, re.IGNORECASE)
-            for token in raw[1:]
-        )
+        return any(is_git_config_environment_name(token) for token in raw[1:])
     return False
 
 
@@ -1475,32 +1471,80 @@ def git_config_option_present(tokens: list[str], option: str) -> bool:
     )
 
 
-def git_config_argv_roles(args: list[str]) -> tuple[list[str], list[str]]:
-    """Separate parsed options from operands without promoting option values."""
-    lowered = [token.lower() for token in args]
+_GIT_CONFIG_READ_ACTIONS = {"get", "get-all", "get-regexp", "get-urlmatch", "list"}
+_GIT_CONFIG_WRITE_COMMANDS = {
+    "edit",
+    "remove-section",
+    "rename-section",
+    "set",
+    "unset",
+}
+
+
+def parse_git_config_args(
+    args: list[str],
+) -> tuple[str, list[str], list[str], list[str]]:
+    """Return command action, options, operands, and explicit file targets."""
     options: list[str] = []
     operands: list[str] = []
+    file_targets: list[str] = []
+    action = ""
     index = 0
-    while index < len(lowered):
-        token = lowered[index]
+    while index < len(args):
+        token = args[index]
+        lowered = token.lower()
         if token == "--":
-            operands.extend(lowered[index + 1 :])
+            operands.extend(item.lower() for item in args[index + 1 :])
             break
         if not token.startswith("-") or token == "-":
-            # Git's config parser stops option processing at the first operand.
-            operands.extend(lowered[index:])
+            if (
+                not action
+                and not operands
+                and lowered in (_GIT_CONFIG_READ_ACTIONS | _GIT_CONFIG_WRITE_COMMANDS)
+            ):
+                action = lowered
+                index += 1
+                continue
+            # Git's parser stops option processing at the first real operand.
+            operands.extend(item.lower() for item in args[index:])
             break
-        options.append(token)
-        consumes_next = token in {"-f", "-t"} or (
-            "=" not in token
-            and any(
-                token == option or git_option_abbreviates(token, option)
+        options.append(lowered)
+        if (
+            lowered.startswith("-f")
+            and not lowered.startswith("--")
+            and lowered != "-f"
+        ):
+            file_targets.append(token[2:])
+            index += 1
+            continue
+        option_name = lowered.split("=", 1)[0]
+        value_option = next(
+            (
+                option
                 for option in _GIT_CONFIG_VALUE_OPTIONS
-                if option.startswith("--")
-            )
+                if option_name == option
+                or (
+                    option.startswith("--")
+                    and git_option_abbreviates(option_name, option)
+                )
+            ),
+            None,
         )
-        index += 2 if consumes_next and index + 1 < len(lowered) else 1
-    return options, operands
+        if value_option is None:
+            index += 1
+            continue
+        if "=" in token and value_option.startswith("--"):
+            value = token.split("=", 1)[1]
+            index += 1
+        elif index + 1 < len(args):
+            value = args[index + 1]
+            index += 2
+        else:
+            value = ""
+            index += 1
+        if value_option in {"-f", "--file"} and value:
+            file_targets.append(value)
+    return action, options, operands, file_targets
 
 
 def protected_git_config_section(section: str) -> bool:
@@ -1614,52 +1658,14 @@ def protected_git_config_key(token: str) -> bool:
     )
 
 
-def git_config_file_targets(args: list[str]) -> list[str]:
-    """Return explicit config-file operands without losing option provenance."""
-    targets = []
-    index = 0
-    while index < len(args):
-        token = args[index]
-        lowered = token.lower()
-        if lowered == "-f":
-            if index + 1 < len(args):
-                targets.append(args[index + 1])
-            index += 2
-            continue
-        if lowered.startswith("-f") and not lowered.startswith("--"):
-            targets.append(token[2:])
-            index += 1
-            continue
-        option, separator, attached = token.partition("=")
-        if option.lower() == "--file" or git_option_abbreviates(
-            option.lower(), "--file"
-        ):
-            if separator:
-                targets.append(attached)
-                index += 1
-            else:
-                if index + 1 < len(args):
-                    targets.append(args[index + 1])
-                index += 2
-            continue
-        index += 1
-    return targets
-
-
-def git_config_operation_is_read_only(args: list[str]) -> bool:
+def git_config_operation_is_read_only(
+    action: str, options: list[str], operands: list[str]
+) -> bool:
     """Classify modern command mode and legacy config reads conservatively."""
-    command_action = args[0].lower() if args else ""
-    if command_action in {"get", "list"}:
+    if action in _GIT_CONFIG_READ_ACTIONS:
         return True
-    if command_action in {
-        "edit",
-        "remove-section",
-        "rename-section",
-        "set",
-        "unset",
-    }:
+    if action in _GIT_CONFIG_WRITE_COMMANDS:
         return False
-    options, operands = git_config_argv_roles(args)
     if any(git_config_option_present(options, flag) for flag in _GIT_CONFIG_EDIT_FLAGS):
         return False
     if any(
@@ -1676,50 +1682,34 @@ def git_config_operation_is_read_only(args: list[str]) -> bool:
 
 def dangerous_git_config_mutation(args: list[str]) -> bool:
     """Reject writes/removals that can change a later push's behavior."""
-    if any(git_config_option_present(args, flag) for flag in _GIT_CONFIG_EDIT_FLAGS):
-        return True
-    if not git_config_operation_is_read_only(args) and any(
-        token_mentions_secret_path(target) for target in git_config_file_targets(args)
+    action, options, operands, file_targets = parse_git_config_args(args)
+    if action == "edit" or any(
+        git_config_option_present(options, flag) for flag in _GIT_CONFIG_EDIT_FLAGS
     ):
         return True
-    command_action = args[0].lower() if args else ""
-    if command_action in {
-        "edit",
-        "get",
-        "list",
-        "remove-section",
-        "rename-section",
-        "set",
-        "unset",
-    }:
-        _command_options, command_operands = git_config_argv_roles(args[1:])
-        if command_action in {"get", "list"}:
+    if not git_config_operation_is_read_only(action, options, operands) and any(
+        token_mentions_secret_path(target) for target in file_targets
+    ):
+        return True
+    if action:
+        if action in _GIT_CONFIG_READ_ACTIONS:
             return False
-        if command_action == "edit":
-            return True
-        if command_action == "set":
+        if action in {"set", "unset"}:
+            return bool(operands and protected_git_config_key(operands[0]))
+        if action == "remove-section":
             return bool(
-                command_operands and protected_git_config_key(command_operands[0])
-            )
-        if command_action == "unset":
-            return bool(
-                command_operands and protected_git_config_key(command_operands[0])
-            )
-        if command_action == "remove-section":
-            return bool(
-                command_operands
+                operands
                 and (
-                    protected_git_config_section(command_operands[0])
-                    or executable_git_config_section(command_operands[0])
+                    protected_git_config_section(operands[0])
+                    or executable_git_config_section(operands[0])
                 )
             )
         return any(
             protected_git_config_section(section)
             or executable_git_config_section(section)
-            for section in command_operands[:2]
+            for section in operands[:2]
         )
 
-    options, operands = git_config_argv_roles(args)
     if any(
         git_config_option_present(options, action)
         for action in {"--remove-section", "--rename-section"}
