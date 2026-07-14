@@ -3997,7 +3997,7 @@ def respond(decision: str, reason: str, runtime: str = "claude"):
 
 
 def main():
-    event = "pre"
+    event = "invalid"
     runtime = "claude"
     event_options = [
         token

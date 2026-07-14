@@ -1740,6 +1740,11 @@ def main():
             "deny",
         ),
         (
+            "missing event option fails closed",
+            run_case_with_argv("git status", []),
+            "deny",
+        ),
+        (
             "attached pre event remains active",
             run_case_with_argv("git push --force", ["--event=pre"]),
             "deny",
