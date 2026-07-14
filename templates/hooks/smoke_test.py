@@ -2365,6 +2365,22 @@ def main():
         "PowerShell common-parameter repository environment override": (
             "Set-Item -ErrorAction Stop Env:GIT_DIR repo/.git; " "git push origin main"
         ),
+        "PowerShell warning-parameter repository environment override": (
+            "Set-Item -WarningAction Stop Env:GIT_DIR repo/.git; "
+            "git push origin main"
+        ),
+        "PowerShell information-parameter repository environment override": (
+            "Set-Item -InformationAction Continue Env:GIT_DIR repo/.git; "
+            "git push origin main"
+        ),
+        "PowerShell out-variable repository environment override": (
+            "Set-Item -OutVariable capture Env:GIT_DIR repo/.git; "
+            "git push origin main"
+        ),
+        "PowerShell pipeline-variable repository environment override": (
+            "Set-Item -PipelineVariable item Env:GIT_DIR repo/.git; "
+            "git push origin main"
+        ),
         "PowerShell slash-provider repository environment override": (
             "Set-Item -Path Env:/GIT_DIR -Value repo/.git; git push origin main"
         ),
@@ -2526,6 +2542,13 @@ def main():
         HERE,
         remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
     )
+    provider_status_decision, _reason = dispatch_module.check(
+        "Set-Item -ErrorAction Stop Env:GIT_DIR repo/.git; git status",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda _args, _cwd, _globals: (False, "private"),
+    )
     scoped_then_push_calls = []
 
     def scoped_then_push_resolver(args, cwd, git_globals):
@@ -2572,6 +2595,11 @@ def main():
             (
                 "nested command-scoped repository environment remains safe for status",
                 nested_scoped_status_decision,
+                "allow",
+            ),
+            (
+                "provider repository environment remains safe for status",
+                provider_status_decision,
                 "allow",
             ),
             (
