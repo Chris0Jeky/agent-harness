@@ -350,13 +350,22 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
     while index < len(toks):
         token = toks[index]
         if token.startswith("@") or has_dynamic_shell_token(token):
-            return None, "Dynamic or splatted Start-Process arguments cannot be inspected safely."
+            return (
+                None,
+                "Dynamic or splatted Start-Process arguments cannot be inspected safely.",
+            )
         if token.startswith("-"):
             name, attached = parameter_name(token)
             if name is None:
-                return None, "An unknown or ambiguous Start-Process parameter is opaque."
+                return (
+                    None,
+                    "An unknown or ambiguous Start-Process parameter is opaque.",
+                )
             if name in opaque_parameters:
-                return None, f"Start-Process -{name} changes child execution outside floor inspection."
+                return (
+                    None,
+                    f"Start-Process -{name} changes child execution outside floor inspection.",
+                )
             kind = parameters[name]
             if kind == "switch":
                 if attached not in {None, "true", "false", "$true", "$false"}:
@@ -391,9 +400,7 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
             executable = token
         else:
             child_args.extend(
-                part.replace(_LITERAL_COMMA, ",")
-                for part in token.split(",")
-                if part
+                part.replace(_LITERAL_COMMA, ",") for part in token.split(",") if part
             )
         index += 1
     if not executable:
@@ -1187,6 +1194,7 @@ def git_config_env_keys(toks: list[str]) -> list[str] | None:
 
 def has_git_config_environment(raw: list[str]) -> bool:
     """Detect per-command or inherited Git config environment injection."""
+
     def is_injection_name(name: str) -> bool:
         upper = name.upper()
         return upper.startswith("GIT_CONFIG") and upper != "GIT_CONFIG_NOSYSTEM"
@@ -2942,9 +2950,13 @@ def check(
 
             if sub == "lfs":
                 lfs_args = [token.lower() for token in args]
-                if lfs_args and lfs_args[0] == "status" and all(
-                    token in {"--help", "--json", "--porcelain", "-h"}
-                    for token in lfs_args[1:]
+                if (
+                    lfs_args
+                    and lfs_args[0] == "status"
+                    and all(
+                        token in {"--help", "--json", "--porcelain", "-h"}
+                        for token in lfs_args[1:]
+                    )
                 ):
                     continue
                 return (
