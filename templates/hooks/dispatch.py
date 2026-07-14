@@ -780,7 +780,13 @@ def command_head(toks):
         if _ASSIGN.match(t):
             i += 1
             continue
-        base = _EXE_SUFFIX.sub("", t.replace("\\", "/").split("/")[-1]).lower()
+        executable = t.lstrip("({").rstrip(")}")
+        if not executable:
+            i += 1
+            continue
+        base = _EXE_SUFFIX.sub("", executable.replace("\\", "/").split("/")[-1]).lower()
+        if base == "git-push":
+            return "git", ["git", "push", *toks[i + 1 :]]
         if base.startswith("microsoft.powershell."):
             for qualified_head in (
                 "remove-item",
@@ -1881,6 +1887,7 @@ def has_download_pipe_to_shell(command: str) -> bool:
     """Recognize pipeline endpoints after path/wrapper normalization."""
     download_seen = False
     for stage, operator_after in quote_aware_segments_with_operators(command):
+        stage = strip_control_prefixes(stage)
         stage_head, _ = command_head(stage)
         if download_seen and stage_head in {
             "sh",
@@ -1992,7 +1999,7 @@ def check(
     ):
         return "deny", "A dynamic call-operator target cannot be inspected safely."
     sanitized, inert_placeholders = strip_quotes(command)
-    for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}\|?\s*(\S+)", sanitized):
+    for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
         redirect_target = full_redirect.group(1).strip("'\"")
         if is_dynamic_value(redirect_target) or redirect_target.startswith("("):
             return "deny", "A dynamic redirect target cannot be inspected safely."
@@ -2821,7 +2828,7 @@ def check(
                         f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
                     )
         else:
-            redir = re.search(r"(?:\d*|&)?>{1,2}\|?\s*(\S+)", segment_text)
+            redir = re.search(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", segment_text)
             if redir and is_secret_path(redir.group(1)):
                 return (
                     "deny",
