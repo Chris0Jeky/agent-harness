@@ -1260,7 +1260,13 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
     if subcommand == "bisect" and args and args[0].lower() == "run":
         return "A git bisect run command is opaque to floor inspection."
     if subcommand == "submodule" and args:
-        action = args[0].lower()
+        action_index = 0
+        while action_index < len(args) and args[action_index].startswith("-"):
+            option = args[action_index].lower()
+            if option not in {"-q", "--quiet", "--cached"}:
+                return "Opaque leading git submodule options are floor-blocked."
+            action_index += 1
+        action = args[action_index].lower() if action_index < len(args) else ""
         if action == "foreach":
             return "A git submodule foreach command is opaque to floor inspection."
         if action == "set-url":
@@ -1272,8 +1278,15 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             for strategy in strategies
         ):
             return "A custom Git merge strategy can execute outside floor inspection."
-    if subcommand in {"diff", "log", "show", "whatchanged"} and any(
-        token.lower() == "--ext-diff" for token in args
+    diff_args = None
+    if subcommand in {"diff", "format-patch", "log", "show", "whatchanged"}:
+        diff_args = args
+    elif subcommand == "stash" and args and args[0].lower() == "show":
+        diff_args = args[1:]
+    if diff_args is not None and any(
+        token.lower() == "--ext-diff"
+        or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
+        for token in diff_args
     ):
         return "Git external-diff execution is floor-blocked."
     return None
