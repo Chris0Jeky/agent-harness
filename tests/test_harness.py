@@ -5,8 +5,10 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import harness
 
@@ -341,6 +343,75 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.sync_global(args)
         self.assertEqual(hooks_path.read_text(encoding="utf-8"), original)
+
+    def test_sync_global_preserves_same_second_backup_sets(self) -> None:
+        root = Path(self.temp.name)
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        source_skill = codex_source / "skills" / "sample"
+        source_skill.mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("canonical laws\n", encoding="utf-8")
+        (source_skill / "SKILL.md").write_text("canonical skill\n", encoding="utf-8")
+
+        codex_home = root / "codex-home"
+        claude_home = root / "claude-home"
+        skills_home = root / "skills-home"
+        (claude_home / "hooks").mkdir(parents=True)
+        (skills_home / "sample").mkdir(parents=True)
+        codex_home.mkdir()
+        (codex_home / "AGENTS.md").write_text("original laws\n", encoding="utf-8")
+        (claude_home / "hooks" / "dispatch.py").write_text(
+            "original dispatcher\n", encoding="utf-8"
+        )
+        (claude_home / "hooks" / "smoke_test.py").write_text(
+            "original smoke\n", encoding="utf-8"
+        )
+        (skills_home / "sample" / "SKILL.md").write_text(
+            "original skill\n", encoding="utf-8"
+        )
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        frozen = datetime(2026, 7, 14, 4, 0, tzinfo=timezone.utc)
+
+        class FrozenDatetime:
+            @classmethod
+            def now(cls, _tz: object) -> datetime:
+                return frozen
+
+        with mock.patch.object(harness, "datetime", FrozenDatetime):
+            self.assertEqual(harness.sync_global(args), 0)
+            (codex_home / "AGENTS.md").write_text(
+                "intermediate laws\n", encoding="utf-8"
+            )
+            (skills_home / "sample" / "SKILL.md").write_text(
+                "intermediate skill\n", encoding="utf-8"
+            )
+            self.assertEqual(harness.sync_global(args), 0)
+
+        first = codex_home / "backups" / "20260714T040000Z"
+        second = codex_home / "backups" / "20260714T040000Z-01"
+        self.assertEqual(
+            (first / "AGENTS.md").read_text(encoding="utf-8"), "original laws\n"
+        )
+        self.assertEqual(
+            (second / "AGENTS.md").read_text(encoding="utf-8"),
+            "intermediate laws\n",
+        )
+        first_skill = skills_home / ".harness-backups" / first.name / "sample"
+        second_skill = skills_home / ".harness-backups" / second.name / "sample"
+        self.assertEqual(
+            (first_skill / "SKILL.md").read_text(encoding="utf-8"),
+            "original skill\n",
+        )
+        self.assertEqual(
+            (second_skill / "SKILL.md").read_text(encoding="utf-8"),
+            "intermediate skill\n",
+        )
 
     def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
         direct = {

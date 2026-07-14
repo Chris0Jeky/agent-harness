@@ -264,6 +264,20 @@ def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
     return "updated" if (backup_root / target.name).exists() else "created"
 
 
+def reserve_backup_root(parent: Path, stem: str) -> Path:
+    """Atomically reserve a backup directory without replacing an earlier run."""
+    parent.mkdir(parents=True, exist_ok=True)
+    index = 0
+    while True:
+        suffix = "" if index == 0 else f"-{index:02d}"
+        candidate = parent / f"{stem}{suffix}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            index += 1
+
+
 def parse_hooks_document(
     current: str,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Any]]:
@@ -785,7 +799,10 @@ def sync_global(args: argparse.Namespace) -> int:
         print("dry run; pass --apply to install")
         return 0
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_root = codex_home / "backups" / stamp
+    backup_root = reserve_backup_root(codex_home / "backups", stamp)
+    skill_backup = reserve_backup_root(
+        skills_home / ".harness-backups", backup_root.name
+    )
     for source, target in actions:
         copy_with_backup(source, target, backup_root)
     hooks_target = codex_home / "hooks.json"
@@ -798,17 +815,17 @@ def sync_global(args: argparse.Namespace) -> int:
             hooks_target.write_text(hook_text, encoding="utf-8")
         else:
             hooks_target.unlink(missing_ok=True)
-    skill_backup = skills_home / ".harness-backups" / stamp
     for source, target in skill_actions:
         if target.exists():
             backup = skill_backup / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
-            if backup.exists():
-                shutil.rmtree(backup)
             shutil.copytree(target, backup)
             shutil.rmtree(target)
         shutil.copytree(source, target)
-    print(f"installed shared guidance and dispatcher layer; backups: {backup_root}")
+    print(
+        "installed shared guidance and dispatcher layer; "
+        f"backups: {backup_root}; skill backups: {skill_backup}"
+    )
     print(
         "Codex deny-floor trust remains project-local; review each repo's .codex/hooks.json in /hooks."
     )
