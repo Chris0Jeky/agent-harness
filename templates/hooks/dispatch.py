@@ -445,7 +445,7 @@ def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | 
     """Return a clustered downloader output switch and its attached value."""
     if not token.startswith("-") or token.startswith("--"):
         return None, None
-    markers = {"o", "c", "D"} if head == "curl" else {"o", "O", "a"}
+    markers = {"o", "c", "D"} if head == "curl" else {"o", "O", "a", "P"}
     prefix_flags = _DOWNLOADER_CLUSTER_PREFIXES.get(head)
     if prefix_flags is None:
         return None, None
@@ -5248,6 +5248,9 @@ def check(
                 "--output-document",
                 "--output-file",
                 "--append-output",
+                "--directory-prefix",
+                "--save-cookies",
+                "--warc-file",
                 "--cookie-jar",
                 "--dump-header",
                 "--trace",
