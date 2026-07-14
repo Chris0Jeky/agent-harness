@@ -2291,6 +2291,12 @@ def check(
                 cwd_uncertain = True
             cwd_changed = True
 
+        if head in {"source", "."} and has_opaque_posix_shell_input(toks):
+            return (
+                "deny",
+                "Sourcing program text from an opaque input cannot be inspected safely.",
+            )
+
         nested_script = None
         nested_command_requested = False
         if head == "cmd":
