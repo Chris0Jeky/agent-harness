@@ -192,6 +192,35 @@ class HarnessTests(unittest.TestCase):
                 current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
                 self.assertEqual(len(harness.managed_codex_floor_groups(current)), 1)
 
+    def test_global_floor_detection_decodes_powershell_abbreviations(self) -> None:
+        encoded_script = (
+            "$d='$HOME/.claude/hooks/dispatch.py'; " "& $d --event pre --runtime codex"
+        )
+        encoded = base64.b64encode(encoded_script.encode("utf-16-le")).decode("ascii")
+        for flag in ("-E", "-Ec", "-En", "-Enco", "-EncodedCommand"):
+            with self.subTest(flag=flag):
+                handler = {"commandWindows": f"powershell {flag} {encoded}"}
+                current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
+                self.assertIn(
+                    "dispatch.py",
+                    harness.decode_windows_hook_command(handler["commandWindows"]),
+                )
+                self.assertEqual(len(harness.managed_codex_floor_groups(current)), 1)
+                self.assertEqual(len(harness.repo_codex_floor_candidates(current)), 1)
+
+        malformed = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"hooks": [{"commandWindows": "powershell -Ec not-base64"}]}
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.managed_codex_floor_groups(malformed)), 1)
+        self.assertEqual(len(harness.repo_codex_floor_candidates(malformed)), 1)
+        self.assertEqual(harness.repo_codex_floor_groups(malformed), [])
+
     def test_hooks_helpers_reject_wrong_shapes(self) -> None:
         for current in ("[]", "null", '"text"', "1"):
             with self.subTest(current=current):
@@ -450,6 +479,70 @@ class HarnessTests(unittest.TestCase):
         }
         current = json.dumps({"hooks": {"PreToolUse": [group]}})
         self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_rejects_commented_and_chained_markers(self) -> None:
+        pin = "e" * 64
+        marker = (
+            "python $HOME/.claude/hooks/dispatch.py "
+            f"--event pre --runtime codex expected={pin}"
+        )
+        carriers = (
+            (
+                f"python -c pass # {marker}",
+                f"py -3 -c pass # {marker}",
+            ),
+            (
+                f"python -c pass; echo {marker}",
+                f"py -3 -c pass; Write-Output {marker}",
+            ),
+        )
+        for command, command_windows in carriers:
+            with self.subTest(command=command):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "commandWindows": command_windows,
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_requires_bound_pin_and_executable_variable_flow(self) -> None:
+        pin = "f" * 64
+        posix = (
+            f"expected='{pin}'; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+            'exec python3 "$dispatcher" --event pre --runtime codex'
+        )
+        windows = (
+            f"$expected='{pin}';"
+            "$d=Join-Path $env:USERPROFILE '.claude\\hooks\\dispatch.py';"
+            "$p=Join-Path $env:SystemRoot 'py.exe';"
+            "& $p -3 $d --event pre --runtime codex"
+        )
+        group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": windows,
+                }
+            ],
+        }
+        current = json.dumps({"hooks": {"PreToolUse": [group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(current, pin), [group])
+
+        loose_pin = json.loads(current)
+        loose_pin["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex " + pin
+        )
+        self.assertEqual(
+            harness.repo_codex_floor_groups(json.dumps(loose_pin), pin), []
+        )
 
     def test_repo_floor_rejects_non_command_handler(self) -> None:
         handler = {

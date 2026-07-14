@@ -158,9 +158,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   text has different PowerShell filesystem semantics.
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
-  shared dispatcher or that wrapper, carry the normalized dispatcher hash pin, and use a matcher
-  that positively includes Bash. `doctor --repo` requires exactly one candidate, one structurally
-  valid handler, and one current pin. This is static topology/token validation: it does not execute
+  shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
+  and use a matcher that positively includes Bash. `doctor --repo` requires exactly one candidate,
+  one conservatively recognized execution shape, and one current pin. Commented or output-only
+  marker carriers are not valid adapters. This is static topology validation: it does not execute
   the hook, prove OS-level integrity, or grant Codex trust. Review the adapter and activate it with
   `/hooks` in a new Codex session, then run a live safe/deny canary.
 - Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively

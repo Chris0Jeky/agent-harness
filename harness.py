@@ -356,8 +356,10 @@ def is_global_floor_handler(handler: dict[str, Any]) -> bool:
             or "invoke_deny_floor" in command.lower()
         )
         for command in (
-            handler.get("command", ""),
-            decode_windows_hook_command(handler.get("commandWindows", "")),
+            strip_shell_comments(handler.get("command", "")),
+            strip_shell_comments(
+                decode_windows_hook_command(handler.get("commandWindows", ""))
+            ),
         )
     )
 
@@ -398,9 +400,7 @@ def managed_codex_floor_groups(current: str) -> list[Any]:
 
 def decode_windows_hook_command(command: str) -> str:
     """Expose a PowerShell EncodedCommand payload for topology validation."""
-    if not re.search(r"(?i)-(?:encodedcommand|enc)(?::|\s)", command):
-        return command
-    executable_match = re.match(r'^\s*(?:"([^"]+)"|(\S+))', command)
+    executable_match = re.match(r'^\s*(?:&\s*)?(?:"([^"]+)"|(\S+))', command)
     if executable_match is None:
         return command
     executable = (executable_match.group(1) or executable_match.group(2)).replace(
@@ -409,20 +409,202 @@ def decode_windows_hook_command(command: str) -> str:
     executable = executable.rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if executable not in {"powershell", "pwsh"}:
         return command
-    match = re.search(
-        r"(?i)(?:^|\s)-(?:encodedcommand|enc)(?::|\s+)"
-        r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)",
-        command,
-    )
-    if match is None:
-        return ""
+    encoded_payload = None
+    for match in re.finditer(r"(?i)(?:^|\s)-([a-z]+)(?::|\s+)", command):
+        option = match.group(1).lower()
+        if option not in {"e", "ec"} and not "encodedcommand".startswith(option):
+            continue
+        payload_match = re.match(
+            r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)", command[match.end() :]
+        )
+        if payload_match is None:
+            return "invoke_deny_floor opaque-encoded-command"
+        encoded_payload = payload_match.group(1)
+        break
+    if encoded_payload is None:
+        return command
     try:
-        payload = base64.b64decode(match.group(1), validate=True)
+        payload = base64.b64decode(encoded_payload, validate=True)
         if not payload or len(payload) % 2:
-            return ""
+            return "invoke_deny_floor opaque-encoded-command"
         return payload.decode("utf-16-le")
     except (binascii.Error, UnicodeDecodeError, ValueError):
-        return ""
+        return "invoke_deny_floor opaque-encoded-command"
+
+
+def strip_shell_comments(command: str) -> str:
+    """Remove unquoted line comments before inspecting topology tokens."""
+    result: list[str] = []
+    quote = ""
+    escaped = False
+    in_comment = False
+    for index, char in enumerate(command):
+        if in_comment:
+            if char in "\r\n":
+                in_comment = False
+                result.append(char)
+            continue
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char in {"\\", "`"} and quote != "'":
+            result.append(char)
+            escaped = True
+            continue
+        if quote:
+            result.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            result.append(char)
+            continue
+        previous = command[index - 1] if index else ""
+        if char == "#" and (not previous or previous.isspace() or previous in ";|&()"):
+            in_comment = True
+            continue
+        result.append(char)
+    return "".join(result)
+
+
+def shell_command_segments(command: str) -> list[str]:
+    """Split top-level command statements without splitting quoted data."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    for char in command:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char in {"\\", "`"} and quote != "'":
+            current.append(char)
+            escaped = True
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            continue
+        if char in ";\r\n":
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = []
+            continue
+        current.append(char)
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def assigned_floor_variables(segments: list[str], marker: str) -> set[str]:
+    """Find variables whose assignment statement binds a floor path marker."""
+    result: set[str] = set()
+    for segment in segments:
+        normalized = segment.lower().replace("\\", "/")
+        marker_index = normalized.find(marker)
+        if marker_index < 0:
+            continue
+        prefix = segment[:marker_index]
+        matches = list(
+            re.finditer(r"(?i)(?:^|[\s{(])\$?([a-z_][a-z0-9_]*)\s*=", prefix)
+        )
+        if matches:
+            result.add(matches[-1].group(1).lower())
+    return result
+
+
+def variable_reference(name: str) -> str:
+    return rf"\$(?:\{{{re.escape(name)}\}}|{re.escape(name)}\b)"
+
+
+def starts_python(segment: str) -> bool:
+    return bool(
+        re.match(
+            r"(?i)^\s*\(?\s*(?:exec\s+)?(?:&\s*)?"
+            r"(?:\"(?:[^\"]*[\\/])?(?:python3?|py)(?:\.exe)?\"|"
+            r"'(?:[^']*[\\/])?(?:python3?|py)(?:\.exe)?'|"
+            r"(?:\S*[\\/])?(?:python3?|py)(?:\.exe)?)(?=\s|$)",
+            segment,
+        )
+    )
+
+
+def segment_invokes_direct_floor(
+    segment: str, dispatcher_variables: set[str], interpreter_variables: set[str]
+) -> bool:
+    """Recognize conservative direct dispatcher execution shapes."""
+    if not (
+        command_has_flag_value(segment, "event", "pre")
+        and command_has_flag_value(segment, "runtime", "codex")
+    ):
+        return False
+    normalized = segment.lower().replace("\\", "/")
+    if starts_python(segment) and ".claude/hooks/dispatch.py" in normalized:
+        return True
+    for dispatcher in dispatcher_variables:
+        dispatcher_ref = variable_reference(dispatcher)
+        if starts_python(segment) and re.search(dispatcher_ref, segment, re.IGNORECASE):
+            return True
+        if re.match(rf"(?i)^\s*&\s*{dispatcher_ref}(?=\s|$)", segment):
+            return True
+        for interpreter in interpreter_variables:
+            interpreter_ref = variable_reference(interpreter)
+            if re.match(
+                rf"(?i)^\s*&\s*{interpreter_ref}(?=\s|$).*{dispatcher_ref}",
+                segment,
+            ):
+                return True
+    return False
+
+
+def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
+    """Recognize conservative project-wrapper execution shapes."""
+    normalized = segment.lower().replace("\\", "/")
+    targets = [r"[^\s;]*invoke_deny_floor[^\s;]*"] + [
+        variable_reference(name) for name in wrapper_variables
+    ]
+    for target in targets:
+        if re.match(
+            rf"(?i)^\s*\(?\s*(?:exec\s+)?(?:/[^\s]*/)?(?:ba)?sh\b.*{target}",
+            normalized,
+        ):
+            return True
+        if re.match(rf"(?i)^\s*&\s*{target}", normalized):
+            return True
+        if re.match(
+            rf"(?i)^\s*(?:\$?[a-z_]\w*\s*=\s*)?start-process\b"
+            rf".*-argumentlist\b.*-file\b.*{target}",
+            normalized,
+        ):
+            return True
+        if re.match(
+            rf"(?i)^\s*(?:powershell|pwsh)(?:\.exe)?\b.*-file\b.*{target}",
+            normalized,
+        ):
+            return True
+    return False
+
+
+def command_binds_pin(command: str, expected_pin: str | None) -> bool:
+    if expected_pin is None:
+        return True
+    return bool(
+        re.search(
+            rf"(?i)\$?[a-z_][a-z0-9_]*\s*=\s*[\"']?"
+            rf"{re.escape(expected_pin)}[\"']?(?=$|[\s;}})])",
+            command,
+        )
+    )
 
 
 def matcher_targets_bash(matcher: Any) -> bool:
@@ -431,23 +613,24 @@ def matcher_targets_bash(matcher: Any) -> bool:
 
 
 def platform_project_floor_command(command: str, expected_pin: str | None) -> bool:
-    normalized = command.lower().replace("\\", "/")
-    if re.match(r"^\s*(?:echo|printf|write-output)\b", normalized):
+    inspected = strip_shell_comments(command)
+    normalized = inspected.lower().replace("\\", "/")
+    if ".claude/hooks/dispatch.py" not in normalized:
         return False
-    points_to_shared = ".claude/hooks/dispatch.py" in normalized
-    direct = command_has_flag_value(
-        command, "runtime", "codex"
-    ) and command_has_flag_value(command, "event", "pre")
-    wrapped = "invoke_deny_floor" in normalized
-    has_executor = bool(
-        re.search(
-            r"(?i)(?:\b(?:python3?|py)(?:\.exe)?\b|\bstart-process\b|"
-            r"(?:^|[\s;/])(?:/bin/)?(?:ba)?sh\b|&\s*\$)",
-            command,
-        )
+    segments = shell_command_segments(inspected)
+    dispatcher_variables = assigned_floor_variables(
+        segments, ".claude/hooks/dispatch.py"
     )
-    has_pin = expected_pin is None or expected_pin.lower() in normalized
-    return points_to_shared and (direct or wrapped) and has_executor and has_pin
+    wrapper_variables = assigned_floor_variables(segments, "invoke_deny_floor")
+    interpreter_variables = assigned_floor_variables(segments, "py.exe")
+    invokes_floor = any(
+        segment_invokes_direct_floor(
+            segment, dispatcher_variables, interpreter_variables
+        )
+        or segment_invokes_wrapper(segment, wrapper_variables)
+        for segment in segments
+    )
+    return invokes_floor and command_binds_pin(inspected, expected_pin)
 
 
 def repo_codex_floor_candidates(current: str) -> list[Any]:
@@ -457,8 +640,10 @@ def repo_codex_floor_candidates(current: str) -> list[Any]:
     for group in groups:
         for handler in group.get("hooks", []):
             commands = (
-                handler.get("command", ""),
-                decode_windows_hook_command(handler.get("commandWindows", "")),
+                strip_shell_comments(handler.get("command", "")),
+                strip_shell_comments(
+                    decode_windows_hook_command(handler.get("commandWindows", ""))
+                ),
             )
             if any(
                 ".claude/hooks/dispatch.py" in command.lower().replace("\\", "/")
