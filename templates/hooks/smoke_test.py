@@ -772,6 +772,26 @@ CASES = [
         {},
         "deny",
     ),
+    (
+        "$env:C='1'; $env:K='protocol.allow'; $env:V='always'; "
+        "Copy-Item Env:C Env:GIT_CONFIG_COUNT; "
+        "Copy-Item Env:K Env:GIT_CONFIG_KEY_0; "
+        "Copy-Item Env:V Env:GIT_CONFIG_VALUE_0; "
+        "git ls-remote ext::helper",
+        1,
+        {},
+        "deny",
+    ),
+    ("Copy-Item Env:C Env:GIT_CONFIG_COUNT", 1, {}, "deny"),
+    (
+        "cpi -Path Env:C -Destination:Env:GIT_CONFIG_KEY_0",
+        1,
+        {},
+        "deny",
+    ),
+    ("Rename-Item Env:C GIT_CONFIG_VALUE_0", 1, {}, "deny"),
+    ("ren -Path Env:C -NewName:GIT_CONFIG_COUNT", 1, {}, "deny"),
+    ("Copy-Item Env:C $TARGET", 1, {}, "deny"),
     ("git apply --build-fake-ancestor $TARGET patch.diff", 1, {}, "deny"),
     ("git -P diff --output=.env", 1, {}, "deny"),
     ("git diff --output .env", 1, {}, "deny"),
@@ -2000,6 +2020,8 @@ CASES = [
         "allow",
     ),
     ("env -i git status", 1, {}, "allow"),
+    ("Copy-Item Env:C Env:HARMLESS", 1, {}, "allow"),
+    ("Rename-Item Env:C HARMLESS", 1, {}, "allow"),
     ("timeout 1 git status", 1, {}, "allow"),
     ("busybox echo safe", 1, {}, "allow"),
     ("Start-Process notepad", 1, {}, "allow"),

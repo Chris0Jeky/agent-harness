@@ -2808,6 +2808,16 @@ def is_git_config_environment_mutation(raw: list[str]) -> bool:
     provider_assignment = powershell_provider_assignment(raw)
     if provider_assignment is not None:
         return is_git_config_environment_name(provider_assignment[0])
+    provider_copy = powershell_provider_copy_or_rename(raw)
+    if provider_copy is not None:
+        _operation, source, destination = provider_copy
+        source_is_environment = source.lower().strip("'\"").startswith("env:")
+        if source_is_environment and (
+            has_dynamic_shell_token(source) or has_dynamic_shell_token(destination)
+        ):
+            return True
+        if source_is_environment or destination.lower().strip("'\"").startswith("env:"):
+            return is_git_config_environment_name(destination)
     if any(
         is_git_config_environment_name(name)
         for name, _value in dotnet_environment_mutations(raw)
