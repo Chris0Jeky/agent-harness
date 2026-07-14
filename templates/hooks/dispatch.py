@@ -2872,6 +2872,14 @@ def has_download_pipe_to_shell(command: str) -> bool:
             assignment_rhs
         ):
             stage = tokens(assignment_rhs)
+        if re.search(
+            r"<\s*\(\s*(?:(?:env|command)\s+(?:--\s+)?)?"
+            r"(?:[^\s()]+[\\/])?"
+            r"(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)(?:\.exe)?\b",
+            " ".join(raw_stage),
+            re.IGNORECASE,
+        ):
+            download_seen = True
         stage_head, _ = command_head(stage)
         if download_seen and stage_head in {
             "sh",
@@ -2918,6 +2926,23 @@ def has_download_pipe_to_shell(command: str) -> bool:
             compound_closers.pop()
         if operator_after not in {"|", "|&"} and not compound_closers:
             download_seen = False
+    return False
+
+
+def contains_downloader_command(command: str) -> bool:
+    """Return whether an evaluated expression directly invokes a downloader."""
+    for segment in segments(command):
+        raw = strip_control_prefixes(tokens(segment))
+        head, _ = command_head(raw)
+        if head in {
+            "curl",
+            "wget",
+            "iwr",
+            "irm",
+            "invoke-webrequest",
+            "invoke-restmethod",
+        }:
+            return True
     return False
 
 
@@ -3025,7 +3050,9 @@ def check(
     sanitized, inert_placeholders = strip_quotes(command)
     for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
         redirect_target = full_redirect.group(1).strip("'\"")
-        if has_dynamic_shell_token(redirect_target) or redirect_target.startswith("("):
+        if has_dynamic_shell_token(redirect_target) or re.match(
+            r"^[<>]?\(", redirect_target
+        ):
             return "deny", "A dynamic redirect target cannot be inspected safely."
         if token_mentions_secret_path(redirect_target):
             return (
@@ -3189,6 +3216,13 @@ def check(
                     return (
                         "deny",
                         "A dynamic evaluator argument cannot be inspected safely.",
+                    )
+                if head in {"iex", "invoke-expression"} and contains_downloader_command(
+                    evaluated
+                ):
+                    return (
+                        "deny",
+                        "Evaluating downloader output directly is floor-blocked.",
                     )
                 evaluated_decision = check(
                     evaluated,
