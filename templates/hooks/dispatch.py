@@ -4790,6 +4790,21 @@ def check(
                         "deny",
                         "Git archive output to an opaque or secret-looking file is floor-blocked.",
                     )
+            if sub == "apply":
+                fake_ancestor_outputs = git_option_values(
+                    args,
+                    "--build-fake-ancestor",
+                )
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in fake_ancestor_outputs
+                ):
+                    return (
+                        "deny",
+                        "Git apply fake-ancestor output to an opaque or secret-looking file is floor-blocked.",
+                    )
             if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
                 diff_outputs = git_option_values(args, "--output")
                 if any(
@@ -4828,6 +4843,23 @@ def check(
                         return (
                             "deny",
                             "Git bundle output to an opaque or secret-looking file is floor-blocked.",
+                        )
+            if sub == "maintenance":
+                action = next(
+                    (token.lower() for token in args if not token.startswith("-")),
+                    "",
+                )
+                if action in {"register", "unregister"}:
+                    config_outputs = git_option_values(args, "--config-file")
+                    if any(
+                        target is None
+                        or has_dynamic_shell_token(target)
+                        or token_mentions_secret_path(target)
+                        for target in config_outputs
+                    ):
+                        return (
+                            "deny",
+                            "Git maintenance config output to an opaque or secret-looking file is floor-blocked.",
                         )
             if sub == "worktree" and any(token.lower() == "remove" for token in args):
                 return "deny", "Git worktree removal is floor-blocked."
