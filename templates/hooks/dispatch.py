@@ -1358,6 +1358,30 @@ def powershell_bound_value(token: str, names: set[str]) -> tuple[bool, str]:
     return False, ""
 
 
+_POWERSHELL_COMMON_VALUE_PARAMETERS = {
+    "erroraction",
+    "ea",
+    "errorvariable",
+    "ev",
+    "informationaction",
+    "infa",
+    "informationvariable",
+    "iv",
+    "outbuffer",
+    "ob",
+    "outvariable",
+    "ov",
+    "pipelinevariable",
+    "pv",
+    "progressaction",
+    "proga",
+    "warningaction",
+    "wa",
+    "warningvariable",
+    "wv",
+}
+
+
 def location_transition(
     head: str,
     toks: list[str],
@@ -2881,7 +2905,7 @@ def check(
             positional_groups = []
             index = 1
             path_parameters = {"path", "literalpath", "filepath", "destination"}
-            value_parameters = set()
+            value_parameters = set(_POWERSHELL_COMMON_VALUE_PARAMETERS)
             if head in {"new-item", "ni"}:
                 path_parameters.add("name")
                 value_parameters.update({"itemtype", "type", "value"})
