@@ -616,6 +616,61 @@ def downloader_output_binding(head: str, token: str) -> tuple[str | None, str | 
     return None, None
 
 
+_WGET_EXECUTE_OUTPUT_COMMANDS = {
+    "dirprefix",
+    "logfile",
+    "outputdocument",
+    "savecookies",
+    "warcfile",
+}
+
+
+def wget_execute_output_bindings(
+    toks: list[str],
+) -> tuple[list[tuple[str, str]] | None, str]:
+    """Recover output-bearing wgetrc assignments passed through -e/--execute."""
+    bindings: list[tuple[str, str]] = []
+    prefix_flags = _DOWNLOADER_CLUSTER_PREFIXES["wget"]
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        directive = None
+        consumes_next = False
+        if token.startswith("--"):
+            option, separator, attached = token.partition("=")
+            lowered = option.lower()
+            if len(lowered) >= len("--exe") and "--execute".startswith(lowered):
+                directive = attached if separator else None
+                consumes_next = not separator
+        elif token.startswith("-"):
+            body = token[1:]
+            for offset, character in enumerate(body):
+                if character == "e":
+                    directive = body[offset + 1 :] or None
+                    consumes_next = directive is None
+                    break
+                if character not in prefix_flags:
+                    break
+
+        if directive is None and consumes_next:
+            if index + 1 >= len(toks):
+                return None, "wget -e/--execute is missing its directive."
+            directive = toks[index + 1]
+            index += 1
+        if directive is not None or consumes_next:
+            restored = restore_quoted_literal_markers(directive or "").strip()
+            if not restored or is_dynamic_value(restored):
+                return None, "A dynamic or empty wget -e directive is opaque."
+            assignment = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.*?)\s*", restored)
+            if assignment is None or not assignment.group(2):
+                return None, "A malformed wget -e directive is opaque."
+            name = re.sub(r"[_-]", "", assignment.group(1).lower())
+            if name in _WGET_EXECUTE_OUTPUT_COMMANDS:
+                bindings.append((name, assignment.group(2)))
+        index += 1
+    return bindings, ""
+
+
 _CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
     {
         "--abstract-unix-socket",
@@ -5790,6 +5845,26 @@ def check(
             }
             explicit_output = False
             remote_name_output = head == "wget"
+            if head == "wget":
+                execute_bindings, error = wget_execute_output_bindings(toks)
+                if execute_bindings is None:
+                    return "deny", error
+                for execute_name, execute_target in execute_bindings:
+                    if is_dynamic_value(execute_target) or re.match(
+                        r"^[<>]?\(", execute_target
+                    ):
+                        return (
+                            "deny",
+                            "A dynamic wget -e output target cannot be inspected safely.",
+                        )
+                    if token_mentions_secret_path(execute_target):
+                        return (
+                            "deny",
+                            "wget -e output to a secret-looking path is floor-blocked.",
+                        )
+                    explicit_output = (
+                        explicit_output or execute_name == "outputdocument"
+                    )
             output_tokens = [] if head == "curl" else toks[1:]
             for index, token in enumerate(output_tokens, start=1):
                 lowered = token.lower()
