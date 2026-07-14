@@ -1223,11 +1223,88 @@ def has_git_config_environment(raw: list[str]) -> bool:
     return False
 
 
+_GIT_PROCESS_ENVIRONMENT = {
+    "GIT_ASKPASS",
+    "GIT_EDITOR",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "GIT_PROXY_COMMAND",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "SSH_ASKPASS",
+}
+_GIT_PROCESS_COMMAND_ENVIRONMENT = _GIT_PROCESS_ENVIRONMENT | {
+    "EDITOR",
+    "PAGER",
+    "VISUAL",
+}
+
+
+def git_environment_name(token: str) -> str:
+    """Normalize shell/provider spellings of an environment variable name."""
+    candidate = token.strip("'\"")
+    if "=" in candidate:
+        candidate = candidate.split("=", 1)[0]
+    lowered = candidate.lower()
+    for prefix in ("$env:", "${env:", "env:", "environment::"):
+        if lowered.startswith(prefix):
+            candidate = candidate[len(prefix) :]
+            break
+    return candidate.rstrip("}").upper()
+
+
+def has_git_process_environment(raw: list[str]) -> bool:
+    """Detect command-scoped or inherited process-launching Git variables."""
+    if any(name.upper() in _GIT_PROCESS_ENVIRONMENT for name in os.environ):
+        return True
+    for token in raw:
+        base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
+        if base == "git":
+            break
+        if (
+            _ASSIGN.match(token)
+            and git_environment_name(token) in _GIT_PROCESS_COMMAND_ENVIRONMENT
+        ):
+            return True
+    return False
+
+
+def is_git_process_environment_mutation(raw: list[str]) -> bool:
+    """Detect persistent shell mutations of process-launching Git variables."""
+    if not raw:
+        return False
+    first = raw[0].lower()
+    if (
+        _ASSIGN.match(raw[0])
+        and git_environment_name(raw[0]) in _GIT_PROCESS_ENVIRONMENT
+    ):
+        return True
+    if (
+        git_environment_name(raw[0]) in _GIT_PROCESS_ENVIRONMENT
+        and ("=" in raw[0] or (len(raw) > 1 and raw[1] == "="))
+        and first.startswith(("$env:", "${env:", "env:", "environment::"))
+    ):
+        return True
+    if first in {"export", "set", "setx"}:
+        return any(
+            git_environment_name(token) in _GIT_PROCESS_ENVIRONMENT for token in raw[1:]
+        )
+    if first in {"set-item", "new-item", "si", "ni"}:
+        return any(
+            git_environment_name(token) in _GIT_PROCESS_ENVIRONMENT for token in raw[1:]
+        )
+    return False
+
+
 def is_git_config_environment_mutation(raw: list[str]) -> bool:
     """Detect shell commands that establish Git config injection state."""
     if not raw:
         return False
     first = raw[0].lower()
+    if _ASSIGN.match(raw[0]) and first.startswith("git_config"):
+        return first.split("=", 1)[0] != "git_config_nosystem"
     if re.match(r"^\$env:git_config[a-z0-9_]*=", first, re.IGNORECASE):
         return True
     if first in {"export", "set", "setx"}:
@@ -2602,6 +2679,11 @@ def check(
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
+        if is_git_process_environment_mutation(raw):
+            return (
+                "deny",
+                "Mutating a process-launching Git environment variable is floor-blocked.",
+            )
         assignment_rhs = powershell_assignment_rhs(raw)
         if assignment_rhs is not None:
             if current_pass == 0 and segment_index < len(assignment_segments):
@@ -2917,6 +2999,11 @@ def check(
                 return (
                     "deny",
                     "Git config environment injection is opaque to floor inspection.",
+                )
+            if has_git_process_environment(raw):
+                return (
+                    "deny",
+                    "Git process-launch environment overrides are opaque to floor inspection.",
                 )
             if sub == "push" and inline_configs:
                 return (
