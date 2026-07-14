@@ -433,6 +433,164 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
     return shlex.join([executable, *child_args]), ""
 
 
+def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]:
+    """Recover literal background-job scriptblocks for recursive inspection."""
+    if not toks:
+        return None, "A background-job payload cannot be inspected safely."
+
+    start_job = toks[0].lower() in {"start-job", "sajb"}
+    script_parameters = {"scriptblock"}
+    if start_job:
+        script_parameters.add("command")
+    initialization_parameters = {"initializationscript"}
+    opaque_parameters = {
+        "definitionname",
+        "definitionpath",
+        "filepath",
+        "literalpath",
+        "pspath",
+        "type",
+    }
+    value_parameters = {
+        "argumentlist",
+        "authentication",
+        "credential",
+        "erroraction",
+        "ea",
+        "errorvariable",
+        "ev",
+        "informationaction",
+        "infa",
+        "informationvariable",
+        "iv",
+        "inputobject",
+        "name",
+        "outbuffer",
+        "ob",
+        "outvariable",
+        "ov",
+        "pipelinevariable",
+        "pv",
+        "progressaction",
+        "proga",
+        "psversion",
+        "warningaction",
+        "wa",
+        "warningvariable",
+        "wv",
+        "workingdirectory",
+    }
+    if not start_job:
+        value_parameters.update({"streaminghost", "throttlelimit"})
+    switch_parameters = {
+        "confirm",
+        "debug",
+        "runas32",
+        "verbose",
+        "whatif",
+    }
+    parameter_names = (
+        script_parameters
+        | initialization_parameters
+        | opaque_parameters
+        | value_parameters
+        | switch_parameters
+    )
+
+    def parameter(token: str) -> tuple[str | None, str | None]:
+        raw = token.lstrip("-")
+        name, separator, attached = raw.partition(":")
+        lowered = name.lower()
+        if lowered in parameter_names:
+            return lowered, attached if separator else None
+        matches = [
+            candidate for candidate in parameter_names if candidate.startswith(lowered)
+        ]
+        if len(matches) != 1:
+            return None, None
+        return matches[0], attached if separator else None
+
+    def literal_scriptblock(
+        index: int,
+        attached: str | None,
+    ) -> tuple[str | None, int, str]:
+        if attached is None:
+            if index >= len(toks):
+                return None, index, "A background-job scriptblock is missing."
+            first = toks[index]
+            index += 1
+        else:
+            first = attached
+        if not first.startswith("{"):
+            return (
+                None,
+                index,
+                "A dynamic background-job scriptblock cannot be inspected safely.",
+            )
+        chunks = [first]
+        depth = first.count("{") - first.count("}")
+        if depth < 0:
+            return None, index, "A background-job scriptblock is malformed."
+        while depth > 0 and index < len(toks):
+            chunk = toks[index]
+            chunks.append(chunk)
+            depth += chunk.count("{") - chunk.count("}")
+            index += 1
+        if depth != 0:
+            return None, index, "A background-job scriptblock is malformed."
+        literal = " ".join(chunks)
+        body = unwrap_powershell_scriptblock(literal)
+        if body == literal:
+            return None, index, "A background-job scriptblock is malformed."
+        return body, index, ""
+
+    scripts: list[str] = []
+    main_script_seen = False
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if token.startswith("@"):
+            return None, "A splatted background-job payload cannot be inspected safely."
+        if token.startswith("-"):
+            name, attached = parameter(token)
+            if name is None:
+                return None, "A background-job parameter cannot be inspected safely."
+            index += 1
+            if name in opaque_parameters:
+                return None, "A file-backed or registered background job is opaque."
+            if name in script_parameters | initialization_parameters:
+                body, index, error = literal_scriptblock(index, attached)
+                if body is None:
+                    return None, error
+                if name in script_parameters:
+                    if main_script_seen:
+                        return None, "A background job has multiple primary payloads."
+                    main_script_seen = True
+                scripts.append(body)
+                continue
+            if name in value_parameters:
+                if attached is None:
+                    if index >= len(toks):
+                        return None, "A background-job parameter value is missing."
+                    index += 1
+                continue
+            continue
+        if main_script_seen:
+            return (
+                None,
+                "A background-job positional payload cannot be inspected safely.",
+            )
+        body, index, error = literal_scriptblock(index, None)
+        if body is None:
+            return None, error
+        main_script_seen = True
+        scripts.append(body)
+
+    if not main_script_seen:
+        return None, "A background job has no inspectable primary scriptblock."
+    return scripts, ""
+
+
 _DOWNLOADER_CLUSTER_PREFIXES = {
     # Short switches in these sets take no value, so a later output switch in
     # the same argv token still owns the remaining suffix.
@@ -4553,6 +4711,29 @@ def check(
             )
             if child_decision[0] != "allow":
                 return child_decision
+            continue
+        if head in {"start-job", "sajb", "start-threadjob"}:
+            if not quote_aware:
+                continue
+            job_scripts, error = powershell_job_scriptblocks(toks)
+            if job_scripts is None:
+                return "deny", error
+            for job_script in job_scripts:
+                child_decision = check(
+                    job_script,
+                    tier_cfg,
+                    project_dir,
+                    current_cwd,
+                    _depth + 1,
+                    cwd_uncertain,
+                    cwd_changed,
+                    remote_resolver,
+                    _remote_cache,
+                    _remote_deadline,
+                    frozenset(effective_git_repository_environment),
+                )
+                if child_decision[0] != "allow":
+                    return child_decision
             continue
         if head == "start":
             return (
