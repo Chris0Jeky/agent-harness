@@ -899,7 +899,38 @@ class HarnessTests(unittest.TestCase):
                 "$d=Join-Path $env:USERPROFILE '.claude\\hooks\\dispatch.py';"
                 "$p='x/py.exe';& $p -3 $d --event pre --runtime codex",
             ),
+            # quote-glued prefix: bash concatenates evil'.claude/...' -> evil.claude/...
+            (
+                f"pin={pin}; d=evil'.claude/hooks/dispatch.py'; "
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
+            (
+                f"pin={pin}; d='evil'.claude/hooks/dispatch.py; "
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
         )
+        # value_binds_anchored_floor_path is a strict whitelist: only the exact
+        # dispatcher/interpreter/wrapper value shapes bind; everything else fails.
+        for good in (
+            "$HOME/.claude/hooks/dispatch.py",
+            "'.claude/hooks/dispatch.py'",
+            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
+            "Join-Path $env:SystemRoot 'py.exe'",
+            ".codex/invoke_deny_floor.sh",
+        ):
+            self.assertTrue(harness.value_binds_anchored_floor_path(good), good)
+        for bad in (
+            "evil'.claude/hooks/dispatch.py'",
+            "x.claude/hooks/dispatch.py",
+            ".claude/hooks/dispatch.py+evil",
+            "./attacker.sh",
+            "x/py.exe",
+            "evilinvoke_deny_floor.sh",
+            '"$HOME"evil"/.claude/hooks/dispatch.py"',
+        ):
+            self.assertFalse(harness.value_binds_anchored_floor_path(bad), bad)
         for command, command_windows in invalid_pairs:
             with self.subTest(command=command, command_windows=command_windows):
                 doc = json.dumps(

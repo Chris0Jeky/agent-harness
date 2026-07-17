@@ -972,6 +972,13 @@ CASES = [
     # --- Copy-Item filesystem alias (cpi) writes secret destinations ---
     ("cpi secret.txt .env", 1, {}, "deny"),
     ("Copy-Item -Destination .env source", 1, {}, "deny"),
+    # --- modern SSH private keys are secret across every mutation vector ---
+    ("cp /tmp/evil ~/.ssh/id_ed25519", 1, {}, "deny"),
+    ("rm ~/.ssh/id_ecdsa", 1, {}, "deny"),
+    ("rm ~/.ssh/id_dsa", 1, {}, "deny"),
+    ("mv x ~/.ssh/id_ed25519", 1, {}, "deny"),
+    ("Set-Content -Path id_ed25519 -Value x", 1, {}, "deny"),
+    ("echo pwned > ~/.ssh/id_ed25519", 1, {}, "deny"),
     # --- wget server-selected filenames ---
     ("wget --trust-server-names https://host/file", 1, {}, "deny"),
     ("wget --content-disposition https://host/file", 1, {}, "deny"),

@@ -1870,7 +1870,8 @@ ENV_ROOTS = re.compile(
 )
 
 _SECRET_PATH = re.compile(
-    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\.|id_rsa|\.pem$",
+    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\.|id_(?:rsa|dsa|ecdsa|ed25519)"
+    r"|\.pem$",
     re.IGNORECASE,
 )
 _SECRET_GLOB_PROBES = {
@@ -1881,6 +1882,9 @@ _SECRET_GLOB_PROBES = {
     "secret.txt",
     "secrets.json",
     "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
     "key.pem",
 }
 
