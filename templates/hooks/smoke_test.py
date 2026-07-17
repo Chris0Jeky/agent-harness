@@ -2561,8 +2561,13 @@ CASES = [
     # --- secret-file mutators / dynamic targets ---
     ("tar -cf .env file", 1, {}, "deny"),
     ("tar --create --file=.env src", 1, {}, "deny"),
+    ("tar cf .env somefile", 1, {}, "deny"),  # old dashless option style
+    ("tar cvf credentials.json x", 1, {}, "deny"),
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
+    ("tar cf backup.tar src", 1, {}, "allow"),
+    ("rm .envrc", 1, {}, "deny"),
+    ("echo x > .envrc", 1, {}, "deny"),
     ("mkdir .env", 1, {}, "deny"),
     ("mkdir -p credentials.json", 1, {}, "deny"),
     ("mkdir build", 1, {}, "allow"),

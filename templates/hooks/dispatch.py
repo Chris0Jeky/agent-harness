@@ -1907,7 +1907,7 @@ ENV_ROOTS = re.compile(
 )
 
 _SECRET_PATH = re.compile(
-    r"(^|[\\/])\.env(\.[\w.]+)?([\\/]|$)|credential|secrets?\."
+    r"(^|[\\/])\.env(rc)?(\.[\w.]+)?([\\/]|$)|credential|secrets?\."
     r"|(^|[\\/._-])id_(?:rsa|dsa|ecdsa|ed25519)"
     r"|\.pem$",
     re.IGNORECASE,
@@ -7403,26 +7403,45 @@ def check(
             if any(token_mentions_secret_path(token) for token in install_targets):
                 return "deny", "Installing over a secret-looking file is floor-blocked."
         if head in {"tar", "gtar", "bsdtar"}:
+            # Traditional tar "old option style" makes the first argument a
+            # dashless option cluster (`tar cf ARCHIVE files`), accepted by GNU,
+            # bsd, and busybox tar. Normalize it to the getopt `-cf` form so the
+            # write-mode + archive-target detection below sees it.
+            tar_tokens = list(toks)
+            if (
+                len(tar_tokens) > 1
+                and re.fullmatch(r"[A-Za-z]+", tar_tokens[1])
+                and any(function in tar_tokens[1] for function in "crtuxAd")
+            ):
+                tar_tokens[1] = "-" + tar_tokens[1]
             write_mode = any(
                 bool(re.match(r"^-[A-Za-z]*[cruA]", token))
                 or token.lower()
                 in {"--create", "--append", "--update", "--concatenate", "--catenate"}
-                for token in toks[1:]
+                for token in tar_tokens[1:]
             )
             if write_mode:
                 archive = None
                 index = 1
-                while index < len(toks):
-                    token = toks[index]
+                while index < len(tar_tokens):
+                    token = tar_tokens[index]
                     lowered = token.lower()
                     if token == "-f" or lowered == "--file":
-                        archive = toks[index + 1] if index + 1 < len(toks) else None
+                        archive = (
+                            tar_tokens[index + 1]
+                            if index + 1 < len(tar_tokens)
+                            else None
+                        )
                         index += 2
                         continue
                     if lowered.startswith("--file="):
                         archive = token.split("=", 1)[1]
                     elif re.match(r"^-[A-Za-z]*f$", token):
-                        archive = toks[index + 1] if index + 1 < len(toks) else None
+                        archive = (
+                            tar_tokens[index + 1]
+                            if index + 1 < len(tar_tokens)
+                            else None
+                        )
                         index += 2
                         continue
                     index += 1
