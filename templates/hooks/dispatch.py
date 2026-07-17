@@ -2339,6 +2339,16 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         )
     ):
         return "A custom git upload-pack program can execute outside floor inspection."
+    if subcommand == "clone":
+        # clone --config takes effect before fetch: core.sshCommand and friends
+        # run during the clone itself, exactly like a global `git -c` override.
+        for config in git_option_values(args, "--config", {"-c"}):
+            if config is None or has_dynamic_shell_token(config.split("=", 1)[0]):
+                return "A git clone --config value is opaque to floor inspection."
+            if protected_git_config_key(config.split("=", 1)[0].lower()):
+                return (
+                    "Git clone --config can inject execution or destination config."
+                )
     if subcommand == "archive" and git_option_is_present(args, "--exec"):
         return "A custom git archive program can execute outside floor inspection."
     if subcommand == "rebase" and git_option_is_present(args, "--exec", {"-x"}):
@@ -3336,6 +3346,36 @@ _GIT_PUSH_VALUE_LONG_OPTIONS = {
     "--receive-pack",
     "--recurse-submodules",
     "--repo",
+}
+
+# worktree options that consume a SEPARATE value token; skipping them keeps
+# the action/path positionals aligned for destination inspection.
+_GIT_WORKTREE_VALUE_OPTIONS = {"-b", "-B", "--reason"}
+
+# clone options that consume a SEPARATE value token; skipping them keeps the
+# repository/destination positionals aligned for destination inspection.
+_GIT_CLONE_VALUE_OPTIONS = {
+    "-b",
+    "--branch",
+    "--bundle-uri",
+    "-c",
+    "--config",
+    "--depth",
+    "--filter",
+    "-j",
+    "--jobs",
+    "-o",
+    "--origin",
+    "--reference",
+    "--reference-if-able",
+    "--revision",
+    "--separate-git-dir",
+    "--server-option",
+    "--shallow-exclude",
+    "--shallow-since",
+    "--template",
+    "-u",
+    "--upload-pack",
 }
 
 _FEATURE_BRANCH_ROOTS = {
@@ -5366,8 +5406,24 @@ def check(
                         "deny",
                         "Git apply fake-ancestor output to an opaque or secret-looking file is floor-blocked.",
                     )
+            if sub in {"apply", "am"}:
+                directory_roots = git_option_values(args, "--directory")
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in directory_roots
+                ):
+                    return (
+                        "deny",
+                        "Git patch application under an opaque or secret-looking directory root is floor-blocked.",
+                    )
             if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
                 diff_outputs = git_option_values(args, "--output")
+                if sub == "format-patch":
+                    diff_outputs = diff_outputs + git_option_values(
+                        args, "--output-directory", {"-o"}
+                    )
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -5422,8 +5478,82 @@ def check(
                             "deny",
                             "Git maintenance config output to an opaque or secret-looking file is floor-blocked.",
                         )
-            if sub == "worktree" and any(token.lower() == "remove" for token in args):
-                return "deny", "Git worktree removal is floor-blocked."
+            if sub == "clone":
+                separate_git_dirs = git_option_values(args, "--separate-git-dir")
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in separate_git_dirs
+                ):
+                    return (
+                        "deny",
+                        "Git clone separate-git-dir output to an opaque or secret-looking path is floor-blocked.",
+                    )
+                clone_positionals = []
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token == "--":
+                        clone_positionals.extend(args[index + 1 :])
+                        break
+                    if token in _GIT_CLONE_VALUE_OPTIONS:
+                        index += 2
+                        continue
+                    if token.startswith("-"):
+                        index += 1
+                        continue
+                    clone_positionals.append(token)
+                    index += 1
+                if len(clone_positionals) > 1 and any(
+                    has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in clone_positionals[1:]
+                ):
+                    return (
+                        "deny",
+                        "Git clone into an opaque or secret-looking destination is floor-blocked.",
+                    )
+            if sub == "worktree":
+                if any(token.lower() == "remove" for token in args):
+                    return "deny", "Git worktree removal is floor-blocked."
+                worktree_action = next(
+                    (token.lower() for token in args if not token.startswith("-")),
+                    "",
+                )
+                if worktree_action in {"add", "move"}:
+                    worktree_positionals = []
+                    seen_action = False
+                    index = 0
+                    while index < len(args):
+                        token = args[index]
+                        if token in _GIT_WORKTREE_VALUE_OPTIONS:
+                            index += 2
+                            continue
+                        if token.startswith("-"):
+                            index += 1
+                            continue
+                        if not seen_action:
+                            seen_action = True  # the action word itself
+                            index += 1
+                            continue
+                        worktree_positionals.append(token)
+                        index += 1
+                    # add writes its first operand; move writes its second.
+                    destination_targets = (
+                        worktree_positionals
+                        if worktree_action == "add"
+                        else worktree_positionals[1:]
+                    )
+                    if any(
+                        has_dynamic_shell_token(target)
+                        or token_mentions_secret_path(target)
+                        for target in destination_targets
+                    ):
+                        return (
+                            "deny",
+                            "Git worktree creation at an opaque or secret-looking destination is floor-blocked.",
+                        )
             if sub == "rm":
                 lowered_rm_args = [token.lower() for token in args]
                 if not any(token in {"-n", "--dry-run"} for token in lowered_rm_args):
