@@ -7022,9 +7022,9 @@ def check(
                         )
 
             if sub == "checkout" and any(
-                token == "--force"
-                or token == "-f"
-                or bool(re.match(r"^-[a-zA-Z]*f$", token))
+                token == "-f"
+                or git_option_abbreviates(token, "--force", min_prefix=3)
+                or bool(re.match(r"^-[a-zA-Z]*f", token))  # -f, -fq, -qf clusters
                 for token in (args[: args.index("--")] if "--" in args else args)
             ):
                 if strict:
@@ -7038,7 +7038,14 @@ def check(
                         "T3: git checkout -f discards local modifications. Confirm.",
                     )
 
-            if sub == "switch" and any(token == "--discard-changes" for token in args):
+            # git switch documents `-f, --force` as an alias for --discard-changes.
+            if sub == "switch" and any(
+                token == "-f"
+                or token == "--force"
+                or git_option_abbreviates(token, "--discard-changes", min_prefix=4)
+                or bool(re.match(r"^-[a-zA-Z]*f", token))
+                for token in args
+            ):
                 if strict:
                     return (
                         "deny",
