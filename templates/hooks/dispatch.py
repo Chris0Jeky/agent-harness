@@ -2412,6 +2412,28 @@ def gnu_time_secret_output(raw: list[str]) -> str | None:
     return None
 
 
+def _chmod_loosens_access(mode: str) -> bool:
+    """True when a chmod mode grants group/other read or write (exposing a
+    secret). Owner-only/tightening modes (600, 400, 700, u+x, go-rwx) return
+    False; an unparseable symbolic clause fails closed (True)."""
+    if not mode:
+        return False
+    if re.fullmatch(r"[0-7]{3,4}", mode):
+        # The last two octal digits are the group and other permissions; the
+        # read (4) and write (2) bits there expose the file beyond its owner.
+        return any(int(digit) & 0o6 for digit in mode[-2:])
+    for clause in mode.split(","):
+        match = re.match(r"^([ugoa]*)([-+=])([rwxXst]*)$", clause)
+        if match is None:
+            return True  # unrecognized symbolic clause: fail closed
+        who, operator, perms = match.groups()
+        if operator in {"+", "="} and ("r" in perms or "w" in perms):
+            # An empty `who` means "all"; g/o/a each grant beyond the owner.
+            if who == "" or any(target in who for target in "goa"):
+                return True
+    return False
+
+
 def _launcher_child_command(head: str, toks: list[str]) -> str | None:
     """Return a child command string for watch/flock/coproc, "" for none, or
     None when the child is opaque and the launcher must be denied."""
@@ -2456,8 +2478,12 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
                 index += 1
                 continue
             break
-        # toks[index] is the lock file/fd; the child command follows it.
+        # toks[index] is the lock file/fd; the child command follows it. The
+        # documented `flock [options] <file> -c <command>` form puts -c AFTER the
+        # lockfile, so the child string can hide behind a post-lockfile -c.
         child = toks[index + 1 :]
+        if child and child[0].lower() in {"-c", "--command"}:
+            return restore_quoted_literal_markers(child[1]) if len(child) > 1 else None
     else:  # coproc
         child = toks[1:]
         if any(token in {"{", "}"} or token.endswith("{") for token in child):
@@ -2538,19 +2564,22 @@ def _trap_handler_decision(toks: list[str], recurse):
 
 def _ssh_runs_local_child(toks: list[str]) -> bool:
     """True when ssh argv selects a locally-executed child via ProxyCommand or
-    LocalCommand, which OpenSSH runs through the user's shell."""
+    LocalCommand, which OpenSSH runs through the user's shell. OpenSSH parses an
+    -o value like a config line, so keyword and value may be separated by `=` OR
+    whitespace (`-o "ProxyCommand cmd"` == `-o ProxyCommand=cmd`)."""
+    local_child = re.compile(r"(?:proxy|local)command[=\s]")
     index = 1
     while index < len(toks):
         token = toks[index]
         lowered = token.lower()
         if token == "-o":
             value = (toks[index + 1] if index + 1 < len(toks) else "").lower()
-            if value.startswith(("proxycommand=", "localcommand=")):
+            if local_child.match(value):
                 return True
             index += 2
             continue
         if lowered.startswith("-o") and len(token) > 2:
-            if lowered[2:].startswith(("proxycommand=", "localcommand=")):
+            if local_child.match(lowered[2:]):
                 return True
         index += 1
     return False
@@ -5564,12 +5593,25 @@ def check(
             continue
         # Resolve a previously-defined alias to its real command so an aliased
         # `gp push --force` / `zap` is inspected, not treated as an unknown head.
-        if quote_aware and head in command_aliases:
-            expansion = command_aliases[head]
-            if expansion and not is_dynamic_value(expansion):
+        # Bash re-scans the first word after each alias expansion, so an alias
+        # chain (`alias b='rm -rf ~'; alias a=b; a`) resolves transitively;
+        # resolve in a bounded loop, capped to avoid a self-referential cycle.
+        if quote_aware:
+            seen_aliases: set[str] = set()
+            while (
+                head in command_aliases
+                and head not in seen_aliases
+                and len(seen_aliases) < 16
+            ):
+                seen_aliases.add(head)
+                expansion = command_aliases[head]
+                if not expansion or is_dynamic_value(expansion):
+                    break
                 head, toks = command_head(tokens(expansion) + toks[1:])
                 if not toks:
-                    continue
+                    break
+            if not toks:
+                continue
         if quote_aware:
             command_aliases.update(parse_alias_definitions(head, toks))
         # A BASH_ENV startup file is read and executed by a non-interactive bash
@@ -5732,7 +5774,7 @@ def check(
                 "deny",
                 "A process launcher can conceal an irreversible child command. Run the child directly.",
             )
-        if head in {"systemd-run", "nsenter", "unshare", "script", "setarch", "capsh"}:
+        if head in {"systemd-run", "nsenter", "unshare", "setarch", "capsh"}:
             # These launchers have option grammars where reconstructing which
             # flags consume a value is error-prone, so a child command can hide
             # behind a misparsed option. They are rarely legitimate in an agent
@@ -5741,6 +5783,42 @@ def check(
                 "deny",
                 f"{head} can launch an uninspected child command; run the child directly.",
             )
+        if head == "script":
+            # `script -c <cmd> [file]` runs a child command; recurse it. Plain
+            # `script [file]` only records an interactive session whose commands
+            # the floor still inspects as they are typed, so it is allowed.
+            for command_index, token in enumerate(toks[1:], start=1):
+                lowered = token.lower()
+                if lowered in {"-c", "--command"}:
+                    value = (
+                        toks[command_index + 1]
+                        if command_index + 1 < len(toks)
+                        else None
+                    )
+                    if value is None:
+                        return "deny", "A script -c child command is opaque."
+                    child = restore_quoted_literal_markers(value)
+                    if is_dynamic_value(child):
+                        return (
+                            "deny",
+                            "A dynamic script -c command cannot be inspected.",
+                        )
+                    child_decision = _recurse_child(child)
+                    if child_decision[0] != "allow":
+                        return child_decision
+                    break
+                if lowered.startswith("--command="):
+                    child = restore_quoted_literal_markers(token.split("=", 1)[1])
+                    if is_dynamic_value(child):
+                        return (
+                            "deny",
+                            "A dynamic script -c command cannot be inspected.",
+                        )
+                    child_decision = _recurse_child(child)
+                    if child_decision[0] != "allow":
+                        return child_decision
+                    break
+            continue
         if head in {"watch", "flock", "coproc"}:
             child_command = _launcher_child_command(head, toks)
             if child_command is None:
@@ -7014,10 +7092,26 @@ def check(
             "ln",
             "mkdir",
             "md",
-            "chmod",
-            "chown",
-            "chgrp",
         }
+        if head == "chmod":
+            # chmod changes metadata, not content, so `chmod 600 ~/.ssh/id_rsa`
+            # (the standard secure-your-key op) must stay allowed. Only deny a
+            # mode that LOOSENS a secret file — grants group/other read or write,
+            # which exposes the secret. A dynamic target fails closed.
+            chmod_positionals = [
+                token for token in toks[1:] if not token.startswith("-")
+            ]
+            mode = chmod_positionals[0] if chmod_positionals else ""
+            chmod_files = chmod_positionals[1:]
+            if _chmod_loosens_access(mode) and any(
+                has_dynamic_shell_token(token) or token_mentions_secret_path(token)
+                for token in chmod_files
+            ):
+                return (
+                    "deny",
+                    "chmod that grants group/other access to a secret-looking file "
+                    "is floor-blocked.",
+                )
         if head in secret_mutators:
             if any(token.startswith("@") for token in toks[1:]):
                 return (
@@ -7176,31 +7270,90 @@ def check(
             token == "-i" or token.startswith(("-i", "--in-place"))
             for token in toks[1:]
         ):
-            # The file operands are the non-option, non-script tokens. A dynamic
-            # operand may expand to a secret path, so fail closed on it too.
-            for token in toks[1:]:
-                if token.startswith("-") or re.match(r"^[0-9]*[sy]([^\w]|$)", token):
-                    continue  # option or an inline sed script (s///, y///, 5d ...)
-                if has_dynamic_shell_token(token):
-                    return (
-                        "deny",
-                        "A dynamic sed in-place target cannot be inspected safely.",
-                    )
-            if any(token_mentions_secret_path(token) for token in toks[1:]):
+            # Inspect only the FILE operands, not the sed program. `sed SCRIPT
+            # FILE...`: the first bare positional is the inline script UNLESS a
+            # -e/--expression or -f/--file supplies it, in which case every bare
+            # positional is a file. Scanning the script for secret substrings
+            # (`/credentials/d`, `s/x/secret.y/`) wrongly denies benign edits.
+            sed_script_from_option = False
+            sed_operands: list[str] = []
+            index = 1
+            while index < len(toks):
+                token = toks[index]
+                lowered = token.lower()
+                if lowered in {"-e", "--expression", "-f", "--file"}:
+                    sed_script_from_option = True
+                    index += 2
+                    continue
+                if (
+                    lowered.startswith(("--expression=", "--file="))
+                    or (token.startswith("-e") and len(token) > 2)
+                    or (token.startswith("-f") and len(token) > 2)
+                ):
+                    sed_script_from_option = True
+                    index += 1
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                sed_operands.append(token)
+                index += 1
+            if not sed_script_from_option and sed_operands:
+                sed_operands = sed_operands[1:]  # drop the inline script operand
+            if any(has_dynamic_shell_token(token) for token in sed_operands):
+                return (
+                    "deny",
+                    "A dynamic sed in-place target cannot be inspected safely.",
+                )
+            if any(token_mentions_secret_path(token) for token in sed_operands):
                 return (
                     "deny",
                     "In-place editing of a secret-looking file is floor-blocked.",
                 )
         if head == "install":
-            # install SOURCE... DEST (or -t DIR): a dynamic destination may expand
-            # to a secret path, so fail closed rather than treat it as safe.
-            for token in toks[1:]:
-                if not token.startswith("-") and has_dynamic_shell_token(token):
-                    return (
-                        "deny",
-                        "A dynamic install destination cannot be inspected safely.",
-                    )
-            if any(token_mentions_secret_path(token) for token in toks[1:]):
+            # Inspect only the DESTINATION: `install SRC... DEST` writes DEST
+            # (the last positional), `install -d DIR...` creates each positional,
+            # and `-t DIR` is covered by the target-directory scan above. Sources
+            # are read, not written, so they are not checked here. Option VALUES
+            # (`-m 644`, `-o root`) are skipped so a mode is never read as a path.
+            install_value_options = {
+                "-m",
+                "--mode",
+                "-o",
+                "--owner",
+                "-g",
+                "--group",
+                "-S",
+                "--suffix",
+                "-t",
+                "--target-directory",
+            }
+            install_positionals = []
+            makes_dirs = False
+            index = 1
+            while index < len(toks):
+                token = toks[index]
+                if token in {"-d", "--directory"}:
+                    makes_dirs = True
+                    index += 1
+                    continue
+                if token in install_value_options:
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                install_positionals.append(token)
+                index += 1
+            install_targets = (
+                install_positionals if makes_dirs else install_positionals[-1:]
+            )
+            if any(has_dynamic_shell_token(token) for token in install_targets):
+                return (
+                    "deny",
+                    "A dynamic install destination cannot be inspected safely.",
+                )
+            if any(token_mentions_secret_path(token) for token in install_targets):
                 return "deny", "Installing over a secret-looking file is floor-blocked."
         if head in {"tar", "gtar", "bsdtar"}:
             write_mode = any(
