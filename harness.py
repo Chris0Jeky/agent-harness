@@ -424,10 +424,54 @@ def decode_windows_hook_command(command: str) -> str:
     executable = executable.rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if executable not in {"powershell", "pwsh"}:
         return command
+    # Only these PowerShell options may precede -EncodedCommand without changing
+    # what actually executes. A code directive (-Command/-File/-CommandWithArgs)
+    # or any UNKNOWN option would slurp/redefine the command line so the encoded
+    # payload never runs as PowerShell — the decoded inner text would then
+    # diverge from runtime. Fail closed on anything else before the payload.
+    inert_prefix_switches = {
+        "noprofile",
+        "noprofileloadtime",
+        "noninteractive",
+        "nologo",
+        "noexit",
+        "sta",
+        "mta",
+        "interactive",
+    }
+    inert_prefix_value_options = {
+        "executionpolicy",
+        "version",
+        "windowstyle",
+        "inputformat",
+        "outputformat",
+        "configurationname",
+        "psconsolefile",
+        "settingsfile",
+        "custompipename",
+        "workingdirectory",
+    }
     encoded_payload = None
-    for match in re.finditer(r"(?i)(?:^|\s)-([a-z]+)(?::|\s+)", command):
+    # Lookbehind (not a consuming `\s`) for the option boundary so back-to-back
+    # options like `-NoProfile -EncodedCommand` are both matched.
+    for match in re.finditer(r"(?i)(?:^|(?<=\s))-([a-z]+)(?::|\s+)", command):
         option = match.group(1).lower()
         if option not in {"e", "ec"} and not "encodedcommand".startswith(option):
+            # A directive that redefines execution, or an unrecognized option,
+            # before the encoded payload -> the decode cannot be trusted.
+            if (
+                "command".startswith(option)
+                or "file".startswith(option)
+                or "commandwithargs".startswith(option)
+                or option == "cwa"
+                or not (
+                    any(name.startswith(option) for name in inert_prefix_switches)
+                    or any(
+                        name.startswith(option) for name in inert_prefix_value_options
+                    )
+                )
+            ):
+                return "invoke_deny_floor opaque-encoded-command"
             continue
         remainder = command[match.end() :]
         payload_match = re.match(r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)", remainder)

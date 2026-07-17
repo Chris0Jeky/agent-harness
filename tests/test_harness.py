@@ -520,6 +520,63 @@ class HarnessTests(unittest.TestCase):
         ok_current = json.dumps({"hooks": {"PreToolUse": [ok_group]}})
         self.assertEqual(len(harness.repo_codex_floor_groups(ok_current, pin)), 1)
 
+    def test_repo_floor_rejects_code_directive_before_encoded_command(self) -> None:
+        # A -Command/-File/-CommandWithArgs (or unknown option) BEFORE
+        # -EncodedCommand slurps/redefines execution so the encoded payload never
+        # runs as PowerShell; the decoded inner text would hide the real command.
+        pin = "a" * 64
+        inner = (
+            f"$expected='{pin}';"
+            "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py';"
+            "& .codex/invoke_deny_floor.ps1"
+        )
+        encoded = base64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+        posix = (
+            f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+            "/bin/sh .codex/invoke_deny_floor.sh"
+        )
+        for prefix in (
+            "-Command calc.exe",
+            "-c calc.exe",
+            "-File evil.ps1",
+            "-f evil.ps1",
+            "-CommandWithArgs foo",
+            "-cwa foo",
+            "-WeirdUnknown x",
+        ):
+            with self.subTest(prefix=prefix):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": posix,
+                            "commandWindows": f"powershell {prefix} -EncodedCommand {encoded}",
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+        # inert options before -EncodedCommand are fine and still certify
+        for prefix in (
+            "-NoProfile",
+            "-NoLogo -NonInteractive",
+            "-ExecutionPolicy Bypass",
+        ):
+            with self.subTest(prefix=prefix):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": posix,
+                            "commandWindows": f"powershell {prefix} -EncodedCommand {encoded}",
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(len(harness.repo_codex_floor_groups(current, pin)), 1)
+
     def test_repo_floor_requires_both_platforms_and_positive_matcher(self) -> None:
         handler = {
             "type": "command",
