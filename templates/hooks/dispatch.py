@@ -2441,6 +2441,11 @@ def _command_option_value(token: str) -> tuple[bool, str | None]:
     attached is the glued value, or None when a separate value token follows."""
     if token.lower() == "-c":
         return True, None
+    # getopt short options glue their value: `-c'rm -rf ~'` -> `-crm -rf ~`. Match
+    # the exact lowercase `-c` (short options are case-sensitive; `-C` is not this
+    # option) with a glued value, but never a long `--…` token.
+    if token[:2] == "-c" and len(token) > 2 and not token.startswith("--"):
+        return True, token[2:]
     name, separator, value = token.partition("=")
     lowered = name.lower()
     # `--command` is the only long option in these tools beginning `--com`, so any
