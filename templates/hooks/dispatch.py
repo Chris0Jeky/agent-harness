@@ -5355,7 +5355,7 @@ def check(
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
             continue
-        if head in {"sudo", "su", "doas", "pkexec", "run0", "please"}:
+        if head in {"sudo", "su", "doas", "pkexec", "run0", "please", "runas"}:
             return (
                 "deny",
                 f"{head} is blocked at the floor: privilege elevation conceals an "

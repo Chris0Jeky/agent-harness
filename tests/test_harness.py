@@ -474,6 +474,52 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(harness.repo_codex_floor_groups(current, pin), [group])
         self.assertEqual(harness.repo_codex_floor_groups(current, "b" * 64), [])
 
+    def test_repo_floor_rejects_encoded_command_trailing_statement(self) -> None:
+        # An outer statement after -EncodedCommand runs but would be hidden by
+        # the decoded inner text; the certifier must fail closed on any tail.
+        pin = "a" * 64
+        inner = (
+            f"$expected='{pin}';"
+            "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py';"
+            "& .codex/invoke_deny_floor.ps1"
+        )
+        encoded = base64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+        posix = (
+            f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+            "/bin/sh .codex/invoke_deny_floor.sh"
+        )
+        for tail in (
+            "; Remove-Item -Recurse -Force x",
+            " & Remove-Item x",
+            "\nRemove-Item x",
+        ):
+            with self.subTest(tail=tail):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": posix,
+                            "commandWindows": f"powershell -EncodedCommand {encoded}{tail}",
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+        # trailing whitespace after the payload is harmless and still certifies
+        ok_group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": f"powershell -EncodedCommand {encoded}  ",
+                }
+            ],
+        }
+        ok_current = json.dumps({"hooks": {"PreToolUse": [ok_group]}})
+        self.assertEqual(len(harness.repo_codex_floor_groups(ok_current, pin)), 1)
+
     def test_repo_floor_requires_both_platforms_and_positive_matcher(self) -> None:
         handler = {
             "type": "command",

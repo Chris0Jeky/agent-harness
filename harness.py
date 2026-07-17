@@ -429,10 +429,15 @@ def decode_windows_hook_command(command: str) -> str:
         option = match.group(1).lower()
         if option not in {"e", "ec"} and not "encodedcommand".startswith(option):
             continue
-        payload_match = re.match(
-            r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)", command[match.end() :]
-        )
+        remainder = command[match.end() :]
+        payload_match = re.match(r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)", remainder)
         if payload_match is None:
+            return "invoke_deny_floor opaque-encoded-command"
+        # Anything executable AFTER the encoded payload (e.g. `<B64> ; evil` or
+        # `<B64> & evil`) is a sibling statement the outer PowerShell runs but
+        # the decoded inner text would hide. Only trailing whitespace is safe;
+        # otherwise fail closed so the tail cannot be certified away.
+        if remainder[payload_match.end() :].strip():
             return "invoke_deny_floor opaque-encoded-command"
         encoded_payload = payload_match.group(1)
         break
