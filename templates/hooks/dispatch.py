@@ -2434,6 +2434,22 @@ def _chmod_loosens_access(mode: str) -> bool:
     return False
 
 
+def _command_option_value(token: str) -> tuple[bool, str | None]:
+    """Recognize a `-c` / `--command` option (as flock and script use it),
+    including the glued `--command=VALUE` form and unambiguous getopt_long
+    abbreviations (`--com`, `--comm`, ...). Returns (matched, attached_value):
+    attached is the glued value, or None when a separate value token follows."""
+    if token.lower() == "-c":
+        return True, None
+    name, separator, value = token.partition("=")
+    lowered = name.lower()
+    # `--command` is the only long option in these tools beginning `--com`, so any
+    # `--com..`-through-`--command` prefix is an unambiguous abbreviation of it.
+    if lowered.startswith("--com") and "--command".startswith(lowered):
+        return True, (value if separator else None)
+    return False, None
+
+
 def _launcher_child_command(head: str, toks: list[str]) -> str | None:
     """Return a child command string for watch/flock/coproc, "" for none, or
     None when the child is opaque and the launcher must be denied."""
@@ -2456,13 +2472,24 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             break
         child = toks[index:]
     elif head == "flock":
+
+        def _flock_command(tok: str, follow: str | None) -> str | None:
+            # Resolve a flock -c/--command (incl. --command=VALUE and getopt_long
+            # abbreviations) to its child command string, or None if absent/empty.
+            matched, attached = _command_option_value(tok)
+            if not matched:
+                return None
+            value = attached if attached is not None else follow
+            return restore_quoted_literal_markers(value) if value else "\0"
+
         index = 1
         while index < len(toks):
             token = toks[index]
             lowered = token.lower()
-            if lowered in {"-c", "--command"}:
-                value = toks[index + 1] if index + 1 < len(toks) else None
-                return restore_quoted_literal_markers(value) if value else None
+            follow = toks[index + 1] if index + 1 < len(toks) else None
+            resolved = _flock_command(token, follow)
+            if resolved is not None:
+                return None if resolved == "\0" else resolved
             if lowered in {"-w", "--timeout", "-E", "--conflict-exit-code"}:
                 if index + 1 >= len(toks):
                     return None
@@ -2480,10 +2507,13 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             break
         # toks[index] is the lock file/fd; the child command follows it. The
         # documented `flock [options] <file> -c <command>` form puts -c AFTER the
-        # lockfile, so the child string can hide behind a post-lockfile -c.
+        # lockfile, so the child string can hide behind a post-lockfile -c
+        # (including the glued `--command=` / abbreviated spellings).
         child = toks[index + 1 :]
-        if child and child[0].lower() in {"-c", "--command"}:
-            return restore_quoted_literal_markers(child[1]) if len(child) > 1 else None
+        if child:
+            resolved = _flock_command(child[0], child[1] if len(child) > 1 else None)
+            if resolved is not None:
+                return None if resolved == "\0" else resolved
     else:  # coproc
         child = toks[1:]
         if any(token in {"{", "}"} or token.endswith("{") for token in child):
@@ -5784,40 +5814,27 @@ def check(
                 f"{head} can launch an uninspected child command; run the child directly.",
             )
         if head == "script":
-            # `script -c <cmd> [file]` runs a child command; recurse it. Plain
+            # `script -c <cmd> [file]` runs a child command; recurse it (including
+            # the glued `--command=` and abbreviated `--com` spellings). Plain
             # `script [file]` only records an interactive session whose commands
             # the floor still inspects as they are typed, so it is allowed.
             for command_index, token in enumerate(toks[1:], start=1):
-                lowered = token.lower()
-                if lowered in {"-c", "--command"}:
-                    value = (
-                        toks[command_index + 1]
-                        if command_index + 1 < len(toks)
-                        else None
-                    )
-                    if value is None:
-                        return "deny", "A script -c child command is opaque."
-                    child = restore_quoted_literal_markers(value)
-                    if is_dynamic_value(child):
-                        return (
-                            "deny",
-                            "A dynamic script -c command cannot be inspected.",
-                        )
-                    child_decision = _recurse_child(child)
-                    if child_decision[0] != "allow":
-                        return child_decision
-                    break
-                if lowered.startswith("--command="):
-                    child = restore_quoted_literal_markers(token.split("=", 1)[1])
-                    if is_dynamic_value(child):
-                        return (
-                            "deny",
-                            "A dynamic script -c command cannot be inspected.",
-                        )
-                    child_decision = _recurse_child(child)
-                    if child_decision[0] != "allow":
-                        return child_decision
-                    break
+                matched, attached = _command_option_value(token)
+                if not matched:
+                    continue
+                if attached is not None:
+                    value = attached
+                elif command_index + 1 < len(toks):
+                    value = toks[command_index + 1]
+                else:
+                    return "deny", "A script -c child command is opaque."
+                child = restore_quoted_literal_markers(value)
+                if is_dynamic_value(child):
+                    return "deny", "A dynamic script -c command cannot be inspected."
+                child_decision = _recurse_child(child)
+                if child_decision[0] != "allow":
+                    return child_decision
+                break
             continue
         if head in {"watch", "flock", "coproc"}:
             child_command = _launcher_child_command(head, toks)
@@ -7267,7 +7284,8 @@ def check(
                         "dd output to a secret-looking file is floor-blocked.",
                     )
         if head in {"sed", "gsed"} and any(
-            token == "-i" or token.startswith(("-i", "--in-place"))
+            token.startswith("--in-place")
+            or bool(re.match(r"^-[A-Za-z]*i", token))  # -i, -i.bak, bundled -ni
             for token in toks[1:]
         ):
             # Inspect only the FILE operands, not the sed program. `sed SCRIPT
@@ -7330,11 +7348,22 @@ def check(
             }
             install_positionals = []
             makes_dirs = False
+            has_target_dir = False
             index = 1
             while index < len(toks):
                 token = toks[index]
                 if token in {"-d", "--directory"}:
                     makes_dirs = True
+                    index += 1
+                    continue
+                if token in {"-t", "--target-directory"}:
+                    has_target_dir = True
+                    index += 2
+                    continue
+                if token.startswith("--target-directory=") or (
+                    token.startswith("-t") and len(token) > 2
+                ):
+                    has_target_dir = True
                     index += 1
                     continue
                 if token in install_value_options:
@@ -7345,9 +7374,15 @@ def check(
                     continue
                 install_positionals.append(token)
                 index += 1
-            install_targets = (
-                install_positionals if makes_dirs else install_positionals[-1:]
-            )
+            # With -d every positional is a created directory; with -t every
+            # positional is a SOURCE (the destination is the -t value, already
+            # checked by gnu_target_directory_values), so nothing here is a dest.
+            if makes_dirs:
+                install_targets = install_positionals
+            elif has_target_dir:
+                install_targets = []
+            else:
+                install_targets = install_positionals[-1:]
             if any(has_dynamic_shell_token(token) for token in install_targets):
                 return (
                     "deny",
