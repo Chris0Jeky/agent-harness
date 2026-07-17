@@ -2412,6 +2412,22 @@ def gnu_time_secret_output(raw: list[str]) -> str | None:
     return None
 
 
+def _sed_edits_in_place(token: str) -> bool:
+    """True when a sed argument requests in-place editing (-i / --in-place /
+    bundled -ni). A value-taking flag (-e/-f/-l) consumes the rest of a short
+    cluster, so an `i` after one (e.g. `-e'insert'`) is that value, not -i."""
+    if token.startswith("--in-place"):
+        return True
+    if not token.startswith("-") or token.startswith("--"):
+        return False
+    for char in token[1:]:
+        if char == "i":
+            return True
+        if char in "efl":  # -e/-f/-l take a value that consumes the cluster tail
+            return False
+    return False
+
+
 def _chmod_loosens_access(mode: str) -> bool:
     """True when a chmod mode grants group/other read or write (exposing a
     secret). Owner-only/tightening modes (600, 400, 700, u+x, go-rwx) return
@@ -7296,9 +7312,7 @@ def check(
                         "dd output to a secret-looking file is floor-blocked.",
                     )
         if head in {"sed", "gsed"} and any(
-            token.startswith("--in-place")
-            or bool(re.match(r"^-[A-Za-z]*i", token))  # -i, -i.bak, bundled -ni
-            for token in toks[1:]
+            _sed_edits_in_place(token) for token in toks[1:]
         ):
             # Inspect only the FILE operands, not the sed program. `sed SCRIPT
             # FILE...`: the first bare positional is the inline script UNLESS a
@@ -7434,8 +7448,13 @@ def check(
                         )
                         index += 2
                         continue
+                    attached_archive = re.match(r"^-[A-Za-z]*f(.+)$", token)
                     if lowered.startswith("--file="):
                         archive = token.split("=", 1)[1]
+                    elif attached_archive and not token.startswith("--"):
+                        # getopt glues -f's value to the cluster tail: `-cf.env`
+                        # means archive `.env`, so f need not be the last char.
+                        archive = attached_archive.group(1)
                     elif re.match(r"^-[A-Za-z]*f$", token):
                         archive = (
                             tar_tokens[index + 1]

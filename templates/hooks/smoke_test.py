@@ -2563,6 +2563,9 @@ CASES = [
     ("tar --create --file=.env src", 1, {}, "deny"),
     ("tar cf .env somefile", 1, {}, "deny"),  # old dashless option style
     ("tar cvf credentials.json x", 1, {}, "deny"),
+    ("tar -cf.env payload", 1, {}, "deny"),  # attached-value short option
+    ("tar -cvf.env x", 1, {}, "deny"),
+    ("tar -cfbackup.tar src", 1, {}, "allow"),
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
     ("tar cf backup.tar src", 1, {}, "allow"),
@@ -2592,6 +2595,7 @@ CASES = [
     ("install -m 644 server.pem /etc/ssl/certs/", 1, {}, "allow"),
     ("install -t /etc/ssl/certs a.pem b.pem", 1, {}, "allow"),
     ("sed -ni 's/x/y/' .env", 1, {}, "deny"),
+    ("sed -e'insert' .env", 1, {}, "allow"),  # glued -e value, not in-place
     ("$env:T='.env'; [IO.File]::WriteAllText($env:T, 'x')", 1, {}, "deny"),
     ("$p='.env'; Get-Process | Export-Csv -Path $p", 1, {}, "deny"),
     ("Export-Csv -Path data.csv", 1, {}, "allow"),
