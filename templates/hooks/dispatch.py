@@ -5429,6 +5429,7 @@ def check(
             wsl_value_options = {
                 "-d",
                 "--distribution",
+                "--distribution-id",
                 "-u",
                 "--user",
                 "--cd",

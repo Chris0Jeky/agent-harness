@@ -552,6 +552,7 @@ CASES = [
     ("wsl git push --force origin main", 1, {}, "deny"),
     ("wsl -e sh -c 'git push --force origin main'", 1, {}, "deny"),
     ("wsl -d Ubuntu git push -f origin main", 1, {}, "deny"),
+    ("wsl --distribution-id ABC git push --force origin main", 1, {}, "deny"),
     ("wsl ls", 1, {}, "allow"),
     ("& { Remove-Item -Recurse C:/critical/outside }", 1, {}, "deny"),
     (". { Remove-Item -Recurse C:/critical/outside }", 1, {}, "deny"),
