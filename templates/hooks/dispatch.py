@@ -906,6 +906,54 @@ def wget_execute_output_bindings(
     return bindings, ""
 
 
+_WGET_SERVER_NAME_DIRECTIVES = {"trustservernames", "contentdisposition"}
+
+
+def wget_uses_server_named_output(toks: list[str]) -> bool:
+    """Return whether wget lets the server pick the local output filename."""
+    for token in toks[1:]:
+        lowered = token.lower().split("=", 1)[0]
+        if lowered in {"--trust-server-names", "--content-disposition"}:
+            return True
+    prefix_flags = _DOWNLOADER_CLUSTER_PREFIXES["wget"]
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        directive = None
+        consumes_next = False
+        if token.startswith("--"):
+            option, separator, attached = token.partition("=")
+            if len(option) >= len("--exe") and "--execute".startswith(option.lower()):
+                directive = attached if separator else None
+                consumes_next = not separator
+        elif token.startswith("-"):
+            for offset, character in enumerate(token[1:]):
+                if character == "e":
+                    directive = token[1:][offset + 1 :] or None
+                    consumes_next = directive is None
+                    break
+                if character not in prefix_flags:
+                    break
+        if directive is None and consumes_next:
+            if index + 1 >= len(toks):
+                break
+            directive = toks[index + 1]
+            index += 1
+        if directive:
+            restored = restore_quoted_literal_markers(directive).strip()
+            assignment = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.*?)\s*", restored)
+            if assignment is not None:
+                name = re.sub(r"[_-]", "", assignment.group(1).lower())
+                value = assignment.group(2).strip().strip("'\"").lower()
+                if (
+                    name in _WGET_SERVER_NAME_DIRECTIVES
+                    and value not in {"off", "0", "no", "false", ""}
+                ):
+                    return True
+        index += 1
+    return False
+
+
 _CURL_LONG_OPTIONS_WITH_VALUE = frozenset(
     {
         "--abstract-unix-socket",
@@ -2198,6 +2246,27 @@ def wrapper_command_index(name: str, toks: list[str], index: int) -> int | None:
 
         return None
     return len(toks)
+
+
+def gnu_target_directory_values(toks: list[str]) -> list[str]:
+    """Return GNU coreutils -t/--target-directory destinations from an argv."""
+    values: list[str] = []
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if token == "--":
+            break
+        if token == "--target-directory" or token == "-t":
+            if index + 1 < len(toks):
+                values.append(toks[index + 1])
+            index += 2
+            continue
+        if token.startswith("--target-directory="):
+            values.append(token.split("=", 1)[1])
+        elif token.startswith("-t") and len(token) > 2 and not token.startswith("--"):
+            values.append(token[2:].lstrip("="))
+        index += 1
+    return values
 
 
 def command_head(toks):
@@ -3621,6 +3690,7 @@ def executable_git_config_section(section: str) -> bool:
     """Return whether renaming into a section can create an executable config key."""
     root = section.lower().split(".", 1)[0]
     return root in {
+        "alias",
         "browser",
         "core",
         "credential",
@@ -5999,6 +6069,25 @@ def check(
                 or bool(re.match(r"^-[a-zA-Z]*f", t))
                 for t in args
             ):
+                # Secret-looking pathspecs are floor-blocked regardless of tier:
+                # `git clean -f .env` removes an untracked secret file outright.
+                clean_pathspecs = []
+                after_separator = False
+                for token in args:
+                    if token == "--":
+                        after_separator = True
+                        continue
+                    if after_separator or not token.startswith("-"):
+                        clean_pathspecs.append(token)
+                if any(
+                    has_dynamic_shell_token(pathspec)
+                    or token_mentions_secret_path(pathspec)
+                    for pathspec in clean_pathspecs
+                ):
+                    return (
+                        "deny",
+                        "Git clean of an opaque or secret-looking path is floor-blocked.",
+                    )
                 if strict:
                     return (
                         "deny",
@@ -6007,6 +6096,29 @@ def check(
                 if tier >= 3 and not relaxed:
                     return "ask", "T3: git clean -f deletes untracked files. Confirm."
 
+            if sub == "checkout":
+                # Pathspec restores overwrite worktree files, so a secret-looking
+                # target is floor-blocked before the tier work-loss guard runs.
+                if any(
+                    token == "--pathspec-from-file"
+                    or token.startswith("--pathspec-from-file=")
+                    for token in args
+                ):
+                    return (
+                        "deny",
+                        "Git checkout pathspec files are opaque to the deny floor.",
+                    )
+                if "--" in args:
+                    checkout_pathspecs = args[args.index("--") + 1 :]
+                    if any(
+                        has_dynamic_shell_token(pathspec)
+                        or token_mentions_secret_path(pathspec)
+                        for pathspec in checkout_pathspecs
+                    ):
+                        return (
+                            "deny",
+                            "Git checkout of an opaque or secret-looking path is floor-blocked.",
+                        )
             if sub == "checkout" and "--" in args:
                 after = args[args.index("--") + 1 :]
                 if "." in after:
@@ -6190,6 +6302,22 @@ def check(
                         f"Mutating a secret-looking file ({target}) is floor-blocked. The human manages secrets.",
                     )
 
+        # GNU cp/mv/install/ln bind the destination directory to -t/
+        # --target-directory rather than a trailing positional, so that syntax
+        # bypasses the positional secret check above.
+        if head in {"cp", "mv", "install", "ln"}:
+            for target in gnu_target_directory_values(toks):
+                if has_dynamic_shell_token(target) or target.startswith("("):
+                    return (
+                        "deny",
+                        "A dynamic GNU target-directory cannot be inspected safely.",
+                    )
+                if token_mentions_secret_path(target):
+                    return (
+                        "deny",
+                        f"Mutating a secret-looking directory ({target}) is floor-blocked. The human manages secrets.",
+                    )
+
         # Common output/mutation tools whose destination syntax differs from
         # the filesystem mutators above. This remains a bounded parser
         # contract; unfamiliar writers are covered by follow-up hardening and
@@ -6337,6 +6465,16 @@ def check(
                             "deny",
                             "Downloading into a secret-looking file is floor-blocked.",
                         )
+            if head == "wget" and not explicit_output and wget_uses_server_named_output(
+                toks
+            ):
+                # --trust-server-names / --content-disposition let the redirect
+                # target or response header pick the local filename, so the name
+                # is unknowable at inspection time. Require an inspected output doc.
+                return (
+                    "deny",
+                    "wget server-selected filenames are opaque; require an inspected --output-document.",
+                )
             if remote_name_output and not (head == "wget" and explicit_output):
                 for token in toks[1:]:
                     if "://" in token and token_mentions_secret_path(token):
@@ -6344,7 +6482,7 @@ def check(
                             "deny",
                             "A remote-name download would create a secret-looking file.",
                         )
-        if head == "export-clixml" and any(
+        if head in {"export-clixml", "export-csv", "epcsv"} and any(
             token_mentions_secret_path(token) for token in toks[1:]
         ):
             return "deny", "Serializing into a secret-looking file is floor-blocked."
