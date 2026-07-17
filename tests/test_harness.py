@@ -849,6 +849,54 @@ class HarnessTests(unittest.TestCase):
             )
         )
 
+    def test_repo_floor_rejects_sibling_dispatcher_path_impersonation(self) -> None:
+        pin = "d" * 64
+        good_windows = (
+            f"$expected='{pin}'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        # A sibling file whose path merely CONTAINS the dispatcher path, or a
+        # variable bound to such a sibling, must not certify.
+        invalid_pairs = (
+            (
+                f"expected={pin}; .claude/hooks/dispatch.py.evil "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; & .claude/hooks/dispatch.py.evil "
+                "--event pre --runtime codex",
+            ),
+            (
+                f"expected={pin}; python $HOME/.claude/hooks/dispatch.py2 "
+                "--event pre --runtime codex",
+                good_windows,
+            ),
+            (
+                f"expected={pin}; d=$HOME/.claude/hooks/dispatch.py.evil; "
+                "python $d --event pre --runtime codex",
+                good_windows,
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^Bash$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": command,
+                                            "commandWindows": command_windows,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+
     def test_repo_floor_requires_wrapper_as_executed_operand(self) -> None:
         pin = "e" * 64
         good_posix = (

@@ -638,20 +638,46 @@ def is_inert_floor_setup_segment(
     return bool(re.fullmatch(r"(?i)[0-9a-f]{64}", literal))
 
 
-def assigned_floor_variables(segments: list[str], marker: str) -> set[str]:
-    """Find variables whose assignment statement binds a floor path marker."""
+def _marker_occurrence_is_anchored(
+    normalized: str, marker_index: int, marker_len: int, allow_extension: bool
+) -> bool:
+    """Reject a marker followed by more path text (e.g. dispatch.py.evil)."""
+    rest = normalized[marker_index + marker_len :]
+    if allow_extension:
+        extension = re.match(r"\.[a-z0-9]+", rest)
+        if extension:
+            rest = rest[extension.end() :]
+    return rest == "" or rest[0] in "'\" \t;+)}&|<>"
+
+
+def assigned_floor_variables(
+    segments: list[str], marker: str, allow_extension: bool = False
+) -> set[str]:
+    """Find variables whose assignment statement binds a floor path marker.
+
+    The marker must be the END of its path token (optionally followed by one
+    file extension for wrapper scripts) so a sibling like `dispatch.py.evil` or
+    an attacker-controlled `py.exe.sh` cannot be bound as the floor path.
+    """
     result: set[str] = set()
     for segment in segments:
         normalized = segment.lower().replace("\\", "/")
-        marker_index = normalized.find(marker)
-        if marker_index < 0:
-            continue
-        prefix = segment[:marker_index]
-        matches = list(
-            re.finditer(r"(?i)(?:^|[\s{(])\$?([a-z_][a-z0-9_]*)\s*=", prefix)
-        )
-        if matches:
-            result.add(matches[-1].group(1).lower())
+        search_from = 0
+        while True:
+            marker_index = normalized.find(marker, search_from)
+            if marker_index < 0:
+                break
+            search_from = marker_index + len(marker)
+            if not _marker_occurrence_is_anchored(
+                normalized, marker_index, len(marker), allow_extension
+            ):
+                continue
+            prefix = segment[:marker_index]
+            matches = list(
+                re.finditer(r"(?i)(?:^|[\s{(])\$?([a-z_][a-z0-9_]*)\s*=", prefix)
+            )
+            if matches:
+                result.add(matches[-1].group(1).lower())
     return result
 
 
@@ -688,9 +714,14 @@ def token_references_variable(token: str, names: set[str]) -> bool:
     )
 
 
+_DISPATCHER_PATH_TOKEN = re.compile(r"(?:^|/)\.claude/hooks/dispatch\.py$")
+
+
 def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
     normalized = token.strip("'\"").lower().replace("\\", "/")
-    if ".claude/hooks/dispatch.py" in normalized:
+    # Anchor to the END of the path token so a sibling like
+    # `.claude/hooks/dispatch.py.evil` or `dispatch.py2` cannot impersonate it.
+    if _DISPATCHER_PATH_TOKEN.search(normalized):
         return True
     return token_references_variable(token, dispatcher_variables)
 
@@ -757,9 +788,13 @@ def segment_invokes_direct_floor(
     return False
 
 
+_WRAPPER_PATH_TOKEN = re.compile(r"(?:^|/)invoke_deny_floor(?:\.[a-z0-9]+)?$")
+
+
 def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
-    if "invoke_deny_floor" in stripped:
+    # Anchor to the wrapper basename so `invoke_deny_floor.sh.evil` cannot pass.
+    if _WRAPPER_PATH_TOKEN.search(stripped):
         return True
     return token_references_variable(token, wrapper_variables)
 
@@ -876,7 +911,9 @@ def platform_project_floor_command(
     dispatcher_variables = assigned_floor_variables(
         segments, ".claude/hooks/dispatch.py"
     )
-    wrapper_variables = assigned_floor_variables(segments, "invoke_deny_floor")
+    wrapper_variables = assigned_floor_variables(
+        segments, "invoke_deny_floor", allow_extension=True
+    )
     interpreter_variables = assigned_floor_variables(segments, "py.exe")
     invocation_indexes = [
         index

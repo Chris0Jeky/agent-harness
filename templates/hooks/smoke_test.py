@@ -2365,6 +2365,15 @@ CASES = [
     # a branch whose name merely contains a secret-looking substring is a ref
     ("git checkout fix/credential-rotation", 1, {}, "allow"),
     ("git checkout credentials-refactor", 1, {}, "allow"),
+    # brace expansion must not evade the bare-checkout secret guard
+    ("git checkout {.env,README}", 1, {}, "deny"),
+    ("git checkout .env{,.bak}", 1, {}, "deny"),
+    ("git checkout main {.env,x}", 1, {}, "deny"),
+    ("git checkout {feature,bugfix}/x", 1, {}, "allow"),
+    # non-canonical secret filenames are still blocked for bare checkout refs
+    ("git checkout credentials.xml", 1, {}, "deny"),
+    ("git checkout id_rsa_backup", 1, {}, "deny"),
+    ("git checkout secrets.bin", 1, {}, "deny"),
     ("git clean -f src", 2, {}, "allow"),
     ("git clean -n .env", 1, {}, "allow"),
     ("git config --global --rename-section user harmlessdata", 1, {}, "allow"),
@@ -2955,6 +2964,16 @@ def main():
             "deny",
         ),
         (
+            "inherited pager applies to stash list",
+            run_case("git stash list", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited pager does not affect stash push",
+            run_case("git stash push", 3, {}, env_extra={"GIT_PAGER": "helper"}),
+            "allow",
+        ),
+        (
             "inherited EDITOR fallback applies to commit",
             run_case("git commit", 3, {}, env_extra={"EDITOR": "sh"}),
             "deny",
@@ -3003,6 +3022,26 @@ def main():
             "inherited EDITOR fallback ignores attached -mWIP message",
             run_case("git commit -mWIP", 3, {}, env_extra={"EDITOR": "sh"}),
             "allow",
+        ),
+        (
+            "attached -S value resembling a message does not suppress editor",
+            run_case("git commit -SDEADBEEF", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "template option opens editor despite value letters",
+            run_case("git commit -ttemplate.md", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "reedit -c value opens editor",
+            run_case("git commit -cFETCH_HEAD", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "merge -s strategy value is not a message",
+            run_case("git merge -sm topic", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
         ),
         (
             "revert -m is mainline not message; editor still opens",

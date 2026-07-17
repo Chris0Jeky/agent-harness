@@ -1894,18 +1894,54 @@ def is_secret_path(target: str) -> bool:
 
 
 _SECRET_FILENAME = re.compile(
-    r"^(?:\.env(?:\.[\w.]+)?|id_rsa|.+\.pem"
-    r"|credentials?\.(?:json|txt|ya?ml|ini|cfg)"
-    r"|secrets?\.(?:json|txt|ya?ml|ini|cfg))$",
+    r"^(?:\.env(?:\.[\w.]+)?"
+    r"|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._-][\w.]+)?"
+    r"|.+\.pem"
+    r"|credentials?\.[\w.]+"
+    r"|secrets?\.[\w.]+)$",
     re.IGNORECASE,
 )
 
 
-def token_is_secret_filename(token: str) -> bool:
-    """Stricter than ``token_mentions_secret_path``: match a secret FILE basename
-    rather than any substring, for contexts (git refs/branches) where a loose
-    ``credential`` substring would wrongly flag a branch like ``fix/credential-x``.
+def brace_expand_variants(token: str) -> tuple[list[str], bool]:
+    """Expand bounded Bash comma/sequence braces.
+
+    Returns (variants, overflow). overflow=True means the expansion is
+    unbounded or too large, so callers should fail closed.
     """
+    variants = [token]
+    while True:
+        next_variants: list[str] = []
+        changed = False
+        for variant in variants:
+            comma_match = re.search(r"\{([^{}]*,[^{}]*)\}", variant)
+            sequence_match = _BRACE_SEQUENCE.search(variant)
+            matches = [match for match in (comma_match, sequence_match) if match]
+            if not matches:
+                next_variants.append(variant)
+                continue
+            match = min(matches, key=lambda candidate: candidate.start())
+            changed = True
+            alternatives = (
+                match.group(1).split(",")
+                if match is comma_match
+                else brace_sequence_alternatives(match)
+            )
+            if alternatives is None:
+                return [], True
+            if len(next_variants) + len(alternatives) > 64:
+                return [], True
+            next_variants.extend(
+                variant[: match.start()] + alternative + variant[match.end() :]
+                for alternative in alternatives
+            )
+        variants = next_variants
+        if not changed:
+            break
+    return variants, False
+
+
+def _single_token_is_secret_filename(token: str) -> bool:
     normalized = (
         restore_quoted_literal_markers(token).replace("\\", "/").strip("'\"[]{}() ")
     )
@@ -1913,6 +1949,20 @@ def token_is_secret_filename(token: str) -> bool:
     if any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES):
         return True
     return bool(_SECRET_FILENAME.match(basename))
+
+
+def token_is_secret_filename(token: str) -> bool:
+    """Stricter than ``token_mentions_secret_path``: match a secret FILE basename
+    rather than any substring, for contexts (git refs/branches) where a loose
+    ``credential`` substring would wrongly flag a branch like ``fix/credential-x``.
+
+    Bash brace lists still expand (``{.env,README}`` -> ``.env``) so the strict
+    predicate cannot be evaded by wrapping the secret name in a brace group.
+    """
+    variants, overflow = brace_expand_variants(token)
+    if overflow:
+        return True
+    return any(_single_token_is_secret_filename(variant) for variant in variants)
 
 
 _BRACE_SEQUENCE = re.compile(
@@ -3077,6 +3127,12 @@ def git_pager_is_reachable(
             in {"-l", "--list", "--get-all", "--get-regexp", "--get-urlmatch"}
             for token in args
         )
+    if subcommand == "stash":
+        # Only the read actions paginate; stash push/pop/apply do not.
+        action = next(
+            (token.lower() for token in args if not token.startswith("-")), ""
+        )
+        return action in {"list", "show"}
     return subcommand in _GIT_PAGER_SUBCOMMANDS
 
 
@@ -3141,13 +3197,14 @@ def git_editor_message_is_supplied(subcommand: str, args: list[str]) -> bool:
         lowered = name.lower()
         if name in {"-m", "-F", "-C"}:
             return True
-        # Clustered/attached short forms supply a message too: -am, -mWIP,
-        # -FNOTES, -CHEAD. Case-sensitive: lowercase -c (reedit) opens the
-        # editor and must NOT count; -F/-C/-m suppress it.
-        if name.startswith("-") and not name.startswith("--"):
-            letters = name[1:]
-            if any(flag in letters for flag in ("m", "F", "C")):
-                return True
+        # Clustered/attached short forms supply a message: -am, -mWIP, -FNOTES,
+        # -CHEAD. The message option letter must be reached through non-value-
+        # consuming switch letters only (`-a` --all); a value-consuming option
+        # such as -S/-t/-c/-s(strategy) would otherwise swallow a value whose
+        # text merely resembles m/F/C. Case-sensitive: -F/-C are message flags
+        # while lowercase -c (reedit) opens the editor and must NOT count.
+        if re.match(r"^-a?[mFC]", name):
+            return True
         if lowered == "--no-edit" or (
             name.startswith("--")
             and (
