@@ -11,7 +11,7 @@ explicit where their hook/config contracts differ.
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
 | `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up shared global sync |
-| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.6 bypass matrix. `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
+| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.7 bypass matrix. `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
 ## Use
@@ -42,12 +42,16 @@ match a conservative direct/wrapper execution shape and bind the current normali
 hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
 review and live safe/deny canary remain mandatory.
 
-Status (2026-07-14): the blueprint, shared v1.4.6 deny floor, project-local Codex adapter model,
+Status (2026-07-17): the blueprint, shared v1.4.7 deny floor, project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
 PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
 pipelines, git push safety, and secret-file mutations. It remains a defense-in-depth tripwire,
-not an exhaustive shell sandbox. Gardener scheduling remains intentionally deferred until the
-bootstrap/audit loop has earned trust through real use.
+not an exhaustive shell sandbox. Its guarantee is scoped to command-line argv it can parse: it
+does NOT intercept `apply_patch`, Edit/Write, or MCP tool surfaces (those are separate matchers the
+runtime must expose), it cannot recover program text passed through arbitrary interpreters or
+stdin, and it cannot repair a runtime that fails open on hook spawn/timeout/crash. Those remain
+Codex-engine limitations, not floor guarantees. Gardener scheduling remains intentionally deferred
+until the bootstrap/audit loop has earned trust through real use.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own

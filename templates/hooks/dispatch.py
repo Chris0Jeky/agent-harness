@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.4.6 (2026-07-14)"
+FLOOR_VERSION = "1.4.7 (2026-07-17)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -798,9 +798,7 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
                     attached = toks[index] if index < len(toks) else ""
                     index += 1
                 if not attached.startswith("{"):
-                    return (
-                        "A dynamic pipeline scriptblock cannot be inspected safely."
-                    )
+                    return "A dynamic pipeline scriptblock cannot be inspected safely."
                 next_index = skip_powershell_literal_block(toks, index, attached)
                 if next_index is None:
                     return "A pipeline scriptblock is malformed."
@@ -945,10 +943,13 @@ def wget_uses_server_named_output(toks: list[str]) -> bool:
             if assignment is not None:
                 name = re.sub(r"[_-]", "", assignment.group(1).lower())
                 value = assignment.group(2).strip().strip("'\"").lower()
-                if (
-                    name in _WGET_SERVER_NAME_DIRECTIVES
-                    and value not in {"off", "0", "no", "false", ""}
-                ):
+                if name in _WGET_SERVER_NAME_DIRECTIVES and value not in {
+                    "off",
+                    "0",
+                    "no",
+                    "false",
+                    "",
+                }:
                     return True
         index += 1
     return False
@@ -2415,9 +2416,7 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             if config is None or has_dynamic_shell_token(config.split("=", 1)[0]):
                 return "A git clone --config value is opaque to floor inspection."
             if protected_git_config_key(config.split("=", 1)[0].lower()):
-                return (
-                    "Git clone --config can inject execution or destination config."
-                )
+                return "Git clone --config can inject execution or destination config."
     if subcommand == "archive" and git_option_is_present(args, "--exec"):
         return "A custom git archive program can execute outside floor inspection."
     if subcommand == "rebase" and git_option_is_present(args, "--exec", {"-x"}):
@@ -6179,6 +6178,7 @@ def check(
             "copy",
             "copy-item",
             "ci",
+            "cpi",
             "set-content",
             "sc",
             "add-content",
@@ -6465,8 +6465,10 @@ def check(
                             "deny",
                             "Downloading into a secret-looking file is floor-blocked.",
                         )
-            if head == "wget" and not explicit_output and wget_uses_server_named_output(
-                toks
+            if (
+                head == "wget"
+                and not explicit_output
+                and wget_uses_server_named_output(toks)
             ):
                 # --trust-server-names / --content-disposition let the redirect
                 # target or response header pick the local filename, so the name

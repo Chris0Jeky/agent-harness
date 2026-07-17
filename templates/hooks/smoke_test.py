@@ -941,6 +941,9 @@ CASES = [
     ("Get-Process | Export-Csv .env", 1, {}, "deny"),
     ("Export-Csv -Path .env", 1, {}, "deny"),
     ("epcsv -LiteralPath credentials.json", 1, {}, "deny"),
+    # --- Copy-Item filesystem alias (cpi) writes secret destinations ---
+    ("cpi secret.txt .env", 1, {}, "deny"),
+    ("Copy-Item -Destination .env source", 1, {}, "deny"),
     # --- wget server-selected filenames ---
     ("wget --trust-server-names https://host/file", 1, {}, "deny"),
     ("wget --content-disposition https://host/file", 1, {}, "deny"),

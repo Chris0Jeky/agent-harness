@@ -751,7 +751,9 @@ class HarnessTests(unittest.TestCase):
 
     def test_repo_floor_rejects_command_substitution_in_invocation(self) -> None:
         pin = "7" * 64
-        good_posix = "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        good_posix = (
+            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        )
         good_windows = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
             "--event pre --runtime codex"
@@ -797,7 +799,9 @@ class HarnessTests(unittest.TestCase):
 
     def test_repo_floor_requires_dispatcher_as_python_script_operand(self) -> None:
         pin = "8" * 64
-        good_posix = "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        good_posix = (
+            "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        )
         good_windows = (
             "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
             "--event pre --runtime codex"
@@ -909,6 +913,45 @@ class HarnessTests(unittest.TestCase):
                 }
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_repo_floor_rejects_non_blocking_handler_shapes(self) -> None:
+        pin = "9" * 64
+        posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        windows = (
+            f"$expected='{pin}'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        base_handler = {
+            "type": "command",
+            "command": posix,
+            "commandWindows": windows,
+        }
+        # The canonical shape (positive timeout, synchronous) still certifies.
+        good = {**base_handler, "timeout": 5}
+        good_doc = json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [good]}]}}
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(good_doc, pin)), 1)
+        # A handler Codex would not run as a blocking gate must never certify.
+        for bad_field in (
+            {"async": True},
+            {"background": True},
+            {"nonBlocking": True},
+            {"timeout": 0},
+            {"timeout": -1},
+            {"timeout": "5"},
+            {"timeout": True},
+        ):
+            with self.subTest(bad_field=bad_field):
+                handler = {**base_handler, **bad_field}
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [{"matcher": "^Bash$", "hooks": [handler]}]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
 
     def test_repo_floor_requires_bound_pin_and_executable_variable_flow(self) -> None:
         pin = "f" * 64

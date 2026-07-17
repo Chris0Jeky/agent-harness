@@ -852,6 +852,25 @@ def repo_codex_floor_candidates(current: str) -> list[Any]:
     return result
 
 
+def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
+    """Reject handler shapes Codex would not run as a blocking PreToolUse gate.
+
+    Codex skips async handlers, so an async/background floor never denies. A
+    non-positive or non-numeric timeout is likewise treated as unusable rather
+    than certified, so doctor cannot false-green a hook that will not gate.
+    """
+    for field in ("async", "background", "nonBlocking", "non_blocking", "detached"):
+        if handler.get(field):
+            return False
+    if "timeout" in handler:
+        timeout = handler["timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            return False
+        if timeout <= 0:
+            return False
+    return True
+
+
 def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> list[Any]:
     """Return one group entry per platform-complete project floor handler."""
     _current_data, _hooks, groups = parse_hooks_document(current)
@@ -865,6 +884,8 @@ def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> li
             continue
         handler = handlers[0]
         if handler.get("type") != "command":
+            continue
+        if not handler_gates_synchronously(handler):
             continue
         command = handler.get("command", "")
         windows_command = decode_windows_hook_command(handler.get("commandWindows", ""))
