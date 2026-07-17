@@ -979,6 +979,15 @@ CASES = [
     ("mv x ~/.ssh/id_ed25519", 1, {}, "deny"),
     ("Set-Content -Path id_ed25519 -Value x", 1, {}, "deny"),
     ("echo pwned > ~/.ssh/id_ed25519", 1, {}, "deny"),
+    # a value-parameter fed a token-spanning subexpression desyncs alignment
+    ("Set-Content -Value (Get-Content foo) id_ed25519", 1, {}, "deny"),
+    ("Set-Content -Value:(Get-Content foo) .env", 1, {}, "deny"),
+    ("Add-Content -Value (gc x) credentials.json", 1, {}, "deny"),
+    # a balanced single-token subexpression keeps alignment; safe target allowed
+    ("Set-Content -Path safe.txt -Value hello", 1, {}, "allow"),
+    # anchored id_ match: filenames merely containing the substring are allowed
+    ("echo x > valid_rsa.txt", 1, {}, "allow"),
+    ("cp a grid_dsa", 1, {}, "allow"),
     # --- wget server-selected filenames ---
     ("wget --trust-server-names https://host/file", 1, {}, "deny"),
     ("wget --content-disposition https://host/file", 1, {}, "deny"),

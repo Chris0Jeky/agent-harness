@@ -849,6 +849,42 @@ class HarnessTests(unittest.TestCase):
             )
         )
 
+    def test_repo_floor_rejects_bare_assignment_invocation(self) -> None:
+        # A pure `VAR=path` assignment runs nothing (exit 0); it must never be
+        # classified as the floor invocation, or the hook silently allows-all.
+        pin = "b" * 64
+        doc = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"pin={pin}; "
+                                        "d=$HOME/.claude/hooks/dispatch.py; "
+                                        "x=./invoke_deny_floor.sh"
+                                    ),
+                                    "commandWindows": (
+                                        f"$pin='{pin}'; "
+                                        '$d="$env:USERPROFILE/.claude/hooks/dispatch.py"; '
+                                        "$x='./invoke_deny_floor.ps1'"
+                                    ),
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+        self.assertFalse(harness.token_is_wrapper("x=./invoke_deny_floor.sh", set()))
+        self.assertFalse(
+            harness.token_is_dispatcher("x=$HOME/.claude/hooks/dispatch.py", set())
+        )
+
     def test_repo_floor_rejects_variable_rebinding_and_glued_floor_paths(self) -> None:
         pin = "c" * 64
         good_windows = (

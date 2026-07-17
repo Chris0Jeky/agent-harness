@@ -758,14 +758,21 @@ def token_references_variable(token: str, names: set[str]) -> bool:
     )
 
 
-_DISPATCHER_PATH_TOKEN = re.compile(r"(?:^|/)\.claude/hooks/dispatch\.py$")
+# A clean path component: word chars, dot, dollar/brace/colon (var expansions),
+# tilde, dash. Notably EXCLUDES `=`, so a `VAR=path` assignment word never
+# matches — an assignment is not an executed command.
+_PATH_COMPONENT = r"[\w.$:{}~-]+"
+_DISPATCHER_PATH_TOKEN = re.compile(
+    rf"^(?:{_PATH_COMPONENT}/)*\.claude/hooks/dispatch\.py$"
+)
 
 
 def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
     normalized = token.strip("'\"").lower().replace("\\", "/")
-    # Anchor to the END of the path token so a sibling like
-    # `.claude/hooks/dispatch.py.evil` or `dispatch.py2` cannot impersonate it.
-    if _DISPATCHER_PATH_TOKEN.search(normalized):
+    # The WHOLE token must be a clean path ending in the dispatcher, so neither a
+    # sibling (`dispatch.py.evil`) nor an assignment word (`x=.../dispatch.py`)
+    # can pass.
+    if _DISPATCHER_PATH_TOKEN.fullmatch(normalized):
         return True
     return token_references_variable(token, dispatcher_variables)
 
@@ -832,13 +839,17 @@ def segment_invokes_direct_floor(
     return False
 
 
-_WRAPPER_PATH_TOKEN = re.compile(r"(?:^|/)invoke_deny_floor(?:\.[a-z0-9]+)?$")
+_WRAPPER_PATH_TOKEN = re.compile(
+    rf"^(?:{_PATH_COMPONENT}/)*invoke_deny_floor\.(?:sh|ps1|cmd|bat)$"
+)
 
 
 def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
-    # Anchor to the wrapper basename so `invoke_deny_floor.sh.evil` cannot pass.
-    if _WRAPPER_PATH_TOKEN.search(stripped):
+    # The WHOLE token must be a clean path whose final component is the wrapper
+    # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
+    # (`x=.../invoke_deny_floor.sh`) can pass.
+    if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
         return True
     return token_references_variable(token, wrapper_variables)
 
@@ -907,7 +918,9 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
     stripped = re.sub(r"(?i)^exec\s+", "", stripped)
     stripped = re.sub(r"^&\s+", "", stripped)
-    stripped = re.sub(r"(?i)^\$?[a-z_]\w*\s*=\s*", "", stripped)
+    # A bare `VAR=path` assignment is NOT an execution — it sets a variable and
+    # runs nothing (exit 0). Do NOT strip an assignment prefix and treat the RHS
+    # path as an executed wrapper.
     try:
         tokens = shlex.split(stripped, posix=True)
     except ValueError:
@@ -963,6 +976,9 @@ def platform_project_floor_command(
         index
         for index, segment in enumerate(segments)
         if is_safe_floor_invocation_segment(segment, windows=windows)
+        # A segment that parses as a bare assignment sets a variable and executes
+        # nothing (exit 0); it can never be the floor invocation.
+        and inert_floor_assignment(segment, windows=windows) is None
         and (
             segment_invokes_direct_floor(
                 segment, dispatcher_variables, interpreter_variables

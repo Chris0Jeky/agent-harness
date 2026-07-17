@@ -1870,7 +1870,8 @@ ENV_ROOTS = re.compile(
 )
 
 _SECRET_PATH = re.compile(
-    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\.|id_(?:rsa|dsa|ecdsa|ed25519)"
+    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\."
+    r"|(^|[\\/._-])id_(?:rsa|dsa|ecdsa|ed25519)"
     r"|\.pem$",
     re.IGNORECASE,
 )
@@ -6419,6 +6420,17 @@ def check(
                 return (
                     "deny",
                     "Array/splatted secret-mutation targets cannot be inspected safely.",
+                )
+            # A `(...)`/`$(...)` subexpression that SPANS tokens (unbalanced open
+            # paren) is split by the whitespace tokenizer, desynchronizing
+            # positional/parameter alignment so a later real target (e.g. a
+            # value-parameter fed `(Get-Content foo)`) would go uninspected. A
+            # balanced single-token subexpression keeps alignment, so only the
+            # unbalanced case fails closed.
+            if any(token.count("(") > token.count(")") for token in toks[1:]):
+                return (
+                    "deny",
+                    "A parenthesized secret-mutation subexpression cannot be inspected safely.",
                 )
             explicit_paths = []
             positional_groups = []
