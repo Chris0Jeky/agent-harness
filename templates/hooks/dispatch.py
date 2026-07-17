@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.4.7 (2026-07-17)"
+FLOOR_VERSION = "1.5.0 (2026-07-17)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -836,6 +836,30 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     return None
 
 
+def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
+    """Return the restored inner text of each literal `{ ... }` scriptblock in a
+    pipeline cmdlet's argv, so quoted evaluator payloads inside the block (which
+    the sanitized segment pass masks) can be recursively inspected."""
+    bodies: list[str] = []
+    index = 0
+    while index < len(toks):
+        token = toks[index]
+        if token.startswith("{"):
+            end = skip_powershell_literal_block(toks, index + 1, token)
+            if end is None:
+                break
+            block = " ".join(toks[index:end]).strip()
+            if block.startswith("{"):
+                block = block[1:]
+            if block.endswith("}"):
+                block = block[:-1]
+            bodies.append(restore_quoted_literal_markers(block.strip()))
+            index = end
+            continue
+        index += 1
+    return bodies
+
+
 _DOWNLOADER_CLUSTER_PREFIXES = {
     # Short switches in these sets take no value, so a later output switch in
     # the same argv token still owns the remaining suffix.
@@ -1442,6 +1466,20 @@ def curl_secret_output_risk(toks: list[str]) -> str:
         side_outputs = {}
         write_out = None
 
+    def set_remote_name_selector(entry: tuple[str, str | None]) -> None:
+        # -O and --no-remote-name toggle the NEXT URL's output mode; when several
+        # stack before a URL, the last wins. Collapse a still-pending toggle from
+        # this same pair so a later -O is not masked by an earlier
+        # --no-remote-name. `remote-off` is a distinct no-file tag so an unrelated
+        # --out-null stdout selector is never collapsed away.
+        if len(selectors) > len(urls) and selectors[-1] in {
+            ("remote", None),
+            ("remote-off", None),
+        }:
+            selectors[-1] = entry
+        else:
+            selectors.append(entry)
+
     index = 0
     options_ended = False
     while index < len(args):
@@ -1477,11 +1515,10 @@ def curl_secret_output_risk(toks: list[str]) -> str:
             index += 1
             continue
         if canonical_option in {"--remote-name", "--no-remote-name"}:
-            selectors.append(
-                (
-                    "remote" if canonical_option == "--remote-name" else "stdout",
-                    None,
-                )
+            set_remote_name_selector(
+                ("remote", None)
+                if canonical_option == "--remote-name"
+                else ("remote-off", None)
             )
             index += 1
             continue
@@ -1569,7 +1606,7 @@ def curl_secret_output_risk(toks: list[str]) -> str:
                 if marker == "K":
                     return "curl config files are opaque to the deny floor."
                 if marker == "O":
-                    selectors.append(("remote", None))
+                    set_remote_name_selector(("remote", None))
                     offset += 1
                     continue
                 if marker == "J":
@@ -1870,7 +1907,7 @@ ENV_ROOTS = re.compile(
 )
 
 _SECRET_PATH = re.compile(
-    r"(^|[\\/])\.env(\.[\w.]+)?$|credential|secrets?\."
+    r"(^|[\\/])\.env(\.[\w.]+)?([\\/]|$)|credential|secrets?\."
     r"|(^|[\\/._-])id_(?:rsa|dsa|ecdsa|ed25519)"
     r"|\.pem$",
     re.IGNORECASE,
@@ -2336,6 +2373,187 @@ def wrapper_command_index(name: str, toks: list[str], index: int) -> int | None:
 
         return None
     return len(toks)
+
+
+def gnu_time_secret_output(raw: list[str]) -> str | None:
+    """Return 'dynamic'/'secret' when a GNU `time -o <file>` wrapper writes its
+    timing report to a dynamic or secret-looking path, else None. `time` is a
+    wrapper stripped before head resolution, so its -o value is inspected here."""
+    index = 0
+    while index < len(raw) and _ASSIGN.match(raw[index]):
+        index += 1
+    if index >= len(raw):
+        return None
+    base = _EXE_SUFFIX.sub("", raw[index].replace("\\", "/").split("/")[-1]).lower()
+    if base != "time":
+        return None
+    index += 1
+    while index < len(raw):
+        token = raw[index]
+        lowered = token.lower()
+        value = None
+        if lowered in {"-o", "--output"}:
+            value = raw[index + 1] if index + 1 < len(raw) else None
+            index += 2
+        elif lowered.startswith("--output="):
+            value = token.split("=", 1)[1]
+            index += 1
+        elif token.startswith("-o") and len(token) > 2:
+            value = token[2:]
+            index += 1
+        else:
+            index += 1
+            continue
+        if value is not None:
+            if is_dynamic_value(value):
+                return "dynamic"
+            if token_mentions_secret_path(value):
+                return "secret"
+    return None
+
+
+def _launcher_child_command(head: str, toks: list[str]) -> str | None:
+    """Return a child command string for watch/flock/coproc, "" for none, or
+    None when the child is opaque and the launcher must be denied."""
+    if head == "watch":
+        index = 1
+        while index < len(toks):
+            token = toks[index]
+            lowered = token.lower()
+            if token == "--":
+                index += 1
+                break
+            if lowered in {"-n", "--interval"}:
+                if index + 1 >= len(toks):
+                    return None
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            break
+        child = toks[index:]
+    elif head == "flock":
+        index = 1
+        while index < len(toks):
+            token = toks[index]
+            lowered = token.lower()
+            if lowered in {"-c", "--command"}:
+                value = toks[index + 1] if index + 1 < len(toks) else None
+                return restore_quoted_literal_markers(value) if value else None
+            if lowered in {"-w", "--timeout", "-E", "--conflict-exit-code"}:
+                if index + 1 >= len(toks):
+                    return None
+                index += 2
+                continue
+            if lowered.startswith(("--timeout=", "--conflict-exit-code=")):
+                index += 1
+                continue
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-"):
+                index += 1
+                continue
+            break
+        # toks[index] is the lock file/fd; the child command follows it.
+        child = toks[index + 1 :]
+    else:  # coproc
+        child = toks[1:]
+        if any(token in {"{", "}"} or token.endswith("{") for token in child):
+            return None  # compound coproc block is opaque
+    if not child:
+        return ""
+    return shlex.join(restore_quoted_literal_markers(token) for token in child)
+
+
+def parse_alias_definitions(head: str, toks: list[str]) -> dict[str, str]:
+    """Return {name: body} for a Bash `alias name=body` or PowerShell
+    Set-Alias/New-Alias definition, so a later invocation can be resolved to the
+    real command instead of an uninspected alias head."""
+    aliases: dict[str, str] = {}
+    if head == "alias":
+        for token in toks[1:]:
+            if token.startswith("-"):
+                continue
+            name, separator, body = token.partition("=")
+            if separator and name:
+                aliases[name.lower()] = restore_quoted_literal_markers(body)
+    elif head in {"set-alias", "sal", "new-alias", "nal"}:
+        name = None
+        value = None
+        positionals: list[str] = []
+        index = 1
+        while index < len(toks):
+            token = toks[index]
+            option = token.lstrip("-/").split(":", 1)[0].lower()
+            if token.startswith("-") and option:
+                is_name = "name".startswith(option)
+                is_value = "value".startswith(option)
+                if is_name or is_value:
+                    if ":" in token:
+                        bound = token.split(":", 1)[1]
+                        index += 1
+                    else:
+                        bound = toks[index + 1] if index + 1 < len(toks) else None
+                        index += 2
+                    if is_name:
+                        name = bound
+                    else:
+                        value = bound
+                    continue
+                index += 1
+                continue
+            positionals.append(token)
+            index += 1
+        if name is None and positionals:
+            name = positionals[0]
+        if value is None and len(positionals) > 1:
+            value = positionals[1]
+        if name and value:
+            aliases[name.lower()] = restore_quoted_literal_markers(value)
+    return aliases
+
+
+def _trap_handler_decision(toks: list[str], recurse):
+    """Return a decision tuple when a Bash trap installs an executable handler,
+    else None. `trap 'cmd' SIG` runs `cmd` when the signal fires."""
+    args = toks[1:]
+    if args and args[0] in {"-p", "--print", "-l", "--list"}:
+        return None  # printing/listing traps executes nothing
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        return None
+    handler = restore_quoted_literal_markers(args[0])
+    if handler in {"", "-"}:
+        return None  # reset to default disposition, nothing runs
+    if is_dynamic_value(handler):
+        return "deny", "A dynamic trap handler cannot be inspected safely."
+    decision = recurse(handler)
+    if decision[0] != "allow":
+        return decision
+    return None
+
+
+def _ssh_runs_local_child(toks: list[str]) -> bool:
+    """True when ssh argv selects a locally-executed child via ProxyCommand or
+    LocalCommand, which OpenSSH runs through the user's shell."""
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        lowered = token.lower()
+        if token == "-o":
+            value = (toks[index + 1] if index + 1 < len(toks) else "").lower()
+            if value.startswith(("proxycommand=", "localcommand=")):
+                return True
+            index += 2
+            continue
+        if lowered.startswith("-o") and len(token) > 2:
+            if lowered[2:].startswith(("proxycommand=", "localcommand=")):
+                return True
+        index += 1
+    return False
 
 
 def _is_target_directory_long_option(option: str) -> bool:
@@ -4861,7 +5079,6 @@ _CONTROL_PREFIXES = {
     "try",
     "catch",
     "finally",
-    "trap",
     "function",
 }
 _CONTROL_ONLY = {"fi", "done", "esac", "}"}
@@ -5047,6 +5264,19 @@ def powershell_implicit_command(toks: list[str]) -> str | None:
 
 def has_opaque_posix_shell_input(toks: list[str]) -> bool:
     """Reject shell program text supplied through opaque stdin/file expansion."""
+    has_command_flag = any(
+        token == "-c" or bool(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token))
+        for token in toks[1:]
+    )
+
+    def reads_program_from_stdin(redirect_index: int) -> bool:
+        # A shell runs stdin as program text only when neither a -c command
+        # string nor a script-file operand (a non-option token before the
+        # redirect) supplies the program.
+        if has_command_flag:
+            return False
+        return not any(not toks[i].startswith("-") for i in range(1, redirect_index))
+
     for index, token in enumerate(toks[1:], start=1):
         if token == "<<<":
             return True
@@ -5055,9 +5285,12 @@ def has_opaque_posix_shell_input(toks: list[str]) -> bool:
         candidate_index = index + 1
         if toks[candidate_index] == "<":
             candidate_index += 1
-        if candidate_index < len(toks) and toks[candidate_index].lstrip().startswith(
-            "("
-        ):
+        candidate = toks[candidate_index] if candidate_index < len(toks) else ""
+        if candidate.lstrip().startswith("("):
+            return True
+        # A plain `< file` redirect feeds the file's contents to a shell that
+        # reads its program from stdin, which the floor cannot inspect.
+        if reads_program_from_stdin(index):
             return True
     return False
 
@@ -5204,7 +5437,26 @@ def check(
     environment_provider_context = False
     active_git_process_environment: set[str] = set()
     active_git_repository_environment = set(repository_environment_seed)
+    command_aliases: dict[str, str] = {}
     previous_pass = None
+
+    def _recurse_child(child_command: str):
+        """Inspect a wrapper/launcher's child command with the live segment cwd
+        and Git-env context. Closes over the loop locals, read at call time."""
+        return check(
+            child_command,
+            tier_cfg,
+            project_dir,
+            current_cwd,
+            _depth + 1,
+            cwd_uncertain,
+            cwd_changed,
+            remote_resolver,
+            _remote_cache,
+            _remote_deadline,
+            frozenset(effective_git_repository_environment),
+        )
+
     for (
         raw,
         quote_aware,
@@ -5221,6 +5473,7 @@ def check(
             environment_provider_context = False
             active_git_process_environment = set()
             active_git_repository_environment = set(repository_environment_seed)
+            command_aliases = {}
         previous_pass = current_pass
         if not raw:
             continue
@@ -5298,9 +5551,37 @@ def check(
             )
         # Normalize away wrappers / VAR=val / path + .exe so `env git`, `git.exe`,
         # `/usr/bin/git`, `sudo.exe` all resolve to their real head (bypass fix).
+        time_output = gnu_time_secret_output(raw)
+        if time_output == "dynamic":
+            return "deny", "A dynamic GNU time -o target cannot be inspected safely."
+        if time_output == "secret":
+            return (
+                "deny",
+                "GNU time -o output to a secret-looking file is floor-blocked.",
+            )
         head, toks = command_head(raw)
         if not toks:
             continue
+        # Resolve a previously-defined alias to its real command so an aliased
+        # `gp push --force` / `zap` is inspected, not treated as an unknown head.
+        if quote_aware and head in command_aliases:
+            expansion = command_aliases[head]
+            if expansion and not is_dynamic_value(expansion):
+                head, toks = command_head(tokens(expansion) + toks[1:])
+                if not toks:
+                    continue
+        if quote_aware:
+            command_aliases.update(parse_alias_definitions(head, toks))
+        # A BASH_ENV startup file is read and executed by a non-interactive bash
+        # (`bash -c ...`) before the command body runs, so a leading (or env-set)
+        # BASH_ENV assignment injects opaque program text the floor cannot see.
+        if head in _POSIX_SHELL_HEADS and any(
+            re.match(r"^BASH_ENV=\S", token) for token in raw
+        ):
+            return (
+                "deny",
+                "A BASH_ENV startup file runs opaque program text before the shell body.",
+            )
         if quote_aware and re.match(r"^(?:\$|%[^%]+%$|![^!]+!$|`|\$\()", toks[0]):
             return "deny", "A dynamic executable name cannot be inspected safely."
         if any(
@@ -5355,11 +5636,22 @@ def check(
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
             continue
-        if head in {"sudo", "su", "doas", "pkexec", "run0", "please", "runas"}:
+        if head in {
+            "sudo",
+            "su",
+            "doas",
+            "pkexec",
+            "run0",
+            "please",
+            "runas",
+            "runuser",
+            "setpriv",
+            "sg",
+        }:
             return (
                 "deny",
-                f"{head} is blocked at the floor: privilege elevation conceals an "
-                "uninspected child command. If elevation is truly needed, the human runs it.",
+                f"{head} is blocked at the floor: privilege/identity elevation conceals "
+                "an uninspected child command. If elevation is truly needed, the human runs it.",
             )
         if head in {"start-process", "saps"}:
             child_command, error = powershell_start_process_command(toks)
@@ -5417,12 +5709,69 @@ def check(
             pipeline_error = powershell_pipeline_scriptblock_opacity(head, toks)
             if pipeline_error:
                 return "deny", pipeline_error
+            # A literal ForEach-Object block executes its body per pipeline item,
+            # so inspect it: a quoted `iex 'git push --force'` inside is masked
+            # from the segment pass. Where-Object blocks are filter expressions
+            # (property comparisons), not command bodies, so they are left inert.
+            if head in {"foreach-object", "%", "foreach"}:
+                for body in powershell_literal_scriptblock_bodies(toks):
+                    if not body or is_dynamic_value(body):
+                        continue
+                    body_head, _ = command_head(tokens(body))
+                    # Only a command invocation is recursed; a pure expression or
+                    # member access (`$_.Name`, `1..3`) is inert output, not a
+                    # command, and its head does not start with a letter.
+                    if not body_head or not re.match(r"^[A-Za-z]", body_head):
+                        continue
+                    body_decision = _recurse_child(body)
+                    if body_decision[0] != "allow":
+                        return body_decision
             continue
         if head == "start":
             return (
                 "deny",
                 "A process launcher can conceal an irreversible child command. Run the child directly.",
             )
+        if head in {"systemd-run", "nsenter", "unshare", "script", "setarch", "capsh"}:
+            # These launchers have option grammars where reconstructing which
+            # flags consume a value is error-prone, so a child command can hide
+            # behind a misparsed option. They are rarely legitimate in an agent
+            # shell, so treat them as opaque rather than risk a false allow.
+            return (
+                "deny",
+                f"{head} can launch an uninspected child command; run the child directly.",
+            )
+        if head in {"watch", "flock", "coproc"}:
+            child_command = _launcher_child_command(head, toks)
+            if child_command is None:
+                return (
+                    "deny",
+                    f"A {head} child command is opaque to floor inspection.",
+                )
+            if child_command:
+                if is_dynamic_value(child_command):
+                    return (
+                        "deny",
+                        f"A dynamic {head} child command cannot be inspected safely.",
+                    )
+                child_decision = _recurse_child(child_command)
+                if child_decision[0] != "allow":
+                    return child_decision
+            continue
+        if head == "trap":
+            if not quote_aware:
+                continue
+            trap_error = _trap_handler_decision(toks, _recurse_child)
+            if trap_error is not None:
+                return trap_error
+            continue
+        if head == "ssh":
+            if _ssh_runs_local_child(toks):
+                return (
+                    "deny",
+                    "ssh ProxyCommand/LocalCommand runs a local child outside floor "
+                    "inspection.",
+                )
         if head == "wsl":
             # wsl runs a child command inside the Linux distro; inspect that
             # child so `wsl rm -rf /` / `wsl -e sh -c '...'` are not concealed.
@@ -5493,7 +5842,10 @@ def check(
             if nested_decision[0] != "allow":
                 return nested_decision
         if head == "find":
-            if any(token in {"-exec", "-execdir", "-delete"} for token in toks[1:]):
+            if any(
+                token in {"-exec", "-execdir", "-ok", "-okdir", "-delete"}
+                for token in toks[1:]
+            ):
                 return (
                     "deny",
                     "find execution/deletion actions are opaque to the deny floor. Enumerate first.",
@@ -5657,9 +6009,19 @@ def check(
                         nested_script = bound_value
                     elif index + 1 < len(toks):
                         if head in _POSIX_SHELL_HEADS:
+                            # Shell options may appear between -c and the command
+                            # string (`bash -c -e 'cmd'`); skip them so the real
+                            # script is inspected, not an option token.
                             script_index = index + 1
-                            if toks[script_index] == "--":
-                                script_index += 1
+                            while script_index < len(toks):
+                                candidate = toks[script_index]
+                                if candidate == "--":
+                                    script_index += 1
+                                    break
+                                if candidate.startswith("-") and len(candidate) > 1:
+                                    script_index += 1
+                                    continue
+                                break
                             if script_index < len(toks):
                                 nested_script = toks[script_index]
                         elif is_command_with_args:
@@ -5833,6 +6195,12 @@ def check(
                         "deny",
                         "Git apply fake-ancestor output to an opaque or secret-looking file is floor-blocked.",
                     )
+            if sub == "apply" and any(token == "--unsafe-paths" for token in args):
+                return (
+                    "deny",
+                    "Git apply --unsafe-paths can write outside the working tree; "
+                    "floor-blocked.",
+                )
             if sub in {"apply", "am"}:
                 directory_roots = git_option_values(args, "--directory")
                 if any(
@@ -5940,6 +6308,41 @@ def check(
                     return (
                         "deny",
                         "Git clone into an opaque or secret-looking destination is floor-blocked.",
+                    )
+            if sub == "init":
+                init_targets = git_option_values(args, "--separate-git-dir")
+                for token in args:
+                    if not token.startswith("-"):
+                        init_targets.append(token)  # optional [<directory>] operand
+                if any(
+                    target is None
+                    or has_dynamic_shell_token(target)
+                    or token_mentions_secret_path(target)
+                    for target in init_targets
+                ):
+                    return (
+                        "deny",
+                        "Git init into an opaque or secret-looking directory is floor-blocked.",
+                    )
+            if sub == "stash":
+                if any(
+                    token == "--pathspec-from-file"
+                    or token.startswith("--pathspec-from-file=")
+                    for token in args
+                ):
+                    return (
+                        "deny",
+                        "Git stash pathspec files are opaque to the deny floor.",
+                    )
+                stash_pathspecs = args[args.index("--") + 1 :] if "--" in args else []
+                if any(
+                    has_dynamic_shell_token(pathspec)
+                    or token_mentions_secret_path(pathspec)
+                    for pathspec in stash_pathspecs
+                ):
+                    return (
+                        "deny",
+                        "Git stash of an opaque or secret-looking path is floor-blocked.",
                     )
             if sub == "worktree":
                 if any(token.lower() == "remove" for token in args):
@@ -6392,14 +6795,19 @@ def check(
                         "T3: git reset --hard discards uncommitted work. Confirm you want this.",
                     )
 
-            if sub == "clean" and any(
+            clean_forced = sub == "clean" and any(
                 t == "--force"
                 or git_option_abbreviates(t, "--force", min_prefix=1)
                 or bool(re.match(r"^-[a-zA-Z]*f", t))
                 for t in args
-            ):
+            )
+            clean_interactive = sub == "clean" and any(
+                t == "--interactive" or bool(re.match(r"^-[a-zA-Z]*i", t)) for t in args
+            )
+            if clean_forced or clean_interactive:
                 # Secret-looking pathspecs are floor-blocked regardless of tier:
-                # `git clean -f .env` removes an untracked secret file outright.
+                # `git clean -f .env` (or interactive `-i .env`) removes an
+                # untracked secret file.
                 clean_pathspecs = []
                 after_separator = False
                 for token in args:
@@ -6417,6 +6825,7 @@ def check(
                         "deny",
                         "Git clean of an opaque or secret-looking path is floor-blocked.",
                     )
+            if clean_forced:
                 if strict:
                     return (
                         "deny",
@@ -6468,20 +6877,39 @@ def check(
                         continue
                     bare_positionals.append(token)
                     index += 1
-                if any(
-                    has_dynamic_shell_token(pathspec)
-                    or token_mentions_secret_path(pathspec)
-                    for pathspec in separator_pathspecs
-                ) or any(
-                    token_is_secret_filename(pathspec) for pathspec in bare_positionals
+                # With a tree-ish plus further bare operands, the operands after
+                # the first are pathspecs; a dynamic one may expand to a secret
+                # path, so fail closed the same as after `--`.
+                bare_pathspecs = (
+                    bare_positionals[1:] if len(bare_positionals) > 1 else []
+                )
+                if (
+                    any(
+                        has_dynamic_shell_token(pathspec)
+                        or token_mentions_secret_path(pathspec)
+                        for pathspec in separator_pathspecs
+                    )
+                    or any(
+                        token_is_secret_filename(pathspec)
+                        for pathspec in bare_positionals
+                    )
+                    or any(
+                        has_dynamic_shell_token(pathspec) for pathspec in bare_pathspecs
+                    )
                 ):
                     return (
                         "deny",
                         "Git checkout of an opaque or secret-looking path is floor-blocked.",
                     )
+
+            # A whole-tree pathspec restores every tracked file, discarding all
+            # local modifications, whether spelled `.` or the root magic `:/`.
+            def _is_whole_tree_pathspec(token: str) -> bool:
+                return token == "." or token == ":/" or token.startswith(":(top")
+
             if sub == "checkout" and "--" in args:
                 after = args[args.index("--") + 1 :]
-                if "." in after:
+                if any(_is_whole_tree_pathspec(token) for token in after):
                     if strict:
                         return (
                             "deny",
@@ -6493,9 +6921,38 @@ def check(
                             "T3: checkout -- . wipes local modifications. Confirm.",
                         )
 
+            if sub == "checkout" and any(
+                token == "--force"
+                or token == "-f"
+                or bool(re.match(r"^-[a-zA-Z]*f$", token))
+                for token in (args[: args.index("--")] if "--" in args else args)
+            ):
+                if strict:
+                    return (
+                        "deny",
+                        "T4/wave: git checkout -f throws away local modifications.",
+                    )
+                if tier >= 3 and not relaxed:
+                    return (
+                        "ask",
+                        "T3: git checkout -f discards local modifications. Confirm.",
+                    )
+
+            if sub == "switch" and any(token == "--discard-changes" for token in args):
+                if strict:
+                    return (
+                        "deny",
+                        "T4/wave: git switch --discard-changes throws away local modifications.",
+                    )
+                if tier >= 3 and not relaxed:
+                    return (
+                        "ask",
+                        "T3: git switch --discard-changes discards local modifications. Confirm.",
+                    )
+
             if (
                 sub == "restore"
-                and "." in args
+                and any(_is_whole_tree_pathspec(token) for token in args)
                 and (not restore_staged or restore_worktree)
             ):
                 if strict:
@@ -6555,6 +7012,11 @@ def check(
             "ni",
             "unlink",
             "ln",
+            "mkdir",
+            "md",
+            "chmod",
+            "chown",
+            "chgrp",
         }
         if head in secret_mutators:
             if any(token.startswith("@") for token in toks[1:]):
@@ -6710,19 +7172,71 @@ def check(
                         "deny",
                         "dd output to a secret-looking file is floor-blocked.",
                     )
-        if (
-            head in {"sed", "gsed"}
-            and any(
-                token == "-i" or token.startswith(("-i", "--in-place"))
+        if head in {"sed", "gsed"} and any(
+            token == "-i" or token.startswith(("-i", "--in-place"))
+            for token in toks[1:]
+        ):
+            # The file operands are the non-option, non-script tokens. A dynamic
+            # operand may expand to a secret path, so fail closed on it too.
+            for token in toks[1:]:
+                if token.startswith("-") or re.match(r"^[0-9]*[sy]([^\w]|$)", token):
+                    continue  # option or an inline sed script (s///, y///, 5d ...)
+                if has_dynamic_shell_token(token):
+                    return (
+                        "deny",
+                        "A dynamic sed in-place target cannot be inspected safely.",
+                    )
+            if any(token_mentions_secret_path(token) for token in toks[1:]):
+                return (
+                    "deny",
+                    "In-place editing of a secret-looking file is floor-blocked.",
+                )
+        if head == "install":
+            # install SOURCE... DEST (or -t DIR): a dynamic destination may expand
+            # to a secret path, so fail closed rather than treat it as safe.
+            for token in toks[1:]:
+                if not token.startswith("-") and has_dynamic_shell_token(token):
+                    return (
+                        "deny",
+                        "A dynamic install destination cannot be inspected safely.",
+                    )
+            if any(token_mentions_secret_path(token) for token in toks[1:]):
+                return "deny", "Installing over a secret-looking file is floor-blocked."
+        if head in {"tar", "gtar", "bsdtar"}:
+            write_mode = any(
+                bool(re.match(r"^-[A-Za-z]*[cruA]", token))
+                or token.lower()
+                in {"--create", "--append", "--update", "--concatenate", "--catenate"}
                 for token in toks[1:]
             )
-            and any(token_mentions_secret_path(token) for token in toks[1:])
-        ):
-            return "deny", "In-place editing of a secret-looking file is floor-blocked."
-        if head == "install" and any(
-            token_mentions_secret_path(token) for token in toks[1:]
-        ):
-            return "deny", "Installing over a secret-looking file is floor-blocked."
+            if write_mode:
+                archive = None
+                index = 1
+                while index < len(toks):
+                    token = toks[index]
+                    lowered = token.lower()
+                    if token == "-f" or lowered == "--file":
+                        archive = toks[index + 1] if index + 1 < len(toks) else None
+                        index += 2
+                        continue
+                    if lowered.startswith("--file="):
+                        archive = token.split("=", 1)[1]
+                    elif re.match(r"^-[A-Za-z]*f$", token):
+                        archive = toks[index + 1] if index + 1 < len(toks) else None
+                        index += 2
+                        continue
+                    index += 1
+                if archive is not None:
+                    if has_dynamic_shell_token(archive):
+                        return (
+                            "deny",
+                            "A dynamic tar archive target cannot be inspected safely.",
+                        )
+                    if token_mentions_secret_path(archive):
+                        return (
+                            "deny",
+                            "Writing a tar archive over a secret-looking file is floor-blocked.",
+                        )
         if head in {
             "curl",
             "wget",
@@ -6781,7 +7295,6 @@ def check(
                     head,
                     token,
                 )
-                clustered_output = clustered_marker is not None
                 matched_long = next(
                     (
                         option
@@ -6792,10 +7305,18 @@ def check(
                 )
                 powershell_parameter = lowered.lstrip("-").split(":", 1)[0]
                 powershell_outfile = (
-                    head in {"iwr", "irm", "invoke-webrequest", "invoke-restmethod"}
+                    head
+                    in {"iwr", "irm", "invoke-webrequest", "invoke-restmethod", "wget"}
                     and len(powershell_parameter) >= 4
                     and "outfile".startswith(powershell_parameter)
                 )
+                # A PowerShell -OutFile parameter starts with `-O`, so the GNU
+                # clustered `-O<file>` parser would otherwise misread `-OutFile`
+                # as `-O` + `utFile`; drop that misparse so the real destination
+                # operand (`-OutFile .env`) is still inspected as a separate value.
+                if powershell_outfile:
+                    clustered_marker, clustered_target = None, None
+                clustered_output = clustered_marker is not None
                 if matched_long and "=" in token:
                     attached_target = token.split("=", 1)[1]
                 elif powershell_outfile and ":" in token:
@@ -6857,19 +7378,70 @@ def check(
                             "deny",
                             "A remote-name download would create a secret-looking file.",
                         )
+            if head == "wget" and not explicit_output:
+                # -r/-m/-p and -i/--input-file create local files whose names come
+                # from discovered links or a URL list, so they can materialize a
+                # secret-looking file that is unknowable at inspection time. Match
+                # -r/-m/-p only inside a genuine no-value short-flag cluster, so a
+                # value like `-U eoutput...` is not misread as a recursive flag.
+                no_value_flags = _DOWNLOADER_CLUSTER_PREFIXES["wget"]
+
+                def _wget_recursive(token: str) -> bool:
+                    if token.lower() in {
+                        "--recursive",
+                        "--mirror",
+                        "--page-requisites",
+                    }:
+                        return True
+                    if not token.startswith("-") or token.startswith("--"):
+                        return False
+                    body = token[1:]
+                    return (
+                        bool(body)
+                        and all(char in no_value_flags for char in body)
+                        and any(char in "rmp" for char in body)
+                    )
+
+                if any(_wget_recursive(token) for token in toks[1:]):
+                    return (
+                        "deny",
+                        "Recursive wget without an inspected --output-document has "
+                        "opaque remote-name output.",
+                    )
+                if any(
+                    token in {"-i", "--input-file"}
+                    or token.lower().startswith("--input-file=")
+                    or (token.startswith("-i") and len(token) > 2)
+                    for token in toks[1:]
+                ):
+                    return (
+                        "deny",
+                        "wget URL files have opaque remote-name output; require an "
+                        "inspected --output-document.",
+                    )
         if head in {"export-clixml", "export-csv", "epcsv"} and any(
-            token_mentions_secret_path(token) for token in toks[1:]
+            token_mentions_secret_path(token) or has_dynamic_shell_token(token)
+            for token in toks[1:]
         ):
-            return "deny", "Serializing into a secret-looking file is floor-blocked."
+            return (
+                "deny",
+                "Serializing into a secret-looking or dynamic file is floor-blocked.",
+            )
         if (
             ("::" in head or head.startswith("["))
             and re.search(
                 r"(?i)(?:writealltext|writeallbytes|appendalltext|create|delete|move|copy)",
                 head,
             )
-            and token_mentions_secret_path(" ".join(toks))
+            and (
+                token_mentions_secret_path(" ".join(toks))
+                or has_dynamic_shell_token(" ".join(toks))
+            )
         ):
-            return "deny", "A file API write to a secret-looking path is floor-blocked."
+            return (
+                "deny",
+                "A file API write to a secret-looking or dynamic path is floor-blocked.",
+            )
         if quote_aware:
             for index, token in enumerate(raw[:-1]):
                 if token in (">", ">>") and token_mentions_secret_path(raw[index + 1]):
