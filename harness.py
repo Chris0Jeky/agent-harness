@@ -482,10 +482,14 @@ def _powershell_encoded_payload(rest: str) -> str | None:
                 consumed_end = index + 2
             # The payload must be a bare base64 string AND the LAST token, so no
             # sibling statement follows and nothing precedes that would slurp it.
+            # It must also appear VERBATIM in the raw argv: if shlex stripped a
+            # backslash/quote (`SQ\Bu` -> `SQBu`), the bytes we decode differ
+            # from what PowerShell receives, so decode a payload it can't.
             if (
                 payload is None
                 or consumed_end != len(tokens)
                 or not re.fullmatch(r"[A-Za-z0-9+/=]+", payload)
+                or payload not in rest
             ):
                 return ""
             return payload
