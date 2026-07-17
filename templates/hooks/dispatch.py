@@ -7023,7 +7023,7 @@ def check(
 
             if sub == "checkout" and any(
                 token == "-f"
-                or git_option_abbreviates(token, "--force", min_prefix=3)
+                or git_option_abbreviates(token, "--force", min_prefix=1)
                 or bool(re.match(r"^-[a-zA-Z]*f", token))  # -f, -fq, -qf clusters
                 for token in (args[: args.index("--")] if "--" in args else args)
             ):
@@ -7042,7 +7042,7 @@ def check(
             if sub == "switch" and any(
                 token == "-f"
                 or token == "--force"
-                or git_option_abbreviates(token, "--discard-changes", min_prefix=4)
+                or git_option_abbreviates(token, "--discard-changes", min_prefix=1)
                 or bool(re.match(r"^-[a-zA-Z]*f", token))
                 for token in args
             ):
