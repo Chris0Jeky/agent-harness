@@ -413,6 +413,101 @@ def managed_codex_floor_groups(current: str) -> list[Any]:
     return [group for group in existing_groups if is_managed(group)]
 
 
+# PowerShell's own options. Only these may precede -EncodedCommand without
+# changing what actually executes: a code directive (-Command/-File/-cwa), a
+# bare positional (binds to the implicit -Command), or any UNKNOWN option would
+# slurp/redefine the command line so the encoded payload never runs as
+# PowerShell — the decoded inner text would then diverge from runtime.
+_POWERSHELL_INERT_SWITCHES = {
+    "noprofile",
+    "noprofileloadtime",
+    "noninteractive",
+    "nologo",
+    "noexit",
+    "sta",
+    "mta",
+    "interactive",
+}
+_POWERSHELL_INERT_VALUE_OPTIONS = {
+    "executionpolicy",
+    "version",
+    "windowstyle",
+    "inputformat",
+    "outputformat",
+    "configurationname",
+    "psconsolefile",
+    "settingsfile",
+    "custompipename",
+    "workingdirectory",
+}
+
+
+def _is_encoded_switch(token: str) -> bool:
+    if not token.startswith(("-", "/")):
+        return False
+    option = token.lstrip("-/").partition(":")[0].lower()
+    return bool(option) and (
+        option in {"e", "ec"} or "encodedcommand".startswith(option)
+    )
+
+
+def _powershell_encoded_payload(rest: str) -> str | None:
+    """Return the base64 payload of a clean `-EncodedCommand` invocation.
+
+    None -> no -EncodedCommand present (caller keeps the raw command).
+    ""   -> an -EncodedCommand is present but the surrounding argv is unsafe (a
+            positional / code-directive / unknown option would redefine what
+            runs, or a statement follows the payload) -> caller fails closed.
+    <b64> -> the clean terminal encoded form (the ONLY trusted decode).
+    """
+    try:
+        tokens = shlex.split(rest, posix=True)
+    except ValueError:
+        # Unbalanced quotes: if it even mentions an encoded switch, fail closed.
+        return "" if re.search(r"(?i)(?:^|\s)[-/]e", rest) else None
+    if not any(_is_encoded_switch(token) for token in tokens):
+        return None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        raw = token.lstrip("-/")
+        option = raw.partition(":")[0].lower()
+        separator = ":" in raw
+        attached = raw.partition(":")[2]  # original case (base64 is case-sensitive)
+        if _is_encoded_switch(token):
+            if separator:
+                payload, consumed_end = attached, index + 1
+            else:
+                payload = tokens[index + 1] if index + 1 < len(tokens) else None
+                consumed_end = index + 2
+            # The payload must be a bare base64 string AND the LAST token, so no
+            # sibling statement follows and nothing precedes that would slurp it.
+            if (
+                payload is None
+                or consumed_end != len(tokens)
+                or not re.fullmatch(r"[A-Za-z0-9+/=]+", payload)
+            ):
+                return ""
+            return payload
+        if not token.startswith(("-", "/")):
+            return ""  # bare positional binds to the implicit -Command
+        if (
+            "command".startswith(option)
+            or "file".startswith(option)
+            or "commandwithargs".startswith(option)
+            or option == "cwa"
+        ):
+            return ""  # code directive redefines execution
+        if any(name.startswith(option) for name in _POWERSHELL_INERT_SWITCHES):
+            index += 1
+            continue
+        if any(name.startswith(option) for name in _POWERSHELL_INERT_VALUE_OPTIONS):
+            index += 1 if separator else 2  # consume the option's value token
+            continue
+        return ""  # unknown option
+    return ""
+
+
 def decode_windows_hook_command(command: str) -> str:
     """Expose a PowerShell EncodedCommand payload for topology validation."""
     executable_match = re.match(r'^\s*(?:&\s*)?(?:"([^"]+)"|(\S+))', command)
@@ -424,69 +519,11 @@ def decode_windows_hook_command(command: str) -> str:
     executable = executable.rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if executable not in {"powershell", "pwsh"}:
         return command
-    # Only these PowerShell options may precede -EncodedCommand without changing
-    # what actually executes. A code directive (-Command/-File/-CommandWithArgs)
-    # or any UNKNOWN option would slurp/redefine the command line so the encoded
-    # payload never runs as PowerShell — the decoded inner text would then
-    # diverge from runtime. Fail closed on anything else before the payload.
-    inert_prefix_switches = {
-        "noprofile",
-        "noprofileloadtime",
-        "noninteractive",
-        "nologo",
-        "noexit",
-        "sta",
-        "mta",
-        "interactive",
-    }
-    inert_prefix_value_options = {
-        "executionpolicy",
-        "version",
-        "windowstyle",
-        "inputformat",
-        "outputformat",
-        "configurationname",
-        "psconsolefile",
-        "settingsfile",
-        "custompipename",
-        "workingdirectory",
-    }
-    encoded_payload = None
-    # Lookbehind (not a consuming `\s`) for the option boundary so back-to-back
-    # options like `-NoProfile -EncodedCommand` are both matched.
-    for match in re.finditer(r"(?i)(?:^|(?<=\s))-([a-z]+)(?::|\s+)", command):
-        option = match.group(1).lower()
-        if option not in {"e", "ec"} and not "encodedcommand".startswith(option):
-            # A directive that redefines execution, or an unrecognized option,
-            # before the encoded payload -> the decode cannot be trusted.
-            if (
-                "command".startswith(option)
-                or "file".startswith(option)
-                or "commandwithargs".startswith(option)
-                or option == "cwa"
-                or not (
-                    any(name.startswith(option) for name in inert_prefix_switches)
-                    or any(
-                        name.startswith(option) for name in inert_prefix_value_options
-                    )
-                )
-            ):
-                return "invoke_deny_floor opaque-encoded-command"
-            continue
-        remainder = command[match.end() :]
-        payload_match = re.match(r"[\"']?([A-Za-z0-9+/=]+)[\"']?(?=$|\s)", remainder)
-        if payload_match is None:
-            return "invoke_deny_floor opaque-encoded-command"
-        # Anything executable AFTER the encoded payload (e.g. `<B64> ; evil` or
-        # `<B64> & evil`) is a sibling statement the outer PowerShell runs but
-        # the decoded inner text would hide. Only trailing whitespace is safe;
-        # otherwise fail closed so the tail cannot be certified away.
-        if remainder[payload_match.end() :].strip():
-            return "invoke_deny_floor opaque-encoded-command"
-        encoded_payload = payload_match.group(1)
-        break
+    encoded_payload = _powershell_encoded_payload(command[executable_match.end() :])
     if encoded_payload is None:
         return command
+    if encoded_payload == "":
+        return "invoke_deny_floor opaque-encoded-command"
     try:
         payload = base64.b64decode(encoded_payload, validate=True)
         if not payload or len(payload) % 2:

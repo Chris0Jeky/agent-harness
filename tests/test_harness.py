@@ -543,6 +543,11 @@ class HarnessTests(unittest.TestCase):
             "-CommandWithArgs foo",
             "-cwa foo",
             "-WeirdUnknown x",
+            # a bare positional binds to the implicit -Command and runs itself,
+            # demoting -EncodedCommand to an inert argument
+            "C:\\evil\\payload.exe",
+            "calc.exe",
+            "-WindowStyle Hidden calc.exe",
         ):
             with self.subTest(prefix=prefix):
                 group = {
