@@ -849,6 +849,60 @@ class HarnessTests(unittest.TestCase):
             )
         )
 
+    def test_repo_floor_rejects_relative_interpreter_head(self) -> None:
+        # A path-qualified interpreter head runs a repo-shipped attacker binary;
+        # only a bare (PATH-resolved) or absolute interpreter may certify.
+        pin = "a" * 64
+        good_windows = (
+            f"$expected='{pin}'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        good_posix = (
+            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        invalid_pairs = (
+            (
+                f"expected={pin}; ./python3 $HOME/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                good_windows,
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; & tools/py.exe -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex",
+            ),
+            (
+                f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                "tools/bash .codex/invoke_deny_floor.sh",
+                good_windows,
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^Bash$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": command,
+                                            "commandWindows": command_windows,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+        self.assertFalse(harness.token_is_python_executable("./python3"))
+        self.assertFalse(harness.token_is_python_executable("tools/py.exe"))
+        self.assertTrue(harness.token_is_python_executable("python3"))
+
     def test_repo_floor_rejects_bare_assignment_invocation(self) -> None:
         # A pure `VAR=path` assignment runs nothing (exit 0); it must never be
         # classified as the floor invocation, or the hook silently allows-all.

@@ -4992,6 +4992,58 @@ def contains_downloader_command(command: str) -> bool:
 
 _POSIX_SHELL_HEADS = {"ash", "bash", "dash", "ksh", "sh", "zsh"}
 
+# Windows PowerShell (powershell.exe, 5.1) binds a bare trailing token to an
+# implicit -Command, so `powershell git push --force` executes the force-push.
+# These are its own options; the first token that is neither locates the payload.
+_POWERSHELL_SWITCH_OPTIONS = {
+    "noprofile",
+    "nologo",
+    "noninteractive",
+    "noexit",
+    "sta",
+    "mta",
+    "interactive",
+}
+_POWERSHELL_VALUE_OPTIONS = {
+    "executionpolicy",
+    "version",
+    "windowstyle",
+    "inputformat",
+    "outputformat",
+    "configurationname",
+    "psconsolefile",
+    "settingsfile",
+    "custompipename",
+    "workingdirectory",
+}
+
+
+def powershell_implicit_command(toks: list[str]) -> str | None:
+    """Return the implicit -Command payload of a bare powershell.exe invocation.
+
+    Returns the joined payload string, "" when only known options are present
+    (no payload), or None when an unknown/ambiguous option makes the payload
+    position unlocatable (caller fails closed).
+    """
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if not token.startswith(("-", "/")):
+            return " ".join(toks[index:])
+        option, separator, _bound = token.lstrip("-/").lower().partition(":")
+        if not option:
+            return None
+        is_switch = any(name.startswith(option) for name in _POWERSHELL_SWITCH_OPTIONS)
+        is_value = any(name.startswith(option) for name in _POWERSHELL_VALUE_OPTIONS)
+        if is_switch and not is_value:
+            index += 1
+            continue
+        if is_value and not is_switch:
+            index += 1 if separator else 2
+            continue
+        return None
+    return ""
+
 
 def has_opaque_posix_shell_input(toks: list[str]) -> bool:
     """Reject shell program text supplied through opaque stdin/file expansion."""
@@ -5371,6 +5423,56 @@ def check(
                 "deny",
                 "A process launcher can conceal an irreversible child command. Run the child directly.",
             )
+        if head == "wsl":
+            # wsl runs a child command inside the Linux distro; inspect that
+            # child so `wsl rm -rf /` / `wsl -e sh -c '...'` are not concealed.
+            wsl_value_options = {
+                "-d",
+                "--distribution",
+                "-u",
+                "--user",
+                "--cd",
+                "--shell-type",
+            }
+            child_index = 1
+            while child_index < len(toks):
+                token = toks[child_index]
+                if token == "--":
+                    child_index += 1
+                    break
+                if token in wsl_value_options:
+                    child_index += 2
+                    continue
+                if token.startswith("-"):
+                    child_index += 1
+                    continue
+                break
+            if child_index < len(toks):
+                wsl_child = shlex.join(
+                    restore_quoted_literal_markers(token)
+                    for token in toks[child_index:]
+                )
+                if is_dynamic_value(wsl_child):
+                    return (
+                        "deny",
+                        "A dynamic wsl child command cannot be inspected safely.",
+                    )
+                wsl_decision = check(
+                    wsl_child,
+                    tier_cfg,
+                    project_dir,
+                    current_cwd,
+                    _depth + 1,
+                    cwd_uncertain,
+                    cwd_changed,
+                    remote_resolver,
+                    _remote_cache,
+                    _remote_deadline,
+                    frozenset(effective_git_repository_environment),
+                )
+                if wsl_decision[0] != "allow":
+                    return wsl_decision
+            continue
         if head == "call":
             if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
                 return "deny", "A dynamic cmd call target cannot be inspected safely."
@@ -5450,6 +5552,7 @@ def check(
 
         nested_script = None
         nested_command_requested = False
+        saw_powershell_file = False
         if head == "cmd":
             nested_command_requested, nested_script = cmd_nested_script(toks)
         elif head in _POSIX_SHELL_HEADS | {"pwsh", "powershell"}:
@@ -5458,10 +5561,29 @@ def check(
                     "deny",
                     "Shell program text from an opaque input source cannot be inspected safely.",
                 )
+            ps_skip_until = 0
             for index, token in enumerate(toks[1:], start=1):
                 option_text = token.lstrip("-/")
                 option, separator, bound_value = option_text.partition(":")
                 option = option.lower()
+                if head in {"pwsh", "powershell"}:
+                    if index <= ps_skip_until:
+                        continue  # consumed as a value-option's value
+                    is_terminal = bool(option) and (
+                        "command".startswith(option)
+                        or "encodedcommand".startswith(option)
+                        or "file".startswith(option)
+                        or option == "cwa"
+                        or "commandwithargs".startswith(option)
+                    )
+                    if not token.startswith(("-", "/")):
+                        break  # the implicit -Command/-File payload begins here
+                    if not is_terminal and any(
+                        name.startswith(option) for name in _POWERSHELL_VALUE_OPTIONS
+                    ):
+                        if not separator and index + 1 < len(toks):
+                            ps_skip_until = index + 1
+                        continue
                 is_encoded = (
                     head in {"pwsh", "powershell"}
                     and bool(option)
@@ -5487,6 +5609,7 @@ def check(
                     and "file".startswith(option)
                 )
                 if is_file:
+                    saw_powershell_file = True
                     file_value = (
                         bound_value
                         if separator
@@ -5547,6 +5670,22 @@ def check(
                 default_script = " ".join(toks[1:]).strip()
                 if re.match(r"^(?:[&.]\s*)?\{", default_script):
                     nested_script = default_script
+                elif (
+                    head == "powershell"
+                    and not nested_command_requested
+                    and not saw_powershell_file
+                    and len(toks) > 1
+                ):
+                    # powershell.exe binds a bare payload to an implicit -Command.
+                    implicit = powershell_implicit_command(toks)
+                    if implicit is None:
+                        return (
+                            "deny",
+                            "A PowerShell invocation whose implicit -Command payload "
+                            "cannot be located is opaque.",
+                        )
+                    if implicit:
+                        nested_script = implicit
         if nested_command_requested and not nested_script:
             return (
                 "deny",

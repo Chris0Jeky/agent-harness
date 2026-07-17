@@ -737,21 +737,11 @@ def variable_reference(name: str) -> str:
     return rf"\$(?:\{{{re.escape(name)}\}}|{re.escape(name)}\b)"
 
 
-def starts_python(segment: str) -> bool:
-    return bool(
-        re.match(
-            r"(?i)^\s*\(?\s*(?:exec\s+)?(?:&\s*)?"
-            r"(?:\"(?:[^\"]*[\\/])?(?:python3?|py)(?:\.exe)?\"|"
-            r"'(?:[^']*[\\/])?(?:python3?|py)(?:\.exe)?'|"
-            r"(?:\S*[\\/])?(?:python3?|py)(?:\.exe)?)(?=\s|$)",
-            segment,
-        )
-    )
-
-
-_PYTHON_EXECUTABLE_TOKEN = re.compile(
-    r"(?i)^(?:[^\s/\\]*[\\/])?(?:python3?|py)(?:\.exe)?$"
-)
+# A BARE interpreter name only (no path separator): `python`/`python3`/`py`,
+# resolved via the trusted system PATH. A path-qualified interpreter (`./python3`,
+# `tools/py.exe`) would run a repo-shipped attacker binary, so a path-anchored
+# interpreter must instead flow through a SYSTEM-anchored floor variable.
+_PYTHON_EXECUTABLE_TOKEN = re.compile(r"(?i)^(?:python3?|py)(?:\.exe)?$")
 
 
 def token_is_python_executable(token: str) -> bool:
@@ -939,7 +929,16 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     # Direct execution: the wrapper (or a variable bound to it) is the head.
     if token_is_wrapper(head, wrapper_variables):
         return True
-    head_base = head.strip("'\"").lower().replace("\\", "/").rsplit("/", 1)[-1]
+    normalized_head = head.strip("'\"").replace("\\", "/")
+    # The shell/PowerShell interpreter that runs the wrapper must be a bare
+    # command name (system PATH) or an absolute path — a repo-relative
+    # interpreter (`tools/bash`, `./pwsh`) would be attacker-shipped.
+    if "/" in normalized_head and not (
+        normalized_head.startswith("/")
+        or re.match(r"[a-z]:/", normalized_head, re.IGNORECASE)
+    ):
+        return False
+    head_base = normalized_head.lower().rsplit("/", 1)[-1]
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
         return shell_script_operand_is_wrapper(tokens, wrapper_variables)

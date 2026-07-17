@@ -533,6 +533,26 @@ CASES = [
     ),
     ("Get-ChildItem | powershell -Command Remove-Item", 1, {}, "deny"),
     ("pwsh -cwa 'git push --force origin main'", 1, {}, "deny"),
+    # powershell.exe binds a bare payload to an implicit -Command
+    ("powershell git push --force origin main", 1, {}, "deny"),
+    ('powershell "git push -f origin main"', 1, {}, "deny"),
+    ("powershell -NoProfile git push --force origin main", 1, {}, "deny"),
+    (
+        "powershell -ExecutionPolicy Bypass git push --force origin main",
+        1,
+        {},
+        "deny",
+    ),
+    ("powershell -NoLogo -NonInteractive git push -f origin main", 1, {}, "deny"),
+    ("powershell rm -rf /critical/outside", 1, {}, "deny"),
+    ("powershell echo hi", 1, {}, "allow"),
+    ("powershell -NoProfile", 1, {}, "allow"),
+    # wsl runs a concealed Linux child that must be inspected
+    ("wsl rm -rf /critical/outside", 1, {}, "deny"),
+    ("wsl git push --force origin main", 1, {}, "deny"),
+    ("wsl -e sh -c 'git push --force origin main'", 1, {}, "deny"),
+    ("wsl -d Ubuntu git push -f origin main", 1, {}, "deny"),
+    ("wsl ls", 1, {}, "allow"),
     ("& { Remove-Item -Recurse C:/critical/outside }", 1, {}, "deny"),
     (". { Remove-Item -Recurse C:/critical/outside }", 1, {}, "deny"),
     (
