@@ -849,6 +849,79 @@ class HarnessTests(unittest.TestCase):
             )
         )
 
+    def test_repo_floor_rejects_variable_rebinding_and_glued_floor_paths(self) -> None:
+        pin = "c" * 64
+        good_windows = (
+            f"$expected='{pin}'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        good_posix = (
+            f"expected={pin}; python $HOME/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        # A floor variable bound to the real dispatcher must not be rebindable to
+        # an attacker path, built by concatenation past the marker, glued behind
+        # a non-slash prefix, or point at a relative attacker interpreter.
+        invalid_pairs = (
+            (
+                f"expected={pin}; d=$HOME/.claude/hooks/dispatch.py; d=./attacker.sh; "
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; $d='.claude/hooks/dispatch.py'; "
+                "$d='.claude/hooks/attacker.ps1'; & $d --event pre --runtime codex",
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; $d='.claude/hooks/dispatch.py'+'.ps1'; "
+                "& $d --event pre --runtime codex",
+            ),
+            (
+                f'expected={pin}; d=".claude/hooks/dispatch.py"evil; '
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
+            (
+                f"expected={pin}; d=x.claude/hooks/dispatch.py; "
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
+            (
+                f"expected={pin}; d=.claude/hooks/dispatch.py+evil; "
+                '"$d" --event pre --runtime codex',
+                good_windows,
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}';"
+                "$d=Join-Path $env:USERPROFILE '.claude\\hooks\\dispatch.py';"
+                "$p='x/py.exe';& $p -3 $d --event pre --runtime codex",
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^Bash$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": command,
+                                            "commandWindows": command_windows,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+
     def test_repo_floor_rejects_sibling_dispatcher_path_impersonation(self) -> None:
         pin = "d" * 64
         good_windows = (

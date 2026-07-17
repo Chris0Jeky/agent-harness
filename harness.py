@@ -623,6 +623,50 @@ def inert_floor_assignment(segment: str, *, windows: bool) -> tuple[str, str] | 
     return name, value
 
 
+# (marker, allow trailing .ext, require a $-variable prefix). The interpreter
+# path (py.exe) must be anchored to a system variable such as $env:SystemRoot
+# so a relative attacker-shipped `x/py.exe` cannot be trusted as the launcher.
+_FLOOR_PATH_MARKERS = (
+    (".claude/hooks/dispatch.py", False, False),
+    ("invoke_deny_floor", True, False),
+    ("py.exe", False, True),
+)
+
+
+def value_binds_anchored_floor_path(value: str) -> bool:
+    """Return whether an assignment value resolves to a floor path token.
+
+    The floor marker must be a TERMINAL path component: preceded by a path
+    separator / quote / start-of-value, and followed only by an optional file
+    extension (wrapper scripts) then the end of the value or a closing quote.
+    This rejects a rebind to an attacker path, a marker glued behind a non-slash
+    prefix (``x.claude/hooks/dispatch.py``), and concatenation that appends past
+    the marker (``'.../dispatch.py'+'.evil'``), so a variable used as the
+    executed floor cannot diverge from the pinned dispatcher/wrapper.
+    """
+    normalized = value.lower().replace("\\", "/")
+    for marker, allow_extension, require_variable in _FLOOR_PATH_MARKERS:
+        search_from = 0
+        while True:
+            index = normalized.find(marker, search_from)
+            if index < 0:
+                break
+            search_from = index + len(marker)
+            before = normalized[index - 1] if index > 0 else ""
+            if before not in {"", "/", "'", '"'}:
+                continue
+            if require_variable and "$" not in normalized[:index]:
+                continue
+            rest = normalized[index + len(marker) :]
+            if allow_extension:
+                extension = re.match(r"\.[a-z0-9]+", rest)
+                if extension:
+                    rest = rest[extension.end() :]
+            if re.fullmatch(r"['\"]?\s*", rest):
+                return True
+    return False
+
+
 def is_inert_floor_setup_segment(
     segment: str, allowed_variables: set[str], *, windows: bool
 ) -> bool:
@@ -631,7 +675,10 @@ def is_inert_floor_setup_segment(
         return False
     name, value = assignment
     if name in allowed_variables:
-        return True
+        # A floor variable may only be (re)bound to the anchored floor path; any
+        # other value — an attacker rebind or concatenation past the marker —
+        # is rejected so the executed path cannot diverge from the pinned one.
+        return value_binds_anchored_floor_path(value)
     literal = value.strip()
     if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
         literal = literal[1:-1]
