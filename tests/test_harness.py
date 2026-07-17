@@ -749,6 +749,92 @@ class HarnessTests(unittest.TestCase):
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
 
+    def test_repo_floor_rejects_command_substitution_in_invocation(self) -> None:
+        pin = "7" * 64
+        good_posix = "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        good_windows = (
+            "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        invalid_pairs = (
+            (
+                f"expected={pin}; {good_posix} $(rm -rf /critical/outside)",
+                f"$expected='{pin}'; {good_windows}",
+            ),
+            (
+                f"expected={pin}; {good_posix} `rm -rf /critical/outside`",
+                f"$expected='{pin}'; {good_windows}",
+            ),
+            (
+                f"expected={pin}; {good_posix}",
+                f"$expected='{pin}'; {good_windows} $(Remove-Item x)",
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "commandWindows": command_windows,
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+        self.assertFalse(
+            harness.is_safe_floor_invocation_segment(
+                "python dispatch.py $(rm -rf x)", windows=False
+            )
+        )
+        self.assertFalse(
+            harness.is_safe_floor_invocation_segment(
+                "python dispatch.py `rm x`", windows=False
+            )
+        )
+
+    def test_repo_floor_requires_dispatcher_as_python_script_operand(self) -> None:
+        pin = "8" * 64
+        good_posix = "python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
+        good_windows = (
+            "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        invalid_pairs = (
+            (
+                f"expected={pin}; python -c pass $HOME/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; {good_windows}",
+            ),
+            (
+                f"expected={pin}; python -m http.server "
+                "$HOME/.claude/hooks/dispatch.py --event pre --runtime codex",
+                f"$expected='{pin}'; {good_windows}",
+            ),
+            (
+                f"expected={pin}; {good_posix}",
+                f"$expected='{pin}'; py -3 -c pass "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                group = {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "commandWindows": command_windows,
+                        }
+                    ],
+                }
+                current = json.dumps({"hooks": {"PreToolUse": [group]}})
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
     def test_repo_floor_rejects_non_inert_setup_segments(self) -> None:
         pin = "6" * 64
         posix_invocation = (

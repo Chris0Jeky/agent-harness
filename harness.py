@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -549,6 +550,12 @@ def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
             continue
         if char in {"<", ">", "|"}:
             return False
+        # Command substitution and backticks run BEFORE the dispatcher, so a
+        # segment carrying them can have arbitrary pre-dispatch side effects.
+        if char == "`":
+            return False
+        if char == "$" and index + 1 < len(segment) and segment[index + 1] == "(":
+            return False
         if char == "&":
             if windows and not saw_non_whitespace and not used_call_operator:
                 used_call_operator = True
@@ -652,6 +659,59 @@ def starts_python(segment: str) -> bool:
     )
 
 
+_PYTHON_EXECUTABLE_TOKEN = re.compile(
+    r"(?i)^(?:[^\s/\\]*[\\/])?(?:python3?|py)(?:\.exe)?$"
+)
+
+
+def token_is_python_executable(token: str) -> bool:
+    return bool(_PYTHON_EXECUTABLE_TOKEN.fullmatch(token.strip("'\"")))
+
+
+def token_references_variable(token: str, names: set[str]) -> bool:
+    stripped = token.strip("'\"")
+    return any(
+        re.fullmatch(variable_reference(name), stripped, re.IGNORECASE)
+        for name in names
+    )
+
+
+def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
+    normalized = token.strip("'\"").lower().replace("\\", "/")
+    if ".claude/hooks/dispatch.py" in normalized:
+        return True
+    return token_references_variable(token, dispatcher_variables)
+
+
+def python_script_operand_is_dispatcher(
+    tokens: list[str], dispatcher_variables: set[str]
+) -> bool:
+    """Require the dispatcher to be Python's executed script, not a -c/-m arg."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return index + 1 < len(tokens) and token_is_dispatcher(
+                tokens[index + 1], dispatcher_variables
+            )
+        if token.startswith("--"):
+            index += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            short_flags = token[1:]
+            # -c cmd / -m mod execute something other than the script operand.
+            if "c" in short_flags.lower() or "m" in short_flags.lower():
+                return False
+            # -W and -X consume the following token as their value.
+            if short_flags in {"W", "X"}:
+                index += 2
+                continue
+            index += 1
+            continue
+        return token_is_dispatcher(token, dispatcher_variables)
+    return False
+
+
 def segment_invokes_direct_floor(
     segment: str, dispatcher_variables: set[str], interpreter_variables: set[str]
 ) -> bool:
@@ -661,22 +721,27 @@ def segment_invokes_direct_floor(
         and command_has_flag_value(segment, "runtime", "codex")
     ):
         return False
-    normalized = segment.lower().replace("\\", "/")
-    if starts_python(segment) and ".claude/hooks/dispatch.py" in normalized:
+    stripped = segment.strip()
+    stripped = re.sub(r"(?i)^\(\s*", "", stripped)
+    stripped = re.sub(r"(?i)^exec\s+", "", stripped)
+    stripped = re.sub(r"^&\s+", "", stripped)
+    try:
+        tokens = shlex.split(stripped, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    head = tokens[0]
+    # Direct execution: the dispatcher script (or a variable bound to it) is the
+    # command head, launched via its shebang without a Python operand.
+    if token_is_dispatcher(head, dispatcher_variables):
         return True
-    for dispatcher in dispatcher_variables:
-        dispatcher_ref = variable_reference(dispatcher)
-        if starts_python(segment) and re.search(dispatcher_ref, segment, re.IGNORECASE):
-            return True
-        if re.match(rf"(?i)^\s*&\s*{dispatcher_ref}(?=\s|$)", segment):
-            return True
-        for interpreter in interpreter_variables:
-            interpreter_ref = variable_reference(interpreter)
-            if re.match(
-                rf"(?i)^\s*&\s*{interpreter_ref}(?=\s|$).*{dispatcher_ref}",
-                segment,
-            ):
-                return True
+    # Interpreted execution: a python/py interpreter (literal or a variable
+    # bound to py.exe) must run the dispatcher AS its script operand.
+    if token_is_python_executable(head) or token_references_variable(
+        head, interpreter_variables
+    ):
+        return python_script_operand_is_dispatcher(tokens, dispatcher_variables)
     return False
 
 
