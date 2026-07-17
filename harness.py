@@ -757,31 +757,94 @@ def segment_invokes_direct_floor(
     return False
 
 
+def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
+    stripped = token.strip("'\"").lower().replace("\\", "/")
+    if "invoke_deny_floor" in stripped:
+        return True
+    return token_references_variable(token, wrapper_variables)
+
+
+def shell_script_operand_is_wrapper(
+    tokens: list[str], wrapper_variables: set[str]
+) -> bool:
+    """Require the wrapper to be sh/bash's executed script, not a -c string."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return index + 1 < len(tokens) and token_is_wrapper(
+                tokens[index + 1], wrapper_variables
+            )
+        if token.startswith("-") and len(token) > 1:
+            # -c runs a COMMAND STRING (not a script file); reject it.
+            if "c" in token[1:]:
+                return False
+            index += 1
+            continue
+        return token_is_wrapper(token, wrapper_variables)
+    return False
+
+
+def powershell_file_operand_is_wrapper(
+    tokens: list[str], wrapper_variables: set[str]
+) -> bool:
+    """Require the wrapper to be the -File operand, not a -Command payload."""
+    file_value = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith(("-", "/")):
+            option, separator, attached = token.lstrip("-/").lower().partition(":")
+            if option and (
+                "command".startswith(option)
+                or "encodedcommand".startswith(option)
+                or option in {"e", "ec", "cwa"}
+                or "commandwithargs".startswith(option)
+            ):
+                return False
+            if option and "file".startswith(option) and len(option) >= 1:
+                if separator:
+                    file_value = attached
+                    index += 1
+                elif index + 1 < len(tokens):
+                    file_value = tokens[index + 1]
+                    index += 2
+                else:
+                    index += 1
+                continue
+            index += 1
+            continue
+        index += 1
+    return file_value is not None and token_is_wrapper(file_value, wrapper_variables)
+
+
 def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
-    """Recognize conservative project-wrapper execution shapes."""
-    normalized = segment.lower().replace("\\", "/")
-    targets = [r"[^\s;]*invoke_deny_floor[^\s;]*"] + [
-        variable_reference(name) for name in wrapper_variables
-    ]
-    for target in targets:
-        if re.match(
-            rf"(?i)^\s*\(?\s*(?:exec\s+)?(?:/[^\s]*/)?(?:ba)?sh\b.*{target}",
-            normalized,
-        ):
-            return True
-        if re.match(rf"(?i)^\s*&\s*{target}", normalized):
-            return True
-        if re.match(
-            rf"(?i)^\s*(?:\$?[a-z_]\w*\s*=\s*)?start-process\b"
-            rf".*-argumentlist\b.*-file\b.*{target}",
-            normalized,
-        ):
-            return True
-        if re.match(
-            rf"(?i)^\s*(?:powershell|pwsh)(?:\.exe)?\b.*-file\b.*{target}",
-            normalized,
-        ):
-            return True
+    """Recognize conservative project-wrapper execution shapes.
+
+    The wrapper must be the EXECUTED script operand — a `-c` command string or a
+    trailing argument that merely mentions the wrapper path does not qualify.
+    """
+    stripped = segment.strip()
+    stripped = re.sub(r"(?i)^\(\s*", "", stripped)
+    stripped = re.sub(r"(?i)^exec\s+", "", stripped)
+    stripped = re.sub(r"^&\s+", "", stripped)
+    stripped = re.sub(r"(?i)^\$?[a-z_]\w*\s*=\s*", "", stripped)
+    try:
+        tokens = shlex.split(stripped, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    head = tokens[0]
+    # Direct execution: the wrapper (or a variable bound to it) is the head.
+    if token_is_wrapper(head, wrapper_variables):
+        return True
+    head_base = head.strip("'\"").lower().replace("\\", "/").rsplit("/", 1)[-1]
+    head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
+    if head_base in {"sh", "bash", "dash", "ash"}:
+        return shell_script_operand_is_wrapper(tokens, wrapper_variables)
+    if head_base in {"powershell", "pwsh", "start-process", "saps"}:
+        return powershell_file_operand_is_wrapper(tokens, wrapper_variables)
     return False
 
 

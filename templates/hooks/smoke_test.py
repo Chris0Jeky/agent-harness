@@ -577,6 +577,29 @@ CASES = [
     ("$sb={ rm -rf /critical/outside }; 1 | % ($sb)", 1, {}, "deny"),
     ("$sb={ rm -rf /critical/outside }; 1 | ForEach-Object ($sb)", 1, {}, "deny"),
     ("$sb={ rm -rf /critical/outside }; 1 | foreach ($sb)", 1, {}, "deny"),
+    # runtime-constructed scriptblock expressions (no literal $) stay opaque
+    (
+        "Invoke-Command ([scriptblock]::Create('git push --force origin main'))",
+        1,
+        {},
+        "deny",
+    ),
+    ("icm ([scriptblock]::Create('rm -rf /critical/outside'))", 1, {}, "deny"),
+    (
+        "1 | Where-Object ([scriptblock]::Create('rm -rf /critical/outside'))",
+        1,
+        {},
+        "deny",
+    ),
+    ("1 | % ([scriptblock]::Create('rm -rf /critical/outside'))", 1, {}, "deny"),
+    ("Get-Process | Where-Object Name -eq pwsh", 1, {}, "allow"),
+    # ln secret destinations (link name is a write target)
+    ("ln -sf /tmp/evil .env", 1, {}, "deny"),
+    ("ln target credentials.json", 1, {}, "deny"),
+    ("ln -s a b", 1, {}, "allow"),
+    # GNU target-directory abbreviations
+    ("cp --tar=.env somefile", 1, {}, "deny"),
+    ("mv --target-dir .env a b", 1, {}, "deny"),
     (
         "Invoke-Command -ScriptBlock { git push --force origin main }",
         1,
@@ -2336,8 +2359,12 @@ CASES = [
     ("git checkout .env", 1, {}, "deny"),
     ("git checkout HEAD .env", 1, {}, "deny"),
     ("git checkout credentials.json", 1, {}, "deny"),
+    ("git checkout HEAD id_rsa", 1, {}, "deny"),
     ("git checkout feature/x", 1, {}, "allow"),
     ("git checkout -b .env", 1, {}, "allow"),
+    # a branch whose name merely contains a secret-looking substring is a ref
+    ("git checkout fix/credential-rotation", 1, {}, "allow"),
+    ("git checkout credentials-refactor", 1, {}, "allow"),
     ("git clean -f src", 2, {}, "allow"),
     ("git clean -n .env", 1, {}, "allow"),
     ("git config --global --rename-section user harmlessdata", 1, {}, "allow"),
@@ -2966,6 +2993,35 @@ def main():
             "inherited EDITOR fallback honors forced --edit",
             run_case("git commit -m wip -e", 3, {}, env_extra={"EDITOR": "sh"}),
             "deny",
+        ),
+        (
+            "inherited EDITOR fallback ignores clustered -am message",
+            run_case("git commit -am wip", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited EDITOR fallback ignores attached -mWIP message",
+            run_case("git commit -mWIP", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "revert -m is mainline not message; editor still opens",
+            run_case("git revert -m 1 abc123", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "cherry-pick -m is mainline not message; editor still opens",
+            run_case(
+                "git cherry-pick -m 1 abc123", 3, {}, env_extra={"GIT_EDITOR": "helper"}
+            ),
+            "deny",
+        ),
+        (
+            "revert --no-edit suppresses the editor",
+            run_case(
+                "git revert -m 1 --no-edit abc123", 3, {}, env_extra={"EDITOR": "sh"}
+            ),
+            "allow",
         ),
         (
             "inherited EDITOR fallback still guards editor commit",

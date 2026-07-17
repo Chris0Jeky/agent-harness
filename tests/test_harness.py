@@ -849,6 +849,75 @@ class HarnessTests(unittest.TestCase):
             )
         )
 
+    def test_repo_floor_requires_wrapper_as_executed_operand(self) -> None:
+        pin = "e" * 64
+        good_posix = (
+            f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+            "/bin/sh .codex/invoke_deny_floor.sh"
+        )
+        good_windows = (
+            f"$expected='{pin}'; "
+            "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+            "& .codex/invoke_deny_floor.ps1"
+        )
+        # The legitimate wrapper form certifies.
+        good_doc = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": good_posix,
+                                    "commandWindows": good_windows,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(good_doc, pin)), 1)
+        # A trailing wrapper argument to `sh -c '<evil>'` or a `-Command`
+        # payload before `-File` must NOT certify — the wrapper must be the
+        # executed script operand.
+        invalid_pairs = (
+            (
+                f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                "/bin/sh -c 'id' .codex/invoke_deny_floor.sh",
+                good_windows,
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; "
+                "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+                "powershell -Command 'id' -File .codex/invoke_deny_floor.ps1",
+            ),
+        )
+        for command, command_windows in invalid_pairs:
+            with self.subTest(command=command, command_windows=command_windows):
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "^Bash$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": command,
+                                            "commandWindows": command_windows,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                )
+                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+
     def test_repo_floor_requires_dispatcher_as_python_script_operand(self) -> None:
         pin = "8" * 64
         good_posix = (

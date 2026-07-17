@@ -737,9 +737,11 @@ def powershell_invoke_command_opacity(toks: list[str]) -> str | None:
                 return "An Invoke-Command scriptblock is malformed."
             index = next_index
             continue
-        if has_dynamic_shell_token(token):
-            return "A dynamic Invoke-Command scriptblock cannot be inspected safely."
-        index += 1
+        # The positional payload of Invoke-Command is the ScriptBlock, so any
+        # non-literal-block positional — a variable, a `(...)`/`@(...)`
+        # subexpression such as [scriptblock]::Create(...), or a bareword — is
+        # a dynamic scriptblock source the floor cannot inspect.
+        return "A dynamic Invoke-Command scriptblock cannot be inspected safely."
     return None
 
 
@@ -819,6 +821,10 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
                 return "A pipeline scriptblock is malformed."
             index = next_index
             continue
+        # A `(...)`/`@(...)` subexpression (e.g. [scriptblock]::Create(...))
+        # builds a scriptblock at runtime whose body the floor never sees.
+        if token.startswith(("(", "@(")):
+            return "A dynamic pipeline scriptblock cannot be inspected safely."
         if has_dynamic_shell_token(token):
             return "A dynamic pipeline scriptblock cannot be inspected safely."
         if foreach:
@@ -1887,6 +1893,28 @@ def is_secret_path(target: str) -> bool:
     return any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES)
 
 
+_SECRET_FILENAME = re.compile(
+    r"^(?:\.env(?:\.[\w.]+)?|id_rsa|.+\.pem"
+    r"|credentials?\.(?:json|txt|ya?ml|ini|cfg)"
+    r"|secrets?\.(?:json|txt|ya?ml|ini|cfg))$",
+    re.IGNORECASE,
+)
+
+
+def token_is_secret_filename(token: str) -> bool:
+    """Stricter than ``token_mentions_secret_path``: match a secret FILE basename
+    rather than any substring, for contexts (git refs/branches) where a loose
+    ``credential`` substring would wrongly flag a branch like ``fix/credential-x``.
+    """
+    normalized = (
+        restore_quoted_literal_markers(token).replace("\\", "/").strip("'\"[]{}() ")
+    )
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    if any(fnmatch.fnmatchcase(probe, basename) for probe in _SECRET_GLOB_PROBES):
+        return True
+    return bool(_SECRET_FILENAME.match(basename))
+
+
 _BRACE_SEQUENCE = re.compile(
     r"\{(?P<start>[A-Za-z]|-?\d+)\.\.(?P<end>[A-Za-z]|-?\d+)"
     r"(?:\.\.(?P<step>-?\d+))?\}"
@@ -2255,6 +2283,17 @@ def wrapper_command_index(name: str, toks: list[str], index: int) -> int | None:
     return len(toks)
 
 
+def _is_target_directory_long_option(option: str) -> bool:
+    """Match --target-directory and its unambiguous GNU prefix abbreviations."""
+    # cp/mv's only --t* option is --target-directory (--no-target-directory
+    # carries the distinct --no- prefix), so any --t.. prefix is unambiguous.
+    return (
+        option.startswith("--t")
+        and len(option) >= 3
+        and "--target-directory".startswith(option)
+    )
+
+
 def gnu_target_directory_values(toks: list[str]) -> list[str]:
     """Return GNU coreutils -t/--target-directory destinations from an argv."""
     values: list[str] = []
@@ -2263,12 +2302,17 @@ def gnu_target_directory_values(toks: list[str]) -> list[str]:
         token = toks[index]
         if token == "--":
             break
-        if token == "--target-directory" or token == "-t":
+        option = token.split("=", 1)[0]
+        if (token == "--target-directory" or token == "-t") or (
+            "=" not in token and _is_target_directory_long_option(option)
+        ):
             if index + 1 < len(toks):
                 values.append(toks[index + 1])
             index += 2
             continue
-        if token.startswith("--target-directory="):
+        if token.startswith("--target-directory=") or (
+            "=" in token and _is_target_directory_long_option(option)
+        ):
             values.append(token.split("=", 1)[1])
         elif token.startswith("-t") and len(token) > 2 and not token.startswith("--"):
             values.append(token[2:].lstrip("="))
@@ -3068,18 +3112,43 @@ _GIT_EDITOR_MESSAGE_SUBCOMMANDS = {
 }
 
 
-def git_editor_message_is_supplied(args: list[str]) -> bool:
+def git_editor_message_is_supplied(subcommand: str, args: list[str]) -> bool:
     """Return whether a message/file/no-edit source prevents the editor opening.
 
     Case-sensitive: ``-C``/``--reuse-message`` and ``-F``/``--file`` supply a
     message (no editor), while ``-c``/``--reedit-message`` open the editor.
+    For ``revert``/``cherry-pick`` the short ``-m`` is the mainline parent
+    NUMBER, not a message, and does NOT suppress the default editor — only
+    ``--no-edit`` / ``--no-commit`` (``-n``) do.
     """
+    if subcommand in {"revert", "cherry-pick"}:
+        for token in args:
+            name = token.split("=", 1)[0]
+            lowered = name.lower()
+            if name == "-n":
+                return True
+            if lowered == "--no-edit" or (
+                name.startswith("--")
+                and (
+                    git_option_abbreviates(lowered, "--no-edit")
+                    or git_option_abbreviates(lowered, "--no-commit")
+                )
+            ):
+                return True
+        return False
     for token in args:
         name = token.split("=", 1)[0]
         lowered = name.lower()
         if name in {"-m", "-F", "-C"}:
             return True
-        if lowered in {"--no-edit"} or (
+        # Clustered/attached short forms supply a message too: -am, -mWIP,
+        # -FNOTES, -CHEAD. Case-sensitive: lowercase -c (reedit) opens the
+        # editor and must NOT count; -F/-C/-m suppress it.
+        if name.startswith("-") and not name.startswith("--"):
+            letters = name[1:]
+            if any(flag in letters for flag in ("m", "F", "C")):
+                return True
+        if lowered == "--no-edit" or (
             name.startswith("--")
             and (
                 git_option_abbreviates(lowered, "--message")
@@ -3124,7 +3193,7 @@ def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
     # message/file/no-edit source suppresses it unless --edit forces it back.
     if (
         subcommand in _GIT_EDITOR_MESSAGE_SUBCOMMANDS
-        and git_editor_message_is_supplied(args)
+        and git_editor_message_is_supplied(subcommand, args)
     ):
         return git_editor_edit_is_forced(args)
     return True
@@ -6201,8 +6270,7 @@ def check(
                     or token_mentions_secret_path(pathspec)
                     for pathspec in separator_pathspecs
                 ) or any(
-                    token_mentions_secret_path(pathspec)
-                    for pathspec in bare_positionals
+                    token_is_secret_filename(pathspec) for pathspec in bare_positionals
                 ):
                     return (
                         "deny",
@@ -6283,6 +6351,7 @@ def check(
             "new-item",
             "ni",
             "unlink",
+            "ln",
         }
         if head in secret_mutators:
             if any(token.startswith("@") for token in toks[1:]):
