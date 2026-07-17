@@ -5303,10 +5303,11 @@ def check(
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
             continue
-        if head == "sudo":
+        if head in {"sudo", "su", "doas", "pkexec", "run0", "please"}:
             return (
                 "deny",
-                "sudo is blocked at the floor. If elevation is truly needed, the human runs it.",
+                f"{head} is blocked at the floor: privilege elevation conceals an "
+                "uninspected child command. If elevation is truly needed, the human runs it.",
             )
         if head in {"start-process", "saps"}:
             child_command, error = powershell_start_process_command(toks)

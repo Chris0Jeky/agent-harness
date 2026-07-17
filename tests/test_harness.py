@@ -946,12 +946,26 @@ class HarnessTests(unittest.TestCase):
                 '"$d" --event pre --runtime codex',
                 good_windows,
             ),
+            # repo-relative / $PWD dispatcher would run a repo-shipped attacker
+            # file; only the HOME-anchored global path may certify.
+            (
+                f"expected={pin}; python $PWD/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                good_windows,
+            ),
+            (
+                f"expected={pin}; python .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                good_windows,
+            ),
         )
         # value_binds_anchored_floor_path is a strict whitelist: only the exact
         # dispatcher/interpreter/wrapper value shapes bind; everything else fails.
         for good in (
             "$HOME/.claude/hooks/dispatch.py",
-            "'.claude/hooks/dispatch.py'",
+            "${HOME}/.claude/hooks/dispatch.py",
+            "~/.claude/hooks/dispatch.py",
+            "$env:USERPROFILE/.claude/hooks/dispatch.py",
             "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
             "Join-Path $env:SystemRoot 'py.exe'",
             ".codex/invoke_deny_floor.sh",
@@ -965,6 +979,13 @@ class HarnessTests(unittest.TestCase):
             "x/py.exe",
             "evilinvoke_deny_floor.sh",
             '"$HOME"evil"/.claude/hooks/dispatch.py"',
+            # dispatcher must be HOME-anchored: relative / $PWD / arbitrary vars
+            ".claude/hooks/dispatch.py",
+            "'.claude/hooks/dispatch.py'",
+            "$PWD/.claude/hooks/dispatch.py",
+            "$oldpwd/.claude/hooks/dispatch.py",
+            "$repo/.claude/hooks/dispatch.py",
+            "$PWD/py.exe",
         ):
             self.assertFalse(harness.value_binds_anchored_floor_path(bad), bad)
         for command, command_windows in invalid_pairs:

@@ -623,28 +623,36 @@ def inert_floor_assignment(segment: str, *, windows: bool) -> tuple[str, str] | 
     return name, value
 
 
-# A shell variable expansion: $HOME, ${HOME}, $env:USERPROFILE, ${env:SystemRoot}.
+# The shared deny floor lives at the HOME-anchored global path
+# `~/.claude/hooks/dispatch.py` (installed by sync-global), so the dispatcher
+# MUST be anchored to a home variable — never a repo-relative, `$PWD`, or
+# arbitrary-variable path, which would run a repo-shipped attacker file.
+_HOME_VAR = r"(?:~|\$\{?home\}?|\$\{?env:userprofile\}?)"
+# The Windows py launcher must be anchored to a system variable, not `$PWD`.
+_SYSTEM_VAR = r"\$\{?env:(?:systemroot|windir)\}?"
+# A generic variable expansion — only used for the (repo-local, /hooks-reviewed)
+# wrapper path, never for the pinned dispatcher or the interpreter.
 _FLOOR_VAR = r"\$(?:\{(?:env:)?[a-z_][a-z0-9_]*\}|(?:env:)?[a-z_][a-z0-9_]*)"
 _FLOOR_DISPATCH = r"\.claude/hooks/dispatch\.py"
 _FLOOR_WRAPPER = r"invoke_deny_floor\.(?:sh|ps1|cmd|bat)"
 
 # Exact accepted shapes for a value bound to a floor executable. A floor
 # variable must match ONE of these whole-value forms — anything else (rebinding,
-# glued prefixes/suffixes, quote concatenation, relative interpreters) fails
-# closed, because char-level anchoring proved to be repeated whack-a-mole.
+# glued prefixes/suffixes, quote concatenation, relative dispatcher/interpreter)
+# fails closed, because char-level anchoring proved to be repeated whack-a-mole.
 _FLOOR_VALUE_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        # dispatcher: bare, var+separator, `+`-concat, or Join-Path
-        rf"['\"]?{_FLOOR_DISPATCH}['\"]?",
-        rf"['\"]?{_FLOOR_VAR}/{_FLOOR_DISPATCH}['\"]?",
-        rf"{_FLOOR_VAR}\+'/{_FLOOR_DISPATCH}'",
-        rf"join-path {_FLOOR_VAR} '{_FLOOR_DISPATCH}'",
-        # interpreter (py.exe): must be system-variable anchored, never relative
-        rf"['\"]?{_FLOOR_VAR}/py\.exe['\"]?",
-        rf"{_FLOOR_VAR}\+'/py\.exe'",
-        rf"join-path {_FLOOR_VAR} 'py\.exe'",
-        # wrapper: a path whose final component is invoke_deny_floor.<ext>
+        # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
+        rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
+        rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
+        rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
+        # interpreter (py.exe): SYSTEM-variable anchored, never relative
+        rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
+        rf"{_SYSTEM_VAR}\+'/py\.exe'",
+        rf"join-path {_SYSTEM_VAR} 'py\.exe'",
+        # wrapper: a repo-relative path whose final component is the wrapper
+        # script (the project's own adapter, trusted via a /hooks review)
         rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?",
     )
 )
@@ -762,16 +770,16 @@ def token_references_variable(token: str, names: set[str]) -> bool:
 # tilde, dash. Notably EXCLUDES `=`, so a `VAR=path` assignment word never
 # matches — an assignment is not an executed command.
 _PATH_COMPONENT = r"[\w.$:{}~-]+"
-_DISPATCHER_PATH_TOKEN = re.compile(
-    rf"^(?:{_PATH_COMPONENT}/)*\.claude/hooks/dispatch\.py$"
-)
+# A literal dispatcher operand must be the HOME-anchored global path — a
+# repo-relative / `$PWD` / bare path would run a repo-shipped attacker file.
+_DISPATCHER_PATH_TOKEN = re.compile(rf"^{_HOME_VAR}/\.claude/hooks/dispatch\.py$")
 
 
 def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
     normalized = token.strip("'\"").lower().replace("\\", "/")
-    # The WHOLE token must be a clean path ending in the dispatcher, so neither a
-    # sibling (`dispatch.py.evil`) nor an assignment word (`x=.../dispatch.py`)
-    # can pass.
+    # The WHOLE token must be the home-anchored dispatcher path, so a sibling
+    # (`dispatch.py.evil`), an assignment word (`x=.../dispatch.py`), or a
+    # repo-relative path (`.claude/...`, `$pwd/...`) cannot pass.
     if _DISPATCHER_PATH_TOKEN.fullmatch(normalized):
         return True
     return token_references_variable(token, dispatcher_variables)
