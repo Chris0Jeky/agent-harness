@@ -752,8 +752,14 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     as their own segments by the sanitized pass.
     """
     foreach = head in {"foreach-object", "%", "foreach"}
-    if foreach and len(toks) > 1 and toks[1].startswith("("):
-        return None  # `foreach ($item in ...)` statement; body splits elsewhere
+    # Only the `foreach` KEYWORD (never the % / ForEach-Object cmdlet aliases)
+    # forms a loop statement, and only with a real `( <var> in ... )` header.
+    # A parenthesized argument to % / ForEach-Object is a dynamic scriptblock
+    # EXPRESSION and must fall through to the opacity checks below.
+    if head == "foreach" and len(toks) > 1 and toks[1].startswith("("):
+        header = " ".join(toks[1:])
+        if re.search(r"\bin\b", header, re.IGNORECASE):
+            return None  # `foreach ($item in ...)` statement; body splits elsewhere
     script_parameters = (
         {"begin", "end", "parallel", "process", "remainingscripts"}
         if foreach
@@ -3052,6 +3058,49 @@ def git_network_helper_is_reachable(subcommand: str, args: list[str]) -> bool:
     return False
 
 
+_GIT_EDITOR_MESSAGE_SUBCOMMANDS = {
+    "commit",
+    "merge",
+    "tag",
+    "notes",
+    "revert",
+    "cherry-pick",
+}
+
+
+def git_editor_message_is_supplied(args: list[str]) -> bool:
+    """Return whether a message/file/no-edit source prevents the editor opening.
+
+    Case-sensitive: ``-C``/``--reuse-message`` and ``-F``/``--file`` supply a
+    message (no editor), while ``-c``/``--reedit-message`` open the editor.
+    """
+    for token in args:
+        name = token.split("=", 1)[0]
+        lowered = name.lower()
+        if name in {"-m", "-F", "-C"}:
+            return True
+        if lowered in {"--no-edit"} or (
+            name.startswith("--")
+            and (
+                git_option_abbreviates(lowered, "--message")
+                or git_option_abbreviates(lowered, "--file")
+                or git_option_abbreviates(lowered, "--reuse-message")
+                or git_option_abbreviates(lowered, "--no-edit")
+            )
+        ):
+            return True
+    return False
+
+
+def git_editor_edit_is_forced(args: list[str]) -> bool:
+    """Return whether an explicit --edit/-e forces the editor back on."""
+    return any(
+        token == "-e"
+        or git_option_abbreviates(token.lower().split("=", 1)[0], "--edit")
+        for token in args
+    )
+
+
 def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
     """Return whether Git can launch the editor selected by GIT_EDITOR."""
     lowered = [token.lower().split("=", 1)[0] for token in args]
@@ -3069,7 +3118,16 @@ def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
         return any(
             git_option_abbreviates(token, "--edit-description") for token in lowered
         )
-    return subcommand in _GIT_EDITOR_SUBCOMMANDS
+    if subcommand not in _GIT_EDITOR_SUBCOMMANDS:
+        return False
+    # These subcommands open the editor for a message, but a supplied
+    # message/file/no-edit source suppresses it unless --edit forces it back.
+    if (
+        subcommand in _GIT_EDITOR_MESSAGE_SUBCOMMANDS
+        and git_editor_message_is_supplied(args)
+    ):
+        return git_editor_edit_is_forced(args)
+    return True
 
 
 def git_template_is_reachable(subcommand: str, args: list[str]) -> bool:
@@ -6098,6 +6156,8 @@ def check(
             if sub == "checkout":
                 # Pathspec restores overwrite worktree files, so a secret-looking
                 # target is floor-blocked before the tier work-loss guard runs.
+                # The `--` form and the bare `git checkout [<tree>] <pathspec>`
+                # form both reach the worktree, so both are inspected.
                 if any(
                     token == "--pathspec-from-file"
                     or token.startswith("--pathspec-from-file=")
@@ -6107,17 +6167,47 @@ def check(
                         "deny",
                         "Git checkout pathspec files are opaque to the deny floor.",
                     )
-                if "--" in args:
-                    checkout_pathspecs = args[args.index("--") + 1 :]
-                    if any(
-                        has_dynamic_shell_token(pathspec)
-                        or token_mentions_secret_path(pathspec)
-                        for pathspec in checkout_pathspecs
-                    ):
-                        return (
-                            "deny",
-                            "Git checkout of an opaque or secret-looking path is floor-blocked.",
-                        )
+                checkout_value_options = {
+                    "-b",
+                    "-B",
+                    "--orphan",
+                    "-s",
+                    "--source",
+                    "--conflict",
+                }
+                # After `--` every token is an explicit pathspec (dynamic or
+                # secret-looking targets both blocked). Before `--` a positional
+                # may be a tree-ish/branch, so only a literal secret NAME is
+                # blocked there — a dynamic branch switch stays allowed.
+                separator_pathspecs = (
+                    args[args.index("--") + 1 :] if "--" in args else []
+                )
+                bare_positionals = []
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token == "--":
+                        break
+                    if token in checkout_value_options:
+                        index += 2
+                        continue
+                    if token.startswith("-"):
+                        index += 1
+                        continue
+                    bare_positionals.append(token)
+                    index += 1
+                if any(
+                    has_dynamic_shell_token(pathspec)
+                    or token_mentions_secret_path(pathspec)
+                    for pathspec in separator_pathspecs
+                ) or any(
+                    token_mentions_secret_path(pathspec)
+                    for pathspec in bare_positionals
+                ):
+                    return (
+                        "deny",
+                        "Git checkout of an opaque or secret-looking path is floor-blocked.",
+                    )
             if sub == "checkout" and "--" in args:
                 after = args[args.index("--") + 1 :]
                 if "." in after:

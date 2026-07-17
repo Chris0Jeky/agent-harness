@@ -530,6 +530,7 @@ def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
     escape_character = "`" if windows else "\\"
 
     for index, char in enumerate(segment):
+        following = segment[index + 1] if index + 1 < len(segment) else ""
         if escaped:
             escaped = False
             continue
@@ -537,12 +538,19 @@ def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
             if char == escape_character and quote != "'":
                 escaped = True
                 continue
+            # Command substitution executes INSIDE double quotes on both shells
+            # ("$(cmd)" everywhere; "`cmd`" in POSIX — backtick is the escape
+            # char in PowerShell, handled above). Single quotes stay inert.
+            if quote == '"':
+                if char == "$" and following == "(":
+                    return False
+                if not windows and char == "`":
+                    return False
             if char == quote:
                 quote = ""
             continue
-        if windows and char == "@" and index + 1 < len(segment):
-            if segment[index + 1] in {"'", '"'}:
-                return False
+        if windows and char == "@" and following in {"'", '"', "("}:
+            return False
         if char in {"'", '"'}:
             quote = char
             continue
@@ -554,7 +562,11 @@ def is_safe_floor_invocation_segment(segment: str, *, windows: bool) -> bool:
         # segment carrying them can have arbitrary pre-dispatch side effects.
         if char == "`":
             return False
-        if char == "$" and index + 1 < len(segment) and segment[index + 1] == "(":
+        if char == "$" and following == "(":
+            return False
+        # PowerShell evaluates (…) and @(…) argument subexpressions before the
+        # callee runs, so an unquoted paren in a Windows invocation is unsafe.
+        if windows and char == "(":
             return False
         if char == "&":
             if windows and not saw_non_whitespace and not used_call_operator:

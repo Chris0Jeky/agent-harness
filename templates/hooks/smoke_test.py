@@ -572,6 +572,11 @@ CASES = [
     ("Get-ChildItem | ForEach-Object Delete", 1, {}, "deny"),
     ("Get-ChildItem | ForEach-Object -MemberName Delete", 1, {}, "deny"),
     ("1 | ForEach-Object -Process { rm -rf /critical/outside }", 1, {}, "deny"),
+    # parenthesized dynamic payloads to the cmdlet aliases must not be mistaken
+    # for a `foreach ($x in ...)` loop header.
+    ("$sb={ rm -rf /critical/outside }; 1 | % ($sb)", 1, {}, "deny"),
+    ("$sb={ rm -rf /critical/outside }; 1 | ForEach-Object ($sb)", 1, {}, "deny"),
+    ("$sb={ rm -rf /critical/outside }; 1 | foreach ($sb)", 1, {}, "deny"),
     (
         "Invoke-Command -ScriptBlock { git push --force origin main }",
         1,
@@ -2328,6 +2333,11 @@ CASES = [
     ("git worktree list", 1, {}, "allow"),
     ("git checkout -- src/app.py", 1, {}, "allow"),
     ("git checkout main", 1, {}, "allow"),
+    ("git checkout .env", 1, {}, "deny"),
+    ("git checkout HEAD .env", 1, {}, "deny"),
+    ("git checkout credentials.json", 1, {}, "deny"),
+    ("git checkout feature/x", 1, {}, "allow"),
+    ("git checkout -b .env", 1, {}, "allow"),
     ("git clean -f src", 2, {}, "allow"),
     ("git clean -n .env", 1, {}, "allow"),
     ("git config --global --rename-section user harmlessdata", 1, {}, "allow"),
@@ -2935,6 +2945,36 @@ def main():
         (
             "inherited EDITOR fallback does not affect status",
             run_case("git status", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited EDITOR fallback ignores committed message",
+            run_case("git commit -m wip", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited EDITOR fallback ignores message file",
+            run_case("git commit -F msg.txt", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited EDITOR fallback ignores no-edit merge",
+            run_case("git merge --no-edit topic", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited EDITOR fallback honors forced --edit",
+            run_case("git commit -m wip -e", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "inherited EDITOR fallback still guards editor commit",
+            run_case("git commit", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "inherited GIT_EDITOR ignores committed message",
+            run_case("git commit -m wip", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
             "allow",
         ),
         (
