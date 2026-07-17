@@ -591,6 +591,241 @@ def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]
     return scripts, ""
 
 
+_POWERSHELL_COMMON_TOKEN_PARAMETERS = {
+    "erroraction",
+    "ea",
+    "errorvariable",
+    "ev",
+    "informationaction",
+    "infa",
+    "informationvariable",
+    "iv",
+    "outbuffer",
+    "ob",
+    "outvariable",
+    "ov",
+    "pipelinevariable",
+    "pv",
+    "progressaction",
+    "proga",
+    "warningaction",
+    "wa",
+    "warningvariable",
+    "wv",
+}
+
+
+def skip_powershell_literal_block(
+    toks: list[str], index: int, opening: str
+) -> int | None:
+    """Skip a literal { ... } block; return the next index, None when unbalanced."""
+    depth = opening.count("{") - opening.count("}")
+    if depth < 0:
+        return None
+    while depth > 0:
+        if index >= len(toks):
+            return None
+        depth += toks[index].count("{") - toks[index].count("}")
+        index += 1
+    return index
+
+
+def resolve_powershell_parameter(
+    token: str, parameter_names: set[str]
+) -> tuple[str | None, str | None, bool]:
+    """Resolve one -Parameter token to (name, bound value, had separator)."""
+    name_text, separator, attached = token.lstrip("-").partition(":")
+    lowered = name_text.lower()
+    if lowered in parameter_names:
+        return lowered, attached if separator else None, bool(separator)
+    matches = [
+        candidate for candidate in parameter_names if candidate.startswith(lowered)
+    ]
+    if len(matches) != 1:
+        return None, None, bool(separator)
+    return matches[0], attached if separator else None, bool(separator)
+
+
+def powershell_invoke_command_opacity(toks: list[str]) -> str | None:
+    """Reject Invoke-Command payloads whose program text is not a literal block.
+
+    Literal `{ ... }` bodies are inspected as their own segments by the
+    sanitized pass, so only dynamic, file-backed, splatted, or ambiguous
+    payload shapes need to fail closed here.
+    """
+    script_parameters = {"scriptblock"}
+    opaque_parameters = {"filepath"}
+    value_parameters = _POWERSHELL_COMMON_TOKEN_PARAMETERS | {
+        "applicationname",
+        "argumentlist",
+        "authentication",
+        "certificatethumbprint",
+        "computername",
+        "cn",
+        "configurationname",
+        "connectionuri",
+        "containerid",
+        "credential",
+        "hostname",
+        "inputobject",
+        "jobname",
+        "keyfilepath",
+        "options",
+        "port",
+        "session",
+        "sessionname",
+        "sessionoption",
+        "subsystem",
+        "throttlelimit",
+        "username",
+        "vmid",
+        "vmname",
+    }
+    switch_parameters = {
+        "allowredirection",
+        "asjob",
+        "confirm",
+        "debug",
+        "enablenetworkaccess",
+        "hidecomputername",
+        "indisconnectedsession",
+        "nonewscope",
+        "remotedebug",
+        "runasadministrator",
+        "usessl",
+        "usewindowspowershell",
+        "verbose",
+        "whatif",
+    }
+    parameter_names = (
+        script_parameters | opaque_parameters | value_parameters | switch_parameters
+    )
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if token.startswith("@"):
+            return "A splatted Invoke-Command payload cannot be inspected safely."
+        if token.startswith("-"):
+            name, attached, separator = resolve_powershell_parameter(
+                token, parameter_names
+            )
+            if name is None:
+                return "An Invoke-Command parameter cannot be inspected safely."
+            index += 1
+            if name in opaque_parameters:
+                return "A file-backed Invoke-Command payload is opaque."
+            if name in script_parameters:
+                if attached is None:
+                    attached = toks[index] if index < len(toks) else ""
+                    index += 1
+                if not attached.startswith("{"):
+                    return (
+                        "A dynamic Invoke-Command scriptblock cannot be "
+                        "inspected safely."
+                    )
+                next_index = skip_powershell_literal_block(toks, index, attached)
+                if next_index is None:
+                    return "An Invoke-Command scriptblock is malformed."
+                index = next_index
+                continue
+            if name in value_parameters and not separator:
+                index += 1
+            continue
+        if token.startswith("{"):
+            next_index = skip_powershell_literal_block(toks, index + 1, token)
+            if next_index is None:
+                return "An Invoke-Command scriptblock is malformed."
+            index = next_index
+            continue
+        if has_dynamic_shell_token(token):
+            return "A dynamic Invoke-Command scriptblock cannot be inspected safely."
+        index += 1
+    return None
+
+
+def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str | None:
+    """Reject pipeline scriptblock consumers whose payload is not a literal block.
+
+    ForEach-Object/Where-Object execute scriptblocks for pipeline input, so a
+    variable-stored block (or a member-name invocation) runs program text the
+    floor never saw. Literal blocks stay allowed: their bodies are inspected
+    as their own segments by the sanitized pass.
+    """
+    foreach = head in {"foreach-object", "%", "foreach"}
+    if foreach and len(toks) > 1 and toks[1].startswith("("):
+        return None  # `foreach ($item in ...)` statement; body splits elsewhere
+    script_parameters = (
+        {"begin", "end", "parallel", "process", "remainingscripts"}
+        if foreach
+        else {"filterscript"}
+    )
+    member_parameters = {"membername"} if foreach else set()
+    value_parameters = _POWERSHELL_COMMON_TOKEN_PARAMETERS | (
+        {"argumentlist", "inputobject", "throttlelimit", "timeoutseconds"}
+        if foreach
+        else {"inputobject"}
+    )
+    switch_parameters = (
+        {"asjob", "confirm", "debug", "usenewrunspace", "verbose", "whatif"}
+        if foreach
+        else set()
+    )
+    parameter_names = (
+        script_parameters | member_parameters | value_parameters | switch_parameters
+    )
+    index = 1
+    while index < len(toks):
+        token = toks[index]
+        if token.startswith("@"):
+            return "A splatted pipeline scriptblock cannot be inspected safely."
+        if token.startswith("-"):
+            name, attached, separator = resolve_powershell_parameter(
+                token, parameter_names
+            )
+            if name is None:
+                if foreach:
+                    return "A pipeline cmdlet parameter cannot be inspected safely."
+                index += 1  # Where-Object comparison operators are inert
+                continue
+            index += 1
+            if name in member_parameters:
+                return (
+                    "ForEach-Object member invocation can execute uninspected "
+                    "methods. Use an explicit scriptblock instead."
+                )
+            if name in script_parameters:
+                if attached is None:
+                    attached = toks[index] if index < len(toks) else ""
+                    index += 1
+                if not attached.startswith("{"):
+                    return (
+                        "A dynamic pipeline scriptblock cannot be inspected safely."
+                    )
+                next_index = skip_powershell_literal_block(toks, index, attached)
+                if next_index is None:
+                    return "A pipeline scriptblock is malformed."
+                index = next_index
+                continue
+            if name in value_parameters and not separator:
+                index += 1
+            continue
+        if token.startswith("{"):
+            next_index = skip_powershell_literal_block(toks, index + 1, token)
+            if next_index is None:
+                return "A pipeline scriptblock is malformed."
+            index = next_index
+            continue
+        if has_dynamic_shell_token(token):
+            return "A dynamic pipeline scriptblock cannot be inspected safely."
+        if foreach:
+            return (
+                "ForEach-Object member invocation can execute uninspected "
+                "methods. Use an explicit scriptblock instead."
+            )
+        return None  # Where-Object property comparisons are inert data
+    return None
+
+
 _DOWNLOADER_CLUSTER_PREFIXES = {
     # Short switches in these sets take no value, so a later output switch in
     # the same argv token still owns the remaining suffix.
@@ -4789,6 +5024,20 @@ def check(
                 )
                 if child_decision[0] != "allow":
                     return child_decision
+            continue
+        if head in {"invoke-command", "icm"}:
+            if not quote_aware:
+                continue
+            invoke_error = powershell_invoke_command_opacity(toks)
+            if invoke_error:
+                return "deny", invoke_error
+            continue
+        if head in {"foreach-object", "%", "foreach", "where-object", "?", "where"}:
+            if not quote_aware:
+                continue
+            pipeline_error = powershell_pipeline_scriptblock_opacity(head, toks)
+            if pipeline_error:
+                return "deny", pipeline_error
             continue
         if head == "start":
             return (
