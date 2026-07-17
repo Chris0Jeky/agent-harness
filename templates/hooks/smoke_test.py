@@ -14,6 +14,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
 GIT_HELPER_ENVIRONMENT = {
+    "EDITOR",
     "GIT_ASKPASS",
     "GIT_COMMON_DIR",
     "GIT_EDITOR",
@@ -28,7 +29,9 @@ GIT_HELPER_ENVIRONMENT = {
     "GIT_TEMPLATE_DIR",
     "GIT_WEB_BROWSER",
     "GIT_WORK_TREE",
+    "PAGER",
     "SSH_ASKPASS",
+    "VISUAL",
 }
 
 
@@ -814,6 +817,17 @@ CASES = [
         "deny",
     ),
     ("Copy-Item Env:C Env:GIT_CONFIG_COUNT", 1, {}, "deny"),
+    # provider copies/renames into process-launching Git helper variables
+    (
+        "$env:X='sh'; Copy-Item Env:X Env:GIT_EDITOR; git commit --allow-empty",
+        1,
+        {},
+        "deny",
+    ),
+    ("Copy-Item Env:X Env:GIT_EDITOR", 1, {}, "deny"),
+    ("Copy-Item Env:X Env:GIT_SSH_COMMAND", 1, {}, "deny"),
+    ("Rename-Item Env:X -NewName GIT_PAGER", 1, {}, "deny"),
+    ("Copy-Item Env:X Env:GIT_EDITOR -WhatIf", 1, {}, "deny"),
     (
         "cpi -Path Env:C -Destination:Env:GIT_CONFIG_KEY_0",
         1,
@@ -2861,6 +2875,36 @@ def main():
             "inherited pager applies to config listings",
             run_case("git config --list", 3, {}, env_extra={"GIT_PAGER": "helper"}),
             "deny",
+        ),
+        (
+            "inherited EDITOR fallback applies to commit",
+            run_case("git commit", 3, {}, env_extra={"EDITOR": "sh"}),
+            "deny",
+        ),
+        (
+            "inherited VISUAL fallback applies to commit",
+            run_case("git commit", 3, {}, env_extra={"VISUAL": "sh"}),
+            "deny",
+        ),
+        (
+            "inherited PAGER fallback applies to log",
+            run_case("git log", 3, {}, env_extra={"PAGER": "sh"}),
+            "deny",
+        ),
+        (
+            "inherited EDITOR fallback does not affect status",
+            run_case("git status", 3, {}, env_extra={"EDITOR": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited PAGER fallback does not affect ordinary status",
+            run_case("git status", 3, {}, env_extra={"PAGER": "sh"}),
+            "allow",
+        ),
+        (
+            "inherited PAGER fallback honors global no-pager",
+            run_case("git --no-pager log", 3, {}, env_extra={"PAGER": "sh"}),
+            "allow",
         ),
         (
             "inherited editor does not affect status",

@@ -2879,6 +2879,7 @@ _GIT_REPOSITORY_COMMAND_ENVIRONMENT = (
     _GIT_REPOSITORY_ENVIRONMENT | _GIT_REPOSITORY_CONTEXT_ENVIRONMENT
 )
 _UNKNOWN_GIT_REPOSITORY_ENVIRONMENT = "<UNKNOWN_REPOSITORY_ENVIRONMENT>"
+_UNKNOWN_GIT_PROCESS_ENVIRONMENT = "<UNKNOWN_PROCESS_ENVIRONMENT>"
 _POSIX_ASSIGNMENT_PERSISTING_BUILTINS = {
     ".",
     ":",
@@ -3061,6 +3062,12 @@ def inherited_git_process_environment_is_reachable(
             subcommand == "help"
             and any(token.lower() in {"-w", "--web"} for token in args)
         )
+    # Git documents GIT_EDITOR falling back to EDITOR/VISUAL and GIT_PAGER
+    # falling back to PAGER, so inherited fallbacks share the same scope.
+    if name in {"EDITOR", "VISUAL"}:
+        return git_editor_is_reachable(subcommand, args)
+    if name == "PAGER":
+        return git_pager_is_reachable(subcommand, args, global_args)
     return False
 
 
@@ -3076,7 +3083,7 @@ def has_git_process_environment(
             name.upper(), subcommand, args, global_args
         )
         for name in os.environ
-        if name.upper() in _GIT_PROCESS_ENVIRONMENT
+        if name.upper() in _GIT_PROCESS_COMMAND_ENVIRONMENT
     ):
         return True
     for token in raw:
@@ -3091,7 +3098,10 @@ def has_git_process_environment(
     return False
 
 
-def git_process_environment_mutations(raw: list[str]) -> set[str]:
+def git_process_environment_mutations(
+    raw: list[str],
+    environment_provider_context: bool = False,
+) -> set[str]:
     """Return process-launching Git variables mutated by one shell segment."""
     if not raw:
         return set()
@@ -3119,6 +3129,20 @@ def git_process_environment_mutations(raw: list[str]) -> set[str]:
         name = git_environment_name(provider_assignment[0])
         if name in _GIT_PROCESS_COMMAND_ENVIRONMENT:
             mutations.add(name)
+    provider_copy = powershell_provider_copy_or_rename(raw)
+    if provider_copy is not None:
+        _operation, source, destination = provider_copy
+        source_is_environment = powershell_environment_provider_path(source)
+        if (
+            source_is_environment
+            or environment_provider_context
+            or powershell_environment_provider_path(destination)
+        ):
+            name = git_environment_name(destination)
+            if name in _GIT_PROCESS_COMMAND_ENVIRONMENT:
+                mutations.add(name)
+            elif has_dynamic_shell_token(destination):
+                mutations.add(_UNKNOWN_GIT_PROCESS_ENVIRONMENT)
     mutations.update(
         name
         for name_token, _value in dotnet_environment_mutations(raw)
@@ -4903,8 +4927,12 @@ def check(
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
-        process_environment_mutations = git_process_environment_mutations(raw)
-        if process_environment_mutations & _GIT_PROCESS_ENVIRONMENT:
+        process_environment_mutations = git_process_environment_mutations(
+            raw, environment_provider_context
+        )
+        if process_environment_mutations & (
+            _GIT_PROCESS_ENVIRONMENT | {_UNKNOWN_GIT_PROCESS_ENVIRONMENT}
+        ):
             return (
                 "deny",
                 "Mutating a process-launching Git environment variable is floor-blocked.",
