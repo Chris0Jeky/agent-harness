@@ -2566,6 +2566,9 @@ CASES = [
     ("tar -cf.env payload", 1, {}, "deny"),  # attached-value short option
     ("tar -cvf.env x", 1, {}, "deny"),
     ("tar -cfbackup.tar src", 1, {}, "allow"),
+    ("tar --cr -f .env src", 1, {}, "deny"),  # GNU long-mode abbreviation
+    ("tar --app -f credentials.json x", 1, {}, "deny"),
+    ("tar --extract -f a.tgz", 1, {}, "allow"),
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
     ("tar cf backup.tar src", 1, {}, "allow"),

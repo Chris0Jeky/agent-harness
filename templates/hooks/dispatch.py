@@ -7428,10 +7428,25 @@ def check(
                 and any(function in tar_tokens[1] for function in "crtuxAd")
             ):
                 tar_tokens[1] = "-" + tar_tokens[1]
+            # GNU tar accepts unambiguous long-option abbreviations (--cr ->
+            # --create, --app -> --append), so treat any --prefix of a write mode
+            # as a write mode; the check only ever over-approximates to denial.
+            tar_write_long = (
+                "--create",
+                "--append",
+                "--update",
+                "--concatenate",
+                "--catenate",
+            )
+
+            def _is_tar_write_long(token: str) -> bool:
+                option = token.split("=", 1)[0].lower()
+                return len(option) > 2 and any(
+                    name.startswith(option) for name in tar_write_long
+                )
+
             write_mode = any(
-                bool(re.match(r"^-[A-Za-z]*[cruA]", token))
-                or token.lower()
-                in {"--create", "--append", "--update", "--concatenate", "--catenate"}
+                bool(re.match(r"^-[A-Za-z]*[cruA]", token)) or _is_tar_write_long(token)
                 for token in tar_tokens[1:]
             )
             if write_mode:
