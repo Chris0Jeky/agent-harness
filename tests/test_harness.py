@@ -914,6 +914,32 @@ class HarnessTests(unittest.TestCase):
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
 
+    def test_repo_owns_current_pinned_codex_floor_adapter(self) -> None:
+        # agent-harness is an active Codex checkout, so it owns exactly one
+        # project floor adapter pinned to the current dispatcher. This test
+        # keeps the pin from silently drifting when dispatch.py changes.
+        repo_root = Path(harness.__file__).resolve().parent
+        adapter = repo_root / ".codex" / "hooks.json"
+        self.assertTrue(
+            adapter.is_file(),
+            "agent-harness must own a .codex/hooks.json project floor adapter",
+        )
+        text = adapter.read_text(encoding="utf-8")
+        pin = harness.normalized_text_sha256(
+            repo_root / "templates" / "hooks" / "dispatch.py"
+        )
+        self.assertEqual(
+            len(harness.repo_codex_floor_candidates(text)),
+            1,
+            "adapter must expose exactly one candidate floor handler",
+        )
+        self.assertEqual(
+            len(harness.repo_codex_floor_groups(text, pin)),
+            1,
+            "adapter pin must match the current normalized dispatcher hash; "
+            "refresh .codex/hooks.json after editing templates/hooks/dispatch.py",
+        )
+
     def test_repo_floor_rejects_non_blocking_handler_shapes(self) -> None:
         pin = "9" * 64
         posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
