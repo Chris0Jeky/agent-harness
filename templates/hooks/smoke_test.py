@@ -2575,6 +2575,8 @@ CASES = [
     ("tar cf backup.tar .env", 1, {}, "allow"),  # .env is an input, not the archive
     ("tar cTf - .env", 1, {}, "deny"),  # -T eats '-', f eats .env (dash-word)
     ("tar cf - .env", 1, {}, "allow"),  # archive is stdout '-', .env is input
+    ("tar --delete -f .env member", 1, {}, "deny"),  # in-place archive mutation
+    ("tar --directory=/x -cf out.tar files", 1, {}, "allow"),
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
     ("tar cf backup.tar src", 1, {}, "allow"),

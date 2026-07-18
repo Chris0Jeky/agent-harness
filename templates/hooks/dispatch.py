@@ -7438,6 +7438,7 @@ def check(
                 "--update",
                 "--concatenate",
                 "--catenate",
+                "--delete",
             )
 
             def _is_tar_write_long(token: str) -> bool:
