@@ -2690,11 +2690,12 @@ def _trap_handler_decision(toks: list[str], recurse):
 
 
 def _ssh_runs_local_child(toks: list[str]) -> bool:
-    """True when ssh argv selects a locally-executed child via ProxyCommand or
-    LocalCommand, which OpenSSH runs through the user's shell. OpenSSH parses an
-    -o value like a config line, so keyword and value may be separated by `=` OR
-    whitespace (`-o "ProxyCommand cmd"` == `-o ProxyCommand=cmd`)."""
-    local_child = re.compile(r"(?:proxy|local)command[=\s]")
+    """True when ssh argv selects a locally-executed child via ProxyCommand,
+    LocalCommand, or a `Match exec` predicate, which OpenSSH runs through the
+    user's shell. OpenSSH parses an -o value like a config line, so keyword and
+    value may be separated by `=` OR whitespace (`-o "ProxyCommand cmd"` ==
+    `-o ProxyCommand=cmd`)."""
+    local_child = re.compile(r"(?:proxy|local)command[=\s]|match\s+.*\bexec\b")
     index = 1
     while index < len(toks):
         token = toks[index]
