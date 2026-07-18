@@ -2471,37 +2471,73 @@ def _command_option_value(token: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def _scan_launcher_options(
+    toks: list[str],
+    value_short: set,
+    value_long: set,
+    start: int = 1,
+) -> tuple[int, set]:
+    """Cluster-aware option scan for a positional-child launcher. Advances from
+    `start` over options, arity-skipping value-taking short letters — whether
+    separate (`-c 0-3`), glued (`-c0-3`), or in a CLUSTER (`-ac0-3`, `-aT 5000`)
+    — and value-taking long options (`--x val` / `--x=val`). Returns
+    (index_at_first_positional, set_of_value_short_letters_consumed)."""
+    consumed: set = set()
+    index = start
+    while index < len(toks):
+        token = toks[index]
+        if token == "--":
+            return index + 1, consumed
+        if token.startswith("--"):
+            name = token.lower().split("=", 1)[0]
+            if "=" not in token and name in value_long:
+                index += 2  # separate long value
+            else:
+                index += 1  # valueless long, or --opt=value (value glued)
+            continue
+        if token.startswith("-") and len(token) > 1:
+            take_next = False
+            for position, char in enumerate(token[1:]):
+                if char in value_short:
+                    consumed.add(char)
+                    # A value-taking letter takes the cluster tail as its value
+                    # if any remains, else the next token.
+                    take_next = position == len(token[1:]) - 1
+                    break
+            index += 2 if take_next else 1
+            continue
+        return index, consumed
+    return index, consumed
+
+
 def _launcher_child_command(head: str, toks: list[str]) -> str | None:
-    """Return a child command string for watch/flock/coproc, "" for none, or
-    None when the child is opaque and the launcher must be denied."""
+    """Return a child command string for watch/flock/coproc/chrt/taskset, "" for
+    none, or None when the child is opaque and the launcher must be denied."""
     if head == "watch":
-        index = 1
-        while index < len(toks):
-            token = toks[index]
-            lowered = token.lower()
-            if token == "--":
-                index += 1
-                break
-            if lowered in {"-n", "--interval"}:
-                if index + 1 >= len(toks):
-                    return None
-                index += 2
-                continue
-            if token.startswith("-"):
-                index += 1
-                continue
-            break
+        index, _ = _scan_launcher_options(toks, {"n"}, {"--interval"})
         child = toks[index:]
     elif head == "flock":
 
         def _flock_command(tok: str, follow: str | None) -> str | None:
-            # Resolve a flock -c/--command (incl. --command=VALUE and getopt_long
-            # abbreviations) to its child command string, or None if absent/empty.
+            # Resolve a flock -c/--command (incl. --command=VALUE, getopt_long
+            # abbreviations, and a -c inside a short cluster) to its child string.
             matched, attached = _command_option_value(tok)
-            if not matched:
-                return None
-            value = attached if attached is not None else follow
-            return restore_quoted_literal_markers(value) if value else "\0"
+            if matched:
+                value = attached if attached is not None else follow
+                return restore_quoted_literal_markers(value) if value else "\0"
+            # -c bundled in a short cluster (`-nc'cmd'` / `-nc cmd`): the command
+            # is the cluster tail after `c`, or the next token if `c` is last.
+            if tok.startswith("-") and not tok.startswith("--") and "c" in tok[1:]:
+                tail = tok[1:]
+                cut = tail.index("c")
+                if all(
+                    ch in {"w", "E", "s", "x", "u", "n", "o", "F", "v"}
+                    for ch in tail[:cut]
+                ):
+                    glued = tail[cut + 1 :]
+                    value = glued if glued else follow
+                    return restore_quoted_literal_markers(value) if value else "\0"
+            return None
 
         index = 1
         while index < len(toks):
@@ -2511,30 +2547,28 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             resolved = _flock_command(token, follow)
             if resolved is not None:
                 return None if resolved == "\0" else resolved
-            # -w and -E are case-sensitive short flags, so compare the original
-            # token (lowercasing turned `-E` into a never-matched `-e`).
-            if token in {"-w", "-E"} or lowered in {
-                "--timeout",
-                "--conflict-exit-code",
-            }:
-                if index + 1 >= len(toks):
-                    return None
+            if token == "--":
+                index += 1
+                break
+            # -w and -E take a value (case-sensitive short flags); cluster-aware.
+            if token.startswith("-") and not token.startswith("--"):
+                take_next = False
+                for position, char in enumerate(token[1:]):
+                    if char in {"w", "E"}:
+                        take_next = position == len(token[1:]) - 1
+                        break
+                index += 2 if take_next else 1
+                continue
+            if lowered in {"--timeout", "--conflict-exit-code"}:
                 index += 2
                 continue
             if lowered.startswith(("--timeout=", "--conflict-exit-code=")):
                 index += 1
                 continue
-            if token == "--":
-                index += 1
-                break
-            if token.startswith("-"):
-                index += 1
-                continue
             break
         # toks[index] is the lock file/fd; the child command follows it. The
         # documented `flock [options] <file> -c <command>` form puts -c AFTER the
-        # lockfile, so the child string can hide behind a post-lockfile -c
-        # (including the glued `--command=` / abbreviated spellings).
+        # lockfile, so the child string can hide behind a post-lockfile -c.
         child = toks[index + 1 :]
         if child:
             resolved = _flock_command(child[0], child[1] if len(child) > 1 else None)
@@ -2543,53 +2577,25 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
     elif head in {"chrt", "taskset"}:
         # `chrt [opts] <prio> cmd` / `taskset [opts] <mask> cmd` run a child after
         # one scheduling positional. `-p`/--pid operates on an existing PID (no
-        # child). Value-taking options must be arity-skipped, and taskset's
-        # -c/--cpu-list SUPPLIES the mask (so no positional mask remains).
+        # child). taskset's -c/--cpu-list SUPPLIES the mask (no positional mask).
         if any(token in {"-p", "--pid"} for token in toks[1:]):
             return ""
-        chrt_value_opts = {
-            "-T",
-            "--sched-runtime",
-            "-D",
-            "--sched-deadline",
-            "-P",
-            "--sched-period",
-        }
-        index = 1
-        mask_from_option = False
-        while index < len(toks):
-            token = toks[index]
-            lowered = token.lower()
-            if token == "--":
-                index += 1
-                break
-            if head == "taskset" and token in {"-c", "--cpu-list"}:
-                index += 2
-                mask_from_option = True
-                continue
-            if head == "taskset" and (
-                lowered.startswith("--cpu-list=")
-                or (token.startswith("-c") and len(token) > 2)
-            ):
-                index += 1
-                mask_from_option = True
-                continue
-            if head == "chrt" and token in chrt_value_opts:
-                index += 2
-                continue
-            if head == "chrt" and lowered.startswith(
-                ("--sched-runtime=", "--sched-deadline=", "--sched-period=")
-            ):
-                index += 1
-                continue
-            if token.startswith("-"):
-                index += 1
-                continue
-            break
-        # If taskset consumed the mask via -c, the first non-option IS the child;
-        # otherwise toks[index] is the positional mask/priority and the child
-        # follows it.
-        child = toks[index:] if mask_from_option else toks[index + 1 :]
+        if head == "chrt":
+            index, _ = _scan_launcher_options(
+                toks,
+                {"T", "D", "P"},
+                {"--sched-runtime", "--sched-deadline", "--sched-period"},
+            )
+            child = toks[index + 1 :]  # skip the priority positional
+        else:
+            index, consumed = _scan_launcher_options(toks, {"c"}, {"--cpu-list"})
+            # -c OR --cpu-list supplies the mask, so the first non-option is the
+            # child; otherwise skip the positional mask before the child.
+            mask_from_option = "c" in consumed or any(
+                token == "--cpu-list" or token.lower().startswith("--cpu-list=")
+                for token in toks[1:index]
+            )
+            child = toks[index:] if mask_from_option else toks[index + 1 :]
     else:  # coproc
         child = toks[1:]
         if any(token in {"{", "}"} or token.endswith("{") for token in child):
@@ -7267,10 +7273,10 @@ def check(
             # SRC... DEST: the final positional is the (local) write target. A
             # value-taking option may TRAIL the destination (`rsync src .env
             # --exclude foo`), so skip such option values before selecting DEST.
-            transfer_value_opts = {
-                "-e",
+            # Short-option ARITIES differ per tool (rsync's -P/-i/-c/-o are flags;
+            # scp's take values), so keep the value sets separate.
+            transfer_long_value = {
                 "--rsh",
-                "-T",
                 "--temp-dir",
                 "--exclude",
                 "--include",
@@ -7293,7 +7299,6 @@ def check(
                 "--contimeout",
                 "--port",
                 "--block-size",
-                "-B",
                 "--modify-window",
                 "--info",
                 "--debug",
@@ -7305,18 +7310,30 @@ def check(
                 "--skip-compress",
                 "--compress-level",
                 "--filter",
-                "-f",
-                "-P",
-                "-i",
-                "-l",
-                "-o",
-                "-c",
-                "-F",
-                "-S",
-                "-J",
-                "-D",
-                "-b",
+                "--write-batch",
+                "--read-batch",
+                "--only-write-batch",
+                "--password-file",
+                "--copy-as",
+                "--stop-after",
             }
+            if head == "rsync":
+                transfer_value_opts = {"-e", "-T", "-B", "-f"} | transfer_long_value
+            else:  # scp / sftp
+                transfer_value_opts = {
+                    "-i",
+                    "-P",
+                    "-c",
+                    "-l",
+                    "-o",
+                    "-F",
+                    "-S",
+                    "-J",
+                    "-D",
+                    "-b",
+                    "-R",
+                    "-B",
+                } | transfer_long_value
             transfer_positionals = []
             index = 1
             while index < len(toks):

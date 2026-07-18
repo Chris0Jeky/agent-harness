@@ -2648,6 +2648,16 @@ CASES = [
     ("git submodule add ext::sh -c payload path", 1, {}, "deny"),
     ("rsync src .env --exclude foo", 1, {}, "deny"),
     ("rsync -a src/ backup/ --exclude .git", 1, {}, "allow"),
+    # getopt short-option CLUSTER arity (value letter at cluster tail)
+    ("taskset -ac0-3 rm -rf /critical/outside", 1, {}, "deny"),
+    ("chrt -aT 5000 0 rm -rf /critical/outside", 1, {}, "deny"),
+    ("watch -tn 2 rm -rf /critical/outside", 1, {}, "deny"),
+    ("flock -nw 5 /tmp/lock git push --force origin main", 1, {}, "deny"),
+    ("flock -nc 'rm -rf /critical/outside' /tmp/lock", 1, {}, "deny"),
+    ("taskset -ac0-3 make", 1, {}, "allow"),
+    ("watch -tn 2 git status", 1, {}, "allow"),
+    ("rsync -P src .env", 1, {}, "deny"),  # -P is a flag in rsync
+    ("rsync -avzP src/ host:dest/", 1, {}, "allow"),
     ("tar --to-command='git push --force origin main' -xf in.tar", 1, {}, "deny"),
     ("tar -I 'sh -c \"git push --force\"' -cf out.tar f", 1, {}, "deny"),
     ("tar -I zstd -cf out.tar.zst src", 1, {}, "allow"),
