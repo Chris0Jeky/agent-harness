@@ -2656,6 +2656,13 @@ CASES = [
     ("flock -nc 'rm -rf /critical/outside' /tmp/lock", 1, {}, "deny"),
     ("taskset -ac0-3 make", 1, {}, "allow"),
     ("watch -tn 2 git status", 1, {}, "allow"),
+    # getopt_long value-option ABBREVIATIONS
+    ("watch --int 2 rm -rf /critical/outside", 1, {}, "deny"),
+    ("chrt --sched-r 5000 0 git push --force origin main", 1, {}, "deny"),
+    ("taskset --cpu=0-3 git push --force origin main", 1, {}, "deny"),
+    ("flock --tim 5 /tmp/lock rm -rf /critical/outside", 1, {}, "deny"),
+    ("watch --int 2 git status", 1, {}, "allow"),
+    ("taskset --cpu 0-3 make", 1, {}, "allow"),
     ("rsync -P src .env", 1, {}, "deny"),  # -P is a flag in rsync
     ("rsync -avzP src/ host:dest/", 1, {}, "allow"),
     ("tar --to-command='git push --force origin main' -xf in.tar", 1, {}, "deny"),

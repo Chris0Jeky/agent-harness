@@ -2471,6 +2471,17 @@ def _command_option_value(token: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def _is_launcher_value_long(name: str, value_long: set) -> bool:
+    """True when a --long option name is a value-taking option or an unambiguous
+    getopt_long PREFIX abbreviation of one (`--int` -> --interval). Over-matching
+    an ambiguous prefix only fails closed (skips a value that may be a positional
+    -> the child is inspected, never allowed through)."""
+    name = name.lower()
+    return name in value_long or (
+        len(name) >= 3 and any(option.startswith(name) for option in value_long)
+    )
+
+
 def _scan_launcher_options(
     toks: list[str],
     value_short: set,
@@ -2490,8 +2501,8 @@ def _scan_launcher_options(
             return index + 1, consumed
         if token.startswith("--"):
             name = token.lower().split("=", 1)[0]
-            if "=" not in token and name in value_long:
-                index += 2  # separate long value
+            if "=" not in token and _is_launcher_value_long(name, value_long):
+                index += 2  # separate long value (incl. prefix abbreviation)
             else:
                 index += 1  # valueless long, or --opt=value (value glued)
             continue
@@ -2559,11 +2570,10 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
                         break
                 index += 2 if take_next else 1
                 continue
-            if lowered in {"--timeout", "--conflict-exit-code"}:
-                index += 2
-                continue
-            if lowered.startswith(("--timeout=", "--conflict-exit-code=")):
-                index += 1
+            if _is_launcher_value_long(
+                lowered.split("=", 1)[0], {"--timeout", "--conflict-exit-code"}
+            ):
+                index += 1 if "=" in token else 2  # glued value vs separate value
                 continue
             break
         # toks[index] is the lock file/fd; the child command follows it. The
@@ -2589,11 +2599,13 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             child = toks[index + 1 :]  # skip the priority positional
         else:
             index, consumed = _scan_launcher_options(toks, {"c"}, {"--cpu-list"})
-            # -c OR --cpu-list supplies the mask, so the first non-option is the
-            # child; otherwise skip the positional mask before the child.
+            # -c OR --cpu-list (incl. prefix abbreviation, glued or separate)
+            # supplies the mask, so the first non-option is the child; otherwise
+            # skip the positional mask before the child.
             mask_from_option = "c" in consumed or any(
-                token == "--cpu-list" or token.lower().startswith("--cpu-list=")
+                _is_launcher_value_long(token.split("=", 1)[0], {"--cpu-list"})
                 for token in toks[1:index]
+                if token.startswith("--")
             )
             child = toks[index:] if mask_from_option else toks[index + 1 :]
     else:  # coproc
