@@ -2541,23 +2541,55 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             if resolved is not None:
                 return None if resolved == "\0" else resolved
     elif head in {"chrt", "taskset"}:
-        # `chrt [opts] <prio> cmd` / `taskset [opts] <mask> cmd` run a child
-        # after one scheduling positional. `-p`/--pid operates on an existing
-        # PID and runs no child.
+        # `chrt [opts] <prio> cmd` / `taskset [opts] <mask> cmd` run a child after
+        # one scheduling positional. `-p`/--pid operates on an existing PID (no
+        # child). Value-taking options must be arity-skipped, and taskset's
+        # -c/--cpu-list SUPPLIES the mask (so no positional mask remains).
         if any(token in {"-p", "--pid"} for token in toks[1:]):
             return ""
+        chrt_value_opts = {
+            "-T",
+            "--sched-runtime",
+            "-D",
+            "--sched-deadline",
+            "-P",
+            "--sched-period",
+        }
         index = 1
+        mask_from_option = False
         while index < len(toks):
             token = toks[index]
+            lowered = token.lower()
             if token == "--":
                 index += 1
                 break
+            if head == "taskset" and token in {"-c", "--cpu-list"}:
+                index += 2
+                mask_from_option = True
+                continue
+            if head == "taskset" and (
+                lowered.startswith("--cpu-list=")
+                or (token.startswith("-c") and len(token) > 2)
+            ):
+                index += 1
+                mask_from_option = True
+                continue
+            if head == "chrt" and token in chrt_value_opts:
+                index += 2
+                continue
+            if head == "chrt" and lowered.startswith(
+                ("--sched-runtime=", "--sched-deadline=", "--sched-period=")
+            ):
+                index += 1
+                continue
             if token.startswith("-"):
                 index += 1
                 continue
             break
-        # toks[index] is the priority/affinity operand; the child follows it.
-        child = toks[index + 1 :]
+        # If taskset consumed the mask via -c, the first non-option IS the child;
+        # otherwise toks[index] is the positional mask/priority and the child
+        # follows it.
+        child = toks[index:] if mask_from_option else toks[index + 1 :]
     else:  # coproc
         child = toks[1:]
         if any(token in {"{", "}"} or token.endswith("{") for token in child):
@@ -2827,10 +2859,17 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         for token in grep_option_args
     ):
         return "Git grep pager execution is floor-blocked."
-    if subcommand in {"clone", "fetch", "ls-remote", "pull", "remote", "push"} and any(
-        re.match(r"(?i)^ext::", token) for token in args
-    ):
-        # git-remote-ext runs the command embedded in an ext:: URL to connect.
+    if subcommand in {
+        "clone",
+        "fetch",
+        "ls-remote",
+        "pull",
+        "remote",
+        "push",
+        "submodule",
+    } and any(re.match(r"(?i)^ext::", token) for token in args):
+        # git-remote-ext runs the command embedded in an ext:: URL to connect
+        # (submodule add clones a command-line/user-protocol URL too).
         return "A git ext:: transport runs an arbitrary command; floor-blocked."
     if subcommand in {"clone", "fetch", "ls-remote", "pull"} and (
         git_option_is_present(
@@ -7225,10 +7264,71 @@ def check(
             "mklink",
         }
         if head in {"rsync", "scp", "sftp"}:
-            # SRC... DEST: only the final positional is the (local) write target.
-            transfer_positionals = [
-                token for token in toks[1:] if not token.startswith("-")
-            ]
+            # SRC... DEST: the final positional is the (local) write target. A
+            # value-taking option may TRAIL the destination (`rsync src .env
+            # --exclude foo`), so skip such option values before selecting DEST.
+            transfer_value_opts = {
+                "-e",
+                "--rsh",
+                "-T",
+                "--temp-dir",
+                "--exclude",
+                "--include",
+                "--exclude-from",
+                "--include-from",
+                "--files-from",
+                "--bwlimit",
+                "--rsync-path",
+                "--compare-dest",
+                "--copy-dest",
+                "--link-dest",
+                "--log-file",
+                "--out-format",
+                "--partial-dir",
+                "--backup-dir",
+                "--chmod",
+                "--max-size",
+                "--min-size",
+                "--timeout",
+                "--contimeout",
+                "--port",
+                "--block-size",
+                "-B",
+                "--modify-window",
+                "--info",
+                "--debug",
+                "--suffix",
+                "--iconv",
+                "--protocol",
+                "--sockopts",
+                "--address",
+                "--skip-compress",
+                "--compress-level",
+                "--filter",
+                "-f",
+                "-P",
+                "-i",
+                "-l",
+                "-o",
+                "-c",
+                "-F",
+                "-S",
+                "-J",
+                "-D",
+                "-b",
+            }
+            transfer_positionals = []
+            index = 1
+            while index < len(toks):
+                token = toks[index]
+                if token in transfer_value_opts:
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                transfer_positionals.append(token)
+                index += 1
             dest = transfer_positionals[-1] if len(transfer_positionals) > 1 else None
             if dest is not None and (
                 has_dynamic_shell_token(dest) or token_mentions_secret_path(dest)
