@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.0 (2026-07-17)"
+FLOOR_VERSION = "1.5.1 (2026-07-18)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -2511,7 +2511,12 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             resolved = _flock_command(token, follow)
             if resolved is not None:
                 return None if resolved == "\0" else resolved
-            if lowered in {"-w", "--timeout", "-E", "--conflict-exit-code"}:
+            # -w and -E are case-sensitive short flags, so compare the original
+            # token (lowercasing turned `-E` into a never-matched `-e`).
+            if token in {"-w", "-E"} or lowered in {
+                "--timeout",
+                "--conflict-exit-code",
+            }:
                 if index + 1 >= len(toks):
                     return None
                 index += 2
@@ -2535,6 +2540,24 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             resolved = _flock_command(child[0], child[1] if len(child) > 1 else None)
             if resolved is not None:
                 return None if resolved == "\0" else resolved
+    elif head in {"chrt", "taskset"}:
+        # `chrt [opts] <prio> cmd` / `taskset [opts] <mask> cmd` run a child
+        # after one scheduling positional. `-p`/--pid operates on an existing
+        # PID and runs no child.
+        if any(token in {"-p", "--pid"} for token in toks[1:]):
+            return ""
+        index = 1
+        while index < len(toks):
+            token = toks[index]
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-"):
+                index += 1
+                continue
+            break
+        # toks[index] is the priority/affinity operand; the child follows it.
+        child = toks[index + 1 :]
     else:  # coproc
         child = toks[1:]
         if any(token in {"{", "}"} or token.endswith("{") for token in child):
@@ -2804,6 +2827,11 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         for token in grep_option_args
     ):
         return "Git grep pager execution is floor-blocked."
+    if subcommand in {"clone", "fetch", "ls-remote", "pull", "remote", "push"} and any(
+        re.match(r"(?i)^ext::", token) for token in args
+    ):
+        # git-remote-ext runs the command embedded in an ext:: URL to connect.
+        return "A git ext:: transport runs an arbitrary command; floor-blocked."
     if subcommand in {"clone", "fetch", "ls-remote", "pull"} and (
         git_option_is_present(
             args,
@@ -3282,6 +3310,34 @@ def dangerous_git_trace_environment_mutation(raw: list[str]) -> bool:
         dangerous_git_trace_setting(name, value)
         for name, value in git_trace_environment_mutations(raw)
     )
+
+
+def dangerous_git_index_file_mutation(raw: list[str]) -> bool:
+    """True when GIT_INDEX_FILE selects a secret-looking or dynamic path (git
+    writes its index there). Checks inherited env and leading assignments."""
+
+    def unsafe(value: str) -> bool:
+        expanded = expand_environment_references(
+            restore_quoted_literal_markers(value).strip("'\"")
+        )
+        return (
+            expanded is None
+            or has_dynamic_shell_token(expanded)
+            or token_mentions_secret_path(expanded)
+        )
+
+    if any(
+        name.upper() == "GIT_INDEX_FILE" and unsafe(value)
+        for name, value in os.environ.items()
+    ):
+        return True
+    for token in raw:
+        base = _EXE_SUFFIX.sub("", token.replace("\\", "/").split("/")[-1]).lower()
+        if base == "git":
+            break
+        if _ASSIGN.match(token) and git_environment_name(token) == "GIT_INDEX_FILE":
+            return unsafe(token.split("=", 1)[1])
+    return False
 
 
 def has_dangerous_git_trace_environment(raw: list[str]) -> bool:
@@ -5565,6 +5621,11 @@ def check(
                 "deny",
                 "Git trace settings cannot write to or disclose secret material.",
             )
+        if dangerous_git_index_file_mutation(raw):
+            return (
+                "deny",
+                "GIT_INDEX_FILE to a secret-looking or dynamic path is floor-blocked.",
+            )
         if is_git_config_environment_mutation(raw, environment_provider_context):
             return (
                 "deny",
@@ -5857,7 +5918,7 @@ def check(
                     return child_decision
                 break
             continue
-        if head in {"watch", "flock", "coproc"}:
+        if head in {"watch", "flock", "coproc", "chrt", "taskset"}:
             child_command = _launcher_child_command(head, toks)
             if child_command is None:
                 return (
@@ -6451,6 +6512,30 @@ def check(
                         "Git stash pathspec files are opaque to the deny floor.",
                     )
                 stash_pathspecs = args[args.index("--") + 1 :] if "--" in args else []
+                # `git stash push [opts] [<pathspec>...]` also takes BARE pathspecs
+                # (no `--`); collect them, skipping the action word and -m's value.
+                before_sep = args[: args.index("--")] if "--" in args else args
+                index = 0
+                while index < len(before_sep) and before_sep[index].startswith("-"):
+                    index += 1
+                if index < len(before_sep) and before_sep[index].lower() in {
+                    "push",
+                    "save",
+                }:
+                    index += 1
+                while index < len(before_sep):
+                    token = before_sep[index]
+                    if token in {"-m", "--message"}:
+                        index += 2
+                        continue
+                    if token.startswith("--message=") or token.startswith("-m"):
+                        index += 1
+                        continue
+                    if token.startswith("-"):
+                        index += 1
+                        continue
+                    stash_pathspecs.append(token)
+                    index += 1
                 if any(
                     has_dynamic_shell_token(pathspec)
                     or token_mentions_secret_path(pathspec)
@@ -7137,7 +7222,64 @@ def check(
             "ln",
             "mkdir",
             "md",
+            "mklink",
         }
+        if head in {"rsync", "scp", "sftp"}:
+            # SRC... DEST: only the final positional is the (local) write target.
+            transfer_positionals = [
+                token for token in toks[1:] if not token.startswith("-")
+            ]
+            dest = transfer_positionals[-1] if len(transfer_positionals) > 1 else None
+            if dest is not None and (
+                has_dynamic_shell_token(dest) or token_mentions_secret_path(dest)
+            ):
+                return (
+                    "deny",
+                    "A file-transfer destination over a secret-looking or dynamic "
+                    "path is floor-blocked.",
+                )
+        if head == "patch":
+            # patch -o/--output FILE and -r/--reject-file FILE write named files.
+            for value in git_option_values(
+                toks[1:], "--output", {"-o"}
+            ) + git_option_values(toks[1:], "--reject-file", {"-r"}):
+                if value is not None and (
+                    has_dynamic_shell_token(value) or token_mentions_secret_path(value)
+                ):
+                    return (
+                        "deny",
+                        "patch output/reject to a secret-looking or dynamic file is "
+                        "floor-blocked.",
+                    )
+        if head == "unzip":
+            # -d EXDIR extracts into a named directory; explicit member operands
+            # extract to named paths.
+            index = 1
+            while index < len(toks):
+                token = toks[index]
+                exdir = None
+                if token == "-d":
+                    exdir = toks[index + 1] if index + 1 < len(toks) else ""
+                    index += 2
+                elif token.startswith("-d") and len(token) > 2:
+                    exdir = token[2:]
+                    index += 1
+                else:
+                    index += 1
+                    continue
+                if has_dynamic_shell_token(exdir) or token_mentions_secret_path(exdir):
+                    return (
+                        "deny",
+                        "unzip extraction into a secret-looking or dynamic directory "
+                        "is floor-blocked.",
+                    )
+            positional = [token for token in toks[1:] if not token.startswith("-")]
+            # positional[0] is the archive; the rest are selected members.
+            if any(token_mentions_secret_path(member) for member in positional[1:]):
+                return (
+                    "deny",
+                    "unzip of a member into a secret-looking path is floor-blocked.",
+                )
         if head == "chmod":
             # chmod changes metadata, not content, so `chmod 600 ~/.ssh/id_rsa`
             # (the standard secure-your-key op) must stay allowed. Only deny a
@@ -7417,6 +7559,40 @@ def check(
             if any(token_mentions_secret_path(token) for token in install_targets):
                 return "deny", "Installing over a secret-looking file is floor-blocked."
         if head in {"tar", "gtar", "bsdtar"}:
+            # tar runs an arbitrary child via --to-command (always a command) and
+            # via -I/--use-compress-program (a program that may itself be a shell
+            # command like `sh -c ...`). Deny --to-command outright; for -I, deny
+            # only a command-shaped value (whitespace/metacharacters/dynamic) and
+            # allow a bare compressor program name (gzip/zstd/pigz).
+            if any(
+                token == "--to-command" or token.lower().startswith("--to-command=")
+                for token in toks[1:]
+            ):
+                return "deny", "A tar --to-command child is opaque to floor inspection."
+            index = 1
+            while index < len(toks):
+                token = toks[index]
+                value = None
+                if token in {"-I", "--use-compress-program"}:
+                    value = toks[index + 1] if index + 1 < len(toks) else ""
+                    index += 2
+                elif token.lower().startswith("--use-compress-program="):
+                    value = token.split("=", 1)[1]
+                    index += 1
+                elif token.startswith("-I") and len(token) > 2:
+                    value = token[2:]
+                    index += 1
+                else:
+                    index += 1
+                    continue
+                if is_dynamic_value(value) or re.search(
+                    r"[\s;|&$()<>`]", restore_quoted_literal_markers(value)
+                ):
+                    return (
+                        "deny",
+                        "A tar compress-program child command is opaque to floor "
+                        "inspection.",
+                    )
             # Traditional tar "old option style" makes the first argument a
             # dashless option cluster (`tar cf ARCHIVE files`), accepted by GNU,
             # bsd, and busybox tar. Detect it so write-mode is seen; its ARCHIVE
