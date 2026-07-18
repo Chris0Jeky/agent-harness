@@ -2663,6 +2663,10 @@ CASES = [
     ("flock --tim 5 /tmp/lock rm -rf /critical/outside", 1, {}, "deny"),
     ("watch --int 2 git status", 1, {}, "allow"),
     ("taskset --cpu 0-3 make", 1, {}, "allow"),
+    ("flock --verbose /tmp/lock git push --force origin main", 1, {}, "deny"),
+    ("flock --exclusive /tmp/lock rm -rf /critical/outside", 1, {}, "deny"),
+    ("flock --no-fork /tmp/lock git push --force origin main", 1, {}, "deny"),
+    ("flock --verbose /tmp/lock ls", 1, {}, "allow"),
     ("rsync -P src .env", 1, {}, "deny"),  # -P is a flag in rsync
     ("rsync -avzP src/ host:dest/", 1, {}, "allow"),
     ("tar --to-command='git push --force origin main' -xf in.tar", 1, {}, "deny"),

@@ -2575,7 +2575,10 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             ):
                 index += 1 if "=" in token else 2  # glued value vs separate value
                 continue
-            break
+            if token.startswith("--"):
+                index += 1  # valueless long flag (--verbose/--shared/...); step over
+                continue
+            break  # a non-option token: this is the lockfile/fd
         # toks[index] is the lock file/fd; the child command follows it. The
         # documented `flock [options] <file> -c <command>` form puts -c AFTER the
         # lockfile, so the child string can hide behind a post-lockfile -c.
