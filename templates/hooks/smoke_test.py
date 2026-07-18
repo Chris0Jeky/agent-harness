@@ -2573,6 +2573,8 @@ CASES = [
     ("tar cvbf 20 .env src", 1, {}, "deny"),  # b consumes a word before f
     ("tar cfz backup.tgz src", 1, {}, "allow"),
     ("tar cf backup.tar .env", 1, {}, "allow"),  # .env is an input, not the archive
+    ("tar cTf - .env", 1, {}, "deny"),  # -T eats '-', f eats .env (dash-word)
+    ("tar cf - .env", 1, {}, "allow"),  # archive is stdout '-', .env is input
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
     ("tar cf backup.tar src", 1, {}, "allow"),

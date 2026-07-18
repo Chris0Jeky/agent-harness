@@ -7454,18 +7454,20 @@ def check(
                 archive = None
                 if old_style:
                     # Old style: each value-taking flag (in letter order) consumes
-                    # the next SEPARATE following word, so f's archive is the word
-                    # whose index equals the count of value-flags before f.
+                    # the next following word POSITIONALLY, so f's archive is the
+                    # word whose index equals the count of value-flags before f.
+                    # Value words may themselves start with `-` (e.g. `-` = stdin
+                    # for -T), so following words are counted unfiltered.
                     cluster = tar_tokens[1][1:]
                     tar_value_letters = set("bCfFgHIKLNTVX")
+                    if head == "bsdtar":
+                        tar_value_letters.add(
+                            "s"
+                        )  # bsdtar -s substitution takes a value
                     before_f = 0
                     for character in cluster:
                         if character == "f":
-                            following = [
-                                token
-                                for token in tar_tokens[2:]
-                                if not token.startswith("-")
-                            ]
+                            following = tar_tokens[2:]
                             if before_f < len(following):
                                 archive = following[before_f]
                             break
