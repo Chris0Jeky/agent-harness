@@ -162,8 +162,10 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 ## 2. The Floor (the only thing that never varies)
 
-One global, argv-aware PreToolUse deny hook (dispatcher spec in SPECS §5), identical policy at
-every tier and adapted explicitly to each runtime's hook contract, protecting only the IRREVERSIBLE:
+One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
+at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE. Claude wires the
+shared dispatcher globally; each active Codex repo owns one pinned project adapter. Never stack a
+global and project Codex floor:
 
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
@@ -180,9 +182,10 @@ T4/wave_mode — the flag is ignored where guards are walls.
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
 gitleaks' job (diff-scoped); command safety is the argv parser's job.
 
-The floor is a tripwire by law 5 — the walls at T3+ are branch protection and restricted
-toolsets. The floor ships with a bypass test matrix (SPECS §6) and `make test-hooks`; a change
-to the floor is T4-class work (top model + review) no matter which repo it runs in.
+The floor is a defense-in-depth tripwire by law 5, not an exhaustive shell sandbox. Its bounded
+parser and bypass matrix cover the explicitly tested command forms; the walls at T3+ remain
+branch protection and restricted toolsets. A change to the floor is T4-class work (top model +
+review) no matter which repo it runs in.
 
 ---
 
@@ -295,6 +298,9 @@ from gone.
   live path → wrapper warnings → HUMAN_TODO alias. Covers ALL roots; doubles as the
   promotion-audit worksheet. New-repo intake: `harness seed --tier 1` at creation; human
   assigns tier.
+- **Codex mirror and floor topology**: global Codex guidance mirrors the universal laws, but the
+  Codex floor hook is project-local. Each active repo pins the shared `~/.claude/hooks/dispatch.py`
+  from one `.codex/hooks.json`; global Codex floor wiring is removed to prevent double dispatch.
 - **Machine layer, `MACHINE.md` + bootstrap** (distinct from repo tiers and global laws):
   front-load `C:\Program Files\Git\cmd` in PATH permanently (Cygwin git), commit vitest
   `maxWorkers` config where it OOMs, scheduled `gh auth` refresh, `DISABLE_AUTOUPDATER`
@@ -418,8 +424,10 @@ create a parallel plan (law 9).
   ≤500 lines at T3; the blueprint is subject to the one-home rule and Gardener pruning like
   everything else. If the quarterly demotion review gets skipped, ceremony calcifies — same
   disease, better names.
-- **The dispatcher is a single point of failure.** One bug drops the floor everywhere. It
-  fails CLOSED, ships with tests, and changes to it are always T4-class work.
+- **The dispatcher is a single point of failure.** One parser bug—or a runtime's fail-open hook
+  launch/output behavior—can drop the floor. Rule-evaluation exceptions fail closed after a Bash
+  command is identified, but wiring still requires audit, smoke tests, and live canaries; changes
+  are always T4-class work.
 - **Caps degrade content instead of curating it.** The budget checker must emit ROTATE
   instructions, never "trim to pass"; rotation is the Gardener's job, not inline deletion
   under CI pressure.

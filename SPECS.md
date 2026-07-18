@@ -120,37 +120,73 @@ here.` / `Live successor: <path or "none">`.
 
 ## §5 Dispatcher hook wiring
 
-One script per EVENT, not stacked matchers (kills the double-process spawn per shell call).
-Claude uses its native wiring below; Codex uses `templates/codex/hooks.json`, rendered with an
-absolute dispatcher path by `harness.py sync-global`.
+The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
+globally. Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
+the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. Repo-tier lifecycle
+hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`, and `Stop`) are separate, repo-owned
+executables when a tier actually implements them. Never route those events through the floor
+dispatcher or stack global and project floor matchers.
+
+Claude global adapter schematic (Codex project adapters must use the stricter contract below):
 
 ```json
 {
   "hooks": {
-    "PreToolUse":         [{ "matcher": "Bash", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event pre",  "timeout": 5 }] }],
-    "PostToolUse":        [{ "matcher": "Bash|Edit|Write", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event post", "timeout": 5 }] }],
-    "PostToolUseFailure": [{ "matcher": "Bash|Edit|Write|mcp__.*", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event failure", "timeout": 10 }] }],
-    "SessionStart":       [{ "matcher": "", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event session-start", "timeout": 5 }] }],
-    "Stop":               [{ "matcher": "", "hooks": [{ "type": "command",
-      "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/dispatch.py\" --event stop", "timeout": 15 }] }]
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command",
+      "command": "python \"$HOME/.claude/hooks/dispatch.py\" --event pre", "timeout": 5 }] }]
   }
 }
 ```
 
-- `dispatch.py` reads `tier.json` once and applies tier-appropriate deny/nudge/Stop rules.
-- **Fail-closed contract**: an unhandled exception in the PRE path returns deny-with-message
-  ("dispatcher error — floor unavailable, fix hooks before proceeding"); POST/session paths
-  fail open with a warning (nudges are not safety).
-- The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`); repos get a
-  copy at seed time; `harness audit` diffs copies against the template (bootstrap-drift guard).
-- Self-tested: `python .claude/hooks/smoke_test.py` (or `make test-hooks`) runs the §6 matrix
-  + one allow-case per event. A floor/dispatcher change is T4-class work in any repo.
-- Codex 0.144 does not support `permissionDecision: "ask"`; the runtime adapter converts T3
-  work-loss asks into model-visible warnings while preserving hard denies.
+- For PRE safety decisions with a hook payload `cwd`, deletion containment uses the nearest
+  declared ancestor on the payload chain. If that chain is undeclared, an environment
+  `CLAUDE_PROJECT_DIR` that lexically encloses `cwd` becomes the boundary even when undeclared;
+  otherwise `cwd` itself is the boundary. When the payload omits `cwd`, the nearest declaration
+  above `CLAUDE_PROJECT_DIR` (or that directory itself when undeclared) is the boundary.
+- Every declaration on both the payload and environment ancestor chains contributes authority,
+  even when the chains are unrelated: the highest tier wins, boolean tightening flags are ORed,
+  and `relaxed_work_loss_guards` applies only when every applicable declaration enables it.
+  Thus a stale or unrelated environment value can tighten policy but cannot widen containment;
+  an enclosing environment project intentionally defines the boundary for an undeclared nested
+  `cwd`.
+- A present `tier.json` must be a readable JSON object with integer `tier` 0-4 and boolean flag
+  values. Invalid authority fails closed on PRE; only an absent declaration receives T1 defaults.
+- Recursive-delete operands are quote-aware, environment-expanded, and resolved from payload
+  `cwd` before canonical containment. Unresolved dynamic/provider paths and relative deletes after
+  a location change fail closed; only strict descendants of the native OS temp root are scratch.
+  On Windows, ambiguous MSYS/WSL `/c/...` and `/mnt/c/...` spellings fail closed because the same
+  text has different PowerShell filesystem semantics.
+- Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
+  wrapper that binds both values. The POSIX and Windows commands must independently invoke the
+  shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
+  and use a matcher that positively includes Bash. `doctor --repo` requires exactly one candidate,
+  one conservatively recognized execution shape, and one current pin. Commented or output-only
+  marker carriers are not valid adapters. This is static topology validation: it does not execute
+  the hook, prove OS-level integrity, or grant Codex trust. Review the adapter and activate it with
+  `/hooks` in a new Codex session, then run a live safe/deny canary.
+- Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively
+  translates `ask` to `deny`. The historical Claude global adapter still omits `--runtime` and
+  therefore selects the Claude default, retaining interactive `ask` behavior; it still passes
+  `--event pre` explicitly.
+- **Fail-closed contract**: after a Bash payload and authority context are identified, an
+  unhandled PRE rule-evaluation error returns deny-with-message ("dispatcher error — floor
+  unavailable, fix hooks before proceeding"). Unparseable stdin cannot identify a tool or
+  command and therefore exits without a decision; installation checks and live canaries must
+  detect that wiring failure. Unsupported, missing, or duplicate event wiring fails closed after
+  Bash identification. A supplied empty, unsupported, or duplicate runtime also fails closed;
+  runtime omission selects Claude only for the historical global adapter. Codex wiring must name
+  `--runtime codex` explicitly. No non-PRE hook may invoke this dispatcher.
+- The canonical dispatcher lives in this repo (`templates/hooks/dispatch.py`). `harness.py seed`
+  writes only the runtime-neutral tier declaration. `harness.py sync-global` previews or installs
+  global guidance, managed skills, and the shared Claude-home dispatcher/smoke bytes only with
+  explicit `--apply`; it prunes the obsolete managed global Codex matcher. Project hook adapters
+  remain repo-owned and trust-gated.
+- Self-tested: `python templates/hooks/smoke_test.py` runs the §6 allow/deny matrix plus payload,
+  authority, runtime-adapter, and remote-resolution regressions for the PRE event. A
+  floor/dispatcher change is T4-class work in any repo.
+  The matrix defines a bounded parser contract, not exhaustive shell-language coverage. The
+  dispatcher is a defense-in-depth tripwire, not a shell sandbox or a substitute for runtime/OS
+  permissions, restricted toolsets, and branch protection.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 
@@ -164,8 +200,9 @@ MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git c
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
 (`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`
-on the agent's OWN feature branch at T1–T2, compound commands where the dangerous-looking text
-is inside quotes.
+with an explicit non-shared feature-branch refspec at T1–T2, and compound commands where the
+dangerous-looking text is inside quotes. Lease pushes to shared/default branch names, selectors,
+or ambiguous `HEAD` destinations remain blocked.
 
 Parsing notes: tokenize argv (shlex for POSIX; separate lightweight matcher for PowerShell
 pipe forms — shlex won't parse `| Remove-Item`); split on `;`, `&&`, `|` and check each
@@ -210,9 +247,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   overwrite. Repo instructions remain judgment work and are not generated blindly.
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
   stale user-profile paths.
-- `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs the
-  Codex global guidance, hook, and skills with timestamped backups.
-- `harness.py doctor` — checks the live Codex installation and core executables.
+- `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
+  Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
+  removes only the obsolete managed global Codex matcher.
+- `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
+  executables, and optionally one repo-local Codex floor definition.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
