@@ -2569,6 +2569,10 @@ CASES = [
     ("tar --cr -f .env src", 1, {}, "deny"),  # GNU long-mode abbreviation
     ("tar --app -f credentials.json x", 1, {}, "deny"),
     ("tar --extract -f a.tgz", 1, {}, "allow"),
+    ("tar cfz .env src", 1, {}, "deny"),  # old-style, f not final
+    ("tar cvbf 20 .env src", 1, {}, "deny"),  # b consumes a word before f
+    ("tar cfz backup.tgz src", 1, {}, "allow"),
+    ("tar cf backup.tar .env", 1, {}, "allow"),  # .env is an input, not the archive
     ("tar -xf release.tar.gz", 1, {}, "allow"),
     ("tar -czf backup.tar.gz src", 1, {}, "allow"),
     ("tar cf backup.tar src", 1, {}, "allow"),

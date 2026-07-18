@@ -7419,14 +7419,15 @@ def check(
         if head in {"tar", "gtar", "bsdtar"}:
             # Traditional tar "old option style" makes the first argument a
             # dashless option cluster (`tar cf ARCHIVE files`), accepted by GNU,
-            # bsd, and busybox tar. Normalize it to the getopt `-cf` form so the
-            # write-mode + archive-target detection below sees it.
+            # bsd, and busybox tar. Detect it so write-mode is seen; its ARCHIVE
+            # semantics differ from getopt and are handled separately below.
             tar_tokens = list(toks)
-            if (
+            old_style = (
                 len(tar_tokens) > 1
                 and re.fullmatch(r"[A-Za-z]+", tar_tokens[1])
                 and any(function in tar_tokens[1] for function in "crtuxAd")
-            ):
+            )
+            if old_style:
                 tar_tokens[1] = "-" + tar_tokens[1]
             # GNU tar accepts unambiguous long-option abbreviations (--cr ->
             # --create, --app -> --append), so treat any --prefix of a write mode
@@ -7451,34 +7452,54 @@ def check(
             )
             if write_mode:
                 archive = None
-                index = 1
-                while index < len(tar_tokens):
-                    token = tar_tokens[index]
-                    lowered = token.lower()
-                    if token == "-f" or lowered == "--file":
-                        archive = (
-                            tar_tokens[index + 1]
-                            if index + 1 < len(tar_tokens)
-                            else None
-                        )
-                        index += 2
-                        continue
-                    attached_archive = re.match(r"^-[A-Za-z]*f(.+)$", token)
-                    if lowered.startswith("--file="):
-                        archive = token.split("=", 1)[1]
-                    elif attached_archive and not token.startswith("--"):
-                        # getopt glues -f's value to the cluster tail: `-cf.env`
-                        # means archive `.env`, so f need not be the last char.
-                        archive = attached_archive.group(1)
-                    elif re.match(r"^-[A-Za-z]*f$", token):
-                        archive = (
-                            tar_tokens[index + 1]
-                            if index + 1 < len(tar_tokens)
-                            else None
-                        )
-                        index += 2
-                        continue
-                    index += 1
+                if old_style:
+                    # Old style: each value-taking flag (in letter order) consumes
+                    # the next SEPARATE following word, so f's archive is the word
+                    # whose index equals the count of value-flags before f.
+                    cluster = tar_tokens[1][1:]
+                    tar_value_letters = set("bCfFgHIKLNTVX")
+                    before_f = 0
+                    for character in cluster:
+                        if character == "f":
+                            following = [
+                                token
+                                for token in tar_tokens[2:]
+                                if not token.startswith("-")
+                            ]
+                            if before_f < len(following):
+                                archive = following[before_f]
+                            break
+                        if character in tar_value_letters:
+                            before_f += 1
+                else:
+                    index = 1
+                    while index < len(tar_tokens):
+                        token = tar_tokens[index]
+                        lowered = token.lower()
+                        if token == "-f" or lowered == "--file":
+                            archive = (
+                                tar_tokens[index + 1]
+                                if index + 1 < len(tar_tokens)
+                                else None
+                            )
+                            index += 2
+                            continue
+                        attached_archive = re.match(r"^-[A-Za-z]*f(.+)$", token)
+                        if lowered.startswith("--file="):
+                            archive = token.split("=", 1)[1]
+                        elif attached_archive and not token.startswith("--"):
+                            # getopt glues -f's value to the cluster tail:
+                            # `-cf.env` means archive `.env`, f need not be last.
+                            archive = attached_archive.group(1)
+                        elif re.match(r"^-[A-Za-z]*f$", token):
+                            archive = (
+                                tar_tokens[index + 1]
+                                if index + 1 < len(tar_tokens)
+                                else None
+                            )
+                            index += 2
+                            continue
+                        index += 1
                 if archive is not None:
                     if has_dynamic_shell_token(archive):
                         return (
