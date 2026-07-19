@@ -11,7 +11,7 @@ explicit where their hook/config contracts differ.
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
 | `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up shared global sync |
-| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting v1.4.7 bypass matrix. `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
+| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting bypass matrix (version = `FLOOR_VERSION` in `dispatch.py`). `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
 ## Use
@@ -42,7 +42,7 @@ match a conservative direct/wrapper execution shape and bind the current normali
 hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
 review and live safe/deny canary remain mandatory.
 
-Status (2026-07-17): the blueprint, shared v1.4.7 deny floor, project-local Codex adapter model,
+Status (2026-07-19): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
 PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
 pipelines, git push safety, and secret-file mutations. It remains a defense-in-depth tripwire,
