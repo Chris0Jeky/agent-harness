@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.2 (2026-07-19)"
+FLOOR_VERSION = "1.5.3 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1749,6 +1749,23 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
     try:
         raw_tokens = list(lexer)
     except ValueError:
+        # POSIX shlex treats a final backslash inside a double-quoted Windows
+        # path as escaping the closing quote. PowerShell does not, so this can
+        # hide an otherwise recognizable recursive delete. Fail closed only
+        # for that irreversible surface; benign PowerShell scriptblocks can
+        # also be intentionally non-POSIX and remain inspectable by the other
+        # normalization passes below.
+        delete_head = re.search(
+            r"(?i)(?:^|[\s;&|({])(?:remove-item|ri|rm|del|erase|rd|rmdir)"
+            r"(?=$|[\s;/])",
+            command,
+        )
+        recursive_flag = re.search(
+            r"(?i)(?:^|\s)(?:--?[^\s]*r[^\s]*|/[^\s]*s[^\s]*)(?=\s|$)",
+            command,
+        )
+        if delete_head and recursive_flag:
+            return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
         return []
 
     separators = set(";&|\n")
@@ -4290,7 +4307,10 @@ def parse_git_config_args(
 def protected_git_config_section(section: str) -> bool:
     """Return whether a section can alter push destinations or inject config."""
     lowered = section.lower()
-    return lowered.startswith(("remote.", "url.", "includeif.")) or lowered == "include"
+    return lowered.startswith(("remote.", "url.", "includeif.")) or lowered in {
+        "include",
+        "push",
+    }
 
 
 def executable_git_config_section(section: str) -> bool:
@@ -5809,6 +5829,7 @@ def check(
             for marker in (
                 "__HARNESS_UNRESOLVED_ANSI_C_QUOTE__",
                 "__HARNESS_UNRESOLVED_LOCALE_QUOTE__",
+                "__HARNESS_UNPARSEABLE_QUOTING__",
             )
         ):
             return "deny", "Cannot safely decode an executable shell word."

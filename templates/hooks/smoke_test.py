@@ -154,12 +154,14 @@ def invoke_payload(
     cwd: str,
     env_project: str | None = None,
     runtime: str | None = None,
+    env_extra: dict[str, str] | None = None,
 ):
     env = clean_dispatch_environment()
     if env_project is None:
         env.pop("CLAUDE_PROJECT_DIR", None)
     else:
         env["CLAUDE_PROJECT_DIR"] = env_project
+    env.update(env_extra or {})
     proc = subprocess.run(
         dispatch_argv(runtime),
         input=json.dumps(payload),
@@ -177,9 +179,10 @@ def invoke_case(
     cwd: str,
     env_project: str | None = None,
     runtime: str | None = None,
+    env_extra: dict[str, str] | None = None,
 ):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
-    return invoke_payload(payload, cwd, env_project, runtime)
+    return invoke_payload(payload, cwd, env_project, runtime, env_extra)
 
 
 def run_synthetic_project_case(
@@ -203,6 +206,13 @@ def run_synthetic_project_case(
         timeout=10,
     )
     return parse_decision(proc)
+
+
+def isolated_dispatch_temp(root: str) -> dict[str, str]:
+    """Give a subprocess a temp root that cannot swallow containment fixtures."""
+    trusted_temp = os.path.join(root, "dispatcher-temp")
+    os.makedirs(trusted_temp, exist_ok=True)
+    return {name: trusted_temp for name in ("TMPDIR", "TEMP", "TMP")}
 
 
 def invoke_synthetic_context(command: str, payload_cwd: str, env_project: str):
@@ -386,6 +396,7 @@ CASES = [
     ('gh repo create leak "--public"', 1, {"sensitive_data": True}, "deny"),
     ('Remove-Item -Recurse -Force "C:/critical/outside path"', 1, {}, "deny"),
     ('Remove-Item -Recurse -Force "C:\\critical\\outside path"', 1, {}, "deny"),
+    (r'''Remove-Item -Recurse "C:\critical\outside path\"''', 1, {}, "deny"),
     ("Remove-Item -Recurse -Force 'C:/critical/outside path'", 1, {}, "deny"),
     ('rm -rf build "C:/critical/outside path"', 1, {}, "deny"),
     ("rm -rf build 'C:/critical/outside path'", 1, {}, "deny"),
@@ -398,6 +409,7 @@ CASES = [
     ("del -Recurse -Force C:/critical/outside", 1, {}, "deny"),
     ("erase -Recur C:/critical/outside", 1, {}, "deny"),
     ("rd /s /q C:/critical/outside", 1, {}, "deny"),
+    (r'''rd /s /q "C:\critical\outside path\"''', 1, {}, "deny"),
     ("rmdir /s /q C:/critical/outside", 1, {}, "deny"),
     ("Remove-Item -R FileSystem::C:/critical/outside", 1, {}, "deny"),
     (
@@ -1098,6 +1110,10 @@ CASES = [
     ("git config include.path C:/outside/injected.gitconfig", 1, {}, "deny"),
     ("git config --unset include.path", 1, {}, "deny"),
     ("git config --remove-section remote.origin", 1, {}, "deny"),
+    ("git config --remove-section push", 1, {}, "deny"),
+    ("git config remove-section push", 1, {}, "deny"),
+    ("git config --rename-section push push-safe", 1, {}, "deny"),
+    ("git config --remove-section color", 1, {}, "allow"),
     ("git config unset remote.origin.url", 1, {}, "deny"),
     ("git config remove-section remote.origin", 1, {}, "deny"),
     ("git config rename-section remote.origin remote.backup", 1, {}, "deny"),
@@ -2970,7 +2986,8 @@ def main():
             failures.append(("junction escape", 1, {}, "deny", got))
         print(f"  [{status}] expected=deny got={got}  junction escape")
     else:
-        with tempfile.TemporaryDirectory(dir=HERE) as link_fixture:
+        with tempfile.TemporaryDirectory() as link_fixture:
+            temp_env = isolated_dispatch_temp(link_fixture)
             project = os.path.join(link_fixture, "project")
             outside = os.path.join(link_fixture, "outside")
             link = os.path.join(project, "escape")
@@ -2985,7 +3002,7 @@ def main():
                 print(f"  [FAIL] symlink fixture unavailable: {exc.__class__.__name__}")
             else:
                 link_target = link.replace("\\", "/")
-                got = invoke_case(f"rm -rf {link_target}", project)
+                got = invoke_case(f"rm -rf {link_target}", project, env_extra=temp_env)
                 status = "ok" if got == "deny" else "FAIL"
                 if got != "deny":
                     failures.append(("symlink escape", 1, {}, "deny", got))
@@ -3099,7 +3116,7 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     authority_cases = []
-    with tempfile.TemporaryDirectory(dir=HERE) as project:
+    with tempfile.TemporaryDirectory() as project:
         invalid_authorities = [
             ("malformed tier JSON", "{"),
             ("non-object tier declaration", "[]"),
@@ -3675,7 +3692,8 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     symlink_authority_count = 1
-    with tempfile.TemporaryDirectory(dir=HERE) as authority_fixture:
+    with tempfile.TemporaryDirectory() as authority_fixture:
+        temp_env = isolated_dispatch_temp(authority_fixture)
         project = os.path.join(authority_fixture, "project")
         outside = os.path.join(authority_fixture, "outside")
         link = os.path.join(project, "linked-cwd")
@@ -3699,7 +3717,7 @@ def main():
         else:
             got = "pending"
         if got == "pending":
-            got = invoke_case("rm -rf build", link, project)
+            got = invoke_case("rm -rf build", link, project, env_extra=temp_env)
         status = "ok" if got == "deny" else "FAIL"
         if got != "deny":
             failures.append(
@@ -4390,7 +4408,7 @@ def main():
             ["https://github.com/example/public-last.git"],
         ),
     ]
-    with tempfile.TemporaryDirectory(dir=HERE) as remote_project:
+    with tempfile.TemporaryDirectory() as remote_project:
         subprocess.run(
             ["git", "init", "--quiet"],
             cwd=remote_project,
@@ -4661,7 +4679,7 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     runtime_neutral_cases = []
-    with tempfile.TemporaryDirectory(dir=HERE) as project:
+    with tempfile.TemporaryDirectory() as project:
         write_tier(project, 1, {})
         write_agent_tier(project, 4, {"sensitive_data": True})
         runtime_neutral_cases.extend(
@@ -4678,7 +4696,7 @@ def main():
                 ),
             ]
         )
-    with tempfile.TemporaryDirectory(dir=HERE) as project:
+    with tempfile.TemporaryDirectory() as project:
         write_agent_tier(project, 1, {})
         write_tier(project, 4, {"sensitive_data": True})
         runtime_neutral_cases.extend(
@@ -4695,7 +4713,7 @@ def main():
                 ),
             ]
         )
-    with tempfile.TemporaryDirectory(dir=HERE) as project:
+    with tempfile.TemporaryDirectory() as project:
         write_agent_tier(project, 3, {"relaxed_work_loss_guards": True})
         write_tier(project, 3, {"relaxed_work_loss_guards": False})
         runtime_neutral_cases.append(
