@@ -217,27 +217,36 @@ def toml_config(config_path: Path) -> dict[str, Any] | None:
         config = tomllib.loads(contents)
     except tomllib.TOMLDecodeError as exc:
         raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
+    except (RecursionError, ValueError) as exc:
+        raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
     validate_toml_integer_range(config, str(config_path))
     return config
 
 
 def validate_toml_integer_range(value: Any, location: str) -> None:
     """Match Rust TOML's signed 64-bit integer representation."""
-    if isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        if not -(1 << 63) <= value <= I64_MAX:
-            raise HarnessError(
-                f"invalid Codex config {location}: integer is outside signed 64-bit range"
+    pending = [(value, location)]
+    while pending:
+        current, current_location = pending.pop()
+        if isinstance(current, bool):
+            continue
+        if isinstance(current, int):
+            if not -(1 << 63) <= current <= I64_MAX:
+                raise HarnessError(
+                    f"invalid Codex config {current_location}: integer is outside "
+                    "signed 64-bit range"
+                )
+            continue
+        if isinstance(current, dict):
+            pending.extend(
+                (nested, f"{current_location}.{key}") for key, nested in current.items()
             )
-        return
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            validate_toml_integer_range(nested, f"{location}.{key}")
-        return
-    if isinstance(value, list):
-        for index, nested in enumerate(value):
-            validate_toml_integer_range(nested, f"{location}[{index}]")
+            continue
+        if isinstance(current, list):
+            pending.extend(
+                (nested, f"{current_location}[{index}]")
+                for index, nested in enumerate(current)
+            )
 
 
 def inline_hooks_from_config(config_path: Path) -> Any | None:

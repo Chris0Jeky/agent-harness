@@ -780,6 +780,19 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.toml_config(config)
 
+    def test_toml_config_normalizes_parser_recursion(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            "ignored = " + ("[" * 1100) + "0" + ("]" * 1100), encoding="utf-8"
+        )
+        with self.assertRaises(harness.HarnessError):
+            harness.toml_config(config)
+
+    def test_toml_config_handles_deep_post_parse_validation(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(("nested." * 1100) + "leaf = 0", encoding="utf-8")
+        self.assertIsNotNone(harness.toml_config(config))
+
     def test_inline_hooks_preserve_ignored_toml_datetime(self) -> None:
         config = Path(self.temp.name) / "config.toml"
         config.write_text(
