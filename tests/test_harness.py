@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +23,12 @@ class HarnessTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         return root
 
-    def make_linked_worktree(self) -> tuple[Path, Path]:
-        root = self.make_repo()
+    def make_linked_worktree(
+        self, *, separate_git_dir: bool = False
+    ) -> tuple[Path, Path]:
+        root = (
+            self.make_separate_git_dir_repo() if separate_git_dir else self.make_repo()
+        )
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
@@ -39,12 +46,62 @@ class HarnessTests(unittest.TestCase):
         )
         return root, linked
 
+    def make_separate_git_dir_repo(self) -> Path:
+        root = Path(self.temp.name) / "separate-git-checkout"
+        git_dir = Path(self.temp.name) / "separate-git-data"
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(git_dir), str(root)],
+            check=True,
+        )
+        return root
+
     @staticmethod
     def write_hooks(checkout: Path, text: str) -> Path:
         hooks = checkout / ".codex" / "hooks.json"
         hooks.parent.mkdir(parents=True, exist_ok=True)
         hooks.write_text(text, encoding="utf-8")
         return hooks
+
+    def run_doctor_with_fixture_globals(self, repo: Path) -> tuple[int, str]:
+        root = Path(self.temp.name)
+        codex_home = root / "codex-home"
+        claude_home = root / "claude-home"
+        skills_home = root / "skills-home"
+        (codex_home / "AGENTS.md").parent.mkdir()
+        (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        harness_root = Path(harness.__file__).resolve().parent
+        for filename in ("dispatch.py", "smoke_test.py"):
+            target = claude_home / "hooks" / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(
+                (harness_root / "templates" / "hooks" / filename).read_bytes()
+            )
+        (skills_home / "sample").mkdir(parents=True)
+        (skills_home / "sample" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+        args = SimpleNamespace(
+            codex_home=str(codex_home),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            repo=str(repo),
+        )
+        original_run = harness.run
+
+        def fixture_run(
+            command: list[str], cwd: Path | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if command == [sys.executable, "--version"]:
+                return subprocess.CompletedProcess(command, 0, "Python fixture", "")
+            if command == ["git", "--version"]:
+                return subprocess.CompletedProcess(command, 0, "git fixture", "")
+            if command == ["codex", "--version"] or command[-1:] == ["codex --version"]:
+                return subprocess.CompletedProcess(command, 0, "codex fixture", "")
+            return original_run(command, cwd)
+
+        output = io.StringIO()
+        with mock.patch.object(harness, "run", side_effect=fixture_run):
+            with redirect_stdout(output):
+                result = harness.doctor(args)
+        return result, output.getvalue()
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -1572,6 +1629,22 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(hooks, repo / ".codex" / "hooks.json")
                 self.assertIn("normal checkout", detail)
 
+    def test_root_checkout_supports_separate_git_dir(self) -> None:
+        repo = self.make_separate_git_dir_repo()
+        requested, authoritative = harness.root_checkout(repo)
+        self.assertEqual(requested, repo.resolve())
+        self.assertEqual(authoritative, repo.resolve())
+
+    def test_root_checkout_rejects_linked_worktree_without_separate_root_fact(
+        self,
+    ) -> None:
+        _, linked = self.make_linked_worktree(separate_git_dir=True)
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            "cannot resolve root checkout from Git common directory",
+        ):
+            harness.root_checkout(linked)
+
     def test_root_checkout_rejects_non_repo(self) -> None:
         outside = Path(self.temp.name) / "outside"
         outside.mkdir()
@@ -1625,6 +1698,34 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn(str(local_hooks), detail)
         self.assertIn("ignored worktree copy differs", detail)
+
+    def test_doctor_rejects_valid_looking_worktree_only_hook(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(linked, valid_adapter)
+        result, output = self.run_doctor_with_fixture_globals(linked)
+        root_hooks = root / ".codex" / "hooks.json"
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn(str(root_hooks), output)
+        self.assertIn("authoritative root source is absent", output)
+        self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
+
+    def test_doctor_uses_identical_root_checkout_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        root_hooks = self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, valid_adapter)
+        result, output = self.run_doctor_with_fixture_globals(linked)
+        self.assertEqual(result, 0, output)
+        self.assertIn(f"[ok] Codex hook source: linked worktree", output)
+        self.assertIn(str(root_hooks), output)
+        self.assertIn("identical worktree copy is ignored", output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
 
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])

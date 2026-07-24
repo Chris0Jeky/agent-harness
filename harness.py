@@ -73,6 +73,17 @@ def git_common_dir(path: Path) -> Path:
     return common_dir.resolve()
 
 
+def git_dir(path: Path) -> Path:
+    """Return Git's own directory for the checkout containing ``path``."""
+    result = run(["git", "rev-parse", "--git-dir"], path)
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError(f"cannot resolve Git directory: {path}")
+    directory = Path(result.stdout.strip())
+    if not directory.is_absolute():
+        directory = path / directory
+    return directory.resolve()
+
+
 def root_checkout(path: Path) -> tuple[Path, Path]:
     """Resolve a requested checkout and its authoritative root checkout.
 
@@ -82,9 +93,7 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
     """
     requested_checkout = git_root(path)
     common_dir = git_common_dir(requested_checkout)
-    if (requested_checkout / ".git").is_dir() and (
-        requested_checkout / ".git"
-    ).resolve() == common_dir:
+    if git_dir(requested_checkout) == common_dir:
         return requested_checkout, requested_checkout
 
     result = run(["git", "worktree", "list", "--porcelain"], requested_checkout)
@@ -96,9 +105,13 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
         if not line.startswith("worktree "):
             continue
         candidate = Path(line.removeprefix("worktree ")).resolve()
-        candidate_git_dir = candidate / ".git"
-        if candidate_git_dir.is_dir() and candidate_git_dir.resolve() == common_dir:
-            return requested_checkout, candidate
+        if not (candidate / ".git").exists():
+            continue
+        try:
+            if git_dir(candidate) == common_dir:
+                return requested_checkout, candidate
+        except HarnessError:
+            continue
     raise HarnessError(
         "cannot resolve root checkout from Git common directory: " f"{common_dir}"
     )
