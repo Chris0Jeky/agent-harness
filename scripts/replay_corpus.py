@@ -60,6 +60,18 @@ COVERAGE LIMITS (read before quoting a number)
   11,739. `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` are deliberately kept —
   the floor resolves `~` and home-root comparisons through them. The run prints
   the names (never the values) of everything it cleared.
+* A run measures one overlay combination. `tier.json` carries flags as well as a
+  tier (`sensitive_data`, `wave_mode`, `dormant_production`,
+  `relaxed_work_loss_guards`) and the floor keys real branches on them —
+  `strict = tier >= 4 or wave_mode` turns the work-loss guards into denies, and
+  `sensitive_data` adds the public-remote push denies. With no `--flag`, every
+  row describes a repo whose flags are all false, which is not what
+  `hq-private` (`sensitive_data`) or `wealthlens-hq`
+  (`relaxed_work_loss_guards`) run. Measured at T2 on this corpus,
+  `git reset --hard HEAD~1`, `git push` and `git checkout -- .` are allow with
+  no flags and deny under `wave_mode`. Pass `--flag` per overlay the gated repo
+  declares; the active set is printed in the header, labels every tier row, and
+  is recorded in the JSON `run` block.
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -96,7 +108,16 @@ DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
 DEFAULT_TIERS = (1, 2, 3, 4)
 DECISIONS = ("allow", "ask", "deny", "error")
 RUNTIMES = ("codex", "claude")
-
+# Tier overlays a repo may declare in `tier.json` (SPECS §2). The floor branches
+# on these, so a row measured without them describes a repo none of the estate
+# actually is. `choices` on `--flag` rejects a typo instead of quietly measuring
+# the no-overlay case under an overlay's name.
+OVERLAY_FLAGS = (
+    "sensitive_data",
+    "wave_mode",
+    "dormant_production",
+    "relaxed_work_loss_guards",
+)
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
 # The argument brace is matched separately from the call so that a non-object
@@ -717,12 +738,19 @@ def decide(
     command: str,
     tier: int,
     project_dir: str,
+    flags: dict[str, bool] | None = None,
 ) -> tuple[str, str]:
-    """Return (decision, reason); an exception inside `check()` is its own class."""
+    """Return (decision, reason); an exception inside `check()` is its own class.
+
+    `flags` is the tier-overlay set (`wave_mode`, `sensitive_data`, ...) exactly
+    as `tier.json` would declare it. A fresh dict is handed to every call so a
+    floor version that normalises its config in place cannot leak state from one
+    command into the next.
+    """
     try:
         decision, reason = module.check(
             command,
-            {"tier": tier, "flags": {}},
+            {"tier": tier, "flags": dict(flags or {})},
             project_dir,
             project_dir,
             remote_resolver=stub_resolver,
@@ -742,6 +770,7 @@ def _worker_init(
     candidate_path: str,
     tiers: Sequence[int],
     project_dir: str,
+    flags: dict[str, bool] | None = None,
 ) -> None:
     # Cleared before the modules load, then again with what they declare they
     # read. Workers are forked/spawned copies, so the parent's clearing does not
@@ -756,6 +785,7 @@ def _worker_init(
     _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
     _WORKER["project_dir"] = project_dir
+    _WORKER["flags"] = dict(flags or {})
 
 
 def _worker_run(
@@ -763,13 +793,14 @@ def _worker_run(
 ) -> tuple[list[tuple[int, list, list]], int]:
     tiers = _WORKER["tiers"]
     project_dir = _WORKER["project_dir"]
+    flags = _WORKER["flags"]
     baseline = _WORKER["baseline"]
     candidate = _WORKER["candidate"]
     before = _OFFLINE_READS["count"]
     results = []
     for index, command in chunk:
-        base = [decide(baseline, command, tier, project_dir) for tier in tiers]
-        cand = [decide(candidate, command, tier, project_dir) for tier in tiers]
+        base = [decide(baseline, command, tier, project_dir, flags) for tier in tiers]
+        cand = [decide(candidate, command, tier, project_dir, flags) for tier in tiers]
         results.append((index, base, cand))
     return results, _OFFLINE_READS["count"] - before
 
@@ -782,9 +813,11 @@ def replay(
     project_dir: str,
     jobs: int,
     progress: bool,
+    flags: dict[str, bool] | None = None,
 ) -> tuple[list[list[tuple[str, str]]], list[list[tuple[str, str]]], int]:
     """Return (baseline, candidate) verdicts indexed [command][tier], and the
     number of git-config reads the offline stub answered instead of spawning."""
+    overlay = dict(flags or {})
     total = len(commands)
     baseline_out: list[Any] = [None] * total
     candidate_out: list[Any] = [None] * total
@@ -804,6 +837,7 @@ def replay(
                 str(candidate_path),
                 tuple(tiers),
                 project_dir,
+                overlay,
             ),
         )
         with pool:
@@ -816,7 +850,9 @@ def replay(
                 if progress:
                     report_progress(done, total)
     else:
-        _worker_init(str(baseline_path), str(candidate_path), tiers, project_dir)
+        _worker_init(
+            str(baseline_path), str(candidate_path), tiers, project_dir, overlay
+        )
         for chunk in chunks:
             batch, reads = _worker_run(chunk)
             for index, base, cand in batch:
@@ -1074,16 +1110,52 @@ def clip(text: str, width: int) -> str:
     return flat[: width - 3] + "..."
 
 
+def print_rest_of_bucket(
+    delta: dict[str, Any], label: str, top: int, tier_key: Any
+) -> None:
+    """Point at the untruncated list instead of leaving the reader with `--top`.
+
+    stdout deliberately never carries whole commands (see PRIVACY), so the
+    remainder cannot simply be printed; naming its exact JSON path is what makes
+    the count auditable.
+    """
+    remaining = delta[f"{label}_unique"] - top
+    if remaining > 0:
+        print(
+            f"    ... and {remaining} more; the complete list is in --json at "
+            f"tiers.{tier_key}.delta.{label}_all"
+        )
+
+
+def tier_label(tier: Any, overlays: Sequence[str]) -> str:
+    """`T2`, or `T2+wave_mode` — a rate is only meaningful with its overlay set.
+
+    A row labelled plain `T2` claims to describe every T2 repo. It describes
+    only the ones that declare no flags, which `hq-private` and `wealthlens-hq`
+    are not, so the overlay travels with the label everywhere a tier is named.
+    """
+    return f"T{tier}" + ("".join(f"+{name}" for name in overlays))
+
+
 def print_report(result: dict[str, Any], top: int, width: int) -> None:
     corpus = result["corpus"]
     baseline = result["baseline"]
     candidate = result["candidate"]
+    overlays = list(result["run"].get("overlays") or [])
     print("=" * 78)
     print("deny-floor corpus replay")
     print("=" * 78)
     print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
     print(f"candidate : floor {candidate['version']}  {candidate['path']}")
     print(f"project   : {result['project_dir']}")
+    print(
+        "overlays  : "
+        + (
+            ", ".join(overlays)
+            if overlays
+            else "(none) - every row describes a repo declaring no tier.json flags"
+        )
+    )
     cleared = result["run"].get("cleared_host_env") or []
     print(
         "host env  : cleared "
@@ -1136,8 +1208,10 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         "  ask -> deny for Codex. For Claude an ask is a prompt, not a refusal;\n"
         "  the Claude-semantics refusal rate (deny + error) is per tier below."
     )
+    labels = {key: tier_label(key, overlays) for key in result["tier_order"]}
+    label_width = max([len("tier")] + [len(text) for text in labels.values()]) + 2
     header = (
-        f"  {'tier':<5}{'baseline':>18}{'candidate':>18}"
+        f"  {'tier':<{label_width}}{'baseline':>18}{'candidate':>18}"
         f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}"
     )
     print(header)
@@ -1146,7 +1220,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         cand = result["tiers"][tier_key]["candidate"]
         delta = result["tiers"][tier_key]["delta"]
         print(
-            f"  T{tier_key:<4}"
+            f"  {labels[tier_key]:<{label_width}}"
             f"{base['unique_blocked']:>8} {base['unique_block_rate'] * 100:>8.2f}%"
             f"{cand['unique_blocked']:>8} {cand['unique_block_rate'] * 100:>8.2f}%"
             f"{delta['newly_blocked_unique']:>9}{delta['newly_allowed_unique']:>9}"
@@ -1163,7 +1237,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     for tier_key in result["tier_order"]:
         tier = result["tiers"][tier_key]
         print("=" * 78)
-        print(f"tier {tier_key}")
+        print(f"tier {tier_key}  [overlays: {', '.join(overlays) or 'none'}]")
         print("-" * 78)
         for label in ("baseline", "candidate"):
             summary = tier[label]
@@ -1332,6 +1406,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[0, 1, 2, 3, 4],
         help="tier to replay (repeatable; default 1 2 3 4)",
     )
+    parser.add_argument(
+        "--flag",
+        action="append",
+        dest="flags",
+        choices=sorted(OVERLAY_FLAGS),
+        help=(
+            "tier.json overlay to enable for every replayed command (repeatable; "
+            "default: none, i.e. a repo that declares no flags)"
+        ),
+    )
     parser.add_argument("--limit", type=int, help="replay a deterministic sample only")
     parser.add_argument(
         "--max-command-chars",
@@ -1382,12 +1466,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore commands embedded in Codex `exec` JS (issue #21 parity)",
     )
     parser.add_argument("--quiet", action="store_true", help="no progress on stderr")
+    parser.add_argument(
+        "--allow-errors",
+        action="store_true",
+        help=(
+            "report an exception inside check() instead of exiting non-zero "
+            "(for a deliberate crash census only; the deltas are not usable)"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     tiers = sorted(set(args.tiers)) if args.tiers else list(DEFAULT_TIERS)
+    overlays = sorted(set(args.flags or ()))
+    flags = {name: True for name in overlays}
     progress = not args.quiet
 
     if args.from_corpus:
@@ -1446,6 +1540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.project_dir),
             max(1, args.jobs),
             progress,
+            flags,
         )
     finally:
         os.environ.update(injected)
@@ -1464,6 +1559,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "project_dir": str(args.project_dir),
         "tier_order": tiers,
         "run": {
+            "flags": flags,
+            "overlays": overlays,
             "limit": args.limit,
             "max_command_chars": args.max_command_chars,
             "jobs": max(1, args.jobs),

@@ -10,7 +10,12 @@ extraction channel that was skipped without being counted, and a sample that
 had to stay stable across runs for a smoke run and a full run to be comparable.
 """
 
+import contextlib
 import importlib.util
+import io
+import json
+import tempfile
+import textwrap
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -20,6 +25,28 @@ REPLAY_PATH = ROOT / "scripts" / "replay_corpus.py"
 
 BACKSLASH = chr(92)
 QUOTE = chr(34)
+
+# A dispatch.py stand-in with the two shapes the replay harness requires: a
+# `check()` with the current signature, and a `command_output` bound as some
+# function's `command_runner` default so `make_module_offline` can prove the run
+# spawns nothing. `DECIDE` is spliced in as the body of the verdict rule.
+STUB_DISPATCH = """
+FLOOR_VERSION = "{version}"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+    tier = tier_cfg["tier"]
+    flags = tier_cfg["flags"]
+{decide}
+"""
 
 
 def load_module(name: str, path: Path):
@@ -421,6 +448,159 @@ class OfflineStubTests(unittest.TestCase):
         bare.command_output = command_output
         with self.assertRaises(RuntimeError):
             replay.make_module_offline(bare)
+
+
+class EndToEndTestCase(unittest.TestCase):
+    """Drive `main()` over throwaway stub floors, as a gate caller would.
+
+    The findings these cover are all about what the CLI does with a run, not
+    about a pure function, so they are only reachable through `main()`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def write_corpus(self, *commands):
+        path = self.dir / "corpus.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"command": command, "codex": 1, "claude": 0}) + "\n"
+                for command in commands
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def write_dispatch(self, name, version, decide):
+        path = self.dir / f"{name}.py"
+        body = "\n".join(
+            "    " + line for line in textwrap.dedent(decide).strip().splitlines()
+        )
+        path.write_text(
+            STUB_DISPATCH.format(version=version, decide=body), encoding="utf-8"
+        )
+        return path
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = replay.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+
+class OverlayFlagTests(EndToEndTestCase):
+    """Overlays were hard-coded off, so a T2 row described no estate repo."""
+
+    def test_decide_passes_the_flag_set_into_check(self):
+        seen = []
+
+        class RecordingModule:
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                seen.append(tier_cfg)
+                return "allow", ""
+
+        replay.decide(RecordingModule, "git push", 2, ".", {"wave_mode": True})
+        self.assertEqual(seen[-1], {"tier": 2, "flags": {"wave_mode": True}})
+        # Omitted entirely, the floor must see a declared-no-flags repo.
+        replay.decide(RecordingModule, "git push", 2, ".")
+        self.assertEqual(seen[-1], {"tier": 2, "flags": {}})
+
+    def test_each_call_gets_its_own_flags_dict(self):
+        # A floor version that normalises its config in place must not be able
+        # to carry a flag from one replayed command into the next.
+        seen = []
+
+        class MutatingModule:
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                seen.append(dict(tier_cfg["flags"]))
+                tier_cfg["flags"]["sensitive_data"] = True
+                return "allow", ""
+
+        flags = {"wave_mode": True}
+        replay.decide(MutatingModule, "a", 2, ".", flags)
+        replay.decide(MutatingModule, "b", 2, ".", flags)
+        self.assertEqual(seen, [{"wave_mode": True}, {"wave_mode": True}])
+        self.assertEqual(flags, {"wave_mode": True})
+
+    def test_cli_flag_reaches_the_replay_and_changes_the_verdict(self):
+        corpus = self.write_corpus("git reset --hard HEAD~1")
+        floor = self.write_dispatch(
+            "wave_aware",
+            "9.9.9",
+            """
+            if flags.get("wave_mode"):
+                return "deny", "work-loss guard is a wall under wave_mode"
+            return "allow", ""
+            """,
+        )
+        common = [
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        ]
+        code, plain, _ = self.run_main(*common)
+        self.assertEqual(code, 0)
+        code, waved, _ = self.run_main(*common, "--flag", "wave_mode")
+        self.assertEqual(code, 0)
+        # Same command, same tier, opposite verdict: the overlay is load-bearing
+        # and a run that cannot set it cannot speak for a wave_mode repo.
+        self.assertIn("deny=0", plain)
+        self.assertIn("deny=1", waved)
+
+    def test_active_overlays_label_the_report_and_the_json(self):
+        corpus = self.write_corpus("git push")
+        floor = self.write_dispatch("allowing", "9.9.9", 'return "allow", ""')
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            "--flag",
+            "wave_mode",
+            "--flag",
+            "sensitive_data",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("overlays  : sensitive_data, wave_mode", text)
+        # The tier row itself carries the overlay; a bare "T2" would claim to
+        # describe repos this run never measured.
+        self.assertIn("T2+sensitive_data+wave_mode", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["overlays"], ["sensitive_data", "wave_mode"])
+        self.assertEqual(run["flags"], {"sensitive_data": True, "wave_mode": True})
+
+    def test_an_unknown_overlay_is_rejected(self):
+        # Silently measuring the no-overlay case under a misspelt overlay name
+        # is the exact under-count this option exists to remove.
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            replay.build_parser().parse_args(["--flag", "wave-mode"])
+
+    def test_tier_label_is_stable_without_overlays(self):
+        self.assertEqual(replay.tier_label(3, []), "T3")
+        self.assertEqual(replay.tier_label(3, ["wave_mode"]), "T3+wave_mode")
 
 
 if __name__ == "__main__":
