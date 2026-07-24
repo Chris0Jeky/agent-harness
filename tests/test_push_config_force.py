@@ -53,6 +53,7 @@ class PushConfigForceTests(unittest.TestCase):
         *,
         mirror: bool = False,
         valueless_mirror: bool = False,
+        receivepack: str | None = None,
     ) -> str:
         repo = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
@@ -68,6 +69,8 @@ class PushConfigForceTests(unittest.TestCase):
                 os.path.join(repo, ".git", "config"), "a", encoding="utf-8"
             ) as handle:
                 handle.write('[remote "bare"]\n\tmirror\n')
+        if receivepack is not None:
+            git(repo, "config", "remote.origin.receivepack", receivepack)
         return repo
 
     def _decide(self, repo: str, command: str, tier: int = 1):
@@ -95,8 +98,16 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo(None, valueless_mirror=True)
         self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
 
+    def test_helper_flags_configured_receivepack(self) -> None:
+        repo = self._repo(None, receivepack="helper --unsafe")
+        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+
     def test_helper_ignores_non_force_refspec(self) -> None:
         repo = self._repo("HEAD:refs/heads/main")
+        self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
+
+    def test_helper_ignores_matching_branches_refspec(self) -> None:
+        repo = self._repo(":")
         self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
 
     def test_helper_ignores_absent_config(self) -> None:
@@ -118,6 +129,12 @@ class PushConfigForceTests(unittest.TestCase):
         self.assertEqual(decision, "deny", reason)
         self.assertIn("push-config-force", reason)
 
+    def test_bare_push_denied_when_receivepack_is_configured(self) -> None:
+        repo = self._repo(None, receivepack="helper --unsafe")
+        decision, reason = self._decide(repo, "git push origin")
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("push-config-force", reason)
+
     def test_bare_push_denied_under_git_dir_override(self) -> None:
         # A GIT_DIR override points git at a different repo than the resolver's
         # cwd, so the inherited config cannot be verified -> fail closed.
@@ -125,6 +142,29 @@ class PushConfigForceTests(unittest.TestCase):
         for command in (
             "GIT_DIR=/other/repo/.git git push origin",
             "$env:GIT_DIR='/other/repo/.git'; git push",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("push-config-unverifiable", reason)
+
+    def test_bare_push_denied_under_scoped_home_override(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "HOME=/other/home git push origin",
+            "XDG_CONFIG_HOME=/other/config git push origin",
+            "$env:USERPROFILE='C:/other/home'; git push origin",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("push-config-unverifiable", reason)
+
+    def test_bare_push_denied_after_repository_config_write(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "printf unsafe >> .git/config; git push origin",
+            "Set-Content .git/config unsafe; git push origin",
         ):
             with self.subTest(command=command):
                 decision, reason = self._decide(repo, command)
@@ -160,6 +200,16 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo("+HEAD:refs/heads/main")
         decision, _ = self._decide(repo, "git push origin main")
         self.assertEqual(decision, "allow")
+
+    def test_repo_option_with_explicit_refspec_overrides_config_force(self) -> None:
+        repo = self._repo("+HEAD:refs/heads/main")
+        for command in (
+            "git push --repo origin main",
+            "git push --repo=origin main",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "allow", reason)
 
     def test_configured_force_still_denied_at_t4(self) -> None:
         repo = self._repo("+HEAD:refs/heads/main")
