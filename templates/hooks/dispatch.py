@@ -5418,6 +5418,43 @@ def push_remotes(
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def configured_push_may_force(
+    project_dir: str,
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+    deadline: float | None = None,
+) -> bool:
+    """True when any configured remote push refspec forces (leading '+').
+
+    A bare `git push` (no command-line refspec) inherits `remote.<name>.push`, so a
+    configured `+src:dst` silently force-updates a shared branch — the charter
+    force-push case (BLUEPRINT §2) that command-line `+`/`--force`/lease checks miss
+    because no refspec appears in argv. Over-approximates across all remotes (a '+'
+    push refspec anywhere -> refuse the bare push); explicit refspecs never reach
+    here. Resolution failure/absence -> "" -> not forced, matching git's own
+    non-fast-forward-rejecting default for an unconfigured bare push."""
+    output = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "config",
+            "--get-regexp",
+            r"^remote\..*\.push$",
+        ],
+        project_dir,
+        deadline,
+    )
+    for line in output.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        for refspec in parts[1].split():
+            if refspec.startswith("+") or refspec.startswith("--force"):
+                return True
+    return False
+
+
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
     """Reject remote-name or URL changes that can retarget a later push."""
     action = next((token.lower() for token in args if not token.startswith("-")), "")
@@ -7363,11 +7400,24 @@ def check(
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
                 if len(positionals) < 2 and not explicit_selector:
                     # Plain `git push` to a configured upstream is the closing move
-                    # of nearly every agent loop. Force spellings (-f/--force/
-                    # +refspec) and force-with-lease are rejected ABOVE this point,
-                    # so a bare push cannot conceal a charter irreversible; the only
-                    # residual is opaque config, which is blast-radius scaled.
+                    # of nearly every agent loop. Command-line force spellings
+                    # (-f/--force/+refspec) and force-with-lease are rejected ABOVE
+                    # this point. The remaining charter risk is a CONFIGURED force:
+                    # a bare push inherits `remote.<name>.push`, which can carry a
+                    # leading '+' and force a shared branch (adversarial review of
+                    # PR #23). Resolve that config and deny if it forces; only the
+                    # provably non-force bare push is graduated by blast radius.
                     # sensitive_data push-privacy resolution still runs below.
+                    if configured_push_may_force(
+                        current_cwd,
+                        git_toks[1:subcommand_index] if subcommand_index else None,
+                        deadline=_remote_deadline,
+                    ):
+                        return (
+                            "deny",
+                            "[push-config-force] A bare git push can inherit a force ('+') refspec "
+                            "from remote config; push an explicit non-force refspec instead.",
+                        )
                     opaque = graduated_opacity(
                         "push-opaque-refspec",
                         "A git push without an explicit refspec can inherit opaque config.",
