@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.2 (2026-07-19)"
+FLOOR_VERSION = "1.5.3 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1702,6 +1702,213 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
+def windows_operator_segments(command: str) -> list[tuple[str, str]]:
+    """Split Windows command operators without splitting quoted inert text."""
+    result: list[tuple[str, str]] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote and (index == 0 or command[index - 1] != "`"):
+                quote = None
+            current.append(char)
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            current.append(char)
+        elif char in ";&|\n":
+            operator = char
+            if index + 1 < len(command) and (
+                command[index + 1] == char
+                or (char == "|" and command[index + 1] == "&")
+            ):
+                operator += command[index + 1]
+                index += 1
+            segment = "".join(current).strip()
+            if segment:
+                result.append((segment, operator))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    segment = "".join(current).strip()
+    if segment:
+        result.append((segment, ""))
+    return result
+
+
+_POWERSHELL_BOUND_WINDOWS_QUOTE = re.compile(
+    r'(?i)(?P<prefix>-(?:literal)?path:)"(?P<value>[^"\r\n]*\\)"' r"(?=$|[\s;&|])"
+)
+
+
+def windows_fallback_tokens(candidate: str) -> list[str]:
+    """Recover argv using Windows quote semantics after POSIX shlex rejects it."""
+    space_marker = "__HARNESS_WINDOWS_BOUND_SPACE__"
+    while space_marker in candidate:
+        space_marker += "_"
+
+    def protect_bound_path(match: "re.Match[str]") -> str:
+        return match.group("prefix") + match.group("value").replace(" ", space_marker)
+
+    candidate = _POWERSHELL_BOUND_WINDOWS_QUOTE.sub(protect_bound_path, candidate)
+    try:
+        recovered = shlex.split(candidate, posix=False)
+    except ValueError:
+        recovered = shlex.split(candidate.rstrip("\"'"), posix=False)
+    return [
+        (
+            token[1:-1]
+            if len(token) >= 2 and (token[0], token[-1]) in {('"', '"'), ("'", "'")}
+            else token
+        ).replace(space_marker, " ")
+        for token in recovered
+    ]
+
+
+def strip_windows_execution_prefix(candidate: str) -> str:
+    """Expose a Windows command after inert control and redirect prefixes."""
+    candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
+    redirect = re.compile(
+        r"(?is)^(?:\d+)?(?:>>?|<)\s*" r"(?:&\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+    )
+    while match := redirect.match(candidate):
+        candidate = candidate[match.end() :].lstrip()
+    return candidate
+
+
+def normalize_windows_shell_head(candidate: str) -> str:
+    """Reduce a path-qualified cmd/PowerShell executable to its known head."""
+    match = re.match(
+        r"(?is)^(?:[A-Za-z]:[\\/]|\\\\)(?:"
+        r'[^"\r\n]*[\\/](?P<quoted>cmd|powershell|pwsh)(?:\.exe)?"'
+        r"|[^\s\"\r\n]*[\\/](?P<bare>cmd|powershell|pwsh)(?:\.exe)?"
+        r")(?=\s|$)",
+        candidate,
+    )
+    if not match:
+        return candidate
+    return (match.group("quoted") or match.group("bare")) + candidate[match.end() :]
+
+
+def unparseable_recursive_delete(command: str) -> list[list[str]]:
+    """Recover recursive deletes hidden by non-POSIX Windows quoting.
+
+    A trailing backslash in a double-quoted Windows path is valid to cmd and
+    PowerShell but makes POSIX shlex reject the whole command. Peel only
+    wrappers that execute their child text; inert commands such as echo and
+    Write-Output deliberately stop the walk.
+    """
+    candidates = [segment for segment, _operator in windows_operator_segments(command)]
+    seen: set[str] = set()
+    recovered_deletes: list[list[str]] = []
+
+    # Every recognized wrapper peel shortens the candidate, and ``seen``
+    # prevents duplicate work. Do not impose a traversal count that turns a
+    # sufficiently deep but still executable wrapper chain into an allow.
+    while candidates:
+        candidate = candidates.pop(0).lstrip()
+        candidate = strip_windows_execution_prefix(candidate)
+        candidate = normalize_windows_shell_head(candidate)
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+
+        delete_head = re.match(
+            r"(?i)(?:[A-Za-z0-9_.-]+\\)?"
+            r"(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)"
+            r"(?=$|[\s;/\"'])",
+            candidate,
+        )
+        if delete_head:
+            delete_name = delete_head.group("head").lower()
+            delete_tail = candidate[delete_head.end("head") :].lstrip("\"'")
+            option_tokens = re.findall(r"(?<!\S)-[^\s\"']+", delete_tail)
+            powershell_recurse = any(
+                is_powershell_recurse_flag(token) for token in option_tokens
+            )
+            posix_recurse = delete_name == "rm" and any(
+                token.startswith("-")
+                and not token.startswith("--")
+                and "r" in token[1:].lower()
+                for token in option_tokens
+            )
+            cmd_recurse = delete_name in {"del", "erase", "rd", "rmdir"} and bool(
+                re.search(r"(?i)(?:^|/)s(?=/|\s|$)", delete_tail)
+            )
+            if powershell_recurse or posix_recurse or cmd_recurse:
+                executable = candidate[: delete_head.end("head")]
+                recovered_deletes.append(
+                    windows_fallback_tokens(f"{executable} {delete_tail}")
+                )
+            continue
+
+        try:
+            candidate_tokens = windows_fallback_tokens(candidate)
+        except ValueError:
+            recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            continue
+        candidate_head, normalized_tokens = command_head(candidate_tokens)
+        if candidate_head in {"start-process", "saps"}:
+            child, _error = powershell_start_process_command(normalized_tokens)
+            if child is None:
+                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            else:
+                candidates.append(child)
+            continue
+        if candidate_head in {"start-job", "sajb", "start-threadjob"}:
+            scripts, _error = powershell_job_scriptblocks(normalized_tokens)
+            if scripts is None:
+                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            else:
+                candidates.extend(scripts)
+            continue
+
+        start_switch = (
+            r"\s+/(?:d|node|affinity|machine)\s+(?:\"[^\"]*\"|\S+)"
+            r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
+            r"realtime|abovenormal|belownormal|wait)"
+        )
+        wrapper = re.match(
+            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
+            candidate,
+        )
+        if not wrapper:
+            wrapper = re.match(
+                r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
+                r"\s[-/](?:command|c)(?:\s+|$)(?P<child>.+)$",
+                candidate,
+            )
+        if not wrapper:
+            wrapper = re.match(r"(?is)^call\s+(?P<child>.+)$", candidate)
+        if not wrapper:
+            wrapper = re.match(
+                r"(?is)^start\b"
+                rf"(?:{start_switch})*"
+                r"(?:\s+\"[^\"]*\")?"
+                rf"(?:{start_switch})*\s+(?P<child>.+)$",
+                candidate,
+            )
+        if not wrapper:
+            wrapper = re.match(
+                r"(?is)^if\s+(?:/i\s+)?(?:not\s+)?(?:\S+\s+){1,3}"
+                r"(?P<child>(?:[\"'&@({\s])*(?:cmd|powershell|pwsh|call|start|"
+                r"remove-item|ri|rm|del|erase|rd|rmdir)\b.+)$",
+                candidate,
+            )
+        if not wrapper:
+            wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
+        if wrapper:
+            child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
+            child_segments = windows_operator_segments(child)
+            candidates.extend(segment for segment, _operator in child_segments)
+
+    return recovered_deletes
+
+
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
     """Tokenize executable argv while protecting quoted operator characters.
 
@@ -1741,15 +1948,43 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         quoted[placeholder] = value
         return placeholder
 
+    bound_windows_delete = []
+    if _POWERSHELL_BOUND_WINDOWS_QUOTE.search(command):
+        bound_windows_delete = unparseable_recursive_delete(command)
+
     protected = _QUOTED.sub(protect, command)
     lexer = shlex.shlex(protected, posix=True, punctuation_chars=";&|<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
+        if bound_windows_delete:
+            raise ValueError("PowerShell-bound Windows path needs fallback parsing")
         raw_tokens = list(lexer)
     except ValueError:
-        return []
+        # POSIX shlex treats a final backslash inside a double-quoted Windows
+        # path as escaping the closing quote. PowerShell does not, so this can
+        # hide an otherwise recognizable recursive delete. Fail closed only
+        # for that irreversible surface; benign PowerShell scriptblocks can
+        # also be intentionally non-POSIX and remain inspectable by the other
+        # normalization passes below.
+        windows_segments = windows_operator_segments(command)
+        recovered_segments: list[tuple[list[str], str]] = []
+        if len(windows_segments) > 1:
+            try:
+                recovered_segments.extend(
+                    (windows_fallback_tokens(segment), operator)
+                    for segment, operator in windows_segments
+                )
+            except ValueError:
+                return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
+        recovered_segments.extend(
+            (segment, "")
+            for segment in (
+                bound_windows_delete or unparseable_recursive_delete(command)
+            )
+        )
+        return recovered_segments
 
     separators = set(";&|\n")
     result: list[tuple[list[str], str]] = []
@@ -4248,7 +4483,8 @@ def parse_git_config_args(
             # Git's parser stops option processing at the first real operand.
             operands.extend(item.lower() for item in args[index:])
             break
-        options.append(lowered)
+        option_name = lowered.split("=", 1)[0]
+        options.append(option_name)
         if (
             lowered.startswith("-f")
             and not lowered.startswith("--")
@@ -4257,7 +4493,18 @@ def parse_git_config_args(
             file_targets.append(token[2:])
             index += 1
             continue
-        option_name = lowered.split("=", 1)[0]
+        section_option = next(
+            (
+                option
+                for option in {"--remove-section", "--rename-section"}
+                if option_name == option or git_option_abbreviates(option_name, option)
+            ),
+            None,
+        )
+        if section_option is not None and "=" in token:
+            operands.append(token.split("=", 1)[1].lower())
+            index += 1
+            continue
         value_option = next(
             (
                 option
@@ -4290,7 +4537,10 @@ def parse_git_config_args(
 def protected_git_config_section(section: str) -> bool:
     """Return whether a section can alter push destinations or inject config."""
     lowered = section.lower()
-    return lowered.startswith(("remote.", "url.", "includeif.")) or lowered == "include"
+    return lowered.startswith(("remote.", "url.", "includeif.")) or lowered in {
+        "include",
+        "push",
+    }
 
 
 def executable_git_config_section(section: str) -> bool:
@@ -4394,7 +4644,7 @@ def protected_git_config_key(token: str) -> bool:
         or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
         or re.fullmatch(r"include(?:if)?\..+", token)
         or re.fullmatch(r"submodule\..+\.url", token)
-        or token == "push.recursesubmodules"
+        or token.startswith("push.")
         or executable_git_config_key(token)
     )
 
@@ -5809,6 +6059,7 @@ def check(
             for marker in (
                 "__HARNESS_UNRESOLVED_ANSI_C_QUOTE__",
                 "__HARNESS_UNRESOLVED_LOCALE_QUOTE__",
+                "__HARNESS_UNPARSEABLE_QUOTING__",
             )
         ):
             return "deny", "Cannot safely decode an executable shell word."
