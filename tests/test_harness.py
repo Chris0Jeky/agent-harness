@@ -1898,6 +1898,102 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project root markers", output)
 
+    def test_doctor_reports_absent_project_root_marker_override(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project root markers", output)
+        self.assertIn("0 explicit inspectable declaration(s)", output)
+
+    def test_doctor_rejects_nested_profile_project_root_markers(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[profiles.custom]\n"
+                'project_root_markers = ["workspace.toml"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("profiles.custom.project_root_markers", output)
+
+    def test_doctor_rejects_multiple_project_root_markers(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config='project_root_markers = [".git", "workspace.toml"]\n',
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+
+    def test_doctor_rejects_conflicting_profile_project_root_markers(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config='project_root_markers = [".git"]\n',
+            profile_configs={
+                "custom.config.toml": 'project_root_markers = ["workspace.toml"]\n'
+            },
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("custom.config.toml", output)
+
+    def test_doctor_rejects_invalid_marker_config_toml(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config="project_root_markers = [\n"
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("invalid Codex config", output)
+
+    def test_doctor_rejects_unreadable_marker_config(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        with mock.patch.object(
+            harness, "toml_config", side_effect=PermissionError("fixture denied")
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers: fixture denied", output)
+
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
