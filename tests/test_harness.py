@@ -924,6 +924,54 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("must be a boolean", output)
 
+    def test_doctor_rejects_required_hook_feature_disable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements=("[feature_requirements]\n" "codex_hooks = false\n"),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("feature_requirements.codex_hooks=false", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_uses_canonical_required_hook_feature_precedence(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements=(
+                "[features]\n" "codex_hooks = false\n" "hooks = true\n"
+            ),
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
+        requirements = Path(self.temp.name) / "requirements.toml"
+        invalid_documents = (
+            '[features]\nhooks = "false"\n',
+            "[features]\nhooks = true\n\n"
+            "[feature_requirements]\ncodex_hooks = true\n",
+            '[features]\nunknown_future_feature = "invalid"\n',
+        )
+        for document in invalid_documents:
+            with self.subTest(document=document):
+                requirements.write_text(document, encoding="utf-8")
+                with self.assertRaises(harness.HarnessError):
+                    harness.requirements_hook_feature_declaration(requirements)
+
     def test_doctor_accepts_explicit_hook_feature_enable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -932,7 +980,8 @@ class HarnessTests(unittest.TestCase):
         self.write_hooks(repo, valid_adapter)
 
         result, output = self.run_doctor_with_fixture_globals(
-            repo, user_config="[features]\nhooks = true\n"
+            repo,
+            user_config=("[features]\n" "codex_hooks = false\n" "hooks = true\n"),
         )
 
         self.assertEqual(result, 0, output)

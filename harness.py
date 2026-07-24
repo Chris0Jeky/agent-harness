@@ -419,8 +419,12 @@ def hook_feature_declarations(
                 raise HarnessError(
                     f"features.{key} in {config_path}:{location} must be a boolean"
                 )
-            if active:
-                declarations.append((f"{config_path}:{location}.features.{key}", value))
+        if active:
+            key = "hooks" if "hooks" in features else "codex_hooks"
+            if key in features:
+                declarations.append(
+                    (f"{config_path}:{location}.features.{key}", features[key])
+                )
 
     inspect(config, "top-level", active=True)
     if reject_legacy_profile:
@@ -430,6 +434,40 @@ def hook_feature_declarations(
                 if isinstance(profile, dict):
                     inspect(profile, f"profiles.{name}", active=False)
     return declarations
+
+
+def requirements_hook_feature_declaration(
+    requirements_path: Path,
+) -> tuple[str, bool] | None:
+    """Return the effective managed Codex hook feature requirement, if present."""
+    requirements = toml_config(requirements_path)
+    if requirements is None:
+        return None
+    aliases = [
+        key for key in ("features", "feature_requirements") if key in requirements
+    ]
+    if len(aliases) > 1:
+        raise HarnessError(
+            f"{requirements_path} must not declare both features and feature_requirements"
+        )
+    if not aliases:
+        return None
+    section_name = aliases[0]
+    features = requirements[section_name]
+    if not isinstance(features, dict):
+        raise HarnessError(f"{section_name} in {requirements_path} must be a table")
+    for key, value in features.items():
+        if not isinstance(value, bool):
+            raise HarnessError(
+                f"{section_name}.{key} in {requirements_path} must be a boolean"
+            )
+
+    # ManagedFeatures canonicalizes both names to CodexHooks. The flattened
+    # BTreeMap visits the legacy name first, so a canonical declaration wins.
+    key = "hooks" if "hooks" in features else "codex_hooks"
+    if key not in features:
+        return None
+    return f"{requirements_path}:{section_name}.{key}", features[key]
 
 
 def valid_user_hook_states(config_path: Path) -> list[tuple[str, bool | None]]:
@@ -478,6 +516,11 @@ def codex_project_hook_activation_status(
             )
         if managed_only:
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
+    required_hook_feature = requirements_hook_feature_declaration(requirements_path)
+    if required_hook_feature is not None:
+        location, enabled = required_hook_feature
+        if not enabled:
+            blockers.append(f"{location}=false")
 
     stored_feature_paths = [
         system_config,
@@ -572,9 +615,11 @@ def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
 def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
     """Count deny-floor copies in every statically inspectable global layer."""
     system_config = codex_system_config_path()
+    requirements_path = system_config.with_name("requirements.toml")
+    requirements_hook_feature_declaration(requirements_path)
     json_paths = [system_config.with_name("hooks.json"), codex_home / "hooks.json"]
     config_sources = [
-        (system_config.with_name("requirements.toml"), "requirements"),
+        (requirements_path, "requirements"),
         (system_config, "config"),
         (codex_home / "config.toml", "config"),
         *((path, "config") for path in codex_profile_config_paths(codex_home)),
