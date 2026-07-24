@@ -164,6 +164,30 @@ class HarnessTests(unittest.TestCase):
                         result = harness.doctor(args)
         return result, output.getvalue()
 
+    def run_doctor_with_denied_static_source(
+        self, repo: Path, denied_path: Path, **fixtures: str
+    ) -> tuple[int, str]:
+        original_is_file = Path.is_file
+        original_read_text = Path.read_text
+
+        def fixture_is_file(path: Path) -> bool:
+            if path == denied_path:
+                return False
+            return original_is_file(path)
+
+        def fixture_read_text(
+            path: Path, *args: object, **kwargs: object
+        ) -> str:
+            if path == denied_path:
+                raise PermissionError("fixture denied")
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "is_file", autospec=True, side_effect=fixture_is_file):
+            with mock.patch.object(
+                Path, "read_text", autospec=True, side_effect=fixture_read_text
+            ):
+                return self.run_doctor_with_fixture_globals(repo, **fixtures)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
 
@@ -2096,6 +2120,44 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("requirements.toml", output)
+
+    def test_doctor_rejects_unreadable_static_global_toml(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        system_config = Path(self.temp.name) / "system-config.toml"
+
+        result, output = self.run_doctor_with_denied_static_source(
+            repo,
+            system_config,
+            system_config=self.inline_floor_config_text(),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] no inspectable global Codex floor: fixture denied", output
+        )
+
+    def test_doctor_rejects_unreadable_static_hooks_json(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        system_hooks = Path(self.temp.name) / "hooks.json"
+
+        result, output = self.run_doctor_with_denied_static_source(
+            repo,
+            system_hooks,
+            system_hooks=valid_adapter,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] no inspectable global Codex floor: fixture denied", output
+        )
 
     def test_doctor_rejects_managed_inline_global_floor(self) -> None:
         repo = self.make_repo()
