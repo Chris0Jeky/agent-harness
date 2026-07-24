@@ -27,6 +27,7 @@ import fnmatch
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -6138,40 +6139,67 @@ def configured_bare_push_is_dangerous(
     return False
 
 
-_SCRIPT_INTERPRETER_HEADS = {
-    "awk",
-    "bash",
-    "gawk",
-    "node",
-    "perl",
-    "php",
-    "pwsh",
-    "python",
-    "python3",
-    "powershell",
-    "ruby",
-    "sh",
-    "zsh",
+_REPOSITORY_CONFIG_PATH_CANDIDATE = re.compile(
+    r"(?i)(?<![a-z0-9_.-])\.git(?:/+[^/'\"`\s,;(){}\[\]|&<>]+)+"
+)
+_GIT_CONFIG_DIRECTORY_REFERENCE = re.compile(
+    r"(?i)(?:\$(?:\{(?:git_dir|git_common_dir)\}|(?:git_dir|git_common_dir))"
+    r"|%(?:git_dir|git_common_dir)%|\$env:(?:git_dir|git_common_dir))"
+)
+
+_REPOSITORY_CONFIG_WRITER_HEADS = {
+    "add-content",
+    "ac",
+    "clear-content",
+    "clc",
+    "copy",
+    "copy-item",
+    "cp",
+    "cpi",
+    "move",
+    "move-item",
+    "mv",
+    "mi",
+    "new-item",
+    "ni",
+    "out-file",
+    "rename-item",
+    "ren",
+    "rni",
+    "set-content",
+    "sc",
+    "tee",
+    "tee-object",
 }
+
+# Heads that read or print a path and have no in-place / output-to-file mode.
+# `echo`/`printf`/`write-*` are safe ONLY because the redirect check runs FIRST.
 _REPOSITORY_CONFIG_READER_HEADS = {
     "bat",
     "cat",
     "cmp",
     "diff",
+    "dir",
+    "echo",
+    "egrep",
+    "fgrep",
+    "file",
     "findstr",
     "gc",
+    "get-childitem",
     "get-content",
     "get-filehash",
     "get-item",
     "gi",
     "grep",
-    "egrep",
-    "fgrep",
     "head",
     "less",
     "ls",
     "md5sum",
     "more",
+    "printf",
+    "readlink",
+    "realpath",
     "rg",
     "select-string",
     "sha1sum",
@@ -6179,14 +6207,206 @@ _REPOSITORY_CONFIG_READER_HEADS = {
     "sls",
     "stat",
     "tail",
+    "test",
     "test-path",
     "type",
     "wc",
+    "write-host",
+    "write-output",
+}
+
+# Git BUILTINS that cannot write any config file and cannot run a program named
+# on their own command line (validated against git 2.45.1). Everything absent --
+# every state-changing porcelain, everything that writes config by design
+# (config/remote/submodule/worktree/init/clone/fetch/pull/gc), everything that
+# runs a user program (filter-branch, `bisect run`, `submodule foreach`),
+# everything with an output path (archive -o, bundle create, format-patch -o),
+# and every ALIAS name -- falls through to "possible writer". Git refuses to let
+# an alias shadow a builtin, so nothing here can be redefined out from under the
+# floor. The vouch means "this segment does not write config", NOT "this segment
+# is harmless": a vouched `git log` still runs whatever core.pager PRE-EXISTING
+# config names.
+_GIT_CONFIG_READONLY_SUBCOMMANDS = {
+    "annotate",
+    "blame",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "check-mailmap",
+    "cherry",
+    "count-objects",
+    "describe",
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "for-each-ref",
+    "grep",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "merge-base",
+    "name-rev",
+    "range-diff",
+    "rev-list",
+    "rev-parse",
+    "shortlog",
+    "show",
+    "show-ref",
+    "status",
+    "stripspace",
+    "var",
+    "verify-commit",
+    "verify-pack",
+    "verify-tag",
+    "version",
+    "whatchanged",
+}
+_GIT_CONFIG_READ_OPTIONS = {
+    "--get",
+    "--get-all",
+    "--get-color",
+    "--get-colorbool",
+    "--get-regexp",
+    "--get-urlmatch",
+    "--list",
+    "-l",
+}
+_GIT_OPAQUE_GLOBAL_OPTIONS = {"-c", "--config-env", "--exec-path"}
+_GH_TEXT_OPTIONS = {
+    "-b",
+    "-t",
+    "-m",
+    "-F",
+    "--body",
+    "--body-file",
+    "--title",
+    "--message",
+    "--notes",
+    "--notes-file",
+    "--comment",
+    "--subject",
 }
 
 
+def token_mentions_repository_config(token: str) -> bool:
+    """Recognize literal repository config paths in argv or inline text.
+
+    Covers `.git/config`, `.git/config.worktree`, the linked-worktree
+    `.git/worktrees/<name>/config.worktree`, and literal `$GIT_DIR` /
+    `$GIT_COMMON_DIR` / `%GIT_DIR%` / `$env:GIT_DIR` references. Only direct
+    spellings; encoded, generated and concatenated paths are out of scope for
+    this bounded temporal check.
+
+    Being substring-capable is what removes the need for an interpreter-head
+    gate: `python3.11 -c "open('.git/config','a')..."` carries the path INSIDE
+    one argument, and enumerating the launchers that can do that does not work
+    (python3.11, py, lua, deno, Rscript, julia, tclsh, `uv run` and `nix-shell`
+    all slipped past the list).
+    """
+    literal = restore_quoted_literal_markers(token).replace("\\", "/")
+    literal = _GIT_CONFIG_DIRECTORY_REFERENCE.sub(".git", literal)
+    for match in _REPOSITORY_CONFIG_PATH_CANDIDATE.finditer(literal):
+        normalized = posixpath.normpath(match.group(0)).lower()
+        if normalized in {".git/config", ".git/config.worktree"}:
+            return True
+        if re.fullmatch(r"\.git/worktrees/[^/]+/config\.worktree", normalized):
+            return True
+    return False
+
+
+def git_segment_is_config_readonly(toks: list[str]) -> bool:
+    """Whether this `git ...` invocation provably cannot rewrite a config file.
+
+    The same inversion applied to git itself: vouch the safe subcommands rather
+    than guess at the dangerous ones. Without it EVERY git subcommand naming a
+    config path -- `git status .git/config`, `git log --grep '.git/config'` --
+    was classed a possible writer and poisoned a later push.
+
+    Two guards keep the vouch honest. `--output*` really does write the named
+    file (`git diff --output=.git/config`). And `-c` / `--config-env` /
+    `--exec-path` can inject a pager, hooksPath or exec-path that executes
+    arbitrary code, so the invocation stops being vouchable -- that scan is
+    case-SENSITIVE and confined to the global-option region, because `git -C
+    <dir>` only chdirs and `git log -c HEAD` is a combined-diff option.
+    """
+    subcommand_index = git_subcommand_index(toks)
+    if subcommand_index is None:
+        return False
+    for token in toks[1:subcommand_index]:
+        if token in _GIT_OPAQUE_GLOBAL_OPTIONS or token.startswith(
+            ("-c", "--config-env=", "--exec-path=")
+        ):
+            return False
+    for token in toks[subcommand_index + 1 :]:
+        lowered = token.lower()
+        if lowered == "--output" or lowered.startswith(
+            ("--output=", "--output-directory")
+        ):
+            return False
+    subcommand = toks[subcommand_index].lower()
+    if subcommand == "config":
+        return any(
+            token in _GIT_CONFIG_READ_OPTIONS
+            or token.startswith(
+                ("--get=", "--get-all=", "--get-regexp=", "--get-urlmatch=")
+            )
+            for token in toks
+        )
+    return subcommand in _GIT_CONFIG_READONLY_SUBCOMMANDS
+
+
+def config_reference_is_readonly_or_message(raw: list[str]) -> bool:
+    """Keep literal config names in ordinary output, read, and message text inert."""
+    head, toks = command_head(raw)
+    if head in _REPOSITORY_CONFIG_READER_HEADS:
+        return True
+    if head == "git":
+        if git_segment_is_config_readonly(toks):
+            return True
+        # A subcommand that is NOT read-only can still confine the mention to
+        # message text: `git commit -m 'touched .git/config'`.
+        return any(
+            token in {"-m", "--message"} or token.startswith(("-m", "--message="))
+            for token in toks
+        )
+    if head == "gh":
+        return any(
+            token in _GH_TEXT_OPTIONS
+            or token.startswith(
+                (
+                    "--body=",
+                    "--body-file=",
+                    "--title=",
+                    "--message=",
+                    "--notes=",
+                    "--notes-file=",
+                    "--comment=",
+                    "--subject=",
+                )
+            )
+            for token in toks
+        )
+    return False
+
+
 def segment_may_mutate_repository_config(raw: list[str]) -> bool:
-    """Return whether a shell segment may rewrite the current repo's config."""
+    """Return whether a segment leaves later push config unverifiable.
+
+    The reference itself is never denied. Recognized writers and redirection keep
+    their precise handling; otherwise ANY head that carries a literal repository
+    config path is conservatively opaque unless it is explicitly vouched
+    read-only or message-only.
+
+    Enumerating the DANGEROUS set does not work. An in-place editor rewrites the
+    file with no redirect and no recognizable head (`sed -i`, `perl -i`, `awk -i
+    inplace`, `ed`), and the interpreter list that was meant to cover the rest
+    failed open on python3.11, py, lua, deno, Rscript, julia, tclsh, `uv run` and
+    `nix-shell` -- all measured. So the SAFE set is enumerated instead: be noisy,
+    not blind. Dynamic, encoded and constructed paths remain outside this
+    bounded temporal check.
+    """
     if not raw:
         return False
     normalized = [
@@ -6196,58 +6416,21 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
     config_indexes = [
         index
         for index, token in enumerate(normalized)
-        if token == ".git/config" or token.endswith("/.git/config")
+        if token_mentions_repository_config(token)
     ]
-    head, _tokens = command_head(raw)
-    # An interpreter carries the path INSIDE a larger argument
-    # (`python -c "open('.git/config','a').write(...)"`), so it needs a substring
-    # test. That test is confined to interpreter heads on purpose: applying it
-    # everywhere would make `git commit -m 'touched .git/config'` look like a
-    # write, and the floor never treats message text as a target.
-    if head in _SCRIPT_INTERPRETER_HEADS and any(
-        ".git/config" in token for token in normalized
-    ):
-        return True
     if not config_indexes:
         return False
-    if head in {
-        "add-content",
-        "ac",
-        "clear-content",
-        "clc",
-        "copy",
-        "copy-item",
-        "cp",
-        "cpi",
-        "move",
-        "move-item",
-        "mv",
-        "mi",
-        "new-item",
-        "ni",
-        "out-file",
-        "rename-item",
-        "ren",
-        "rni",
-        "set-content",
-        "sc",
-        "tee",
-        "tee-object",
-    }:
+    head, _tokens = command_head(raw)
+    if head in _REPOSITORY_CONFIG_WRITER_HEADS:
         return True
+    # MUST stay above the readonly fallback: `echo`/`printf`/`write-host` are
+    # vouched readers, so `echo x > .git/config` reopens if these are reordered.
     if any(
         index > 0 and normalized[index - 1] in {">", ">>", ">|"}
         for index in config_indexes
     ):
         return True
-    # Anything else that names .git/config as an operand is treated as a possible
-    # writer. Enumerating writers cannot work: an in-place editor rewrites the file
-    # with no redirect and no recognizable cmdlet head (`sed -i '$a[remote "origin"]
-    # \n\tpush = +HEAD:refs/heads/main' .git/config`), and the same is true of perl
-    # -i, ed, awk -i inplace, or a python one-liner (PR #23 review). This flag only
-    # forces a later refspec-less push to resolve its config instead of graduating,
-    # so a false "maybe" costs a resolution, while a false "no" costs the guard.
-    return head not in _REPOSITORY_CONFIG_READER_HEADS
+    return not config_reference_is_readonly_or_message(raw)
 
 
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
@@ -8366,6 +8549,27 @@ def check(
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
                 )
+                # A config rewrite that has not happened yet cannot be resolved:
+                # the hook fires BEFORE the mutating segment runs, so reading
+                # config here sees the pre-mutation file. An explicit refspec
+                # does NOT save the push -- remote.*.pushurl, url.*.pushInsteadOf
+                # and remote.*.url still redirect it, and remote.*.receivepack /
+                # core.hooksPath / core.sshCommand still execute a configured
+                # program (all measured on git 2.45.1, except core.sshCommand
+                # which is asserted by analogy). `--mirror` and configured push
+                # refspecs are NOT the justification: git errors on `--mirror`
+                # plus a refspec, and a command-line refspec overrides
+                # remote.*.push. Destination hijack and code execution are.
+                # `--dry-run` is not a carve-out either: it still runs the
+                # pre-push hook and still runs receivepack, it only skips the
+                # ref update.
+                if repository_config_may_have_changed:
+                    return (
+                        "deny",
+                        "[push-config-unverifiable] An earlier command may have rewritten "
+                        "repository config that controls push destination or execution; "
+                        "review the config before running the push separately.",
+                    )
                 if not has_explicit_refspec and not explicit_selector:
                     # Plain `git push` to a configured upstream is the closing move
                     # of nearly every agent loop. Command-line force/lease/`:ref`/
@@ -8393,11 +8597,9 @@ def check(
                         for name in os.environ
                         if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
                     }
-                    if (
-                        bare_push_repository_environment
-                        or repository_config_may_have_changed
-                        or cwd_uncertain
-                    ):
+                    # `repository_config_may_have_changed` is handled
+                    # unconditionally above and would be dead weight here.
+                    if bare_push_repository_environment or cwd_uncertain:
                         return (
                             "deny",
                             "[push-config-unverifiable] A refspec-less git push inherits remote "

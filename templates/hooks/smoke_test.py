@@ -1353,6 +1353,51 @@ CASES = [
         {},
         "allow",
     ),
+    # Enumerating the DANGEROUS interpreter set failed open on every launcher
+    # nobody listed; the safe set is enumerated instead.
+    (
+        "python3.11 -c \"open('.git/config','a').write('x')\"; git push origin main",
+        1,
+        {},
+        "deny",
+    ),
+    ("py -c \"open('.git/config','a').write('x')\"; git push origin", 1, {}, "deny"),
+    (
+        "lua -e \"io.open('.git/config','a'):write('x')\"; git push origin main",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "deno eval \"Deno.writeTextFileSync('.git/config','x')\"; git push origin",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "Rscript -e \"cat('x',file='.git/config')\"; git push origin main",
+        1,
+        {},
+        "deny",
+    ),
+    ("uv run python -c \"open('.git/config','a')\"; git push origin", 1, {}, "deny"),
+    # ...and a read-only probe must not poison a push.
+    ("git status .git/config; git push origin", 1, {}, "allow"),
+    ("git log --grep '.git/config'; git push origin main", 1, {}, "allow"),
+    ("git -C /repo status .git/config; git push origin main", 1, {}, "allow"),
+    ("gh issue comment 5 -b 'about .git/config'; git push origin main", 1, {}, "allow"),
+    # ...but the git vouch has guards, and ordering is load-bearing.
+    ("git diff --output=.git/config; git push origin main", 1, {}, "deny"),
+    (
+        "git -c core.pager='sh -c x' log .git/config; git push origin main",
+        1,
+        {},
+        "deny",
+    ),
+    ("echo x > .git/config; git push origin main", 1, {}, "deny"),
+    ("sed -i s/x/y/ .git/config.worktree; git push origin main", 1, {}, "deny"),
+    ("sed -i s/x/y/ .git/config; git push --dry-run origin main", 1, {}, "deny"),
+    ("git push origin main; sed -i s/x/y/ .git/config", 1, {}, "allow"),
     # A `#` that came out of a QUOTED span is data. Provenance is recorded by
     # the tokenizer, so a quoted span with no `,{}` to mask -- which restores to
     # text byte-identical to a bare comment -- is still known to be one.
