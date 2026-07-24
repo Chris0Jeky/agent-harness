@@ -39,16 +39,18 @@ Codex hooks. Each active repo must update its project `.codex/hooks.json` pin an
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
 `doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
 system `hooks.json`, system `requirements.toml`, inline system/base/stored-profile hooks, and the
-legacy managed config file. It scans inactive stored profiles conservatively and treats unreadable
-sources as failures. Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only
-evidence and must be reconciled in `/hooks`.
+legacy managed config file. On Windows it resolves the system layer through the ProgramData known
+folder, as Codex does. It scans inactive profile files and direct legacy-profile tables
+conservatively; unreadable sources or profile enumeration fail closed. Managed-cloud, MDM,
+per-invocation, and plugin hooks remain runtime-only evidence and must be reconciled in `/hooks`.
 
-`doctor --repo` accepts the Git-root layer walk only when every inspectable system, base-user, and
-stored-profile `project_root_markers` declaration is absent or exactly `[".git"]`; any other,
-conflicting, malformed, or unreadable declaration fails closed. CLI and managed-cloud overrides
-are not statically inspectable. Under that qualified default topology, it walks every active
-`.codex` layer from the checkout root through the requested directory and audits both `hooks.json`
-and inline `[hooks]` in `config.toml`, because Codex loads both forms. Across those sources it
+`doctor --repo` accepts the Git-root layer walk only when every inspectable top-level or direct
+legacy-profile `project_root_markers` declaration in the system, base-user, and stored-profile
+configs is absent or exactly `[".git"]`; any other, conflicting, malformed, or unreadable
+declaration fails closed. CLI and managed-cloud overrides are not statically inspectable. Under
+that qualified default topology, it walks every active `.codex` layer from the checkout root
+through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
+because Codex loads both forms. Across those sources it
 requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
 execution shape, and one current normalized dispatcher pin. That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not

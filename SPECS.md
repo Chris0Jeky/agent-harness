@@ -159,8 +159,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
 - `doctor` requires zero deny-floor copies across all statically inspectable global hook sources:
   user and system `hooks.json`, managed hooks in system `requirements.toml`, inline hooks in
   system/base-user/every stored profile config, and the legacy managed config file. Missing files
-  are absent; unreadable or malformed sources fail closed. Inactive stored profiles are audited
-  conservatively because the invoking profile is not part of the Python process context.
+  are absent; unreadable or malformed sources and failed profile enumeration fail closed. On
+  Windows the system layer uses the ProgramData known folder with the same default fallback as
+  Codex. Inactive profile files and direct legacy-profile tables are audited conservatively because
+  the invoking profile is not part of the Python process context.
   Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
   runtime boundary for exact-session `/hooks`; the static check never represents those sources as
   inspected.
@@ -168,9 +170,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
   shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
   and use a matcher that positively includes Bash. `doctor --repo` uses the Git-root layer walk
-  only when all inspectable system, base-user, nested selectable-profile, and stored profile-file
-  `project_root_markers` declarations are absent or exactly `[".git"]`. Any non-default,
-  conflicting, malformed, or unreadable declaration fails the marker and project-floor checks.
+  only when all inspectable top-level and direct legacy-profile `project_root_markers` declarations
+  in system, base-user, and stored profile-file configs are absent or exactly `[".git"]`. Any
+  non-default, conflicting, malformed, or unreadable declaration fails the marker and project-floor
+  checks.
   CLI and managed-cloud marker overrides are explicitly outside static inspection. Under that
   qualified topology, `doctor` audits every active `.codex` layer from the checkout root through
   the requested directory and both declaration forms Codex loads: `hooks.json` and inline

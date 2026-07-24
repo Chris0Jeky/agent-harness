@@ -1714,6 +1714,38 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(hooks, (repo / ".codex" / "hooks.json").resolve())
                 self.assertIn("normal checkout", detail)
 
+    def test_codex_system_config_uses_program_data_known_folder(self) -> None:
+        known_folder = Path(self.temp.name) / "known-program-data"
+        poisoned_environment = str(Path(self.temp.name) / "poisoned-program-data")
+        expected = known_folder / "OpenAI" / "Codex" / "config.toml"
+
+        with mock.patch.object(harness.os, "name", "nt"):
+            with mock.patch.dict(
+                harness.os.environ, {"PROGRAMDATA": poisoned_environment}
+            ):
+                with mock.patch.object(
+                    harness,
+                    "windows_program_data_path",
+                    return_value=known_folder,
+                ):
+                    actual = harness.codex_system_config_path()
+
+        self.assertEqual(actual, expected)
+        self.assertNotIn(poisoned_environment, str(actual))
+
+    def test_windows_program_data_known_folder_failure_uses_codex_fallback(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            harness.ctypes,
+            "WinDLL",
+            side_effect=OSError("fixture unavailable"),
+            create=True,
+        ):
+            self.assertEqual(
+                harness.windows_program_data_path(), Path("C:/ProgramData")
+            )
+
     def test_root_checkout_supports_separate_git_dir(self) -> None:
         repo = self.make_separate_git_dir_repo()
         requested, authoritative = harness.root_checkout(repo)
@@ -1949,6 +1981,29 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project root markers", output)
 
+    def test_doctor_ignores_unrelated_nested_config_key_collisions(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        unrelated_config = (
+            "[mcp_servers.demo.env]\n"
+            'hooks = "literal"\n'
+            'project_root_markers = "literal"\n\n'
+            "[profiles.custom.features]\n"
+            'hooks = "also literal"\n'
+            'project_root_markers = "also literal"\n'
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=unrelated_config
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] no inspectable global Codex floor", output)
+        self.assertIn("[ok] Codex project root markers", output)
+
     def test_doctor_reports_absent_project_root_marker_override(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -1961,7 +2016,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project root markers", output)
         self.assertIn("0 explicit inspectable declaration(s)", output)
-        self.assertIn("cloud/session/plugin hooks require /hooks", output)
+        self.assertIn("cloud/MDM/session/plugin hooks require /hooks", output)
 
     def test_doctor_rejects_nested_profile_project_root_markers(self) -> None:
         repo = self.make_repo()
@@ -2076,6 +2131,64 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("custom.config.toml", output)
 
+    def test_doctor_rejects_direct_legacy_profile_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        profile_floor = self.inline_floor_config_text().replace(
+            "[[hooks.", "[[profiles.custom.hooks."
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=profile_floor
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("profiles.custom.hooks", output)
+
+    def test_doctor_fails_closed_when_profile_enumeration_is_denied(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        with mock.patch.object(
+            harness,
+            "codex_profile_config_paths",
+            side_effect=harness.HarnessError("fixture profile enumeration denied"),
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] no inspectable global Codex floor: "
+            "fixture profile enumeration denied",
+            output,
+        )
+        self.assertIn(
+            "[FAIL] Codex project root markers: fixture profile enumeration denied",
+            output,
+        )
+
+    def test_profile_config_enumeration_propagates_directory_errors(self) -> None:
+        codex_home = Path(self.temp.name) / "codex-home-enumeration"
+        codex_home.mkdir()
+
+        with mock.patch.object(
+            harness.os,
+            "scandir",
+            side_effect=PermissionError("fixture denied"),
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                "cannot enumerate Codex profile configs.*fixture denied",
+            ):
+                harness.codex_profile_config_paths(codex_home)
+
     def test_doctor_rejects_system_hooks_json_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -2156,6 +2269,74 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("fixture denied", output)
+
+    def test_doctor_rejects_unreadable_canonical_project_hooks(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        project_hooks = self.write_hooks(repo, valid_adapter).resolve()
+        original_read = harness.read_optional_bytes
+
+        def fixture_read(path: Path) -> bytes | None:
+            if path == project_hooks:
+                raise harness.HarnessError(f"cannot read {path}: fixture denied")
+            return original_read(path)
+
+        with mock.patch.object(
+            harness, "read_optional_bytes", side_effect=fixture_read
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("fixture denied", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_rejects_unreadable_ignored_worktree_hooks(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        ignored_hooks = self.write_hooks(linked, valid_adapter).resolve()
+        original_read = harness.read_optional_bytes
+
+        def fixture_read(path: Path) -> bytes | None:
+            if path == ignored_hooks:
+                raise harness.HarnessError(f"cannot read {path}: fixture denied")
+            return original_read(path)
+
+        with mock.patch.object(
+            harness, "read_optional_bytes", side_effect=fixture_read
+        ):
+            result, output = self.run_doctor_with_fixture_globals(linked)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("fixture denied", output)
+
+    def test_doctor_rejects_unreadable_project_codex_layer(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        denied_layer = (repo / ".codex").resolve()
+        original_stat = Path.stat
+
+        def fixture_stat(path: Path, *args: object, **kwargs: object) -> object:
+            if path == denied_layer:
+                raise PermissionError("fixture layer denied")
+            return original_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", autospec=True, side_effect=fixture_stat):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("cannot inspect Codex layer", output)
+        self.assertIn("fixture layer denied", output)
 
     def test_doctor_rejects_managed_inline_global_floor(self) -> None:
         repo = self.make_repo()

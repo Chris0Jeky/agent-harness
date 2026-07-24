@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import ctypes
 import filecmp
 import hashlib
 import json
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -206,15 +208,53 @@ def inline_hooks_from_config(config_path: Path) -> Any | None:
     return config.get("hooks")
 
 
+def windows_program_data_path() -> Path:
+    """Resolve the Windows ProgramData known folder as Codex does."""
+    fallback = Path("C:/ProgramData")
+
+    class Guid(ctypes.Structure):
+        _fields_ = (
+            ("data1", ctypes.c_uint32),
+            ("data2", ctypes.c_uint16),
+            ("data3", ctypes.c_uint16),
+            ("data4", ctypes.c_ubyte * 8),
+        )
+
+    try:
+        folder_id = Guid.from_buffer_copy(
+            uuid.UUID("62ab5d82-fdc1-4dc3-a9dd-070d1d495d97").bytes_le
+        )
+        path_pointer = ctypes.c_void_p()
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        get_known_folder_path = shell32.SHGetKnownFolderPath
+        get_known_folder_path.argtypes = (
+            ctypes.POINTER(Guid),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        get_known_folder_path.restype = ctypes.c_int32
+        result = get_known_folder_path(
+            ctypes.byref(folder_id), 0, None, ctypes.byref(path_pointer)
+        )
+        if result != 0 or path_pointer.value is None:
+            return fallback
+        try:
+            return Path(ctypes.wstring_at(path_pointer.value))
+        finally:
+            free_memory = ole32.CoTaskMemFree
+            free_memory.argtypes = (ctypes.c_void_p,)
+            free_memory.restype = None
+            free_memory(path_pointer)
+    except (AttributeError, OSError, ValueError):
+        return fallback
+
+
 def codex_system_config_path() -> Path:
     """Return Codex's inspectable system config location for this platform."""
     if os.name == "nt":
-        return (
-            Path(os.environ.get("PROGRAMDATA", "C:/ProgramData"))
-            / "OpenAI"
-            / "Codex"
-            / "config.toml"
-        )
+        return windows_program_data_path() / "OpenAI" / "Codex" / "config.toml"
     return Path("/etc/codex/config.toml")
 
 
@@ -225,72 +265,77 @@ def codex_managed_config_path(codex_home: Path) -> Path:
     return Path("/etc/codex/managed_config.toml")
 
 
-def inline_hook_documents_from_config(config_path: Path) -> list[tuple[str, str]]:
-    """Return every stored inline-hook declaration in one config document."""
+def direct_codex_config_values(
+    config_path: Path, key: str, *, include_profiles: bool = True
+) -> list[tuple[str, Any]]:
+    """Return top-level and direct legacy-profile values for one config key."""
     config = toml_config(config_path)
     if config is None:
         return []
 
+    values = [(key, config[key])] if key in config else []
+    profiles = config.get("profiles")
+    if include_profiles and isinstance(profiles, dict):
+        for name, profile in profiles.items():
+            if isinstance(profile, dict) and key in profile:
+                values.append((f"profiles.{name}.{key}", profile[key]))
+    return values
+
+
+def inline_hook_documents_from_config(
+    config_path: Path, *, include_profiles: bool = True
+) -> list[tuple[str, str]]:
+    """Return active stored inline-hook declarations in one config document."""
     declarations: list[tuple[str, str]] = []
-
-    def walk(value: Any, keys: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                child_keys = (*keys, key)
-                if key == "hooks":
-                    if not isinstance(child, dict):
-                        location = ".".join(child_keys)
-                        raise HarnessError(
-                            f"{location} in {config_path} must be a table"
-                        )
-                    try:
-                        document = json.dumps({"hooks": child})
-                    except (TypeError, ValueError) as exc:
-                        raise HarnessError(
-                            f"unsupported inline hooks value in {config_path}: {exc}"
-                        ) from exc
-                    declarations.append((".".join(child_keys), document))
-                else:
-                    walk(child, child_keys)
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, (*keys, f"[{index}]"))
-
-    walk(config)
+    for location, hooks in direct_codex_config_values(
+        config_path, "hooks", include_profiles=include_profiles
+    ):
+        if not isinstance(hooks, dict):
+            raise HarnessError(f"{location} in {config_path} must be a table")
+        try:
+            document = json.dumps({"hooks": hooks})
+        except (TypeError, ValueError) as exc:
+            raise HarnessError(
+                f"unsupported inline hooks value in {config_path}: {exc}"
+            ) from exc
+        declarations.append((location, document))
     return declarations
 
 
 def project_root_markers_from_config(
     config_path: Path,
 ) -> list[tuple[str, list[str]]]:
-    """Return every stored marker declaration with Codex-compatible shapes."""
-    config = toml_config(config_path)
-    if config is None:
-        return []
-
+    """Return active stored marker declarations with Codex-compatible shapes."""
     declarations: list[tuple[str, list[str]]] = []
-
-    def walk(value: Any, keys: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                child_keys = (*keys, key)
-                if key == "project_root_markers":
-                    if not isinstance(child, list) or any(
-                        not isinstance(marker, str) for marker in child
-                    ):
-                        location = ".".join(child_keys)
-                        raise HarnessError(
-                            f"{location} in {config_path} must be an array of strings"
-                        )
-                    declarations.append((".".join(child_keys), child))
-                else:
-                    walk(child, child_keys)
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, (*keys, f"[{index}]"))
-
-    walk(config)
+    for location, markers in direct_codex_config_values(
+        config_path, "project_root_markers"
+    ):
+        if not isinstance(markers, list) or any(
+            not isinstance(marker, str) for marker in markers
+        ):
+            raise HarnessError(
+                f"{location} in {config_path} must be an array of strings"
+            )
+        declarations.append((location, markers))
     return declarations
+
+
+def codex_profile_config_paths(codex_home: Path) -> list[Path]:
+    """Enumerate stored profile-v2 configs without suppressing I/O errors."""
+    try:
+        with os.scandir(codex_home) as entries:
+            paths = [
+                codex_home / entry.name
+                for entry in entries
+                if entry.name.endswith(".config.toml")
+            ]
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot enumerate Codex profile configs in {codex_home}: {exc}"
+        ) from exc
+    return sorted(paths)
 
 
 def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
@@ -304,7 +349,7 @@ def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
     config_paths = [
         codex_system_config_path(),
         codex_home / "config.toml",
-        *sorted(codex_home.glob("*.config.toml")),
+        *codex_profile_config_paths(codex_home),
     ]
     declarations: list[tuple[Path, str, list[str]]] = []
     for config_path in config_paths:
@@ -347,7 +392,7 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
         system_config.with_name("requirements.toml"),
         system_config,
         codex_home / "config.toml",
-        *sorted(codex_home.glob("*.config.toml")),
+        *codex_profile_config_paths(codex_home),
         codex_managed_config_path(codex_home),
     ]
     sources: list[str] = []
@@ -361,7 +406,10 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
         if groups:
             sources.append(f"{hooks_path} ({len(groups)})")
     for config_path in dict.fromkeys(config_paths):
-        for location, document in inline_hook_documents_from_config(config_path):
+        include_profiles = config_path != system_config.with_name("requirements.toml")
+        for location, document in inline_hook_documents_from_config(
+            config_path, include_profiles=include_profiles
+        ):
             groups = managed_codex_floor_groups(document)
             count += len(groups)
             if groups:
@@ -369,7 +417,8 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
 
     source_detail = ", ".join(sources) if sources else "none"
     boundary = (
-        "managed cloud/session/plugin hooks require /hooks in the exact new-session cwd"
+        "managed cloud/MDM/session/plugin hooks require /hooks in the exact "
+        "new-session cwd"
     )
     return (
         count,
