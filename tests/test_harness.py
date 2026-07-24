@@ -1363,6 +1363,8 @@ allow_local_binding = true
         alias = Path(self.temp.name) / "repo-alias"
         remove_alias = self.make_directory_alias(repo, alias)
         try:
+            with mock.patch.object(harness.os.path, "isjunction", None, create=True):
+                self.assertTrue(harness.path_is_alias(alias))
             logical_hooks = alias / ".codex" / "hooks.json"
             self.assertNotEqual(logical_hooks, logical_hooks.resolve())
             key = f"{logical_hooks}:pre_tool_use:0:0"

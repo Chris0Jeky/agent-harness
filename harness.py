@@ -93,7 +93,18 @@ def path_is_alias(path: Path) -> bool:
         if path.is_symlink():
             return True
         is_junction = getattr(os.path, "isjunction", None)
-        return bool(is_junction and is_junction(path))
+        if is_junction and is_junction(path):
+            return True
+        # Python 3.11 (the CI floor) predates os.path.isjunction. Windows
+        # exposes junctions through the reparse tag on lstat instead.
+        if os.name == "nt":
+            reparse_tag = getattr(path.lstat(), "st_reparse_tag", None)
+            # Rust's Windows FileType::is_symlink recognizes every Microsoft
+            # name-surrogate reparse tag, not only ordinary symlinks.
+            return isinstance(reparse_tag, int) and bool(reparse_tag & 0x20000000)
+        return False
+    except FileNotFoundError:
+        return False
     except OSError as exc:
         raise HarnessError(f"cannot inspect path alias {path}: {exc}") from exc
 
