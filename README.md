@@ -42,7 +42,7 @@ match a conservative direct/wrapper execution shape and bind the current normali
 hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
 review and live safe/deny canary remain mandatory.
 
-Status (2026-07-19): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
+Status (2026-07-24): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
 PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
 pipelines, git push safety, and secret-file mutations. It remains a defense-in-depth tripwire,
