@@ -1747,9 +1747,11 @@ def windows_fallback_tokens(candidate: str) -> list[str]:
     except ValueError:
         recovered = shlex.split(candidate.rstrip("\"'"), posix=False)
     return [
-        token[1:-1]
-        if len(token) >= 2 and (token[0], token[-1]) in {('"', '"'), ("'", "'")}
-        else token
+        (
+            token[1:-1]
+            if len(token) >= 2 and (token[0], token[-1]) in {('"', '"'), ("'", "'")}
+            else token
+        )
         for token in recovered
     ]
 
