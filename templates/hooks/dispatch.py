@@ -1756,16 +1756,32 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         # also be intentionally non-POSIX and remain inspectable by the other
         # normalization passes below.
         delete_head = re.search(
-            r"(?i)(?:^|[\s;&|({])(?:remove-item|ri|rm|del|erase|rd|rmdir)"
-            r"(?=$|[\s;/])",
+            r"(?i)(?:^|[;&|({}\n]\s*)"
+            r"(?:&\s*)?"
+            r"(?:(?:powershell|pwsh)(?:\.exe)?\s+-(?:command|c)\s+"
+            r"|cmd(?:\.exe)?\s+/[ck]\s+)?"
+            r"[\"']?(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)"
+            r"(?=$|[\s;/\"'])",
             command,
         )
-        recursive_flag = re.search(
-            r"(?i)(?:^|\s)(?:--?[^\s]*r[^\s]*|/[^\s]*s[^\s]*)(?=\s|$)",
-            command,
-        )
-        if delete_head and recursive_flag:
-            return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
+        if delete_head:
+            delete_name = delete_head.group("head").lower()
+            delete_tail = command[delete_head.end("head") :]
+            option_tokens = re.findall(r"(?<!\S)-[^\s\"']+", delete_tail)
+            powershell_recurse = any(
+                is_powershell_recurse_flag(token) for token in option_tokens
+            )
+            posix_recurse = delete_name == "rm" and any(
+                token.startswith("-")
+                and not token.startswith("--")
+                and "r" in token[1:].lower()
+                for token in option_tokens
+            )
+            cmd_recurse = delete_name in {"del", "erase", "rd", "rmdir"} and bool(
+                re.search(r"(?i)(?:^|/)s(?=/|\s|$)", delete_tail)
+            )
+            if powershell_recurse or posix_recurse or cmd_recurse:
+                return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
         return []
 
     separators = set(";&|\n")
@@ -4265,7 +4281,8 @@ def parse_git_config_args(
             # Git's parser stops option processing at the first real operand.
             operands.extend(item.lower() for item in args[index:])
             break
-        options.append(lowered)
+        option_name = lowered.split("=", 1)[0]
+        options.append(option_name)
         if (
             lowered.startswith("-f")
             and not lowered.startswith("--")
@@ -4274,7 +4291,18 @@ def parse_git_config_args(
             file_targets.append(token[2:])
             index += 1
             continue
-        option_name = lowered.split("=", 1)[0]
+        section_option = next(
+            (
+                option
+                for option in {"--remove-section", "--rename-section"}
+                if option_name == option or git_option_abbreviates(option_name, option)
+            ),
+            None,
+        )
+        if section_option is not None and "=" in token:
+            operands.append(token.split("=", 1)[1].lower())
+            index += 1
+            continue
         value_option = next(
             (
                 option
