@@ -1962,32 +1962,20 @@ def token_is_dispatcher(token: str, dispatcher_variables: set[str]) -> bool:
 
 
 def python_script_operand_is_dispatcher(
-    tokens: list[str], dispatcher_variables: set[str]
+    tokens: list[str],
+    dispatcher_variables: set[str],
+    *,
+    allow_py_selector: bool,
 ) -> bool:
-    """Require the dispatcher to be Python's executed script, not a -c/-m arg."""
+    """Require the dispatcher as Python's script under a strict option prefix."""
     index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            return index + 1 < len(tokens) and token_is_dispatcher(
-                tokens[index + 1], dispatcher_variables
-            )
-        if token.startswith("--"):
-            index += 1
-            continue
-        if token.startswith("-") and len(token) > 1:
-            short_flags = token[1:]
-            # -c cmd / -m mod execute something other than the script operand.
-            if "c" in short_flags.lower() or "m" in short_flags.lower():
-                return False
-            # -W and -X consume the following token as their value.
-            if short_flags in {"W", "X"}:
-                index += 2
-                continue
-            index += 1
-            continue
-        return token_is_dispatcher(token, dispatcher_variables)
-    return False
+    if allow_py_selector and index < len(tokens) and tokens[index] == "-3":
+        index += 1
+    if index < len(tokens) and tokens[index] == "--":
+        index += 1
+    return index < len(tokens) and token_is_dispatcher(
+        tokens[index], dispatcher_variables
+    )
 
 
 def segment_invokes_direct_floor(
@@ -2019,7 +2007,16 @@ def segment_invokes_direct_floor(
     if token_is_python_executable(head) or token_references_variable(
         head, interpreter_variables
     ):
-        return python_script_operand_is_dispatcher(tokens, dispatcher_variables)
+        stripped_head = head.strip("'\"")
+        allow_py_selector = bool(
+            re.fullmatch(r"(?i)py(?:\.exe)?", stripped_head)
+            or token_references_variable(head, interpreter_variables)
+        )
+        return python_script_operand_is_dispatcher(
+            tokens,
+            dispatcher_variables,
+            allow_py_selector=allow_py_selector,
+        )
     return False
 
 
@@ -2041,55 +2038,29 @@ def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
 def shell_script_operand_is_wrapper(
     tokens: list[str], wrapper_variables: set[str]
 ) -> bool:
-    """Require the wrapper to be sh/bash's executed script, not a -c string."""
+    """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            return index + 1 < len(tokens) and token_is_wrapper(
-                tokens[index + 1], wrapper_variables
-            )
-        if token.startswith("-") and len(token) > 1:
-            # -c runs a COMMAND STRING (not a script file); reject it.
-            if "c" in token[1:]:
-                return False
-            index += 1
-            continue
-        return token_is_wrapper(token, wrapper_variables)
-    return False
+    if index < len(tokens) and tokens[index] == "--":
+        index += 1
+    return index < len(tokens) and token_is_wrapper(tokens[index], wrapper_variables)
 
 
 def powershell_file_operand_is_wrapper(
     tokens: list[str], wrapper_variables: set[str]
 ) -> bool:
-    """Require the wrapper to be the -File operand, not a -Command payload."""
-    file_value = None
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token.startswith(("-", "/")):
-            option, separator, attached = token.lstrip("-/").lower().partition(":")
-            if option and (
-                "command".startswith(option)
-                or "encodedcommand".startswith(option)
-                or option in {"e", "ec", "cwa"}
-                or "commandwithargs".startswith(option)
-            ):
-                return False
-            if option and "file".startswith(option) and len(option) >= 1:
-                if separator:
-                    file_value = attached
-                    index += 1
-                elif index + 1 < len(tokens):
-                    file_value = tokens[index + 1]
-                    index += 2
-                else:
-                    index += 1
-                continue
-            index += 1
-            continue
-        index += 1
-    return file_value is not None and token_is_wrapper(file_value, wrapper_variables)
+    """Require the wrapper as PowerShell's immediate -File operand."""
+    if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
+        return False
+    option, separator, attached = tokens[1].lstrip("-/").lower().partition(":")
+    if not option or not "file".startswith(option):
+        return False
+    if separator:
+        file_value = attached
+    elif len(tokens) >= 3:
+        file_value = tokens[2]
+    else:
+        return False
+    return token_is_wrapper(file_value, wrapper_variables)
 
 
 def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
@@ -2128,7 +2099,7 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
         return shell_script_operand_is_wrapper(tokens, wrapper_variables)
-    if head_base in {"powershell", "pwsh", "start-process", "saps"}:
+    if head_base in {"powershell", "pwsh"}:
         return powershell_file_operand_is_wrapper(tokens, wrapper_variables)
     return False
 

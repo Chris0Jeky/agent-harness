@@ -2242,6 +2242,28 @@ class HarnessTests(unittest.TestCase):
                 "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
                 "powershell -Command 'id' -File .codex/invoke_deny_floor.ps1",
             ),
+            (
+                f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                "/bin/bash --version .codex/invoke_deny_floor.sh",
+                good_windows,
+            ),
+            (
+                f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                "/bin/bash --help .codex/invoke_deny_floor.sh",
+                good_windows,
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; "
+                "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+                "Start-Process -File .codex/invoke_deny_floor.ps1",
+            ),
+            (
+                good_posix,
+                f"$expected='{pin}'; "
+                "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+                "saps -File .codex/invoke_deny_floor.ps1",
+            ),
         )
         for command, command_windows in invalid_pairs:
             with self.subTest(command=command, command_windows=command_windows):
@@ -2292,6 +2314,38 @@ class HarnessTests(unittest.TestCase):
                 "--event pre --runtime codex",
             ),
         )
+        no_op_options = (
+            "-V",
+            "--version",
+            "-h",
+            "--help",
+            "-VV",
+            "-X help",
+            "-W ignore",
+            "-u",
+            "-Z",
+        )
+        invalid_pairs += tuple(
+            (
+                f"expected={pin}; python {option} "
+                "$HOME/.claude/hooks/dispatch.py --event pre --runtime codex",
+                f"$expected='{pin}'; {good_windows}",
+            )
+            for option in no_op_options
+        )
+        invalid_pairs += (
+            (
+                f"expected={pin}; python3 -3 $HOME/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; {good_windows}",
+            ),
+            (
+                f"expected={pin}; {good_posix}",
+                f"$expected='{pin}'; py -V "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
         for command, command_windows in invalid_pairs:
             with self.subTest(command=command, command_windows=command_windows):
                 group = {
@@ -2306,6 +2360,52 @@ class HarnessTests(unittest.TestCase):
                 }
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+    def test_platform_floor_command_rejects_nonexecuting_interpreter_shapes(
+        self,
+    ) -> None:
+        pin = "5" * 64
+        posix_prefix = f"expected={pin}; dispatcher=$HOME/.claude/hooks/dispatch.py; "
+        windows_prefix = (
+            f"$expected='{pin}'; " "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+        )
+        self.assertTrue(
+            harness.platform_project_floor_command(
+                posix_prefix + "/bin/sh -- .codex/invoke_deny_floor.sh",
+                pin,
+            )
+        )
+        self.assertTrue(
+            harness.platform_project_floor_command(
+                windows_prefix + "powershell -File .codex/invoke_deny_floor.ps1",
+                pin,
+                windows=True,
+            )
+        )
+        invalid = (
+            (posix_prefix + "/bin/bash --version .codex/invoke_deny_floor.sh", False),
+            (posix_prefix + "/bin/bash --help .codex/invoke_deny_floor.sh", False),
+            (posix_prefix + "/bin/bash -c id .codex/invoke_deny_floor.sh", False),
+            (
+                windows_prefix + "Start-Process -File .codex/invoke_deny_floor.ps1",
+                True,
+            ),
+            (windows_prefix + "saps -File .codex/invoke_deny_floor.ps1", True),
+            (
+                windows_prefix
+                + "powershell -Version -File .codex/invoke_deny_floor.ps1",
+                True,
+            ),
+        )
+        for command, windows in invalid:
+            with self.subTest(command=command):
+                self.assertFalse(
+                    harness.platform_project_floor_command(
+                        command,
+                        pin,
+                        windows=windows,
+                    )
+                )
 
     def test_repo_floor_rejects_non_inert_setup_segments(self) -> None:
         pin = "6" * 64
