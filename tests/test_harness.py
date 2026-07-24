@@ -175,14 +175,14 @@ class HarnessTests(unittest.TestCase):
                 return False
             return original_is_file(path)
 
-        def fixture_read_text(
-            path: Path, *args: object, **kwargs: object
-        ) -> str:
+        def fixture_read_text(path: Path, *args: object, **kwargs: object) -> str:
             if path == denied_path:
                 raise PermissionError("fixture denied")
             return original_read_text(path, *args, **kwargs)
 
-        with mock.patch.object(Path, "is_file", autospec=True, side_effect=fixture_is_file):
+        with mock.patch.object(
+            Path, "is_file", autospec=True, side_effect=fixture_is_file
+        ):
             with mock.patch.object(
                 Path, "read_text", autospec=True, side_effect=fixture_read_text
             ):
@@ -2136,9 +2136,8 @@ class HarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 1)
-        self.assertIn(
-            "[FAIL] no inspectable global Codex floor: fixture denied", output
-        )
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("fixture denied", output)
 
     def test_doctor_rejects_unreadable_static_hooks_json(self) -> None:
         repo = self.make_repo()
@@ -2155,9 +2154,8 @@ class HarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 1)
-        self.assertIn(
-            "[FAIL] no inspectable global Codex floor: fixture denied", output
-        )
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("fixture denied", output)
 
     def test_doctor_rejects_managed_inline_global_floor(self) -> None:
         repo = self.make_repo()

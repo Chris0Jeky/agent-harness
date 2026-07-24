@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -125,6 +126,7 @@ def codex_hook_source_status(
 ) -> tuple[Path, bool, str]:
     """Return one active Codex layer's hook path and copy status."""
     authoritative_hooks = authoritative_checkout / ".codex" / "hooks.json"
+    authoritative_bytes = read_optional_bytes(authoritative_hooks)
     if requested_checkout == authoritative_checkout:
         return (
             authoritative_hooks,
@@ -133,11 +135,12 @@ def codex_hook_source_status(
         )
 
     ignored_hooks = requested_checkout / ".codex" / "hooks.json"
+    ignored_bytes = read_optional_bytes(ignored_hooks)
     source_prefix = (
         "linked worktree; Codex uses root checkout source: " f"{authoritative_hooks}"
     )
-    if not authoritative_hooks.is_file():
-        if ignored_hooks.is_file():
+    if authoritative_bytes is None:
+        if ignored_bytes is not None:
             return (
                 authoritative_hooks,
                 False,
@@ -149,8 +152,8 @@ def codex_hook_source_status(
             True,
             f"{source_prefix}; neither checkout declares hooks in this layer",
         )
-    if ignored_hooks.is_file():
-        if authoritative_hooks.read_bytes() != ignored_hooks.read_bytes():
+    if ignored_bytes is not None:
+        if authoritative_bytes != ignored_bytes:
             return (
                 authoritative_hooks,
                 False,
@@ -164,13 +167,34 @@ def codex_hook_source_status(
     return authoritative_hooks, True, f"{source_prefix}; no worktree-local copy"
 
 
+def read_optional_text(path: Path) -> str | None:
+    """Read UTF-8 text, distinguishing an absent file from an unreadable one."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise HarnessError(f"cannot read {path}: {exc}") from exc
+
+
+def read_optional_bytes(path: Path) -> bytes | None:
+    """Read bytes, distinguishing an absent file from an unreadable one."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarnessError(f"cannot read {path}: {exc}") from exc
+
+
 def toml_config(config_path: Path) -> dict[str, Any] | None:
     """Return one TOML config document, or ``None`` when it is absent."""
-    if not config_path.is_file():
+    contents = read_optional_text(config_path)
+    if contents is None:
         return None
     try:
-        return tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        return tomllib.loads(contents)
+    except tomllib.TOMLDecodeError as exc:
         raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
 
 
@@ -320,6 +344,7 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
     system_config = codex_system_config_path()
     json_paths = [system_config.with_name("hooks.json"), codex_home / "hooks.json"]
     config_paths = [
+        system_config.with_name("requirements.toml"),
         system_config,
         codex_home / "config.toml",
         *sorted(codex_home.glob("*.config.toml")),
@@ -328,9 +353,10 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
     sources: list[str] = []
     count = 0
     for hooks_path in dict.fromkeys(json_paths):
-        if not hooks_path.is_file():
+        hooks_text = read_optional_text(hooks_path)
+        if hooks_text is None:
             continue
-        groups = managed_codex_floor_groups(hooks_path.read_text(encoding="utf-8"))
+        groups = managed_codex_floor_groups(hooks_text)
         count += len(groups)
         if groups:
             sources.append(f"{hooks_path} ({len(groups)})")
@@ -419,7 +445,20 @@ def codex_project_layer_dirs(
     for component in relative_path.parts:
         current /= component
         directories.append(current)
-    return [directory for directory in directories if (directory / ".codex").is_dir()]
+    active_layers: list[Path] = []
+    for directory in directories:
+        dot_codex = directory / ".codex"
+        try:
+            mode = dot_codex.stat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect Codex layer {dot_codex}: {exc}"
+            ) from exc
+        if stat.S_ISDIR(mode):
+            active_layers.append(directory)
+    return active_layers
 
 
 def codex_hook_sources_status(
@@ -1796,11 +1835,12 @@ def doctor(args: argparse.Namespace) -> int:
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
                 requested_path, requested_checkout, authoritative_checkout
             )
-            json_hook_texts = [
-                hooks.read_text(encoding="utf-8")
+            json_hook_documents = [
+                (hooks, text)
                 for hooks in repo_hook_paths
-                if hooks.is_file()
+                if (text := read_optional_text(hooks)) is not None
             ]
+            json_hook_texts = [text for _hooks, text in json_hook_documents]
             inline_hook_texts = [
                 document
                 for hooks in repo_hook_paths
@@ -1822,13 +1862,9 @@ def doctor(args: argparse.Namespace) -> int:
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_count = sum(
-                len(
-                    repo_codex_floor_groups(
-                        hooks.read_text(encoding="utf-8"), expected_pin
-                    )
-                )
-                for hooks in repo_hook_paths
-                if hooks == canonical_hooks and hooks.is_file()
+                len(repo_codex_floor_groups(hooks_text, expected_pin))
+                for hooks, hooks_text in json_hook_documents
+                if hooks == canonical_hooks
             )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
