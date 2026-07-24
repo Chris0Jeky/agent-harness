@@ -37,10 +37,45 @@ up changed global guidance, shared Claude-home hook bytes, and managed skill fol
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
-`doctor --repo` statically requires one project-floor candidate whose POSIX and Windows commands
-match a conservative direct/wrapper execution shape and bind the current normalized dispatcher
-hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
-review and live safe/deny canary remain mandatory.
+`doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
+system `hooks.json`, system `requirements.toml`, inline system/base and selectable profile-v2
+hooks, and the legacy managed config file. On Windows it resolves the system layer through the
+ProgramData known folder, as Codex does. Before counting a floor, it validates the complete hook
+subtree and the hook-specific metadata it statically interprets: every supported event, the JSON
+object wrapper and parser constraints, config hook state, and managed requirements hook paths. It
+scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
+profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
+schema-validated. Ignored JSON values are traversed iteratively, but the stdlib JSON decoder still
+imposes an explicit fail-closed bound at pathological nesting depths before schema inspection.
+Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only evidence and must be
+reconciled in `/hooks`.
+
+`doctor --repo` accepts the Git-root layer walk only when every inspectable top-level
+`project_root_markers` declaration in the system, base-user, and stored profile-v2 configs is
+absent or exactly `[".git"]`; any other, conflicting, malformed, or unreadable declaration fails
+closed. CLI and managed-cloud overrides are not statically inspectable. Under
+that qualified default topology, it walks every active `.codex` layer from the checkout root
+through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
+because Codex loads both forms. Across those sources it
+requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
+execution shape, and one current normalized dispatcher pin. That floor must be the canonical root
+`.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
+execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
+requirements, managed hook-feature requirements, persisted canonical/legacy hook feature
+disables, and a disabled canonical handler state, plus the unsupported stored legacy `profile`
+selector. Valid feature values inside the
+inactive legacy profile map do not affect activation; malformed hook feature values still fail the
+typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
+runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,
+so a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
+
+For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
+in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped
+sources and rejects worktree-only or different local `hooks.json` and inline-hook declarations. An
+identical tracked worktree copy is allowed but remains inactive. Static root discovery currently
+fails closed for linked worktrees whose primary checkout uses `--separate-git-dir`, and when the
+common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
+the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Status (2026-07-24): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
