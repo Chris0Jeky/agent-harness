@@ -120,6 +120,17 @@ HOST_ENV_KEEP = frozenset(
     {"HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "XDG_CONFIG_HOME"}
 )
 
+# Codex function calls that carry a shell command. `shell` is the pre-2026
+# spelling and passes an argv list instead of a command string.
+CODEX_SHELL_CALL_NAMES = frozenset({"shell_command", "shell"})
+POSIX_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+POWERSHELL_NAMES = frozenset({"powershell", "pwsh"})
+CMD_SHELL_NAMES = frozenset({"cmd"})
+POSIX_SHELL_FLAG_RE = re.compile(r"-[a-z]*c", re.IGNORECASE)
+EXECUTABLE_SUFFIX_RE = re.compile(r"\.(?:exe|cmd|bat|com)$", re.IGNORECASE)
+# Tokens that need no quoting in any shell, so joining them cannot invent syntax.
+PLAIN_ARGV_TOKEN_RE = re.compile(r"[A-Za-z0-9_@%+=:,./-]+")
+
 
 # --------------------------------------------------------------------------- #
 # Corpus extraction
@@ -273,6 +284,46 @@ def extract_embedded_commands(source: str, stats: Counter[str]) -> list[str]:
     return found
 
 
+def argv_basename(token: str) -> str:
+    """`C:\\Windows\\powershell.exe` -> `powershell`."""
+    tail = token.replace("\\", "/").rsplit("/", 1)[-1]
+    return EXECUTABLE_SUFFIX_RE.sub("", tail).lower()
+
+
+def command_from_argv(argv: Sequence[Any]) -> str | None:
+    """Recover the command line behind a legacy Codex `shell` argv, or None.
+
+    The pre-`shell_command` function call carries an argv list --
+    `["powershell.exe", "-NoLogo", "-Command", "<script>"]` -- rather than a
+    command string. `check()` inspects a shell command line, so the faithful
+    replay subject is the script the wrapper hands to the shell; that is the
+    same reading the module docstring already applies to `exec_command_end`.
+
+    An argv that is not a recognised wrapper is joined only when every token is
+    unambiguous without quoting (`["git", "status"]`). Anything else returns
+    None and is counted by the caller: a mis-quoted join would invent a command
+    line that no shell ever saw.
+    """
+    tokens = [token for token in argv if isinstance(token, str)]
+    if not tokens or len(tokens) != len(argv):
+        return None
+    base = argv_basename(tokens[0])
+    for index in range(1, len(tokens)):
+        flag = tokens[index].lower()
+        rest = tokens[index + 1 :]
+        if base in POSIX_SHELL_NAMES and POSIX_SHELL_FLAG_RE.fullmatch(flag):
+            # Operands after the script become $0/$1..., not part of it.
+            return rest[0] if rest else None
+        if base in POWERSHELL_NAMES and len(flag) > 1 and "-command".startswith(flag):
+            # PowerShell joins everything after -Command with single spaces.
+            return " ".join(rest) if rest else None
+        if base in CMD_SHELL_NAMES and flag in {"/c", "/k"}:
+            return " ".join(rest) if rest else None
+    if all(PLAIN_ARGV_TOKEN_RE.fullmatch(token) for token in tokens):
+        return " ".join(tokens)
+    return None
+
+
 def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
     """Yield each JSON object in a transcript, counting what will not parse."""
     try:
@@ -303,9 +354,13 @@ def extract_codex_commands(
 ) -> Iterator[str]:
     """Yield every shell command Codex requested, oldest rollout first.
 
-    Two channels carry them: the `shell_command` function call (arguments are a
-    JSON string) and the `exec` custom tool, whose input is a JS program that
-    calls `tools.shell_command(...)` inline.
+    Three channels carry them: the `shell_command` function call (arguments are
+    a JSON string), the older `shell` function call (same wrapper, but
+    `arguments.command` is an argv *list*), and the `exec` custom tool, whose
+    input is a JS program that calls `tools.shell_command(...)` inline.
+    A full inventory of this machine's transcripts finds no fourth channel:
+    every other `function_call` / `custom_tool_call` name is an MCP or planning
+    tool, and no `js_repl` body contains a `tools.shell_command(` call.
     """
     for path in sorted(root.rglob("*.jsonl")):
         stats["extracted-codex-files"] += 1
@@ -315,7 +370,7 @@ def extract_codex_commands(
                 continue
             kind = payload.get("type")
             name = payload.get("name")
-            if kind == "function_call" and name == "shell_command":
+            if kind == "function_call" and name in CODEX_SHELL_CALL_NAMES:
                 raw = payload.get("arguments")
                 if not isinstance(raw, str):
                     stats["unparsed-codex-arguments-not-string"] += 1
@@ -329,6 +384,14 @@ def extract_codex_commands(
                     stats["unparsed-codex-arguments-not-object"] += 1
                     continue
                 command = arguments.get("command")
+                if isinstance(command, list):
+                    recovered = command_from_argv(command)
+                    if recovered is None:
+                        stats["unparsed-codex-legacy-shell-argv-not-recoverable"] += 1
+                        continue
+                    stats["extracted-codex-invocations-legacy-shell"] += 1
+                    yield recovered
+                    continue
                 if not isinstance(command, str):
                     stats["unparsed-codex-command-not-string"] += 1
                     continue
@@ -952,7 +1015,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     print("  extraction ledger:")
     for key, value in sorted(corpus["extracted"].items()):
         print(f"    {key[len('extracted-'):]}: {value}")
-    print("  entries that could NOT be parsed / extracted:")
+    print(
+        "  shell channels scanned: codex function_call{shell_command,shell} + "
+        "custom_tool_call{exec}; claude tool_use{Bash,PowerShell}"
+    )
+    print("  entries in those channels that could NOT be parsed / extracted:")
     unparsed = corpus["unparsed"]
     if not unparsed:
         print(
