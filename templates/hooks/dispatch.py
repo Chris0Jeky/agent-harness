@@ -5441,12 +5441,14 @@ def configured_bare_push_is_dangerous(
 ) -> bool:
     """True when a refspec-less `git push` would FORCE, DELETE, or MIRROR by config.
 
-    A bare push (no command-line refspec) inherits `remote.<name>.push` AND
-    `remote.<name>.mirror`, so it can silently perform charter-blocked updates
+    A bare push (no command-line refspec) inherits `remote.<name>.push`,
+    `remote.<name>.mirror`, AND `remote.<name>.receivepack`, so it can silently
+    perform charter-blocked updates
     (BLUEPRINT §2) that no argv token reveals:
       - a push refspec with a leading '+' -> forced update,
       - a push refspec with an empty source (':dst') -> remote ref deletion,
       - `remote.<name>.mirror=true` -> --mirror (force + delete of removed refs).
+      - `remote.<name>.receivepack` -> execution of a configured receiver command.
     Command-line force/lease/`:ref`/`--mirror` are handled elsewhere; only the
     CONFIGURED forms reach here. Over-approximates across all remotes. Resolution
     failure/absence -> "" -> not dangerous, matching git's own
@@ -5462,7 +5464,7 @@ def configured_bare_push_is_dangerous(
             *(git_globals or []),
             "config",
             "--get-regexp",
-            r"^remote\..*\.(push|mirror)$",
+            r"^remote\..*\.(push|mirror|receivepack)$",
         ],
         project_dir,
         deadline,
@@ -5479,6 +5481,8 @@ def configured_bare_push_is_dangerous(
             if value == "" or value.lower() in {"true", "yes", "on", "1"}:
                 return True
             continue
+        if key.endswith(".receivepack"):
+            return True
         for refspec in value.split():
             # A configured push value is a refspec, never a CLI option: a leading
             # '+' forces and an empty source (':dst') deletes the destination ref.
@@ -7488,7 +7492,13 @@ def check(
                     positionals.append(token)
                     index += 1
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
-                if len(positionals) < 2 and not explicit_selector:
+                repository_via_option = any(
+                    token == "--repo" or token.startswith("--repo=") for token in args
+                )
+                has_explicit_refspec = len(positionals) >= (
+                    1 if repository_via_option else 2
+                )
+                if not has_explicit_refspec and not explicit_selector:
                     # Plain `git push` to a configured upstream is the closing move
                     # of nearly every agent loop. Command-line force/lease/`:ref`/
                     # `--mirror` spellings are rejected ABOVE this point. The residual
@@ -7534,7 +7544,8 @@ def check(
                         return (
                             "deny",
                             "[push-config-force] A refspec-less git push inherits a configured "
-                            "force ('+'), delete (':ref'), or mirror update from remote config; "
+                            "force ('+'), delete (':ref'), mirror update, or receive-pack "
+                            "command from remote config; "
                             "push an explicit non-forcing refspec instead.",
                         )
                     opaque = graduated_opacity(

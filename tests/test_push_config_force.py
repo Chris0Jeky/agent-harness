@@ -53,6 +53,7 @@ class PushConfigForceTests(unittest.TestCase):
         *,
         mirror: bool = False,
         valueless_mirror: bool = False,
+        receivepack: str | None = None,
     ) -> str:
         repo = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
@@ -68,6 +69,8 @@ class PushConfigForceTests(unittest.TestCase):
                 os.path.join(repo, ".git", "config"), "a", encoding="utf-8"
             ) as handle:
                 handle.write('[remote "bare"]\n\tmirror\n')
+        if receivepack is not None:
+            git(repo, "config", "remote.origin.receivepack", receivepack)
         return repo
 
     def _decide(self, repo: str, command: str, tier: int = 1):
@@ -95,6 +98,10 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo(None, valueless_mirror=True)
         self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
 
+    def test_helper_flags_configured_receivepack(self) -> None:
+        repo = self._repo(None, receivepack="helper --unsafe")
+        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+
     def test_helper_ignores_non_force_refspec(self) -> None:
         repo = self._repo("HEAD:refs/heads/main")
         self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
@@ -118,6 +125,12 @@ class PushConfigForceTests(unittest.TestCase):
 
     def test_bare_push_denied_when_config_mirrors(self) -> None:
         repo = self._repo(None, mirror=True)
+        decision, reason = self._decide(repo, "git push origin")
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("push-config-force", reason)
+
+    def test_bare_push_denied_when_receivepack_is_configured(self) -> None:
+        repo = self._repo(None, receivepack="helper --unsafe")
         decision, reason = self._decide(repo, "git push origin")
         self.assertEqual(decision, "deny", reason)
         self.assertIn("push-config-force", reason)
@@ -187,6 +200,16 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo("+HEAD:refs/heads/main")
         decision, _ = self._decide(repo, "git push origin main")
         self.assertEqual(decision, "allow")
+
+    def test_repo_option_with_explicit_refspec_overrides_config_force(self) -> None:
+        repo = self._repo("+HEAD:refs/heads/main")
+        for command in (
+            "git push --repo origin main",
+            "git push --repo=origin main",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "allow", reason)
 
     def test_configured_force_still_denied_at_t4(self) -> None:
         repo = self._repo("+HEAD:refs/heads/main")
