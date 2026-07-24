@@ -620,18 +620,65 @@ _BLOCK_TRUNCATED = "truncated"
 _BLOCK_MALFORMED = "malformed"
 
 
-def strip_powershell_comment_tail(toks: list[str]) -> list[str]:
-    """Drop a `#` comment and everything after it in the same segment.
+_SCRIPTBLOCK_COMMENT_REASON = (
+    "A comment inside a scriptblock hides where the block ends; the floor cannot "
+    "tell its braces from real ones. Move the comment out of the one-liner."
+)
 
-    A comment runs to end of line and segments never span a newline, so the tail
-    is inert text. It matters because a `}` written inside a comment would
-    otherwise be counted as a real block close, ending the scan early and hiding
-    the cmdlet arguments that genuinely follow the block.
+
+def split_segment_comment(toks: list[str]) -> tuple[list[str], bool]:
+    """Drop a `#` comment tail and report whether dropping it hid anything.
+
+    A `#` token can be three different things and, by the time argv is rebuilt,
+    quote provenance is gone so they cannot be told apart:
+
+    - a line comment (`# }`) whose braces are inert text,
+    - the start of a `<# ... #>` block comment, which shlex splits so that `#`
+      leads a token, and
+    - a quoted literal that merely begins with `#` (`{ '# literal' }`), which is
+      an ordinary expression.
+
+    Treating all three as comment text let a crafted `}` inside one close the
+    block early and drop the cmdlet's real trailing arguments; treating none of
+    them as comments let a commented-out `}` close it. Both directions were live
+    deny->allow regressions, so a scriptblock argv containing one is reported
+    unverifiable and the caller fails closed.
+
+    Two narrowings keep this from denying ordinary commands:
+
+    - A token holding a literal marker was produced by restoring a quoted span,
+      so it cannot be a comment. That keeps format strings such as
+      `'#{0} | draft={1}' -f ...` inspectable, and their braces are masked
+      anyway so they cannot affect the count.
+    - A comment only MATTERS if the text it swallows carries something other than
+      closing braces. When only a `}` follows, both readings agree about the
+      cmdlet's arguments and there is nothing to fail closed over. That keeps
+      `Where-Object { $_ -match '^#' }` allowed: the cmd-escape inspection
+      variant strips the `^`, leaving a bare `#` token followed only by `}`.
+
+    Returns `(kept_tokens, opaque)`.
     """
     for index, token in enumerate(toks):
-        if token.startswith("#"):
-            return toks[:index]
-    return list(toks)
+        if not (token.startswith("#") or token.startswith("<#")):
+            continue
+        if token_holds_restored_quote(token):
+            continue
+        swallowed = toks[index + 1 :]
+        return toks[:index], any(part.strip("{}") for part in swallowed)
+    return list(toks), False
+
+
+def token_holds_restored_quote(token: str) -> bool:
+    """Whether this token was produced by restoring a quoted span."""
+    return any(
+        marker in token
+        for marker in (
+            _LITERAL_OPEN_BRACE,
+            _LITERAL_CLOSE_BRACE,
+            _LITERAL_COMMA,
+            _QUOTED_GROUP_LITERAL_PREFIX,
+        )
+    )
 
 
 def powershell_block_depth(token: str) -> int:
@@ -708,8 +755,13 @@ def is_powershell_foreach_loop_statement(head: str, toks: list[str]) -> bool:
     return bool(re.search(r"\bin\b", " ".join(toks[1:]), re.IGNORECASE))
 
 
-def complete_scriptblock_argv(toks: list[str], following: list[list[str]]) -> list[str]:
+def complete_scriptblock_argv(
+    toks: list[str], following: list[list[str]]
+) -> tuple[list[str], bool]:
     """Rejoin an argv whose literal scriptblock was cut by segment splitting.
+
+    Returns `(argv, opaque)`; `opaque` means a `#`-leading token made the brace
+    structure unreadable and the caller must fail closed.
 
     Segmentation treats `;`, `|`, `&` and newline as separators even inside a
     `{ ... }` block, so a cmdlet's argv can continue into the following
@@ -719,18 +771,18 @@ def complete_scriptblock_argv(toks: list[str], following: list[list[str]]) -> li
     keeps them inspectable, so `ForEach-Object { $_ ; } -MemberName Delete`
     cannot launder its member invocation through the split.
     """
-    toks = strip_powershell_comment_tail(toks)
-    depth = sum(powershell_block_depth(token) for token in toks)
+    joined, opaque = split_segment_comment(toks)
+    depth = sum(powershell_block_depth(token) for token in joined)
     if depth <= 0:
-        return toks
-    joined = list(toks)
+        return joined, opaque
     for segment in following:
-        segment = strip_powershell_comment_tail(segment)
-        joined.extend(segment)
-        depth += sum(powershell_block_depth(token) for token in segment)
+        kept, hid = split_segment_comment(segment)
+        opaque = opaque or hid
+        joined.extend(kept)
+        depth += sum(powershell_block_depth(token) for token in kept)
         if depth <= 0:
             break
-    return joined
+    return joined, opaque
 
 
 def resolve_powershell_parameter(
@@ -933,8 +985,10 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     return None
 
 
-def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
-    """Return the restored inner text of each literal `{ ... }` scriptblock in a
+def powershell_literal_scriptblock_bodies(
+    toks: list[str],
+) -> list[tuple[str, list[str]]]:
+    """Return `(body_text, body_tokens)` for each literal `{ ... }` scriptblock in a
     pipeline cmdlet's argv, so quoted evaluator payloads inside the block (which
     the sanitized segment pass masks) can be recursively inspected.
 
@@ -944,8 +998,14 @@ def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
 
     A block bound with the attached `-Parameter:{ ... }` spelling is picked up
     too; its opening brace is inside the parameter token rather than starting
-    it."""
-    bodies: list[str] = []
+    it.
+
+    `body_tokens` are the block's ARGV tokens, not a re-split of the text. A
+    quoted string is a single argv token however many words it holds, which is
+    what lets the caller tell an inert string statement (`{ 'git push --force' }`)
+    from a command (`{ iex 'git push --force' }`) without re-inspecting quoted
+    text the floor promised never to treat as a target."""
+    bodies: list[tuple[str, list[str]]] = []
     index = 0
     while index < len(toks):
         token = toks[index]
@@ -956,12 +1016,11 @@ def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
             state, end = scan_powershell_literal_block(toks, index + 1, opening)
             if state == _BLOCK_MALFORMED:
                 break
-            block = " ".join([opening, *toks[index + 1 : end]]).strip()
-            if block.startswith("{"):
-                block = block[1:]
-            if block.endswith("}"):
-                block = block[:-1]
-            bodies.append(restore_quoted_literal_markers(block.strip()))
+            inner = [opening[1:], *toks[index + 1 : end]]
+            if inner and inner[-1].endswith("}"):
+                inner[-1] = inner[-1][:-1]
+            inner = [restore_quoted_literal_markers(part) for part in inner if part]
+            bodies.append((" ".join(inner).strip(), inner))
             index = end
             continue
         index += 1
@@ -6380,12 +6439,29 @@ def check(
         completed across segment splits — so a payload in a second block
         (`-Begin { ... ; } -Process { ... }`) is inspected too.
         """
-        for body in powershell_literal_scriptblock_bodies(argv):
+        return _inspect_scriptblock_bodies(argv, 0)
+
+    def _inspect_scriptblock_bodies(argv: list[str], block_depth: int):
+        if block_depth > 8:  # runaway guard; real nesting is a handful deep
+            return "allow", ""
+        for body, body_tokens in powershell_literal_scriptblock_bodies(argv):
+            # A NESTED literal block executes too, and its own quoted payload is
+            # equally masked: `. { iex '...' }`, `& { ... }`, `if ($x) { ... }`.
+            nested = _inspect_scriptblock_bodies(body_tokens, block_depth + 1)
+            if nested[0] != "allow":
+                return nested
             if not body or is_dynamic_value(body):
+                continue
+            # A single argv token is one expression — a bare string statement
+            # (`{ 'git push --force origin main' }`) only OUTPUTS its text. Quoting
+            # collapses it to one token no matter how many words it holds, so this
+            # keeps the floor's promise never to treat quoted text as a target,
+            # while `{ iex 'git push --force' }` (two tokens) is still inspected.
+            if len(body_tokens) < 2:
                 continue
             # `$null = iex '...'` is an assignment whose RHS is a command, and
             # the head would otherwise be `$null` and fail the letter gate below.
-            assigned = powershell_assignment_rhs(tokens(body))
+            assigned = powershell_assignment_rhs(body_tokens)
             if assigned:
                 body = assigned
             body_head, _ = command_head(tokens(body))
@@ -6665,9 +6741,11 @@ def check(
         if head in {"invoke-command", "icm"}:
             if not quote_aware:
                 continue
-            complete_argv = complete_scriptblock_argv(
+            complete_argv, argv_opaque = complete_scriptblock_argv(
                 toks, pass_order.get(current_pass, [])[segment_index + 1 :]
             )
+            if argv_opaque:
+                return "deny", _SCRIPTBLOCK_COMMENT_REASON
             invoke_error = powershell_invoke_command_opacity(complete_argv)
             if invoke_error:
                 return "deny", invoke_error
@@ -6678,13 +6756,14 @@ def check(
         if head in {"foreach-object", "%", "foreach", "where-object", "?", "where"}:
             if not quote_aware:
                 continue
-            complete_argv = (
-                toks
-                if is_powershell_foreach_loop_statement(head, toks)
-                else complete_scriptblock_argv(
+            if is_powershell_foreach_loop_statement(head, toks):
+                complete_argv, argv_opaque = toks, False
+            else:
+                complete_argv, argv_opaque = complete_scriptblock_argv(
                     toks, pass_order.get(current_pass, [])[segment_index + 1 :]
                 )
-            )
+            if argv_opaque:
+                return "deny", _SCRIPTBLOCK_COMMENT_REASON
             pipeline_error = powershell_pipeline_scriptblock_opacity(
                 head, complete_argv
             )

@@ -1051,6 +1051,51 @@ CASES = [
         "deny",
     ),
     ("Invoke-Command -ScriptBlock { Write-Host a; # }\n} @icmArgs", 1, {}, "deny"),
+    # PR #29 review round 3. A `#` token in a scriptblock argv is unverifiable —
+    # line comment, `<# ... #>` block comment and a quoted literal starting with
+    # `#` are indistinguishable once argv is rebuilt — so it fails closed. Each
+    # of these hid the real closing brace and a dynamic `-Process $sb`/splat.
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
+        "{ Write-Host a; <# c #> } $sb",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "$sb = { iex 'git push --force origin main' }; "
+        "1 | ForEach-Object -Begin { '# literal' } -Process $sb",
+        1,
+        {},
+        "deny",
+    ),
+    # A nested literal block executes too, and its quoted payload is equally
+    # masked from the sanitized pass: dot-source, call operator, control blocks.
+    (
+        "1 | ForEach-Object { . { iex 'git push --force origin main' }; 1 }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object { & { iex 'git push --force origin main' }; 1 }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object { if ($true) { $null = iex 'git push --force origin main' }; 1 }",
+        1,
+        {},
+        "deny",
+    ),
+    # ...but a bare QUOTED string statement only outputs its text. Reading it as a
+    # command breaks the floor's quoted-text contract. (The ForEach-Object form
+    # was a pre-existing false positive; all three are inert now.)
+    ("Invoke-Command -ScriptBlock { 'git push --force origin main' }", 1, {}, "allow"),
+    ("1 | Where-Object { 'git push --force origin main' }", 1, {}, "allow"),
+    ("1 | ForEach-Object { 'git push --force origin main' }", 1, {}, "allow"),
+    ("1 | ForEach-Object { 'rm -rf /critical/outside' }", 1, {}, "allow"),
     # Truncation must not launder the dynamic-payload branches either.
     (
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",

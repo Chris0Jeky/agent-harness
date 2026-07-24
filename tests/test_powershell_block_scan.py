@@ -21,6 +21,7 @@ a `}` inside a `#` comment close a block.
 """
 
 import importlib.util
+import os
 import unittest
 from pathlib import Path
 
@@ -46,11 +47,29 @@ def stub_resolver(
 
 
 def check(command: str, tier: int = 1, flags=None):
+    """Decide `command` with the host's Git config injection removed.
+
+    `check()` reads the live environment, and an ambient `GIT_CONFIG_COUNT` /
+    `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` family makes it deny with "Git
+    config environment injection is opaque to floor inspection" — which has
+    nothing to do with the parser behaviour these tests assert, and made results
+    depend on the host. Cleared for the duration of each decision.
+    """
     tier_cfg = {"tier": tier, "flags": flags or {}}
     project_dir = str(ROOT)
-    return dispatch.check(
-        command, tier_cfg, project_dir, project_dir, remote_resolver=stub_resolver
-    )
+    injected = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith("GIT_CONFIG")
+    }
+    for name in injected:
+        del os.environ[name]
+    try:
+        return dispatch.check(
+            command, tier_cfg, project_dir, project_dir, remote_resolver=stub_resolver
+        )
+    finally:
+        os.environ.update(injected)
 
 
 class PowershellBlockDepthTests(unittest.TestCase):
@@ -101,13 +120,23 @@ class LiteralScriptblockBodyTests(unittest.TestCase):
     def test_truncated_block_yields_in_segment_remainder(self):
         toks = ["ForEach-Object", "{", "rm", "-rf", "/critical/outside"]
         bodies = dispatch.powershell_literal_scriptblock_bodies(toks)
-        self.assertEqual(bodies, ["rm -rf /critical/outside"])
+        self.assertEqual(
+            bodies, [("rm -rf /critical/outside", ["rm", "-rf", "/critical/outside"])]
+        )
 
     def test_closed_block_body_is_unchanged(self):
         toks = ["ForEach-Object", "{", "git", "status", "}"]
         self.assertEqual(
-            dispatch.powershell_literal_scriptblock_bodies(toks), ["git status"]
+            dispatch.powershell_literal_scriptblock_bodies(toks),
+            [("git status", ["git", "status"])],
         )
+
+    def test_quoted_statement_stays_one_token(self):
+        # A quoted string is ONE argv token however many words it holds; that is
+        # what keeps a bare string statement inert instead of read as a command.
+        toks = ["ForEach-Object", "{", "git push --force origin main", "}"]
+        bodies = dispatch.powershell_literal_scriptblock_bodies(toks)
+        self.assertEqual(len(bodies[0][1]), 1)
 
 
 class BenignTruncatedBlocksAllowTests(unittest.TestCase):
@@ -182,24 +211,28 @@ class SplitArgvRejoinTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
 
     def test_rejoin_stops_once_the_block_closes(self):
-        joined = dispatch.complete_scriptblock_argv(
+        joined, opaque = dispatch.complete_scriptblock_argv(
             ["ForEach-Object", "{", "$_"],
             [["}", "-MemberName", "Delete"], ["rm", "-rf", "/critical/outside"]],
         )
         self.assertEqual(
             joined, ["ForEach-Object", "{", "$_", "}", "-MemberName", "Delete"]
         )
+        self.assertFalse(opaque)
 
     def test_balanced_argv_is_returned_untouched(self):
         toks = ["ForEach-Object", "{", "$_", "}"]
         followers = [["rm", "-rf", "/critical/outside"]]
-        self.assertEqual(dispatch.complete_scriptblock_argv(toks, followers), toks)
+        self.assertEqual(
+            dispatch.complete_scriptblock_argv(toks, followers), (toks, False)
+        )
 
     def test_unterminated_block_consumes_all_followers(self):
-        joined = dispatch.complete_scriptblock_argv(
+        joined, opaque = dispatch.complete_scriptblock_argv(
             ["ForEach-Object", "{", "$_"], [["a"], ["b"]]
         )
         self.assertEqual(joined, ["ForEach-Object", "{", "$_", "a", "b"])
+        self.assertFalse(opaque)
 
 
 class ScriptblockBodyInspectionTests(unittest.TestCase):
@@ -238,23 +271,53 @@ class ScriptblockBodyInspectionTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
 
 
-class CommentTailTests(unittest.TestCase):
-    def test_comment_tail_is_dropped(self):
+class ScriptblockCommentTests(unittest.TestCase):
+    """A `#` token in a scriptblock argv is unverifiable, so it fails closed.
+
+    By the time argv is rebuilt, quote provenance is gone, so a line comment, a
+    `<# ... #>` block comment and a quoted literal that merely starts with `#`
+    are indistinguishable. Treating them all as comment text let a crafted `}`
+    inside one close the block early and drop the cmdlet's trailing arguments;
+    treating none as comments let a commented-out `}` close it. Both directions
+    were live deny->allow regressions found in review of this branch.
+    """
+
+    def test_comment_tail_is_dropped_and_reported(self):
+        # Swallowing a non-brace token is what makes a comment unverifiable.
         self.assertEqual(
-            dispatch.strip_powershell_comment_tail(["a", "#", "}", "b"]), ["a"]
+            dispatch.split_segment_comment(["a", "#", "}", "-Process", "$sb"]),
+            (["a"], True),
         )
+        self.assertEqual(dispatch.split_segment_comment(["<#", "c", "#>"]), ([], True))
         self.assertEqual(
-            dispatch.strip_powershell_comment_tail(["a", "#comment}"]), ["a"]
+            dispatch.split_segment_comment(["# literal", "}", "$sb"]), ([], True)
         )
 
-    def test_no_comment_returns_a_copy(self):
-        toks = ["a", "{", "b"]
-        result = dispatch.strip_powershell_comment_tail(toks)
-        self.assertEqual(result, toks)
-        self.assertIsNot(result, toks)
+    def test_comment_swallowing_only_braces_is_harmless(self):
+        # `Where-Object { $_ -match '^#' }` after cmd-escape stripping: the tail
+        # is just `}`, so both readings agree and there is nothing to deny over.
+        self.assertEqual(
+            dispatch.split_segment_comment(["a", "#", "}"]), (["a"], False)
+        )
 
-    def test_commented_brace_does_not_end_the_rejoin(self):
-        joined = dispatch.complete_scriptblock_argv(
+    def test_restored_quote_is_not_a_comment(self):
+        # A literal marker proves the token came from a quoted span.
+        token = "#" + dispatch._LITERAL_OPEN_BRACE + "0" + dispatch._LITERAL_CLOSE_BRACE
+        self.assertEqual(
+            dispatch.split_segment_comment([token, "-f", "$_", "}"]),
+            ([token, "-f", "$_", "}"], False),
+        )
+
+    def test_no_comment_is_unchanged(self):
+        self.assertEqual(
+            dispatch.split_segment_comment(["a", "{", "b"]), (["a", "{", "b"], False)
+        )
+
+    def test_commented_brace_does_not_close_the_block(self):
+        # The `}` inside the comment must not end the rejoin, or `-Process $sb`
+        # is never seen. Dropping it exposes the real argv, which then denies on
+        # the ordinary dynamic-payload branch rather than needing the fail-closed.
+        joined, opaque = dispatch.complete_scriptblock_argv(
             ["ForEach-Object", "-Begin", "{", "Write-Host", "a"],
             [["#", "}"], ["}", "-Process", "$sb"]],
         )
@@ -271,6 +334,20 @@ class CommentTailTests(unittest.TestCase):
                 "$sb",
             ],
         )
+        self.assertFalse(opaque)
+
+    def test_every_comment_spelling_fails_closed(self):
+        for command in (
+            "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object -Begin "
+            "{ Write-Host a; # }\n} -Process $sb",
+            "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
+            "{ Write-Host a; <# c #> } $sb",
+            "$sb = { iex 'git push --force origin main' }; "
+            "1 | ForEach-Object -Begin { '# literal' } -Process $sb",
+            "Invoke-Command -ScriptBlock { Write-Host a; # }\n} @icmArgs",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(check(command)[0], "deny")
 
 
 class ForeachLoopStatementTests(unittest.TestCase):
@@ -378,7 +455,7 @@ class AttachedParameterBlockTests(unittest.TestCase):
         bodies = dispatch.powershell_literal_scriptblock_bodies(
             ["ForEach-Object", "-Process:{iex", "payload", "}"]
         )
-        self.assertEqual(bodies, ["iex payload"])
+        self.assertEqual(bodies, [("iex payload", ["iex", "payload"])])
 
 
 class DynamicPayloadBranchesUnchangedTests(unittest.TestCase):
