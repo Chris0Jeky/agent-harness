@@ -1,10 +1,14 @@
-"""Floor v1.6.0: a bare `git push` must not inherit a CONFIGURED force refspec.
+"""Floor v1.6.1: a bare `git push` must not inherit unverified force config.
 
 Adversarial review of PR #23 found that graduating bare `git push` to allow below
 T4 reopened a charter force-push: `remote.<name>.push = +src:dst` silently
 force-updates a shared branch on a refspec-less push, and an agent can write
 `.git/config` itself. The floor now resolves that config and denies the bare push
 when it could force, while still allowing the common non-force bare push.
+
+Issue #27 adds bounded temporal containment: an opaque command that carries a
+literal repository-config path poisons only a later refspec-less push.  These
+tests pass command strings to dispatch.check(); they never execute the payloads.
 """
 
 import importlib.util
@@ -166,6 +170,87 @@ class PushConfigForceTests(unittest.TestCase):
             "printf unsafe >> .git/config; git push origin",
             "Set-Content .git/config unsafe; git push origin",
         ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("push-config-unverifiable", reason)
+
+    def test_opaque_interpreters_poison_later_bare_push_at_t1_to_t3(self) -> None:
+        repo = self._repo(None)
+        commands = (
+            "python -c \"open('.git/config', 'w')\"; git push origin",
+            "node -e \"require('fs').writeFileSync('.git/config', 'x')\"; git push origin",
+            "ruby -e \"File.write('.git/config', 'x')\"; git push origin",
+            "perl -e \"open(F, '>', '.git/config')\"; git push origin",
+            "lua -e \"io.open('.git/config', 'w')\"; git push origin",
+            "python3.12 -c \"open('.git/config', 'w')\"; git push origin",
+            "deno eval \"Deno.writeTextFileSync('.git/config', 'x')\"; git push origin",
+            "Rscript -e \"writeLines('x', '.git/config')\"; git push origin",
+            "powershell -Command \"python -c \\\"open('.git/config', 'w')\\\"; git push origin\"",
+            "powershell -Command \"[IO.File]::WriteAllText('.git/config','x')\"; git push origin",
+        )
+        for tier in (1, 2, 3):
+            for command in commands:
+                with self.subTest(tier=tier, command=command):
+                    decision, reason = self._decide(repo, command, tier=tier)
+                    self.assertEqual(decision, "deny", reason)
+                    self.assertIn("push-config-unverifiable", reason)
+
+    def test_unrelated_opaque_interpreter_does_not_poison_bare_push(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "python -c \"open('notes.txt', 'w')\"; git push origin",
+            "node -e \"require('fs').writeFileSync('notes.txt', 'x')\"; git push origin",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "allow", reason)
+
+    def test_documentation_and_read_references_do_not_poison_bare_push(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "echo '.git/config'; git push origin",
+            "echo .git/config; git push origin",
+            "Write-Output '.git/config'; git push origin",
+            "Write-Output .git/config; git push origin",
+            "Get-Content .git/config; git push origin",
+            "printf '%s\\n' .git/config; git push origin",
+            "grep origin .git/config; git push origin",
+            "rg origin .git/config; git push origin",
+            "type .git/config; git push origin",
+            "head -n 1 .git/config; git push origin",
+            "tail -n 1 .git/config; git push origin",
+            "stat .git/config; git push origin",
+            "Test-Path .git/config; git push origin",
+            "Select-String origin .git/config; git push origin",
+            "git commit -m '.git/config'; git push origin",
+            "git commit -m .git/config; git push origin",
+            "gh pr create --body '.git/config'; git push origin",
+            "git config --file .git/config --get remote.origin.push; git push origin",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "allow", reason)
+
+    def test_explicit_refspec_stays_allowed_after_config_path_reference(self) -> None:
+        repo = self._repo(None)
+        decision, reason = self._decide(
+            repo, "python -c \"open('.git/config', 'w')\"; git push origin main"
+        )
+        self.assertEqual(decision, "allow", reason)
+
+    def test_config_path_forms_poison_later_bare_push(self) -> None:
+        repo = self._repo(None)
+        absolute = Path(repo, ".git", "config").as_posix()
+        commands = (
+            "python -c \"open('.git/config.worktree', 'w')\"; git push origin",
+            "python -c \"open('.git/worktrees/feature/config.worktree', 'w')\"; git push origin",
+            f"python -c \"open('{absolute}', 'w')\"; git push origin",
+            "python -c \"open('C:/repos/primary/.git/worktrees/issue27/config.worktree', 'w')\"; git push origin",
+            "python -c \"open('$GIT_DIR/config', 'w')\"; git push origin",
+            "python -c \"open('$GIT_COMMON_DIR/config.worktree', 'w')\"; git push origin",
+        )
+        for command in commands:
             with self.subTest(command=command):
                 decision, reason = self._decide(repo, command)
                 self.assertEqual(decision, "deny", reason)

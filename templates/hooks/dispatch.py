@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.0 (2026-07-24)"
+FLOOR_VERSION = "1.6.1 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -5493,8 +5493,105 @@ def configured_bare_push_is_dangerous(
     return False
 
 
+_REPOSITORY_CONFIG_LITERAL = re.compile(
+    r"(?i)(?<![a-z0-9_.-])\.git[\\/](?:config(?:\.worktree)?|"
+    r"worktrees[\\/][^\\/'\"`\s]+[\\/]config\.worktree)(?![a-z0-9_.-])"
+)
+_GIT_CONFIG_DIRECTORY_LITERAL = re.compile(
+    r"(?i)(?:\$(?:\{(?:git_dir|git_common_dir)\}|(?:git_dir|git_common_dir))"
+    r"|%(?:git_dir|git_common_dir)%|\$env:(?:git_dir|git_common_dir))"
+    r"[\\/]config(?:\.worktree)?(?![a-z0-9_.-])"
+)
+
+
+def token_mentions_repository_config(token: str) -> bool:
+    """Recognize literal repository config paths in argv or inline text.
+
+    This intentionally catches only direct spellings: .git/config,
+    .git/config.worktree, and common-dir .git/worktrees/<name>/config.worktree,
+    including absolute linked-worktree common-dir paths. It also covers literal
+    shell references to GIT_DIR/GIT_COMMON_DIR followed by config. It does not
+    attempt to reconstruct encoded, generated, or concatenated paths.
+    """
+    literal = restore_quoted_literal_markers(token).replace("\\", "/")
+    return bool(
+        _REPOSITORY_CONFIG_LITERAL.search(literal)
+        or _GIT_CONFIG_DIRECTORY_LITERAL.search(literal)
+    )
+
+
+def config_reference_is_readonly_or_message(raw: list[str]) -> bool:
+    """Keep literal config names in ordinary output, read, and message text inert."""
+    head, toks = command_head(raw)
+    if head in {
+        "cat",
+        "dir",
+        "echo",
+        "file",
+        "findstr",
+        "gc",
+        "get-childitem",
+        "get-content",
+        "get-item",
+        "gi",
+        "grep",
+        "head",
+        "ls",
+        "printf",
+        "readlink",
+        "realpath",
+        "rg",
+        "select-string",
+        "sls",
+        "stat",
+        "tail",
+        "test",
+        "test-path",
+        "type",
+        "write-host",
+        "write-output",
+    }:
+        return True
+    if head == "git":
+        subcommand = git_subcommand(toks)
+        if subcommand == "config":
+            return any(
+                token
+                in {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list"}
+                or token.startswith(
+                    ("--get=", "--get-all=", "--get-regexp=", "--get-urlmatch=")
+                )
+                for token in toks
+            )
+        return any(
+            token == "-m"
+            or token.startswith("-m")
+            or token == "--message"
+            or token.startswith("--message=")
+            for token in toks
+        )
+    if head == "gh":
+        return any(
+            token in {"--body", "--body-file", "--title", "--message", "--notes"}
+            or token.startswith(
+                ("--body=", "--body-file=", "--title=", "--message=", "--notes=")
+            )
+            for token in toks
+        )
+    return False
+
+
 def segment_may_mutate_repository_config(raw: list[str]) -> bool:
-    """Return whether a shell segment may rewrite the current repo's config."""
+    """Return whether a segment leaves later bare-push config unverifiable.
+
+    A literal path alone is allowed.  Recognized writers and redirection retain
+    their precise handling; otherwise an arbitrary interpreter or launcher that
+    carries a literal repository config path is conservatively opaque unless its
+    head is explicitly output/read/message-only.  Thus even an opaque inline
+    interpreter that merely prints '.git/config' can poison a later bare push;
+    an explicit refspec remains the narrow escape hatch.  Dynamic, encoded, and
+    constructed paths are outside this bounded temporal check.
+    """
     if not raw:
         return False
     normalized = [
@@ -5504,7 +5601,7 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
     config_indexes = [
         index
         for index, token in enumerate(normalized)
-        if token == ".git/config" or token.endswith("/.git/config")
+        if token_mentions_repository_config(token)
     ]
     if not config_indexes:
         return False
@@ -5534,10 +5631,12 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
         "tee-object",
     }:
         return True
-    return any(
+    if any(
         index > 0 and normalized[index - 1] in {">", ">>", ">|"}
         for index in config_indexes
-    )
+    ):
+        return True
+    return not config_reference_is_readonly_or_message(raw)
 
 
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
