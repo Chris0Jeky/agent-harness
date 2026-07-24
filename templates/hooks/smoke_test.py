@@ -887,6 +887,33 @@ CASES = [
     ("Get-ChildItem | ForEach-Object Delete", 1, {}, "deny"),
     ("Get-ChildItem | ForEach-Object -MemberName Delete", 1, {}, "deny"),
     ("1 | ForEach-Object -Process { rm -rf /critical/outside }", 1, {}, "deny"),
+    # v1.6.1: a literal block cut in half by an inner `;`/`|` separator is a
+    # SEGMENTATION artifact, not an opaque payload — but the body it carries
+    # must still be inspected. Each of these truncates the block and hides a
+    # charter irreversible on one side of the split.
+    ("1 | ForEach-Object { $i++; rm -rf /critical/outside }", 1, {}, "deny"),
+    ("1 | ForEach-Object { rm -rf /critical/outside ; $i++ }", 1, {}, "deny"),
+    ("1 | ForEach-Object { echo a; git push --force origin main }", 1, {}, "deny"),
+    ("1 | ForEach-Object { $x=1; sudo rm -rf / }", 1, {}, "deny"),
+    ("1 | ForEach-Object { echo a; Remove-Item -Recurse -Force C:\\ }", 1, {}, "deny"),
+    ("1 | %{ $i++; rm -rf /critical/outside }", 1, {}, "deny"),
+    ("1 | ForEach-Object -Process { $i++; rm -rf /critical/outside }", 1, {}, "deny"),
+    (
+        'powershell -Command "1 | ForEach-Object { $i++; rm -rf /critical/outside }"',
+        1,
+        {},
+        "deny",
+    ),
+    # A backtick-escaped brace is a literal character, not a block close, so the
+    # block stays open — the delete inside it is still caught.
+    ("1 | ForEach-Object { rm -rf /critical/outside `}", 1, {}, "deny"),
+    # Truncation must not launder the dynamic-payload branches either.
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",
+        1,
+        {},
+        "deny",
+    ),
     # parenthesized dynamic payloads to the cmdlet aliases must not be mistaken
     # for a `foreach ($x in ...)` loop header.
     ("$sb={ rm -rf /critical/outside }; 1 | % ($sb)", 1, {}, "deny"),
@@ -2821,6 +2848,31 @@ CASES = [
     ("foreach ($f in $list) { Write-Output $f }", 1, {}, "allow"),
     ("1 | ForEach-Object { $_ }", 1, {}, "allow"),
     ("Get-ChildItem | ForEach-Object { $_.FullName }", 1, {}, "allow"),
+    # v1.6.1 (#25): a benign literal block containing an inner `;` used to be
+    # denied "A pipeline scriptblock is malformed." — the segmenter split the
+    # block at the `;`, so the brace scan could never balance. 2,659 unique
+    # real commands in the #21 corpus hit this; these are verbatim shapes.
+    (
+        "$i=0; Get-Content 'CLAUDE.md' | ForEach-Object { $i++; '{0,4}: {1}' -f $i,$_ }",
+        1,
+        {},
+        "allow",
+    ),
+    ("Get-Content x.txt | ForEach-Object { $i++; Write-Output $i }", 1, {}, "allow"),
+    (
+        "@('a','b') | ForEach-Object { $n=(Get-Content $_).Count; Write-Output $n }",
+        1,
+        {},
+        "allow",
+    ),
+    ("gci | %{ $a=1; $b=2 }", 1, {}, "allow"),
+    ("1 | ForEach-Object -Process { $i++; Write-Output $i }", 1, {}, "allow"),
+    ("Invoke-Command -ScriptBlock { $i++; git status }", 1, {}, "allow"),
+    # A backtick-escaped brace is a literal character and must not be counted as
+    # a block delimiter.
+    ("1 | ForEach-Object { Write-Host a`{b }", 1, {}, "allow"),
+    # Truncation by an inner pipe, not just an inner semicolon.
+    ("Get-ChildItem | ForEach-Object { $_.Name | Write-Output }", 1, {}, "allow"),
     ("if ($x) { Write-Output $x }", 1, {}, "allow"),
     ("eval 'echo safe'", 1, {}, "allow"),
     ("git commit -F - <<'EOF'\ngit push --force\nEOF", 1, {}, "allow"),
