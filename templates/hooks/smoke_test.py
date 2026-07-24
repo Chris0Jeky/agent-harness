@@ -445,6 +445,31 @@ CASES = [
         "deny",
     ),
     (
+        r'''cmd /c "start "" /wait cmd /c rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''cmd /c "start "window title" /wait cmd /c rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''cmd /c "start /d C:\temp cmd /c rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (r'''cmd /c "if 1==1 @rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
+    (
+        'cmd /c "' + ("call " * 16) + r'''rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
         r'''powershell -Command "powershell -Command Remove-Item -Recurse C:\critical\outside path\"''',
         1,
         {},

@@ -1716,7 +1716,10 @@ def unparseable_recursive_delete(command: str) -> bool:
     )
     seen: set[str] = set()
 
-    while candidates and len(seen) < 16:
+    # Every recognized wrapper peel shortens the candidate, and ``seen``
+    # prevents duplicate work. Do not impose a traversal count that turns a
+    # sufficiently deep but still executable wrapper chain into an allow.
+    while candidates:
         candidate = candidates.pop(0).lstrip()
         candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
         if not candidate or candidate in seen:
@@ -1760,11 +1763,21 @@ def unparseable_recursive_delete(command: str) -> bool:
         if not wrapper:
             wrapper = re.match(r"(?is)^call\s+(?P<child>.+)$", candidate)
         if not wrapper:
-            wrapper = re.match(r"(?is)^start(?:\s+/\S+)*\s+(?P<child>.+)$", candidate)
+            wrapper = re.match(
+                r"(?is)^start\b"
+                r"(?:\s+\"[^\"]*\")?"
+                r"(?:"
+                r"\s+/(?:d|node|affinity|machine)\s+(?:\"[^\"]*\"|\S+)"
+                r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
+                r"realtime|abovenormal|belownormal|wait)"
+                r")*"
+                r"\s+(?P<child>.+)$",
+                candidate,
+            )
         if not wrapper:
             wrapper = re.match(
                 r"(?is)^if\s+(?:not\s+)?(?:\S+\s+){1,3}"
-                r"(?P<child>(?:cmd|powershell|pwsh|call|start|"
+                r"(?P<child>(?:[\"'&@({\s])*(?:cmd|powershell|pwsh|call|start|"
                 r"remove-item|ri|rm|del|erase|rd|rmdir)\b.+)$",
                 candidate,
             )
