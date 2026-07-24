@@ -323,6 +323,20 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.remove_managed_codex_floor(current, dispatcher)
 
+    def test_remove_managed_floor_normalizes_deep_ignored_rewrite(self) -> None:
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        ignored_depth = ('{"nested":' * 10000) + "0" + ("}" * 10000)
+        current = (
+            '{"hooks":{"FutureEvent":'
+            + ignored_depth
+            + ',"PreToolUse":[{"hooks":['
+            + json.dumps(managed_handler)
+            + "]}]}}"
+        )
+        with self.assertRaises(harness.HarnessError):
+            harness.remove_managed_codex_floor(current, dispatcher)
+
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         current = json.dumps(
@@ -591,9 +605,21 @@ class HarnessTests(unittest.TestCase):
             harness.parse_hooks_document(json.dumps(boundary_handler))
         huge_integer = "9" * 5000
         harness.parse_hooks_document(f'{{"hooks":{{"FutureEvent":{huge_integer}}}}}')
-        too_deep = '{"hooks":{"FutureEvent":' + ("[" * 1000) + "0" + ("]" * 1000) + "}}"
-        with self.assertRaises(harness.HarnessError):
-            harness.parse_hooks_document(too_deep)
+        ignored_depth = ("[" * 1100) + "0" + ("]" * 1100)
+        harness.parse_hooks_document('{"hooks":{"FutureEvent":' + ignored_depth + "}}")
+        harness.parse_hooks_document(
+            '{"hooks":{"PreToolUse":[{"ignored":' + ignored_depth + ',"hooks":[]}]}}'
+        )
+
+    def test_hooks_schema_rejects_negative_zero_unsigned_fields(self) -> None:
+        for field in ("timeout", "additionalContextLimit"):
+            with self.subTest(field=field):
+                document = (
+                    '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command",'
+                    '"command":"echo safe","' + field + '":-0}]}]}}'
+                )
+                with self.assertRaises(harness.HarnessError):
+                    harness.parse_hooks_document(document)
 
     def test_hooks_schema_validates_every_known_event(self) -> None:
         adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -1087,12 +1113,44 @@ class HarnessTests(unittest.TestCase):
 
         result, output = self.run_doctor_with_fixture_globals(
             repo,
-            user_config='[profiles.custom.features]\nhooks = "invalid"\n',
+            user_config=('[profiles.custom.features]\nfuture_feature = "invalid"\n'),
         )
 
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("profiles.custom", output)
+        self.assertIn("must be a boolean", output)
+
+    def test_hook_feature_profile_schema_is_fail_closed(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        invalid_documents = (
+            "profiles = 7\n",
+            "[profiles]\ncustom = 7\n",
+            '[profiles.custom.features]\nfuture_feature = "invalid"\n',
+        )
+        for document in invalid_documents:
+            with self.subTest(document=document):
+                config.write_text(document, encoding="utf-8")
+                with self.assertRaises(harness.HarnessError):
+                    harness.hook_feature_declarations(
+                        config, reject_legacy_profile=True
+                    )
+
+    def test_doctor_rejects_nonboolean_project_feature_sibling(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            '[features]\nfuture_feature = "invalid"\n', encoding="utf-8"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("features.future_feature", output)
         self.assertIn("must be a boolean", output)
 
     def test_doctor_ignores_managed_only_key_outside_requirements(self) -> None:
@@ -2782,9 +2840,10 @@ class HarnessTests(unittest.TestCase):
             "[mcp_servers.demo.env]\n"
             'hooks = "literal"\n'
             'project_root_markers = "literal"\n\n'
+            "[profiles.custom]\n"
+            'project_root_markers = "also literal"\n\n'
             "[profiles.custom.features]\n"
             "hooks = false\n"
-            'project_root_markers = "also literal"\n'
         )
 
         result, output = self.run_doctor_with_fixture_globals(

@@ -424,10 +424,7 @@ def hook_feature_declarations(
         features = container["features"]
         if not isinstance(features, dict):
             raise HarnessError(f"features in {config_path}:{location} must be a table")
-        for key in ("hooks", "codex_hooks"):
-            if key not in features:
-                continue
-            value = features[key]
+        for key, value in features.items():
             if not isinstance(value, bool):
                 raise HarnessError(
                     f"features.{key} in {config_path}:{location} must be a boolean"
@@ -441,11 +438,13 @@ def hook_feature_declarations(
 
     inspect(config, "top-level", active=True)
     if reject_legacy_profile:
-        profiles = config.get("profiles")
-        if isinstance(profiles, dict):
-            for name, profile in profiles.items():
-                if isinstance(profile, dict):
-                    inspect(profile, f"profiles.{name}", active=False)
+        if "profiles" in config and not isinstance(config["profiles"], dict):
+            raise HarnessError(f"profiles in {config_path} must be a table")
+        profiles = config.get("profiles", {})
+        for name, profile in profiles.items():
+            if not isinstance(profile, dict):
+                raise HarnessError(f"profiles.{name} in {config_path} must be a table")
+            inspect(profile, f"profiles.{name}", active=False)
     return declarations
 
 
@@ -1159,15 +1158,49 @@ def validate_raw_json_hook_schema(value: Any) -> None:
 
 def json_pairs_to_value(value: Any) -> Any:
     """Collapse lossless object pairs after schema-aware duplicate validation."""
-    if isinstance(value, JsonObjectPairs):
-        return {key: json_pairs_to_value(nested) for key, nested in value}
-    if isinstance(value, list):
-        return [json_pairs_to_value(nested) for nested in value]
-    if isinstance(value, JsonIntegerToken):
-        if len(value.raw) <= 100:
-            return int(value.raw)
-        return value
-    return value
+
+    def leaf(current: Any) -> Any:
+        if isinstance(current, JsonIntegerToken):
+            if current.raw == "-0":
+                return current
+            if len(current.raw) <= 100:
+                return int(current.raw)
+        return current
+
+    def container(current: Any) -> dict[str, Any] | list[Any] | None:
+        if isinstance(current, JsonObjectPairs):
+            return {}
+        if isinstance(current, list):
+            return []
+        return None
+
+    result = container(value)
+    if result is None:
+        return leaf(value)
+    pending: list[tuple[Any, dict[str, Any] | list[Any]]] = [(value, result)]
+    while pending:
+        raw_container, converted = pending.pop()
+        if isinstance(raw_container, JsonObjectPairs):
+            if not isinstance(converted, dict):
+                raise AssertionError("object conversion target must be a dictionary")
+            for key, nested in raw_container:
+                nested_container = container(nested)
+                converted[key] = (
+                    nested_container if nested_container is not None else leaf(nested)
+                )
+                if nested_container is not None:
+                    pending.append((nested, nested_container))
+            continue
+        if not isinstance(converted, list):
+            raise AssertionError("array conversion target must be a list")
+        for nested in raw_container:
+            nested_container = container(nested)
+            converted.append(
+                nested_container if nested_container is not None else leaf(nested)
+            )
+            if nested_container is not None:
+                pending.append((nested, nested_container))
+    return result
 
 
 def reject_json_constant(value: str) -> None:
@@ -2292,9 +2325,10 @@ def remove_managed_codex_floor(
         return ""
     try:
         return json.dumps(current_data, indent=2, allow_nan=False) + "\n"
-    except (TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         raise HarnessError(
-            "refusing to rewrite hooks.json with an ignored non-standard number"
+            "refusing to rewrite hooks.json with an ignored value that cannot be "
+            "serialized"
         ) from exc
 
 

@@ -45,8 +45,10 @@ subtree and the hook-specific metadata it statically interprets: every supported
 object wrapper and parser constraints, config hook state, and managed requirements hook paths. It
 scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
 profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
-schema-validated. Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only evidence
-and must be reconciled in `/hooks`.
+schema-validated. Ignored JSON values are traversed iteratively, but the stdlib JSON decoder still
+imposes an explicit fail-closed bound at pathological nesting depths before schema inspection.
+Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only evidence and must be
+reconciled in `/hooks`.
 
 `doctor --repo` accepts the Git-root layer walk only when every inspectable top-level
 `project_root_markers` declaration in the system, base-user, and stored profile-v2 configs is

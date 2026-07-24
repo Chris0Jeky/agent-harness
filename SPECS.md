@@ -166,11 +166,13 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   A floor is counted only after the complete hook subtree and the source-specific hook metadata
   inspected by the harness pass their static boundaries: the supported JSON object form rejects
   duplicate known fields, non-standard constants, invalid known strings, and invalid wrapper
-  fields while preserving serde's ignored-unknown behavior; every supported event and handler is
+  fields while traversing ignored unknown values iteratively; every supported event and handler is
   schema-valid; inline config hook state and managed requirements hook paths have their
-  source-specific shapes. One malformed hook sibling invalidates the layer instead of leaving a
-  countable `PreToolUse` floor. The harness does not fully schema-validate unrelated ConfigToml or
-  requirements fields; exact Codex startup and `/hooks` remain the authority for those fields.
+  source-specific shapes. Python's stdlib decoder imposes an explicit fail-closed boundary at
+  pathological JSON nesting depths before ignored-value inspection. One malformed hook sibling
+  invalidates the layer instead of leaving a countable `PreToolUse` floor. The harness does not
+  fully schema-validate unrelated ConfigToml or requirements fields; exact Codex startup and
+  `/hooks` remain the authority for those fields.
   Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
   runtime boundary for exact-session `/hooks`; the static check never represents those sources as
   inspected.
