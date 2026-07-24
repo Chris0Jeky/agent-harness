@@ -397,6 +397,7 @@ CASES = [
     ('Remove-Item -Recurse -Force "C:/critical/outside path"', 1, {}, "deny"),
     ('Remove-Item -Recurse -Force "C:\\critical\\outside path"', 1, {}, "deny"),
     (r'''Remove-Item -Recurse "C:\critical\outside path\"''', 1, {}, "deny"),
+    (r'''   Remove-Item -Recurse "C:\critical\outside path\"''', 1, {}, "deny"),
     (
         r'''Write-Output Remove-Item -Recurse "C:\critical\outside path\"''',
         1,
@@ -433,6 +434,33 @@ CASES = [
     (r'''cmd /c "call rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''cmd /c "if 1==1 rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''cmd /c "echo rd /s /q C:\critical\outside path\"''', 1, {}, "allow"),
+    (r'''cmd /c "cmd /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
+    (r'''cmd /c "cmd /d /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
+    (r'''cmd /c "call cmd /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
+    (
+        r'''cmd /c "start /wait cmd /c rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''powershell -Command "powershell -Command Remove-Item -Recurse C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''pwsh -Command "pwsh -Command Remove-Item -Recurse C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''cmd /c "echo cmd /c rd /s /q C:\critical\outside path\"''',
+        1,
+        {},
+        "allow",
+    ),
     ("rmdir /s /q C:/critical/outside", 1, {}, "deny"),
     ("Remove-Item -R FileSystem::C:/critical/outside", 1, {}, "deny"),
     (
@@ -3983,16 +4011,17 @@ def main():
         inherited_original = os.environ.get(inherited_name)
         os.environ[inherited_name] = "repo/.git"
         try:
-            inherited_override_decision, inherited_override_reason = (
-                dispatch_module.check(
-                    "git push origin main",
-                    sensitive_cfg,
-                    HERE,
-                    HERE,
-                    remote_resolver=lambda *args: (
-                        inherited_override_calls.append(args) or (False, "private")
-                    ),
-                )
+            (
+                inherited_override_decision,
+                inherited_override_reason,
+            ) = dispatch_module.check(
+                "git push origin main",
+                sensitive_cfg,
+                HERE,
+                HERE,
+                remote_resolver=lambda *args: (
+                    inherited_override_calls.append(args) or (False, "private")
+                ),
             )
         finally:
             if inherited_original is None:

@@ -1702,6 +1702,78 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
+def unparseable_recursive_delete(command: str) -> bool:
+    """Recognize recursive deletes hidden by non-POSIX Windows quoting.
+
+    A trailing backslash in a double-quoted Windows path is valid to cmd and
+    PowerShell but makes POSIX shlex reject the whole command. Peel only
+    wrappers that execute their child text; inert commands such as echo and
+    Write-Output deliberately stop the walk.
+    """
+    candidates = [command]
+    candidates.extend(
+        part for part in re.split(r"[;&|\n]+", command) if part and part != command
+    )
+    seen: set[str] = set()
+
+    while candidates and len(seen) < 16:
+        candidate = candidates.pop(0).lstrip()
+        candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+
+        delete_head = re.match(
+            r"(?i)(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)" r"(?=$|[\s;/\"'])",
+            candidate,
+        )
+        if delete_head:
+            delete_name = delete_head.group("head").lower()
+            delete_tail = candidate[delete_head.end("head") :]
+            option_tokens = re.findall(r"(?<!\S)-[^\s\"']+", delete_tail)
+            powershell_recurse = any(
+                is_powershell_recurse_flag(token) for token in option_tokens
+            )
+            posix_recurse = delete_name == "rm" and any(
+                token.startswith("-")
+                and not token.startswith("--")
+                and "r" in token[1:].lower()
+                for token in option_tokens
+            )
+            cmd_recurse = delete_name in {"del", "erase", "rd", "rmdir"} and bool(
+                re.search(r"(?i)(?:^|/)s(?=/|\s|$)", delete_tail)
+            )
+            if powershell_recurse or posix_recurse or cmd_recurse:
+                return True
+            continue
+
+        wrapper = re.match(
+            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
+            candidate,
+        )
+        if not wrapper:
+            wrapper = re.match(
+                r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
+                r"\s-(?:command|c)(?:\s+|$)(?P<child>.+)$",
+                candidate,
+            )
+        if not wrapper:
+            wrapper = re.match(r"(?is)^call\s+(?P<child>.+)$", candidate)
+        if not wrapper:
+            wrapper = re.match(r"(?is)^start(?:\s+/\S+)*\s+(?P<child>.+)$", candidate)
+        if not wrapper:
+            wrapper = re.match(
+                r"(?is)^if\s+(?:not\s+)?(?:\S+\s+){1,3}"
+                r"(?P<child>(?:cmd|powershell|pwsh|call|start|"
+                r"remove-item|ri|rm|del|erase|rd|rmdir)\b.+)$",
+                candidate,
+            )
+        if wrapper:
+            candidates.append(wrapper.group("child"))
+
+    return False
+
+
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
     """Tokenize executable argv while protecting quoted operator characters.
 
@@ -1755,35 +1827,8 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         # for that irreversible surface; benign PowerShell scriptblocks can
         # also be intentionally non-POSIX and remain inspectable by the other
         # normalization passes below.
-        delete_head = re.search(
-            r"(?i)(?:^|[;&|({}\n]\s*)"
-            r"(?:&\s*)?"
-            r"(?:(?:powershell|pwsh)(?:\.exe)?\s+-(?:command|c)\s+"
-            r"|cmd(?:\.exe)?\s+/[ck]\s+)?"
-            r"[\"']?(?:@\s*)?"
-            r"(?:(?:call)\s+|if\s+(?:not\s+)?(?:\S+\s+){1,3}?)?"
-            r"[\"']?(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)"
-            r"(?=$|[\s;/\"'])",
-            command,
-        )
-        if delete_head:
-            delete_name = delete_head.group("head").lower()
-            delete_tail = command[delete_head.end("head") :]
-            option_tokens = re.findall(r"(?<!\S)-[^\s\"']+", delete_tail)
-            powershell_recurse = any(
-                is_powershell_recurse_flag(token) for token in option_tokens
-            )
-            posix_recurse = delete_name == "rm" and any(
-                token.startswith("-")
-                and not token.startswith("--")
-                and "r" in token[1:].lower()
-                for token in option_tokens
-            )
-            cmd_recurse = delete_name in {"del", "erase", "rd", "rmdir"} and bool(
-                re.search(r"(?i)(?:^|/)s(?=/|\s|$)", delete_tail)
-            )
-            if powershell_recurse or posix_recurse or cmd_recurse:
-                return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
+        if unparseable_recursive_delete(command):
+            return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
         return []
 
     separators = set(";&|\n")
