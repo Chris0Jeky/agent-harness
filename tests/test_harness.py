@@ -86,13 +86,23 @@ class HarnessTests(unittest.TestCase):
         )
         return config
 
-    def run_doctor_with_fixture_globals(self, repo: Path) -> tuple[int, str]:
+    def run_doctor_with_fixture_globals(
+        self,
+        repo: Path,
+        *,
+        user_config: str | None = None,
+        profile_configs: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
         claude_home = root / "claude-home"
         skills_home = root / "skills-home"
         (codex_home / "AGENTS.md").parent.mkdir()
         (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        if user_config is not None:
+            (codex_home / "config.toml").write_text(user_config, encoding="utf-8")
+        for filename, contents in (profile_configs or {}).items():
+            (codex_home / filename).write_text(contents, encoding="utf-8")
         harness_root = Path(harness.__file__).resolve().parent
         for filename in ("dispatch.py", "smoke_test.py"):
             target = claude_home / "hooks" / filename
@@ -1823,6 +1833,70 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("1 project floor handler(s)", output)
         self.assertIn("0 canonical root hooks.json handler(s)", output)
+
+    def test_doctor_rejects_nondefault_user_project_root_markers(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        nested.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(
+            nested, user_config="project_root_markers = []\n"
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_rejects_stored_profile_project_root_marker_override(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            profile_configs={
+                "custom.config.toml": 'project_root_markers = ["workspace.toml"]\n'
+            },
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("custom.config.toml", output)
+
+    def test_doctor_rejects_invalid_project_root_marker_shape(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config='project_root_markers = ".git"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project root markers", output)
+        self.assertIn("must be an array of strings", output)
+
+    def test_doctor_accepts_explicit_default_project_root_markers(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config='project_root_markers = [".git"]\n'
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project root markers", output)
 
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
