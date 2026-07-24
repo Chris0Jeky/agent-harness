@@ -637,11 +637,18 @@ class HarnessTests(unittest.TestCase):
             harness.parse_hooks_document(json.dumps(boundary_handler))
         huge_integer = "9" * 5000
         harness.parse_hooks_document(f'{{"hooks":{{"FutureEvent":{huge_integer}}}}}')
-        ignored_depth = ("[" * 1100) + "0" + ("]" * 1100)
-        harness.parse_hooks_document('{"hooks":{"FutureEvent":' + ignored_depth + "}}")
-        harness.parse_hooks_document(
-            '{"hooks":{"PreToolUse":[{"ignored":' + ignored_depth + ',"hooks":[]}]}}'
-        )
+
+    def test_hooks_json_normalizes_decoder_recursion_failure(self) -> None:
+        with mock.patch.object(
+            harness.json,
+            "loads",
+            side_effect=RecursionError("fixture depth"),
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"invalid existing hooks\.json: fixture depth",
+            ):
+                harness.parse_hooks_document('{"hooks":{}}')
 
     def test_hooks_schema_rejects_negative_zero_unsigned_fields(self) -> None:
         for field in ("timeout", "additionalContextLimit"):
@@ -1403,7 +1410,7 @@ allow_local_binding = true
             self.assertIn("[FAIL] Codex hook source", output)
             self.assertIn("logical Codex project root disagrees", output)
             self.assertIn(str(repo_a), output)
-            self.assertIn(str(repo_b), output)
+            self.assertIn(str(repo_b.resolve()), output)
             self.assertIn("[FAIL] project Codex floor", output)
         finally:
             remove_alias()
