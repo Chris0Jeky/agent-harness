@@ -679,6 +679,23 @@ def scan_powershell_literal_block(
     return _BLOCK_CLOSED, index
 
 
+def is_powershell_foreach_loop_statement(head: str, toks: list[str]) -> bool:
+    """Whether this is the `foreach ($item in ...)` LOOP STATEMENT.
+
+    Only the `foreach` KEYWORD (never the `%` / ForEach-Object cmdlet aliases)
+    forms a loop statement, and only with a real `( <var> in ... )` header. A
+    parenthesized argument to `%` / ForEach-Object is a dynamic scriptblock
+    EXPRESSION and must stay subject to the opacity checks.
+
+    A loop statement takes no cmdlet arguments after its block, so its argv is
+    never rejoined across a segment split — the body is ordinary code that the
+    normal segment walk already inspects.
+    """
+    if head != "foreach" or len(toks) < 2 or not toks[1].startswith("("):
+        return False
+    return bool(re.search(r"\bin\b", " ".join(toks[1:]), re.IGNORECASE))
+
+
 def complete_scriptblock_argv(toks: list[str], following: list[list[str]]) -> list[str]:
     """Rejoin an argv whose literal scriptblock was cut by segment splitting.
 
@@ -828,14 +845,8 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     as their own segments by the sanitized pass.
     """
     foreach = head in {"foreach-object", "%", "foreach"}
-    # Only the `foreach` KEYWORD (never the % / ForEach-Object cmdlet aliases)
-    # forms a loop statement, and only with a real `( <var> in ... )` header.
-    # A parenthesized argument to % / ForEach-Object is a dynamic scriptblock
-    # EXPRESSION and must fall through to the opacity checks below.
-    if head == "foreach" and len(toks) > 1 and toks[1].startswith("("):
-        header = " ".join(toks[1:])
-        if re.search(r"\bin\b", header, re.IGNORECASE):
-            return None  # `foreach ($item in ...)` statement; body splits elsewhere
+    if is_powershell_foreach_loop_statement(head, toks):
+        return None  # `foreach ($item in ...)` statement; body splits elsewhere
     script_parameters = (
         {"begin", "end", "parallel", "process", "remainingscripts"}
         if foreach
@@ -6565,8 +6576,12 @@ def check(
         if head in {"foreach-object", "%", "foreach", "where-object", "?", "where"}:
             if not quote_aware:
                 continue
-            complete_argv = complete_scriptblock_argv(
-                toks, pass_order.get(current_pass, [])[segment_index + 1 :]
+            complete_argv = (
+                toks
+                if is_powershell_foreach_loop_statement(head, toks)
+                else complete_scriptblock_argv(
+                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
+                )
             )
             pipeline_error = powershell_pipeline_scriptblock_opacity(
                 head, complete_argv

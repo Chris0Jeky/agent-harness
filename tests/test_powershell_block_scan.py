@@ -273,6 +273,52 @@ class CommentTailTests(unittest.TestCase):
         )
 
 
+class ForeachLoopStatementTests(unittest.TestCase):
+    """`foreach ($x in ...)` is a loop statement, not a scriptblock cmdlet.
+
+    It takes no arguments after its block, so rejoining its argv across a split
+    only inflates the recursed body. Doing so newly blocked one real corpus
+    command (a 1.5k-char doc-link checker) by dragging a later bare interpolated
+    string into the body, where it read as a dynamic executable head.
+    """
+
+    def test_loop_header_is_recognised(self):
+        self.assertTrue(
+            dispatch.is_powershell_foreach_loop_statement(
+                "foreach", ["foreach", "($x", "in", "$y)", "{"]
+            )
+        )
+
+    def test_cmdlet_aliases_are_not_loop_statements(self):
+        for head in ("%", "foreach-object"):
+            with self.subTest(head=head):
+                self.assertFalse(
+                    dispatch.is_powershell_foreach_loop_statement(head, [head, "($sb)"])
+                )
+
+    def test_parenthesized_argument_without_in_is_not_a_loop(self):
+        self.assertFalse(
+            dispatch.is_powershell_foreach_loop_statement(
+                "foreach", ["foreach", "($sb)"]
+            )
+        )
+
+    def test_loop_body_payload_still_denies(self):
+        decision, _reason = check(
+            "foreach ($x in $y) { iex 'git push --force origin main' }"
+        )
+        self.assertEqual(decision, "deny")
+
+    def test_multi_statement_loop_script_allows(self):
+        command = (
+            "$roots = @('docs'); $docs = @(); "
+            "foreach ($root in $roots) { $docs += Get-ChildItem -LiteralPath $root }; "
+            '"COUNT=$($docs.Count)"'
+        )
+        decision, reason = check(command)
+        self.assertEqual(decision, "allow", reason)
+
+
 class AttachedParameterBlockTests(unittest.TestCase):
     def test_attached_parameter_block_body_is_extracted(self):
         bodies = dispatch.powershell_literal_scriptblock_bodies(
