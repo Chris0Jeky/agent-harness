@@ -62,6 +62,30 @@ class HarnessTests(unittest.TestCase):
         hooks.write_text(text, encoding="utf-8")
         return hooks
 
+    @staticmethod
+    def write_inline_floor(checkout: Path) -> Path:
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        config = checkout / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n\n'
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            f"command = 'expected={pin}; python3 \"$HOME/.claude/hooks/dispatch.py\" "
+            "--event pre --runtime codex'\n"
+            f"commandWindows = \"$expected='{pin}'; py -3 "
+            "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex\"\n"
+            "timeout = 5\n",
+            encoding="utf-8",
+        )
+        return config
+
     def run_doctor_with_fixture_globals(self, repo: Path) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -1743,6 +1767,38 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
 
+    def test_doctor_audits_nested_inline_hook_layer(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        nested.mkdir()
+        inline_config = self.write_inline_floor(nested)
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 1)
+        self.assertIn(str(inline_config.resolve()), output)
+        self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
+    def test_doctor_allows_nested_config_only_layer(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        config = repo / "nested" / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[features]\nhooks = true\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(config.parent.parent)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("2 active Codex hook layer(s)", output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
@@ -1781,6 +1837,45 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn(str(authoritative_hooks.resolve()), output)
         self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
+    def test_doctor_audits_mapped_nested_root_inline_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, valid_adapter)
+        nested = linked / "nested"
+        config = nested / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[features]\nhooks = true\n", encoding="utf-8")
+        authoritative_config = self.write_inline_floor(root / "nested")
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 1)
+        self.assertIn(str(authoritative_config.resolve()), output)
+        self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
+    def test_doctor_rejects_ignored_worktree_inline_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, valid_adapter)
+        nested = linked / "nested"
+        local_config = self.write_inline_floor(nested)
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        authoritative_config = root / "nested" / ".codex" / "config.toml"
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn(str(authoritative_config.resolve()), output)
+        self.assertIn(str(local_config.resolve()), output)
+        self.assertIn("ignored worktree inline hooks", output)
+        self.assertIn("[FAIL] project Codex floor: 1 project floor handler(s)", output)
 
     def test_doctor_floor_status_fails_with_divergent_worktree_copy(self) -> None:
         root, linked = self.make_linked_worktree()
