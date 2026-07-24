@@ -114,9 +114,7 @@ class HarnessTests(unittest.TestCase):
         if system_hooks is not None:
             (root / "hooks.json").write_text(system_hooks, encoding="utf-8")
         if managed_config is not None:
-            (root / "managed-config.toml").write_text(
-                managed_config, encoding="utf-8"
-            )
+            (root / "managed-config.toml").write_text(managed_config, encoding="utf-8")
         harness_root = Path(harness.__file__).resolve().parent
         for filename in ("dispatch.py", "smoke_test.py"):
             target = claude_home / "hooks" / filename
@@ -152,8 +150,13 @@ class HarnessTests(unittest.TestCase):
                 "codex_system_config_path",
                 return_value=root / "system-config.toml",
             ):
-                with redirect_stdout(output):
-                    result = harness.doctor(args)
+                with mock.patch.object(
+                    harness,
+                    "codex_managed_config_path",
+                    return_value=root / "managed-config.toml",
+                ):
+                    with redirect_stdout(output):
+                        result = harness.doctor(args)
         return result, output.getvalue()
 
     def setUp(self) -> None:

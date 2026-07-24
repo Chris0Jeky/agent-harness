@@ -194,6 +194,48 @@ def codex_system_config_path() -> Path:
     return Path("/etc/codex/config.toml")
 
 
+def codex_managed_config_path(codex_home: Path) -> Path:
+    """Return Codex's inspectable legacy managed-config location."""
+    if os.name == "nt":
+        return codex_home / "managed_config.toml"
+    return Path("/etc/codex/managed_config.toml")
+
+
+def inline_hook_documents_from_config(config_path: Path) -> list[tuple[str, str]]:
+    """Return every stored inline-hook declaration in one config document."""
+    config = toml_config(config_path)
+    if config is None:
+        return []
+
+    declarations: list[tuple[str, str]] = []
+
+    def walk(value: Any, keys: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_keys = (*keys, key)
+                if key == "hooks":
+                    if not isinstance(child, dict):
+                        location = ".".join(child_keys)
+                        raise HarnessError(
+                            f"{location} in {config_path} must be a table"
+                        )
+                    try:
+                        document = json.dumps({"hooks": child})
+                    except (TypeError, ValueError) as exc:
+                        raise HarnessError(
+                            f"unsupported inline hooks value in {config_path}: {exc}"
+                        ) from exc
+                    declarations.append((".".join(child_keys), document))
+                else:
+                    walk(child, child_keys)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, (*keys, f"[{index}]"))
+
+    walk(config)
+    return declarations
+
+
 def project_root_markers_from_config(
     config_path: Path,
 ) -> list[tuple[str, list[str]]]:
@@ -270,6 +312,43 @@ def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
         True,
         f"default {DEFAULT_CODEX_PROJECT_ROOT_MARKERS!r} marker topology; "
         f"{len(declarations)} explicit inspectable declaration(s); {qualifier}",
+    )
+
+
+def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
+    """Count deny-floor copies in every statically inspectable global layer."""
+    system_config = codex_system_config_path()
+    json_paths = [system_config.with_name("hooks.json"), codex_home / "hooks.json"]
+    config_paths = [
+        system_config,
+        codex_home / "config.toml",
+        *sorted(codex_home.glob("*.config.toml")),
+        codex_managed_config_path(codex_home),
+    ]
+    sources: list[str] = []
+    count = 0
+    for hooks_path in dict.fromkeys(json_paths):
+        if not hooks_path.is_file():
+            continue
+        groups = managed_codex_floor_groups(hooks_path.read_text(encoding="utf-8"))
+        count += len(groups)
+        if groups:
+            sources.append(f"{hooks_path} ({len(groups)})")
+    for config_path in dict.fromkeys(config_paths):
+        for location, document in inline_hook_documents_from_config(config_path):
+            groups = managed_codex_floor_groups(document)
+            count += len(groups)
+            if groups:
+                sources.append(f"{config_path}:{location} ({len(groups)})")
+
+    source_detail = ", ".join(sources) if sources else "none"
+    boundary = (
+        "managed cloud/session/plugin hooks require /hooks in the exact new-session cwd"
+    )
+    return (
+        count,
+        f"{count} inspectable global floor group(s); sources: {source_detail}; "
+        f"{boundary}",
     )
 
 
@@ -1661,14 +1740,10 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (label, result.returncode == 0, (result.stdout or result.stderr).strip())
         )
-    hooks_path = codex_home / "hooks.json"
     try:
-        global_floor_count = len(
-            managed_codex_floor_groups(
-                hooks_path.read_text(encoding="utf-8") if hooks_path.is_file() else ""
-            )
+        global_floor_count, global_floor_detail = inspectable_global_codex_floor_status(
+            codex_home
         )
-        global_floor_detail = f"{global_floor_count} managed global floor group(s)"
     except (HarnessError, OSError, UnicodeError) as exc:
         global_floor_count = -1
         global_floor_detail = str(exc)
@@ -1680,7 +1755,11 @@ def doctor(args: argparse.Namespace) -> int:
                 and (codex_home / "AGENTS.md").stat().st_size > 0,
                 str(codex_home / "AGENTS.md"),
             ),
-            ("no global Codex floor", global_floor_count == 0, global_floor_detail),
+            (
+                "no inspectable global Codex floor",
+                global_floor_count == 0,
+                global_floor_detail,
+            ),
             (
                 "shared dispatcher",
                 same_file(
