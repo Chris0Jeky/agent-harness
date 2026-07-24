@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.2 (2026-07-19)"
+FLOOR_VERSION = "1.5.3 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3651,8 +3651,40 @@ def git_editor_edit_is_forced(args: list[str]) -> bool:
     )
 
 
+_GIT_SEQUENCER_TERMINAL_SUBCOMMANDS = {
+    "am",
+    "cherry-pick",
+    "merge",
+    "rebase",
+    "revert",
+}
+
+
+def git_sequencer_flow_is_terminal(args: list[str]) -> bool:
+    """Return whether --abort/--quit terminates the operation editor-free.
+
+    Abort and quit tear down in-progress sequencer/merge state and never
+    consult an editor; Git rejects them combined with message/edit options
+    rather than launching one. --continue and --skip stay editor-reachable
+    (both can open the message editor for the commit being finalized).
+    """
+    for token in args:
+        name = token.lower().split("=", 1)[0]
+        if name.startswith("--") and (
+            git_option_abbreviates(name, "--abort")
+            or git_option_abbreviates(name, "--quit")
+        ):
+            return True
+    return False
+
+
 def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
     """Return whether Git can launch the editor selected by GIT_EDITOR."""
+    if (
+        subcommand in _GIT_SEQUENCER_TERMINAL_SUBCOMMANDS
+        and git_sequencer_flow_is_terminal(args)
+    ):
+        return False
     lowered = [token.lower().split("=", 1)[0] for token in args]
     if subcommand == "add":
         return any(
@@ -3726,8 +3758,10 @@ def inherited_git_process_environment_is_reachable(
     if name == "GIT_EDITOR":
         return git_editor_is_reachable(subcommand, args)
     if name == "GIT_SEQUENCE_EDITOR":
-        return subcommand == "rebase" and any(
-            token.lower() in {"-i", "--interactive"} for token in args
+        return (
+            subcommand == "rebase"
+            and any(token.lower() in {"-i", "--interactive"} for token in args)
+            and not git_sequencer_flow_is_terminal(args)
         )
     if name == "GIT_EXTERNAL_DIFF":
         return git_external_diff_is_reachable(subcommand, args)
