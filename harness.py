@@ -20,6 +20,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
+
 TIER_NAMES = {
     0: "tombstone",
     1: "sandbox",
@@ -162,15 +164,113 @@ def codex_hook_source_status(
     return authoritative_hooks, True, f"{source_prefix}; no worktree-local copy"
 
 
-def inline_hooks_from_config(config_path: Path) -> Any | None:
-    """Return a config layer's inline hooks table, if it declares one."""
+def toml_config(config_path: Path) -> dict[str, Any] | None:
+    """Return one TOML config document, or ``None`` when it is absent."""
     if not config_path.is_file():
         return None
     try:
-        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        return tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
+
+
+def inline_hooks_from_config(config_path: Path) -> Any | None:
+    """Return a config layer's inline hooks table, if it declares one."""
+    config = toml_config(config_path)
+    if config is None:
+        return None
     return config.get("hooks")
+
+
+def codex_system_config_path() -> Path:
+    """Return Codex's inspectable system config location for this platform."""
+    if os.name == "nt":
+        return (
+            Path(os.environ.get("PROGRAMDATA", "C:/ProgramData"))
+            / "OpenAI"
+            / "Codex"
+            / "config.toml"
+        )
+    return Path("/etc/codex/config.toml")
+
+
+def project_root_markers_from_config(
+    config_path: Path,
+) -> list[tuple[str, list[str]]]:
+    """Return every stored marker declaration with Codex-compatible shapes."""
+    config = toml_config(config_path)
+    if config is None:
+        return []
+
+    declarations: list[tuple[str, list[str]]] = []
+
+    def walk(value: Any, keys: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_keys = (*keys, key)
+                if key == "project_root_markers":
+                    if not isinstance(child, list) or any(
+                        not isinstance(marker, str) for marker in child
+                    ):
+                        location = ".".join(child_keys)
+                        raise HarnessError(
+                            f"{location} in {config_path} must be an array of strings"
+                        )
+                    declarations.append((".".join(child_keys), child))
+                else:
+                    walk(child, child_keys)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, (*keys, f"[{index}]"))
+
+    walk(config)
+    return declarations
+
+
+def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
+    """Fail closed when inspectable config can move Codex's project root.
+
+    Codex determines its project root before loading project-local layers. The
+    Git-root audit below is exact only for the default ``[\".git\"]`` marker
+    topology, so any stored base, system, or profile override is an explicit
+    static-verification boundary rather than a guessed layer walk.
+    """
+    config_paths = [
+        codex_system_config_path(),
+        codex_home / "config.toml",
+        *sorted(codex_home.glob("*.config.toml")),
+    ]
+    declarations: list[tuple[Path, str, list[str]]] = []
+    for config_path in config_paths:
+        declarations.extend(
+            (config_path, location, markers)
+            for location, markers in project_root_markers_from_config(config_path)
+        )
+
+    nondefault = [
+        (config_path, location, markers)
+        for config_path, location, markers in declarations
+        if markers != DEFAULT_CODEX_PROJECT_ROOT_MARKERS
+    ]
+    qualifier = (
+        "invocation CLI and managed cloud overrides are not statically inspectable; "
+        "confirm the active topology in new-session /hooks"
+    )
+    if nondefault:
+        detail = "; ".join(
+            f"{config_path}:{location} declares {markers!r}"
+            for config_path, location, markers in nondefault
+        )
+        return (
+            False,
+            "non-default project_root_markers prevent static Git-root proof: "
+            f"{detail}; {qualifier}",
+        )
+    return (
+        True,
+        f"default {DEFAULT_CODEX_PROJECT_ROOT_MARKERS!r} marker topology; "
+        f"{len(declarations)} explicit inspectable declaration(s); {qualifier}",
+    )
 
 
 def inline_hooks_document(config_path: Path) -> str:
@@ -1606,6 +1706,12 @@ def doctor(args: argparse.Namespace) -> int:
     )
     if args.repo:
         try:
+            marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
+        except (HarnessError, OSError, UnicodeError) as exc:
+            marker_ok = False
+            marker_detail = str(exc)
+        checks.append(("Codex project root markers", marker_ok, marker_detail))
+        try:
             requested_path = Path(args.repo).resolve()
             requested_checkout, authoritative_checkout = root_checkout(requested_path)
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
@@ -1664,7 +1770,8 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (
                 "project Codex floor",
-                source_ok
+                marker_ok
+                and source_ok
                 and candidate_floor_count == 1
                 and project_floor_count == 1
                 and current_floor_count == 1

@@ -133,8 +133,13 @@ class HarnessTests(unittest.TestCase):
 
         output = io.StringIO()
         with mock.patch.object(harness, "run", side_effect=fixture_run):
-            with redirect_stdout(output):
-                result = harness.doctor(args)
+            with mock.patch.object(
+                harness,
+                "codex_system_config_path",
+                return_value=root / "system-config.toml",
+            ):
+                with redirect_stdout(output):
+                    result = harness.doctor(args)
         return result, output.getvalue()
 
     def setUp(self) -> None:
@@ -1921,8 +1926,7 @@ class HarnessTests(unittest.TestCase):
         result, output = self.run_doctor_with_fixture_globals(
             repo,
             user_config=(
-                "[profiles.custom]\n"
-                'project_root_markers = ["workspace.toml"]\n'
+                "[profiles.custom]\n" 'project_root_markers = ["workspace.toml"]\n'
             ),
         )
 
