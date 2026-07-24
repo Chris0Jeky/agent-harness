@@ -344,6 +344,35 @@ class HarnessTests(unittest.TestCase):
             harness.sync_global(args)
         self.assertEqual(hooks_path.read_text(encoding="utf-8"), original)
 
+    def test_sync_global_does_not_replace_identical_skill(self) -> None:
+        root = Path(self.temp.name)
+        config_root = root / "config"
+        source_skill = config_root / "codex" / "skills" / "sample"
+        target_skill = root / "skills-home" / "sample"
+        source_skill.mkdir(parents=True)
+        target_skill.mkdir(parents=True)
+        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        for skill in (source_skill, target_skill):
+            (skill / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(root / "skills-home"),
+            apply=True,
+        )
+        with mock.patch.object(
+            harness.shutil,
+            "rmtree",
+            side_effect=AssertionError("identical skill should not be removed"),
+        ):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+
     def test_sync_global_preserves_same_second_backup_sets(self) -> None:
         root = Path(self.temp.name)
         config_root = root / "config"

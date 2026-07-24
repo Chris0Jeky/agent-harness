@@ -1293,6 +1293,8 @@ def sync_global(args: argparse.Namespace) -> int:
         else:
             hooks_target.unlink(missing_ok=True)
     for source, target in skill_actions:
+        if tree_digest(source) == tree_digest(target):
+            continue
         if target.exists():
             backup = skill_backup / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
