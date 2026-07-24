@@ -5454,11 +5454,14 @@ def configured_bare_push_is_dangerous(
     )
     for line in output.splitlines():
         parts = line.split(None, 1)
-        if len(parts) != 2:
+        if not parts:
             continue
-        key, value = parts[0].lower(), parts[1].strip()
+        key = parts[0].lower()
+        value = parts[1].strip() if len(parts) == 2 else ""
         if key.endswith(".mirror"):
-            if value.lower() in {"true", "yes", "on", "1"}:
+            # git treats a valueless boolean key (`mirror` with no `= value`) as
+            # true, and `--get-regexp` emits it with no value — so empty counts.
+            if value == "" or value.lower() in {"true", "yes", "on", "1"}:
                 return True
             continue
         for refspec in value.split():

@@ -47,7 +47,13 @@ class PushConfigForceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.dispatch = load_module("push_force_dispatch", DISPATCH_PATH)
 
-    def _repo(self, push_refspec: str | None, *, mirror: bool = False) -> str:
+    def _repo(
+        self,
+        push_refspec: str | None,
+        *,
+        mirror: bool = False,
+        valueless_mirror: bool = False,
+    ) -> str:
         repo = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         git(repo, "init", "-q")
@@ -56,6 +62,12 @@ class PushConfigForceTests(unittest.TestCase):
             git(repo, "config", "remote.origin.push", push_refspec)
         if mirror:
             git(repo, "config", "remote.origin.mirror", "true")
+        if valueless_mirror:
+            # A boolean key written with no value; git reads it as true.
+            with open(
+                os.path.join(repo, ".git", "config"), "a", encoding="utf-8"
+            ) as handle:
+                handle.write('[remote "bare"]\n\tmirror\n')
         return repo
 
     def _decide(self, repo: str, command: str, tier: int = 1):
@@ -77,6 +89,10 @@ class PushConfigForceTests(unittest.TestCase):
 
     def test_helper_flags_configured_mirror(self) -> None:
         repo = self._repo(None, mirror=True)
+        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+
+    def test_helper_flags_valueless_mirror(self) -> None:
+        repo = self._repo(None, valueless_mirror=True)
         self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
 
     def test_helper_ignores_non_force_refspec(self) -> None:
