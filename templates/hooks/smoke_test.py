@@ -509,6 +509,12 @@ CASES = [
         {},
         "deny",
     ),
+    (
+        r'''cmd /c "echo 'ok & rd /s /q C:\critical\outside\'"''',
+        1,
+        {},
+        "deny",
+    ),
     (r'''rd /s /q "build\"''', 1, {}, "allow"),
     (r'''cmd /c "cmd /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''cmd /c "cmd /d /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
@@ -632,6 +638,12 @@ CASES = [
     ),
     (
         r'''Remove-Item -Recurse -LiteralPath:"C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''Remove-Item -Recurse -Lit:"C:\critical\outside path\"''',
         1,
         {},
         "deny",

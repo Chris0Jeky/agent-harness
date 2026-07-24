@@ -1702,7 +1702,9 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
-def windows_operator_segments(command: str) -> list[tuple[str, str]]:
+def windows_operator_segments(
+    command: str, *, single_quotes_are_inert: bool = True
+) -> list[tuple[str, str]]:
     """Split Windows command operators without splitting quoted inert text."""
     result: list[tuple[str, str]] = []
     current: list[str] = []
@@ -1716,7 +1718,7 @@ def windows_operator_segments(command: str) -> list[tuple[str, str]]:
             current.append(char)
             index += 1
             continue
-        if char in {'"', "'"}:
+        if char == '"' or (char == "'" and single_quotes_are_inert):
             quote = char
             current.append(char)
         elif char in ";&|\n":
@@ -1740,8 +1742,18 @@ def windows_operator_segments(command: str) -> list[tuple[str, str]]:
     return result
 
 
+_POWERSHELL_PATH_PARAMETER_PREFIXES = sorted(
+    {
+        name[:length]
+        for name in ("path", "literalpath")
+        for length in range(1, len(name) + 1)
+    },
+    key=len,
+    reverse=True,
+)
 _POWERSHELL_BOUND_WINDOWS_QUOTE = re.compile(
-    r'(?i)(?P<prefix>-(?:literal)?path:)"(?P<value>[^"\r\n]*\\)"' r"(?=$|[\s;&|])"
+    rf'(?i)(?P<prefix>-(?:{"|".join(_POWERSHELL_PATH_PARAMETER_PREFIXES)}):)'
+    r'"(?P<value>[^"\r\n]*\\)"(?=$|[\s;&|])'
 )
 
 
@@ -1872,10 +1884,11 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
             r"realtime|abovenormal|belownormal|wait)"
         )
-        wrapper = re.match(
+        cmd_wrapper = re.match(
             r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
             candidate,
         )
+        wrapper = cmd_wrapper
         if not wrapper:
             wrapper = re.match(
                 r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
@@ -1903,7 +1916,9 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
-            child_segments = windows_operator_segments(child)
+            child_segments = windows_operator_segments(
+                child, single_quotes_are_inert=cmd_wrapper is None
+            )
             candidates.extend(segment for segment, _operator in child_segments)
 
     return recovered_deletes
@@ -5467,9 +5482,58 @@ def configured_bare_push_is_dangerous(
         for refspec in value.split():
             # A configured push value is a refspec, never a CLI option: a leading
             # '+' forces and an empty source (':dst') deletes the destination ref.
-            if refspec.startswith("+") or refspec.startswith(":"):
+            if refspec.startswith("+") or (
+                refspec.startswith(":") and len(refspec) > 1
+            ):
                 return True
     return False
+
+
+def segment_may_mutate_repository_config(raw: list[str]) -> bool:
+    """Return whether a shell segment may rewrite the current repo's config."""
+    if not raw:
+        return False
+    normalized = [
+        restore_quoted_literal_markers(token).strip("'\"").replace("\\", "/").lower()
+        for token in raw
+    ]
+    config_indexes = [
+        index
+        for index, token in enumerate(normalized)
+        if token == ".git/config" or token.endswith("/.git/config")
+    ]
+    if not config_indexes:
+        return False
+    head, _tokens = command_head(raw)
+    if head in {
+        "add-content",
+        "ac",
+        "clear-content",
+        "clc",
+        "copy",
+        "copy-item",
+        "cp",
+        "cpi",
+        "move",
+        "move-item",
+        "mv",
+        "mi",
+        "new-item",
+        "ni",
+        "out-file",
+        "rename-item",
+        "ren",
+        "rni",
+        "set-content",
+        "sc",
+        "tee",
+        "tee-object",
+    }:
+        return True
+    return any(
+        index > 0 and normalized[index - 1] in {">", ">>", ">|"}
+        for index in config_indexes
+    )
 
 
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
@@ -6075,6 +6139,7 @@ def check(
     environment_provider_context = False
     active_git_process_environment: set[str] = set()
     active_git_repository_environment = set(repository_environment_seed)
+    repository_config_may_have_changed = False
     command_aliases: dict[str, str] = {}
     previous_pass = None
 
@@ -6111,6 +6176,7 @@ def check(
             environment_provider_context = False
             active_git_process_environment = set()
             active_git_repository_environment = set(repository_environment_seed)
+            repository_config_may_have_changed = False
             command_aliases = {}
         previous_pass = current_pass
         if not raw:
@@ -6118,6 +6184,10 @@ def check(
         raw = strip_control_prefixes(raw)
         if not raw:
             continue
+        repository_config_may_have_changed = (
+            repository_config_may_have_changed
+            or segment_may_mutate_repository_config(raw)
+        )
         if dangerous_git_trace_environment_mutation(raw):
             return (
                 "deny",
@@ -6742,7 +6812,10 @@ def check(
                     "A dynamic nested-shell script cannot be inspected safely.",
                 )
             if head == "cmd":
-                nested_script = cmd_unescape(nested_script)
+                # cmd.exe gives single quotes no grouping semantics; leaving them
+                # intact here would make the recursive POSIX/PowerShell-aware pass
+                # hide separators that cmd actually executes.
+                nested_script = cmd_unescape(nested_script).replace("'", "")
             elif head in {"pwsh", "powershell"}:
                 nested_script = unwrap_powershell_scriptblock(nested_script)
             nested_decision = check(
@@ -7436,13 +7509,17 @@ def check(
                     # allowed (issue #21 corpus) while still denying the GIT_DIR case.
                     bare_push_repository_environment = (
                         effective_git_repository_environment
-                        & _GIT_REPOSITORY_ENVIRONMENT
+                        & _GIT_REPOSITORY_COMMAND_ENVIRONMENT
                     ) | {
                         name.upper()
                         for name in os.environ
                         if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
                     }
-                    if bare_push_repository_environment or cwd_uncertain:
+                    if (
+                        bare_push_repository_environment
+                        or repository_config_may_have_changed
+                        or cwd_uncertain
+                    ):
                         return (
                             "deny",
                             "[push-config-unverifiable] A refspec-less git push inherits remote "
