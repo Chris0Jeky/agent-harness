@@ -1,0 +1,1024 @@
+#!/usr/bin/env python3
+"""Replay real agent shell commands through the deny floor to measure false positives.
+
+WHY THIS EXISTS
+---------------
+Issue #21 measured floor v1.5.4 refusing 11.91% of 63,668 unique commands replayed
+from this machine's own Claude and Codex transcripts. That number is the entire
+evidence base for the floor redesign — and the script that produced it was never
+checked in, so nobody (including the author) can reproduce or re-run it against a
+new floor version. Every subsequent slice therefore has to argue its false-positive
+delta from intuition.
+
+This script is that missing instrument. It extracts every shell command the agents
+actually ran, replays each one through `dispatch.check()` offline, and reports:
+
+  * block rate per tier, for two `dispatch.py` versions side by side;
+  * the two deltas that decide a merge — **newly blocked** (baseline allowed,
+    candidate refuses: a regression / new false positive) and **newly allowed**
+    (baseline refused, candidate allows: a relaxation needing security review);
+  * blocks grouped by deny reason, reproducing issue #21's block-class table.
+
+PRIVACY
+-------
+The corpus is real work: repository paths, branch names, occasionally a token
+pasted into a command. stdout therefore only ever carries reason strings and
+`--top N` command samples truncated to `--sample-width` characters. Full command
+text is written only to `--json` / `--corpus-cache`, which belong in a scratch
+directory outside any repository. Nothing is copied out of the transcript trees.
+
+COVERAGE LIMITS (read before quoting a number)
+----------------------------------------------
+* Every command is replayed with the same `--project-dir` (this repo by default),
+  not the directory it originally ran in. Rules keyed on "inside/outside the
+  project" therefore judge a synthetic cwd. Baseline and candidate see the same
+  synthetic cwd, so the *deltas* are sound; the absolute rate is an approximation.
+* The remote resolver is stubbed to "private" so no network is touched, and the
+  ambient `GIT_CONFIG_*` family is cleared so results do not depend on the host.
+* Only the model's own tool-call records are read (`function_call` /
+  `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
+  `exec_command_end` records are skipped on purpose: they are the runtime's
+  post-execution echo, carrying `["powershell.exe", "-Command", <same text>]`,
+  and 6,772 of 6,775 of them cite the `call_id` of a request already counted.
+  Including them would double count every command in a second wrapper form.
+  `~/.codex/history.jsonl` and `~/.claude/history.jsonl` are user-prompt logs,
+  not shell logs, and are not sources.
+* There is no per-command watchdog: a pathological command would stall the run
+  rather than being counted as a block. None has been observed.
+
+Usage:
+    py -3 scripts/replay_corpus.py --baseline <path> --candidate <path> \
+        --limit 2000 --json <scratch>/replay.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import multiprocessing
+import os
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Iterator, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
+DEFAULT_TIERS = (1, 2, 3, 4)
+DECISIONS = ("allow", "ask", "deny", "error")
+RUNTIMES = ("codex", "claude")
+
+# `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
+# `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
+EMBEDDED_CALL_RE = re.compile(r"tools\s*\.\s*shell_command\s*\(\s*\{")
+EMBEDDED_KEY_RE = re.compile(r"""\s*(?:"command"|'command'|command)\s*:\s*""")
+JS_SIMPLE_ESCAPES = {
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "0": "\0",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Corpus extraction
+# --------------------------------------------------------------------------- #
+
+
+def decode_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
+    """Decode the JS string literal at `text[start]`; return (value, end index).
+
+    Returns None when the literal is not decodable as a constant: an
+    interpolated template literal, or an unterminated literal. Codex writes the
+    embedded command as a plain double-quoted literal in ~93% of calls; the rest
+    are variables or interpolations and are counted, not guessed at.
+    """
+    if start >= len(text):
+        return None
+    quote = text[start]
+    if quote not in ('"', "'", "`"):
+        return None
+    out: list[str] = []
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 1
+            if index >= len(text):
+                return None
+            escape = text[index]
+            if escape == "u":
+                if index + 1 < len(text) and text[index + 1] == "{":
+                    close = text.find("}", index + 2)
+                    if close == -1:
+                        return None
+                    try:
+                        out.append(chr(int(text[index + 2 : close], 16)))
+                    except ValueError:
+                        return None
+                    index = close + 1
+                    continue
+                try:
+                    out.append(chr(int(text[index + 1 : index + 5], 16)))
+                except ValueError:
+                    return None
+                index += 5
+                continue
+            if escape == "x":
+                try:
+                    out.append(chr(int(text[index + 1 : index + 3], 16)))
+                except ValueError:
+                    return None
+                index += 3
+                continue
+            out.append(JS_SIMPLE_ESCAPES.get(escape, escape))
+            index += 1
+            continue
+        if char == quote:
+            return "".join(out), index + 1
+        if quote == "`" and char == "$" and text[index : index + 2] == "${":
+            return None  # interpolated: the real command is not in the log
+        if quote != "`" and char == "\n":
+            return None  # unterminated single-line literal
+        out.append(char)
+        index += 1
+    return None
+
+
+def extract_embedded_commands(source: str, stats: Counter[str]) -> list[str]:
+    """Pull literal `tools.shell_command({command: "..."})` bodies out of JS."""
+    found: list[str] = []
+    for match in EMBEDDED_CALL_RE.finditer(source):
+        key = EMBEDDED_KEY_RE.match(source, match.end())
+        if key is None:
+            stats["unparsed-codex-embedded-shorthand-or-reordered"] += 1
+            continue
+        decoded = decode_js_string_literal(source, key.end())
+        if decoded is None:
+            stats["unparsed-codex-embedded-non-literal-command"] += 1
+            continue
+        found.append(decoded[0])
+    return found
+
+
+def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
+    """Yield each JSON object in a transcript, counting what will not parse."""
+    try:
+        handle = path.open(encoding="utf-8", errors="replace")
+    except OSError:
+        stats["unparsed-file-unreadable"] += 1
+        return
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                stats["unparsed-line-not-json"] += 1
+                continue
+            if not isinstance(record, dict):
+                stats["unparsed-line-not-object"] += 1
+                continue
+            yield record
+
+
+def extract_codex_commands(
+    root: Path,
+    stats: Counter[str],
+    include_embedded: bool = True,
+) -> Iterator[str]:
+    """Yield every shell command Codex requested, oldest rollout first.
+
+    Two channels carry them: the `shell_command` function call (arguments are a
+    JSON string) and the `exec` custom tool, whose input is a JS program that
+    calls `tools.shell_command(...)` inline.
+    """
+    for path in sorted(root.rglob("*.jsonl")):
+        stats["extracted-codex-files"] += 1
+        for record in iter_jsonl(path, stats):
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get("type")
+            name = payload.get("name")
+            if kind == "function_call" and name == "shell_command":
+                raw = payload.get("arguments")
+                if not isinstance(raw, str):
+                    stats["unparsed-codex-arguments-not-string"] += 1
+                    continue
+                try:
+                    arguments = json.loads(raw)
+                except ValueError:
+                    stats["unparsed-codex-arguments-not-json"] += 1
+                    continue
+                if not isinstance(arguments, dict):
+                    stats["unparsed-codex-arguments-not-object"] += 1
+                    continue
+                command = arguments.get("command")
+                if not isinstance(command, str):
+                    stats["unparsed-codex-command-not-string"] += 1
+                    continue
+                stats["extracted-codex-invocations-function-call"] += 1
+                yield command
+            elif kind == "custom_tool_call" and name == "exec":
+                source = payload.get("input")
+                if not isinstance(source, str):
+                    stats["unparsed-codex-exec-input-not-string"] += 1
+                    continue
+                if not include_embedded:
+                    stats["extracted-codex-exec-calls-excluded-by-flag"] += 1
+                    continue
+                for command in extract_embedded_commands(source, stats):
+                    stats["extracted-codex-invocations-embedded"] += 1
+                    yield command
+
+
+def extract_claude_commands(root: Path, stats: Counter[str]) -> Iterator[str]:
+    """Yield every command Claude's Bash/PowerShell tools were asked to run."""
+    for path in sorted(root.rglob("*.jsonl")):
+        stats["extracted-claude-files"] += 1
+        for record in iter_jsonl(path, stats):
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                continue
+            if not isinstance(content, list):
+                if content is not None:
+                    stats["unparsed-claude-content-not-list"] += 1
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    stats["unparsed-claude-block-not-object"] += 1
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                if block.get("name") not in ("Bash", "PowerShell"):
+                    continue
+                tool_input = block.get("input")
+                if not isinstance(tool_input, dict):
+                    stats["unparsed-claude-input-not-object"] += 1
+                    continue
+                command = tool_input.get("command")
+                if not isinstance(command, str):
+                    stats["unparsed-claude-command-not-string"] += 1
+                    continue
+                stats["extracted-claude-invocations"] += 1
+                yield command
+
+
+def build_corpus(
+    codex_root: Path | None,
+    claude_root: Path | None,
+    include_embedded: bool = True,
+) -> tuple[dict[str, dict[str, int]], Counter[str]]:
+    """Return {command: {runtime: invocations}} plus a parse-failure ledger."""
+    stats: Counter[str] = Counter()
+    corpus: dict[str, dict[str, int]] = {}
+    sources: list[tuple[str, Iterator[str]]] = []
+    if codex_root is not None and codex_root.is_dir():
+        sources.append(
+            ("codex", extract_codex_commands(codex_root, stats, include_embedded))
+        )
+    elif codex_root is not None:
+        stats["unparsed-codex-root-missing"] += 1
+    if claude_root is not None and claude_root.is_dir():
+        sources.append(("claude", extract_claude_commands(claude_root, stats)))
+    elif claude_root is not None:
+        stats["unparsed-claude-root-missing"] += 1
+    for runtime, stream in sources:
+        for command in stream:
+            entry = corpus.get(command)
+            if entry is None:
+                entry = {name: 0 for name in RUNTIMES}
+                corpus[command] = entry
+            entry[runtime] += 1
+    return corpus, stats
+
+
+def save_corpus(path: Path, corpus: dict[str, dict[str, int]]) -> None:
+    """Write the corpus as JSONL. Contains raw commands: scratch dirs only."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for command, counts in corpus.items():
+            row = {"command": command}
+            row.update(counts)
+            handle.write(json.dumps(row) + "\n")
+
+
+def load_corpus(path: Path) -> dict[str, dict[str, int]]:
+    corpus: dict[str, dict[str, int]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            command = row.get("command")
+            if not isinstance(command, str):
+                continue
+            corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
+    return corpus
+
+
+def select_commands(
+    corpus: dict[str, dict[str, int]],
+    limit: int | None,
+    max_chars: int,
+) -> tuple[list[str], Counter[str]]:
+    """Drop over-long commands, then take a deterministic sample of `limit`.
+
+    The sample is the `limit` commands with the smallest SHA-1 digest — uniform
+    over the corpus (unlike "first N", which would be biased by scan order) and
+    stable across runs, so a smoke run and a full run of the same corpus agree
+    on which commands they share.
+    """
+    notes: Counter[str] = Counter()
+    kept = []
+    for command in corpus:
+        if len(command) > max_chars:
+            notes["skipped-over-max-chars"] += 1
+            continue
+        kept.append(command)
+    if limit is not None and limit < len(kept):
+        kept.sort(key=lambda text: hashlib.sha1(text.encode("utf-8")).digest())
+        kept = kept[:limit]
+        notes["sampled"] += len(kept)
+    return kept, notes
+
+
+# --------------------------------------------------------------------------- #
+# Replay
+# --------------------------------------------------------------------------- #
+
+
+def load_dispatch(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load dispatch module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def stub_resolver(
+    args: Sequence[str],
+    project_dir: str,
+    git_globals: Any = None,
+    command_runner: Any = None,
+    deadline: Any = None,
+) -> tuple[bool, str]:
+    """Keep the network out of the replay; treat every remote as private."""
+    return False, "corpus-replay-stub-private"
+
+
+def clear_git_config_env() -> dict[str, str]:
+    """Remove the ambient `GIT_CONFIG_*` family and return it for restoration.
+
+    `check()` reads the live environment, and an inherited `GIT_CONFIG_COUNT` /
+    `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` family makes it deny with "Git
+    config environment injection is opaque to floor inspection" regardless of
+    the command — which would make every measurement here host-dependent.
+    """
+    injected = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith("GIT_CONFIG")
+    }
+    for name in injected:
+        del os.environ[name]
+    return injected
+
+
+def decide(
+    module: ModuleType,
+    command: str,
+    tier: int,
+    project_dir: str,
+) -> tuple[str, str]:
+    """Return (decision, reason); an exception inside `check()` is its own class."""
+    try:
+        decision, reason = module.check(
+            command,
+            {"tier": tier, "flags": {}},
+            project_dir,
+            project_dir,
+            remote_resolver=stub_resolver,
+        )
+    except Exception as error:  # noqa: BLE001 - a crash is a result, not a stop
+        return "error", f"{type(error).__name__}: {error}".strip()
+    if decision not in DECISIONS:
+        return "error", f"unexpected decision {decision!r}"
+    return decision, str(reason)
+
+
+_WORKER: dict[str, Any] = {}
+
+
+def _worker_init(
+    baseline_path: str,
+    candidate_path: str,
+    tiers: Sequence[int],
+    project_dir: str,
+) -> None:
+    clear_git_config_env()
+    _WORKER["baseline"] = load_dispatch("replay_baseline", Path(baseline_path))
+    _WORKER["candidate"] = load_dispatch("replay_candidate", Path(candidate_path))
+    _WORKER["tiers"] = tuple(tiers)
+    _WORKER["project_dir"] = project_dir
+
+
+def _worker_run(chunk: list[tuple[int, str]]) -> list[tuple[int, list, list]]:
+    tiers = _WORKER["tiers"]
+    project_dir = _WORKER["project_dir"]
+    baseline = _WORKER["baseline"]
+    candidate = _WORKER["candidate"]
+    results = []
+    for index, command in chunk:
+        base = [decide(baseline, command, tier, project_dir) for tier in tiers]
+        cand = [decide(candidate, command, tier, project_dir) for tier in tiers]
+        results.append((index, base, cand))
+    return results
+
+
+def replay(
+    commands: Sequence[str],
+    baseline_path: Path,
+    candidate_path: Path,
+    tiers: Sequence[int],
+    project_dir: str,
+    jobs: int,
+    progress: bool,
+) -> tuple[list[list[tuple[str, str]]], list[list[tuple[str, str]]]]:
+    """Return (baseline, candidate) verdicts, indexed [command][tier]."""
+    total = len(commands)
+    baseline_out: list[Any] = [None] * total
+    candidate_out: list[Any] = [None] * total
+    chunks = [
+        [(index, commands[index]) for index in range(start, min(start + 128, total))]
+        for start in range(0, total, 128)
+    ]
+    done = 0
+    if jobs > 1:
+        context = multiprocessing.get_context("spawn")
+        pool = context.Pool(
+            processes=jobs,
+            initializer=_worker_init,
+            initargs=(
+                str(baseline_path),
+                str(candidate_path),
+                tuple(tiers),
+                project_dir,
+            ),
+        )
+        with pool:
+            for batch in pool.imap_unordered(_worker_run, chunks, chunksize=1):
+                for index, base, cand in batch:
+                    baseline_out[index] = base
+                    candidate_out[index] = cand
+                done += len(batch)
+                if progress:
+                    report_progress(done, total)
+    else:
+        _worker_init(str(baseline_path), str(candidate_path), tiers, project_dir)
+        for chunk in chunks:
+            for index, base, cand in _worker_run(chunk):
+                baseline_out[index] = base
+                candidate_out[index] = cand
+            done += len(chunk)
+            if progress:
+                report_progress(done, total)
+    return baseline_out, candidate_out
+
+
+def report_progress(done: int, total: int) -> None:
+    sys.stderr.write(f"\r  replayed {done}/{total} commands")
+    sys.stderr.flush()
+    if done >= total:
+        sys.stderr.write("\n")
+
+
+# --------------------------------------------------------------------------- #
+# Analysis
+# --------------------------------------------------------------------------- #
+
+
+def invocations(counts: dict[str, int]) -> int:
+    return sum(counts.values())
+
+
+def summarize_tier(
+    commands: Sequence[str],
+    corpus: dict[str, dict[str, int]],
+    verdicts: Sequence[Sequence[tuple[str, str]]],
+    tier_index: int,
+) -> dict[str, Any]:
+    """Block rate plus deny-reason classes for one version at one tier."""
+    decisions: Counter[str] = Counter()
+    decision_invocations: Counter[str] = Counter()
+    by_runtime: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    reason_invocations: Counter[str] = Counter()
+    for position, command in enumerate(commands):
+        decision, reason = verdicts[position][tier_index]
+        counts = corpus[command]
+        weight = invocations(counts)
+        decisions[decision] += 1
+        decision_invocations[decision] += weight
+        if decision != "allow":
+            reasons[reason] += 1
+            reason_invocations[reason] += weight
+            for runtime in RUNTIMES:
+                if counts.get(runtime):
+                    by_runtime[runtime] += 1
+    total = len(commands)
+    blocked = total - decisions["allow"]
+    total_invocations = sum(decision_invocations.values())
+    blocked_invocations = total_invocations - decision_invocations["allow"]
+    return {
+        "unique_commands": total,
+        "unique_blocked": blocked,
+        "unique_block_rate": (blocked / total) if total else 0.0,
+        "invocations": total_invocations,
+        "invocations_blocked": blocked_invocations,
+        "invocation_block_rate": (
+            (blocked_invocations / total_invocations) if total_invocations else 0.0
+        ),
+        "decisions": dict(decisions),
+        "decision_invocations": dict(decision_invocations),
+        "blocked_unique_by_runtime": dict(by_runtime),
+        "reasons": [
+            {
+                "reason": reason,
+                "unique": count,
+                "invocations": reason_invocations[reason],
+            }
+            for reason, count in reasons.most_common()
+        ],
+    }
+
+
+def compare_tier(
+    commands: Sequence[str],
+    corpus: dict[str, dict[str, int]],
+    baseline: Sequence[Sequence[tuple[str, str]]],
+    candidate: Sequence[Sequence[tuple[str, str]]],
+    tier_index: int,
+    top: int,
+) -> dict[str, Any]:
+    """Newly-blocked / newly-allowed deltas plus the full transition matrix.
+
+    `reclassified` matters when reading the block-class tables side by side: a
+    rule whose count grows in the candidate has not necessarily started blocking
+    anything new — it may have inherited commands another rule used to claim.
+    """
+    matrix: Counter[str] = Counter()
+    reclassified: Counter[str] = Counter()
+    newly_blocked: list[dict[str, Any]] = []
+    newly_allowed: list[dict[str, Any]] = []
+    for position, command in enumerate(commands):
+        base_decision, base_reason = baseline[position][tier_index]
+        cand_decision, cand_reason = candidate[position][tier_index]
+        matrix[f"{base_decision}->{cand_decision}"] += 1
+        if base_decision == cand_decision:
+            if base_decision != "allow" and base_reason != cand_reason:
+                reclassified[f"{base_reason}  =>  {cand_reason}"] += 1
+            continue
+        weight = invocations(corpus[command])
+        if base_decision == "allow" and cand_decision != "allow":
+            newly_blocked.append(
+                {
+                    "command": command,
+                    "invocations": weight,
+                    "decision": cand_decision,
+                    "reason": cand_reason,
+                }
+            )
+        elif base_decision != "allow" and cand_decision == "allow":
+            newly_allowed.append(
+                {
+                    "command": command,
+                    "invocations": weight,
+                    "was": base_decision,
+                    "reason": base_reason,
+                }
+            )
+    newly_blocked.sort(key=lambda row: (-row["invocations"], row["command"]))
+    newly_allowed.sort(key=lambda row: (-row["invocations"], row["command"]))
+    return {
+        "transitions": dict(matrix),
+        "reclassified_unique": sum(reclassified.values()),
+        "reclassified_top": reclassified.most_common(top),
+        "newly_blocked_unique": len(newly_blocked),
+        "newly_blocked_invocations": sum(r["invocations"] for r in newly_blocked),
+        "newly_allowed_unique": len(newly_allowed),
+        "newly_allowed_invocations": sum(r["invocations"] for r in newly_allowed),
+        "newly_blocked_reasons": dict(
+            Counter(row["reason"] for row in newly_blocked).most_common()
+        ),
+        "newly_allowed_reasons": dict(
+            Counter(row["reason"] for row in newly_allowed).most_common()
+        ),
+        "newly_blocked_top": newly_blocked[:top],
+        "newly_allowed_top": newly_allowed[:top],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+
+
+def clip(text: str, width: int) -> str:
+    """One-line, width-bounded rendering: stdout never carries a whole command."""
+    flat = " ".join(text.split())
+    if len(flat) <= width:
+        return flat
+    return flat[: width - 3] + "..."
+
+
+def print_report(result: dict[str, Any], top: int, width: int) -> None:
+    corpus = result["corpus"]
+    baseline = result["baseline"]
+    candidate = result["candidate"]
+    print("=" * 78)
+    print("deny-floor corpus replay")
+    print("=" * 78)
+    print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
+    print(f"candidate : floor {candidate['version']}  {candidate['path']}")
+    print(f"project   : {result['project_dir']}")
+    print()
+    print("corpus")
+    print("-" * 78)
+    print(
+        f"  unique commands extracted : {corpus['unique_total']}"
+        f"  ({corpus['invocations_total']} invocations)"
+    )
+    for runtime in RUNTIMES:
+        print(
+            f"    {runtime:<7}: {corpus['unique_by_runtime'][runtime]:>7} unique"
+            f"  {corpus['invocations_by_runtime'][runtime]:>7} invocations"
+        )
+    print(f"    shared : {corpus['unique_shared']:>7} unique (seen in both runtimes)")
+    print(f"  replayed                  : {corpus['unique_replayed']}")
+    if corpus["notes"]:
+        for key, value in sorted(corpus["notes"].items()):
+            print(f"    note {key}: {value}")
+    print(f"  source                    : {corpus['source']}")
+    print("  extraction ledger:")
+    for key, value in sorted(corpus["extracted"].items()):
+        print(f"    {key[len('extracted-'):]}: {value}")
+    print("  entries that could NOT be parsed / extracted:")
+    unparsed = corpus["unparsed"]
+    if not unparsed:
+        print(
+            "    (none)"
+            if corpus["source"] == "transcript-scan"
+            else "    (not measured: this run reused a cached corpus)"
+        )
+    for key, value in sorted(unparsed.items()):
+        print(f"    {key[len('unparsed-'):]}: {value}")
+    print()
+    print("block rate by tier (unique commands)")
+    print("-" * 78)
+    header = (
+        f"  {'tier':<5}{'baseline':>18}{'candidate':>18}"
+        f"{'new blocks':>13}{'new allows':>13}"
+    )
+    print(header)
+    for tier_key in result["tier_order"]:
+        base = result["tiers"][tier_key]["baseline"]
+        cand = result["tiers"][tier_key]["candidate"]
+        delta = result["tiers"][tier_key]["delta"]
+        print(
+            f"  T{tier_key:<4}"
+            f"{base['unique_blocked']:>8} {base['unique_block_rate'] * 100:>8.2f}%"
+            f"{cand['unique_blocked']:>8} {cand['unique_block_rate'] * 100:>8.2f}%"
+            f"{delta['newly_blocked_unique']:>13}{delta['newly_allowed_unique']:>13}"
+        )
+    print()
+    for tier_key in result["tier_order"]:
+        tier = result["tiers"][tier_key]
+        print("=" * 78)
+        print(f"tier {tier_key}")
+        print("-" * 78)
+        for label in ("baseline", "candidate"):
+            summary = tier[label]
+            decisions = summary["decisions"]
+            print(
+                f"  {label:<10} deny={decisions.get('deny', 0)} "
+                f"ask={decisions.get('ask', 0)} "
+                f"error={decisions.get('error', 0)} "
+                f"allow={decisions.get('allow', 0)}  "
+                f"blocked invocations={summary['invocations_blocked']}"
+                f" / {summary['invocations']}"
+                f" ({summary['invocation_block_rate'] * 100:.2f}%)"
+            )
+            runtimes = summary["blocked_unique_by_runtime"]
+            print(
+                "             blocked unique by runtime: "
+                + ", ".join(f"{name}={runtimes.get(name, 0)}" for name in RUNTIMES)
+            )
+        print()
+        print(f"  top block classes ({result['candidate']['version']}, candidate):")
+        print(f"    {'unique':>7} {'invocs':>7}  reason")
+        for row in tier["candidate"]["reasons"][:top]:
+            print(
+                f"    {row['unique']:>7} {row['invocations']:>7}  "
+                f"{clip(row['reason'], width)}"
+            )
+        print()
+        print(f"  top block classes ({result['baseline']['version']}, baseline):")
+        print(f"    {'unique':>7} {'invocs':>7}  reason")
+        for row in tier["baseline"]["reasons"][:top]:
+            print(
+                f"    {row['unique']:>7} {row['invocations']:>7}  "
+                f"{clip(row['reason'], width)}"
+            )
+        delta = tier["delta"]
+        print()
+        print(
+            f"  NEWLY BLOCKED (baseline allow -> candidate block): "
+            f"{delta['newly_blocked_unique']} unique / "
+            f"{delta['newly_blocked_invocations']} invocations"
+        )
+        for row in delta["newly_blocked_top"]:
+            print(
+                f"    [{row['invocations']:>4}x {row['decision']}] "
+                f"{clip(row['command'], width)}"
+            )
+            print(f"           reason: {clip(row['reason'], width)}")
+        print(
+            f"  NEWLY ALLOWED (baseline block -> candidate allow): "
+            f"{delta['newly_allowed_unique']} unique / "
+            f"{delta['newly_allowed_invocations']} invocations"
+        )
+        for row in delta["newly_allowed_top"]:
+            print(
+                f"    [{row['invocations']:>4}x was {row['was']}] "
+                f"{clip(row['command'], width)}"
+            )
+            print(f"           was: {clip(row['reason'], width)}")
+        other = {
+            key: value
+            for key, value in delta["transitions"].items()
+            if key.split("->")[0] != key.split("->")[1]
+            and not (key.startswith("allow->") or key.endswith("->allow"))
+        }
+        if other:
+            print(f"  other transitions: {other}")
+        if delta["reclassified_unique"]:
+            print(
+                f"  RECLASSIFIED (still blocked, different rule): "
+                f"{delta['reclassified_unique']} unique"
+            )
+            for pair, count in delta["reclassified_top"]:
+                print(f"    {count:>6}  {clip(pair, width)}")
+        print()
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
+
+def default_codex_root() -> Path:
+    home = os.environ.get("CODEX_HOME")
+    base = Path(home) if home else Path.home() / ".codex"
+    return base / "sessions"
+
+
+def default_claude_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def module_version(module: ModuleType) -> str:
+    return str(getattr(module, "FLOOR_VERSION", "unknown"))
+
+
+def file_sha256(path: Path) -> str:
+    """Pin exactly which bytes produced a number, for later reproduction."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Replay real agent shell commands through two dispatch.py versions "
+            "and report block rates, deltas and deny-reason classes."
+        )
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=DEFAULT_DISPATCH,
+        help="dispatch.py to treat as the current floor (default: this repo's)",
+    )
+    parser.add_argument(
+        "--candidate",
+        type=Path,
+        default=DEFAULT_DISPATCH,
+        help="dispatch.py to treat as the proposed floor",
+    )
+    parser.add_argument(
+        "--tier",
+        type=int,
+        action="append",
+        dest="tiers",
+        choices=[0, 1, 2, 3, 4],
+        help="tier to replay (repeatable; default 1 2 3 4)",
+    )
+    parser.add_argument("--limit", type=int, help="replay a deterministic sample only")
+    parser.add_argument(
+        "--max-command-chars",
+        type=int,
+        default=20000,
+        help="skip commands longer than this (default 20000, as in issue #21)",
+    )
+    parser.add_argument("--top", type=int, default=15, help="rows per table")
+    parser.add_argument(
+        "--sample-width",
+        type=int,
+        default=160,
+        help="stdout truncation width for command/reason samples",
+    )
+    parser.add_argument(
+        "--json",
+        type=Path,
+        dest="json_path",
+        help="write the full result (including untruncated commands) here",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="worker processes (default 1; each loads both dispatch modules)",
+    )
+    parser.add_argument("--codex-root", type=Path, default=default_codex_root())
+    parser.add_argument("--claude-root", type=Path, default=default_claude_root())
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=REPO_ROOT,
+        help="project/cwd every command is judged against (see module docstring)",
+    )
+    parser.add_argument(
+        "--corpus-cache",
+        type=Path,
+        help="write the extracted corpus here (raw commands: scratch dirs only)",
+    )
+    parser.add_argument(
+        "--from-corpus",
+        type=Path,
+        help="load a previously written corpus instead of rescanning transcripts",
+    )
+    parser.add_argument(
+        "--no-embedded",
+        action="store_true",
+        help="ignore commands embedded in Codex `exec` JS (issue #21 parity)",
+    )
+    parser.add_argument("--quiet", action="store_true", help="no progress on stderr")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    tiers = sorted(set(args.tiers)) if args.tiers else list(DEFAULT_TIERS)
+    progress = not args.quiet
+
+    if args.from_corpus:
+        corpus = load_corpus(args.from_corpus)
+        stats: Counter[str] = Counter(
+            {"extracted-loaded-from-corpus-file": len(corpus)}
+        )
+    else:
+        if progress:
+            sys.stderr.write("scanning transcripts...\n")
+        corpus, stats = build_corpus(
+            args.codex_root, args.claude_root, not args.no_embedded
+        )
+    if not corpus:
+        sys.stderr.write("no commands extracted; nothing to replay\n")
+        return 1
+    if args.corpus_cache:
+        save_corpus(args.corpus_cache, corpus)
+
+    unique_by_runtime = {name: 0 for name in RUNTIMES}
+    invocations_by_runtime = {name: 0 for name in RUNTIMES}
+    shared = 0
+    for counts in corpus.values():
+        present = 0
+        for name in RUNTIMES:
+            if counts.get(name):
+                unique_by_runtime[name] += 1
+                present += 1
+            invocations_by_runtime[name] += counts.get(name, 0)
+        if present > 1:
+            shared += 1
+
+    commands, notes = select_commands(corpus, args.limit, args.max_command_chars)
+    if not commands:
+        sys.stderr.write("every command was filtered out; nothing to replay\n")
+        return 1
+
+    baseline_module = load_dispatch("replay_baseline_probe", args.baseline)
+    candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
+    baseline_version = module_version(baseline_module)
+    candidate_version = module_version(candidate_module)
+
+    injected = clear_git_config_env()
+    try:
+        baseline_verdicts, candidate_verdicts = replay(
+            commands,
+            args.baseline,
+            args.candidate,
+            tiers,
+            str(args.project_dir),
+            max(1, args.jobs),
+            progress,
+        )
+    finally:
+        os.environ.update(injected)
+
+    result: dict[str, Any] = {
+        "baseline": {
+            "path": str(args.baseline),
+            "version": baseline_version,
+            "sha256": file_sha256(args.baseline),
+        },
+        "candidate": {
+            "path": str(args.candidate),
+            "version": candidate_version,
+            "sha256": file_sha256(args.candidate),
+        },
+        "project_dir": str(args.project_dir),
+        "tier_order": tiers,
+        "run": {
+            "limit": args.limit,
+            "max_command_chars": args.max_command_chars,
+            "jobs": max(1, args.jobs),
+            "embedded_codex_exec_included": not args.no_embedded,
+        },
+        "corpus": {
+            "source": (
+                f"cached-corpus {args.from_corpus}"
+                if args.from_corpus
+                else "transcript-scan"
+            ),
+            "unique_total": len(corpus),
+            "invocations_total": sum(invocations(c) for c in corpus.values()),
+            "unique_by_runtime": unique_by_runtime,
+            "invocations_by_runtime": invocations_by_runtime,
+            "unique_shared": shared,
+            "unique_replayed": len(commands),
+            "notes": dict(notes),
+            "extracted": {
+                key: value
+                for key, value in stats.items()
+                if key.startswith("extracted-")
+            },
+            "unparsed": {
+                key: value
+                for key, value in stats.items()
+                if key.startswith("unparsed-")
+            },
+        },
+        "tiers": {},
+    }
+    for tier_index, tier in enumerate(tiers):
+        result["tiers"][tier] = {
+            "baseline": summarize_tier(commands, corpus, baseline_verdicts, tier_index),
+            "candidate": summarize_tier(
+                commands, corpus, candidate_verdicts, tier_index
+            ),
+            "delta": compare_tier(
+                commands,
+                corpus,
+                baseline_verdicts,
+                candidate_verdicts,
+                tier_index,
+                args.top,
+            ),
+        }
+    print_report(result, args.top, args.sample_width)
+    if args.json_path:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        args.json_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        sys.stderr.write(
+            f"wrote {args.json_path} (contains untruncated command text)\n"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
