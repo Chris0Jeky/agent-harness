@@ -606,13 +606,31 @@ CASES = [
         "allow",
     ),
     (
-        r'''Start-Job -ScriptBlock { Remove-Item -Recurse "C:\critical\outside\" }''',
+        r'''cmd /c "echo C:\Windows\System32\cmd.exe /c rd /s /q C:\critical\outside\"''',
+        1,
+        {},
+        "allow",
+    ),
+    (
+        r'''cmd /c "start "" /wait "C:\Program Files\PowerShell\7\pwsh.exe" -Command Remove-Item -Recurse C:\critical\outside\"''',
         1,
         {},
         "deny",
     ),
     (
-        r'''Start-Job -ScriptBlock { Write-Output "C:\path\" }''',
+        r"""Start-Job -ScriptBlock { Remove-Item -Recurse "C:\critical\outside\" }""",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r"""Start-ThreadJob -ScriptBlock { Remove-Item -Recurse "C:\critical\outside\" }""",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r"""Start-Job -ScriptBlock { Write-Output "C:\path\" }""",
         1,
         {},
         "allow",

@@ -1740,8 +1740,21 @@ def windows_operator_segments(command: str) -> list[tuple[str, str]]:
     return result
 
 
+_POWERSHELL_BOUND_WINDOWS_QUOTE = re.compile(
+    r'(?i)(?P<prefix>-(?:literal)?path:)"(?P<value>[^"\r\n]*\\)"' r"(?=$|[\s;&|])"
+)
+
+
 def windows_fallback_tokens(candidate: str) -> list[str]:
     """Recover argv using Windows quote semantics after POSIX shlex rejects it."""
+    space_marker = "__HARNESS_WINDOWS_BOUND_SPACE__"
+    while space_marker in candidate:
+        space_marker += "_"
+
+    def protect_bound_path(match: "re.Match[str]") -> str:
+        return match.group("prefix") + match.group("value").replace(" ", space_marker)
+
+    candidate = _POWERSHELL_BOUND_WINDOWS_QUOTE.sub(protect_bound_path, candidate)
     try:
         recovered = shlex.split(candidate, posix=False)
     except ValueError:
@@ -1751,9 +1764,34 @@ def windows_fallback_tokens(candidate: str) -> list[str]:
             token[1:-1]
             if len(token) >= 2 and (token[0], token[-1]) in {('"', '"'), ("'", "'")}
             else token
-        )
+        ).replace(space_marker, " ")
         for token in recovered
     ]
+
+
+def strip_windows_execution_prefix(candidate: str) -> str:
+    """Expose a Windows command after inert control and redirect prefixes."""
+    candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
+    redirect = re.compile(
+        r"(?is)^(?:\d+)?(?:>>?|<)\s*" r"(?:&\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+    )
+    while match := redirect.match(candidate):
+        candidate = candidate[match.end() :].lstrip()
+    return candidate
+
+
+def normalize_windows_shell_head(candidate: str) -> str:
+    """Reduce a path-qualified cmd/PowerShell executable to its known head."""
+    match = re.match(
+        r"(?is)^(?:[A-Za-z]:[\\/]|\\\\)(?:"
+        r'[^"\r\n]*[\\/](?P<quoted>cmd|powershell|pwsh)(?:\.exe)?"'
+        r"|[^\s\"\r\n]*[\\/](?P<bare>cmd|powershell|pwsh)(?:\.exe)?"
+        r")(?=\s|$)",
+        candidate,
+    )
+    if not match:
+        return candidate
+    return (match.group("quoted") or match.group("bare")) + candidate[match.end() :]
 
 
 def unparseable_recursive_delete(command: str) -> list[list[str]]:
@@ -1773,7 +1811,8 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     # sufficiently deep but still executable wrapper chain into an allow.
     while candidates:
         candidate = candidates.pop(0).lstrip()
-        candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
+        candidate = strip_windows_execution_prefix(candidate)
+        candidate = normalize_windows_shell_head(candidate)
         if not candidate or candidate in seen:
             continue
         seen.add(candidate)
@@ -1807,6 +1846,32 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
                 )
             continue
 
+        try:
+            candidate_tokens = windows_fallback_tokens(candidate)
+        except ValueError:
+            recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            continue
+        candidate_head, normalized_tokens = command_head(candidate_tokens)
+        if candidate_head in {"start-process", "saps"}:
+            child, _error = powershell_start_process_command(normalized_tokens)
+            if child is None:
+                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            else:
+                candidates.append(child)
+            continue
+        if candidate_head in {"start-job", "sajb", "start-threadjob"}:
+            scripts, _error = powershell_job_scriptblocks(normalized_tokens)
+            if scripts is None:
+                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            else:
+                candidates.extend(scripts)
+            continue
+
+        start_switch = (
+            r"\s+/(?:d|node|affinity|machine)\s+(?:\"[^\"]*\"|\S+)"
+            r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
+            r"realtime|abovenormal|belownormal|wait)"
+        )
         wrapper = re.match(
             r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
             candidate,
@@ -1822,18 +1887,14 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
         if not wrapper:
             wrapper = re.match(
                 r"(?is)^start\b"
+                rf"(?:{start_switch})*"
                 r"(?:\s+\"[^\"]*\")?"
-                r"(?:"
-                r"\s+/(?:d|node|affinity|machine)\s+(?:\"[^\"]*\"|\S+)"
-                r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
-                r"realtime|abovenormal|belownormal|wait)"
-                r")*"
-                r"\s+(?P<child>.+)$",
+                rf"(?:{start_switch})*\s+(?P<child>.+)$",
                 candidate,
             )
         if not wrapper:
             wrapper = re.match(
-                r"(?is)^if\s+(?:not\s+)?(?:\S+\s+){1,3}"
+                r"(?is)^if\s+(?:/i\s+)?(?:not\s+)?(?:\S+\s+){1,3}"
                 r"(?P<child>(?:[\"'&@({\s])*(?:cmd|powershell|pwsh|call|start|"
                 r"remove-item|ri|rm|del|erase|rd|rmdir)\b.+)$",
                 candidate,
@@ -1843,8 +1904,6 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
             child_segments = windows_operator_segments(child)
-            if len(child_segments) > 1:
-                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
             candidates.extend(segment for segment, _operator in child_segments)
 
     return recovered_deletes
@@ -1889,12 +1948,18 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         quoted[placeholder] = value
         return placeholder
 
+    bound_windows_delete = []
+    if _POWERSHELL_BOUND_WINDOWS_QUOTE.search(command):
+        bound_windows_delete = unparseable_recursive_delete(command)
+
     protected = _QUOTED.sub(protect, command)
     lexer = shlex.shlex(protected, posix=True, punctuation_chars=";&|<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
+        if bound_windows_delete:
+            raise ValueError("PowerShell-bound Windows path needs fallback parsing")
         raw_tokens = list(lexer)
     except ValueError:
         # POSIX shlex treats a final backslash inside a double-quoted Windows
@@ -1914,7 +1979,10 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             except ValueError:
                 return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
         recovered_segments.extend(
-            (segment, "") for segment in unparseable_recursive_delete(command)
+            (segment, "")
+            for segment in (
+                bound_windows_delete or unparseable_recursive_delete(command)
+            )
         )
         return recovered_segments
 
