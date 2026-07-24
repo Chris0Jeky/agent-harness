@@ -1722,7 +1722,7 @@ class HarnessTests(unittest.TestCase):
         self.write_hooks(linked, valid_adapter)
         result, output = self.run_doctor_with_fixture_globals(linked)
         self.assertEqual(result, 0, output)
-        self.assertIn(f"[ok] Codex hook source: linked worktree", output)
+        self.assertIn("[ok] Codex hook source: linked worktree", output)
         self.assertIn(str(root_hooks), output)
         self.assertIn("identical worktree copy is ignored", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
