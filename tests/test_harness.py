@@ -1727,6 +1727,58 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("identical worktree copy is ignored", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
 
+    def test_doctor_audits_nested_codex_layers_from_requested_directory(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        nested.mkdir()
+        self.write_hooks(nested, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 1)
+        self.assertIn("2 active Codex hook layer(s)", output)
+        self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
+    def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, valid_adapter)
+        nested = linked / "nested"
+        nested.mkdir()
+        local_hooks = self.write_hooks(nested, '{"hooks": {}}\n')
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        authoritative_hooks = root / "nested" / ".codex" / "hooks.json"
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn(str(authoritative_hooks.resolve()), output)
+        self.assertIn(str(local_hooks.resolve()), output)
+        self.assertIn("authoritative root source is absent", output)
+        self.assertIn("[FAIL] project Codex floor: 1 project floor handler(s)", output)
+
+    def test_doctor_floor_status_fails_with_divergent_worktree_copy(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, '{"hooks": {"different": []}}\n')
+
+        result, output = self.run_doctor_with_fixture_globals(linked)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("ignored worktree copy differs", output)
+        self.assertIn("[FAIL] project Codex floor: 1 project floor handler(s)", output)
+
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)
