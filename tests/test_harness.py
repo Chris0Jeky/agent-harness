@@ -391,6 +391,43 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(harness.repo_codex_floor_candidates(malformed)), 1)
         self.assertEqual(harness.repo_codex_floor_groups(malformed), [])
 
+    def test_windows_hook_command_alias_is_audited(self) -> None:
+        alias_only_global = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo noop",
+                                    "command_windows": (
+                                        'py -3 "$env:USERPROFILE/.claude/hooks/'
+                                        'dispatch.py" --event pre --runtime codex'
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.managed_codex_floor_groups(alias_only_global)), 1)
+        self.assertEqual(len(harness.repo_codex_floor_candidates(alias_only_global)), 1)
+
+        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+        handler = adapter["hooks"]["PreToolUse"][0]["hooks"][0]
+        handler["command_windows"] = handler.pop("commandWindows")
+        alias_adapter = json.dumps(adapter)
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(alias_adapter, pin)), 1)
+
     def test_hooks_helpers_reject_wrong_shapes(self) -> None:
         for current in ("[]", "null", '"text"', "1"):
             with self.subTest(current=current):
@@ -410,6 +447,21 @@ class HarnessTests(unittest.TestCase):
             {
                 "hooks": {
                     "PreToolUse": [{"hooks": [{"type": 7, "command": "echo safe"}]}]
+                }
+            },
+            {"hooks": {"PreToolUse": [{"hooks": [{"command_windows": 7}]}]}},
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "commandWindows": "echo one",
+                                    "command_windows": "echo two",
+                                }
+                            ]
+                        }
+                    ]
                 }
             },
         )
@@ -2136,6 +2188,30 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("codex-home", output)
+
+    def test_doctor_rejects_snake_case_windows_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        alias_floor = (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n\n'
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "echo noop"\n'
+            "command_windows = 'py -3 \"$env:USERPROFILE/.claude/hooks/"
+            "dispatch.py\" --event pre --runtime codex'\n"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=alias_floor
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("config.toml:hooks", output)
 
     def test_doctor_rejects_stored_profile_inline_global_floor(self) -> None:
         repo = self.make_repo()

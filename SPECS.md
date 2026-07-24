@@ -169,7 +169,9 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
   shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
-  and use a matcher that positively includes Bash. `doctor --repo` uses the Git-root layer walk
+  and use a matcher that positively includes Bash. The canonical `commandWindows` field and its
+  official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
+  uses the Git-root layer walk
   only when all inspectable top-level `project_root_markers` declarations in system, base-user, and
   stored profile-v2 configs are absent or exactly `[".git"]`. Any non-default, conflicting,
   malformed, or unreadable declaration fails the marker and project-floor checks.

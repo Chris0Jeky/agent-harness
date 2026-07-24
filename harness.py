@@ -811,12 +811,26 @@ def parse_hooks_document(
                 raise HarnessError("existing hook handlers must be objects")
             if "type" in handler and not isinstance(handler["type"], str):
                 raise HarnessError("existing hook handler type must be a string")
-            for field in ("command", "commandWindows"):
+            if "commandWindows" in handler and "command_windows" in handler:
+                raise HarnessError(
+                    "existing hook handler must not declare both commandWindows "
+                    "and command_windows"
+                )
+            for field in ("command", "commandWindows", "command_windows"):
                 if field in handler and not isinstance(handler[field], str):
                     raise HarnessError(
                         f"existing hook handler {field} must be a string"
                     )
     return current_data, hooks, groups
+
+
+def windows_hook_command(handler: dict[str, Any]) -> str:
+    """Return Codex's canonical or aliased Windows command value."""
+    if "commandWindows" in handler and "command_windows" in handler:
+        raise HarnessError(
+            "hook handler must not declare both commandWindows and command_windows"
+        )
+    return handler.get("commandWindows", handler.get("command_windows", ""))
 
 
 def command_has_flag_value(command: str, flag: str, value: str) -> bool:
@@ -851,8 +865,7 @@ def command_points_to_dispatcher(
 def is_direct_codex_floor_handler(
     handler: dict[str, Any], managed_dispatcher: Path | None = None
 ) -> bool:
-    for field in ("command", "commandWindows"):
-        command = handler.get(field, "")
+    for command in (handler.get("command", ""), windows_hook_command(handler)):
         if (
             command
             and command_points_to_dispatcher(command, managed_dispatcher)
@@ -874,7 +887,7 @@ def is_global_floor_handler(handler: dict[str, Any]) -> bool:
         for command in (
             strip_shell_comments(handler.get("command", "")),
             strip_shell_comments(
-                decode_windows_hook_command(handler.get("commandWindows", ""))
+                decode_windows_hook_command(windows_hook_command(handler))
             ),
         )
     )
@@ -1610,7 +1623,7 @@ def repo_codex_floor_candidates(current: str) -> list[Any]:
             commands = (
                 strip_shell_comments(handler.get("command", "")),
                 strip_shell_comments(
-                    decode_windows_hook_command(handler.get("commandWindows", ""))
+                    decode_windows_hook_command(windows_hook_command(handler))
                 ),
             )
             if any(
@@ -1658,7 +1671,7 @@ def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> li
         if not handler_gates_synchronously(handler):
             continue
         command = handler.get("command", "")
-        windows_command = decode_windows_hook_command(handler.get("commandWindows", ""))
+        windows_command = decode_windows_hook_command(windows_hook_command(handler))
         if platform_project_floor_command(
             command, expected_pin
         ) and platform_project_floor_command(
