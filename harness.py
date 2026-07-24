@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -120,7 +121,7 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
 def codex_hook_source_status(
     requested_checkout: Path, authoritative_checkout: Path
 ) -> tuple[Path, bool, str]:
-    """Return the active Codex hook path and linked-worktree copy status."""
+    """Return one active Codex layer's hook path and copy status."""
     authoritative_hooks = authoritative_checkout / ".codex" / "hooks.json"
     if requested_checkout == authoritative_checkout:
         return (
@@ -141,7 +142,11 @@ def codex_hook_source_status(
                 f"{source_prefix}; ignored worktree copy {ignored_hooks} exists "
                 "but the authoritative root source is absent",
             )
-        return authoritative_hooks, False, f"{source_prefix}; source is absent"
+        return (
+            authoritative_hooks,
+            True,
+            f"{source_prefix}; neither checkout declares hooks in this layer",
+        )
     if ignored_hooks.is_file():
         if authoritative_hooks.read_bytes() != ignored_hooks.read_bytes():
             return (
@@ -155,6 +160,136 @@ def codex_hook_source_status(
             f"{source_prefix}; identical worktree copy is ignored: {ignored_hooks}",
         )
     return authoritative_hooks, True, f"{source_prefix}; no worktree-local copy"
+
+
+def inline_hooks_from_config(config_path: Path) -> Any | None:
+    """Return a config layer's inline hooks table, if it declares one."""
+    if not config_path.is_file():
+        return None
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
+    return config.get("hooks")
+
+
+def inline_hooks_document(config_path: Path) -> str:
+    """Convert inline TOML hooks to the hooks.json document shape."""
+    hooks = inline_hooks_from_config(config_path)
+    if hooks is None:
+        return ""
+    try:
+        return json.dumps({"hooks": hooks})
+    except (TypeError, ValueError) as exc:
+        raise HarnessError(
+            f"unsupported inline hooks value in {config_path}: {exc}"
+        ) from exc
+
+
+def codex_inline_hook_source_status(
+    requested_layer: Path, authoritative_layer: Path
+) -> tuple[bool, str]:
+    """Report inline-hook mapping for one normal or linked project layer."""
+    authoritative_config = authoritative_layer / ".codex" / "config.toml"
+    authoritative_hooks = inline_hooks_from_config(authoritative_config)
+    if requested_layer == authoritative_layer:
+        if authoritative_hooks is None:
+            return True, f"no inline hooks in {authoritative_config}"
+        return True, f"inline hooks source: {authoritative_config}"
+
+    ignored_config = requested_layer / ".codex" / "config.toml"
+    ignored_hooks = inline_hooks_from_config(ignored_config)
+    source_prefix = f"root-checkout inline hooks source: {authoritative_config}"
+    if authoritative_hooks is None:
+        if ignored_hooks is not None:
+            return (
+                False,
+                f"{source_prefix}; ignored worktree inline hooks in "
+                f"{ignored_config} exist but the authoritative root source is absent",
+            )
+        return True, f"{source_prefix}; neither checkout declares inline hooks"
+    if ignored_hooks is not None:
+        if ignored_hooks != authoritative_hooks:
+            return (
+                False,
+                f"{source_prefix}; ignored worktree inline hooks differ: "
+                f"{ignored_config}",
+            )
+        return (
+            True,
+            f"{source_prefix}; identical worktree inline hooks are ignored: "
+            f"{ignored_config}",
+        )
+    return True, f"{source_prefix}; no worktree-local inline hooks"
+
+
+def codex_project_layer_dirs(
+    requested_path: Path, requested_checkout: Path
+) -> list[Path]:
+    """Return active ``.codex`` layer directories from checkout root to cwd."""
+    requested_path = requested_path.resolve()
+    try:
+        relative_path = requested_path.relative_to(requested_checkout)
+    except ValueError as exc:
+        raise HarnessError(
+            f"requested path is outside its Git checkout: {requested_path}"
+        ) from exc
+
+    directories = [requested_checkout]
+    current = requested_checkout
+    for component in relative_path.parts:
+        current /= component
+        directories.append(current)
+    return [directory for directory in directories if (directory / ".codex").is_dir()]
+
+
+def codex_hook_sources_status(
+    requested_path: Path,
+    requested_checkout: Path,
+    authoritative_checkout: Path,
+) -> tuple[list[Path], bool, str]:
+    """Return every active Codex hook source between checkout root and cwd.
+
+    Codex creates one project layer for each ``.codex`` directory on that
+    ancestor chain. In a linked worktree, each layer keeps its worktree-local
+    config but takes hooks from the same relative directory in the root
+    checkout, so every ignored local hook copy must be reconciled separately.
+    """
+    layer_dirs = codex_project_layer_dirs(requested_path, requested_checkout)
+    checkout_kind = (
+        "normal checkout"
+        if requested_checkout == authoritative_checkout
+        else "linked worktree"
+    )
+    if not layer_dirs:
+        return (
+            [],
+            True,
+            f"{checkout_kind}; 0 active Codex hook layer(s) between "
+            f"{requested_checkout} and {requested_path.resolve()}",
+        )
+
+    hook_paths: list[Path] = []
+    statuses: list[str] = []
+    source_ok = True
+    for layer_dir in layer_dirs:
+        relative_dir = layer_dir.relative_to(requested_checkout)
+        authoritative_layer = authoritative_checkout / relative_dir
+        hooks, layer_ok, detail = codex_hook_source_status(
+            layer_dir, authoritative_layer
+        )
+        inline_ok, inline_detail = codex_inline_hook_source_status(
+            layer_dir, authoritative_layer
+        )
+        hook_paths.append(hooks)
+        source_ok = source_ok and layer_ok and inline_ok
+        statuses.append(f"{detail}; {inline_detail}")
+    return (
+        hook_paths,
+        source_ok,
+        f"{checkout_kind}; {len(layer_dirs)} active Codex hook layer(s); "
+        + " | ".join(statuses),
+    )
 
 
 def tier_path(repo: Path) -> Path | None:
@@ -1471,34 +1606,57 @@ def doctor(args: argparse.Namespace) -> int:
     )
     if args.repo:
         try:
-            requested_checkout, authoritative_checkout = root_checkout(
-                Path(args.repo).resolve()
+            requested_path = Path(args.repo).resolve()
+            requested_checkout, authoritative_checkout = root_checkout(requested_path)
+            repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
+                requested_path, requested_checkout, authoritative_checkout
             )
-            repo_hooks, source_ok, source_detail = codex_hook_source_status(
-                requested_checkout, authoritative_checkout
+            json_hook_texts = [
+                hooks.read_text(encoding="utf-8")
+                for hooks in repo_hook_paths
+                if hooks.is_file()
+            ]
+            inline_hook_texts = [
+                document
+                for hooks in repo_hook_paths
+                if (document := inline_hooks_document(hooks.with_name("config.toml")))
+            ]
+            repo_hook_texts = json_hook_texts + inline_hook_texts
+            project_floor_count = sum(
+                len(repo_codex_floor_groups(text)) for text in repo_hook_texts
             )
-            repo_hook_text = (
-                repo_hooks.read_text(encoding="utf-8") if repo_hooks.is_file() else ""
+            candidate_floor_count = sum(
+                len(repo_codex_floor_candidates(text)) for text in repo_hook_texts
             )
-            project_floor_groups = repo_codex_floor_groups(repo_hook_text)
-            project_floor_count = len(project_floor_groups)
-            candidate_floor_count = len(repo_codex_floor_candidates(repo_hook_text))
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
-            current_floor_count = len(
-                repo_codex_floor_groups(repo_hook_text, expected_pin)
+            current_floor_count = sum(
+                len(repo_codex_floor_groups(text, expected_pin))
+                for text in repo_hook_texts
+            )
+            canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
+            canonical_root_floor_count = sum(
+                len(
+                    repo_codex_floor_groups(
+                        hooks.read_text(encoding="utf-8"), expected_pin
+                    )
+                )
+                for hooks in repo_hook_paths
+                if hooks == canonical_hooks and hooks.is_file()
             )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
                 f"{current_floor_count} current pinned handler(s); "
+                f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
                 f"{source_detail}; trust is checked manually in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
             candidate_floor_count = -1
             current_floor_count = -1
+            canonical_root_floor_count = -1
             source_ok = False
             source_detail = str(exc)
             project_detail = str(exc)
@@ -1506,9 +1664,11 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (
                 "project Codex floor",
-                candidate_floor_count == 1
+                source_ok
+                and candidate_floor_count == 1
                 and project_floor_count == 1
-                and current_floor_count == 1,
+                and current_floor_count == 1
+                and canonical_root_floor_count == 1,
                 project_detail,
             )
         )
