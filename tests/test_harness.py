@@ -109,6 +109,41 @@ class HarnessTests(unittest.TestCase):
         config.write_text(cls.inline_floor_config_text(), encoding="utf-8")
         return config
 
+    def make_sync_global_skill_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        source_skill = config_root / "codex" / "skills" / "sample"
+        target_skill = root / "skills-home" / "sample"
+        source_skill.mkdir(parents=True)
+        target_skill.mkdir(parents=True)
+        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        for skill in (source_skill, target_skill):
+            (skill / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        skills_home = root / "skills-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        return source_skill, target_skill, skills_home, args
+
+    def assert_sync_global_rejects_alias_without_writes(
+        self,
+        args: SimpleNamespace,
+        alias: Path,
+        skills_home: Path,
+    ) -> None:
+        with self.assertRaisesRegex(harness.HarnessError, "unsafe skill tree alias"):
+            harness.sync_global(args)
+        self.assertTrue(harness.path_is_alias(alias))
+        self.assertFalse(Path(args.codex_home).exists())
+        self.assertFalse(Path(args.claude_home).exists())
+        self.assertFalse((skills_home / ".harness-backups").exists())
+
     def run_doctor_with_fixture_globals(
         self,
         repo: Path,
@@ -1575,6 +1610,124 @@ allow_local_binding = true
         with self.assertRaises(harness.HarnessError):
             harness.sync_global(args)
         self.assertEqual(hooks_path.read_text(encoding="utf-8"), original)
+
+    def test_sync_global_does_not_replace_identical_skill(self) -> None:
+        _source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("identical-skill")
+        )
+        with mock.patch.object(
+            harness.shutil,
+            "rmtree",
+            side_effect=AssertionError("identical skill should not be removed"),
+        ):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+
+    def test_sync_global_replaces_path_content_digest_alias(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("digest-alias")
+        )
+        (source_skill / "ab").write_bytes(b"c")
+        (target_skill / "a").write_bytes(b"bc")
+
+        self.assertNotEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual((target_skill / "ab").read_bytes(), b"c")
+        self.assertFalse((target_skill / "a").exists())
+        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "a").read_bytes(), b"bc")
+
+    def test_sync_global_replaces_mismatched_empty_directories(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("empty-directories")
+        )
+        (source_skill / "assets").mkdir()
+        (target_skill / "obsolete").mkdir()
+
+        self.assertNotEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue((target_skill / "assets").is_dir())
+        self.assertFalse((target_skill / "obsolete").exists())
+        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / "obsolete").is_dir())
+
+    def test_sync_global_rejects_directory_alias_before_writes(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("directory-alias")
+        )
+        (source_skill / "assets").mkdir()
+        (source_skill / "assets" / "data").write_text("current\n", encoding="utf-8")
+        external = Path(self.temp.name) / "external-assets"
+        external.mkdir()
+        (external / "data").write_text("current\n", encoding="utf-8")
+        alias = target_skill / "assets"
+        remove_alias = self.make_directory_alias(external, alias)
+        try:
+            self.assert_sync_global_rejects_alias_without_writes(
+                args, alias, skills_home
+            )
+            self.assertEqual(
+                (external / "data").read_text(encoding="utf-8"), "current\n"
+            )
+        finally:
+            if harness.path_is_alias(alias):
+                remove_alias()
+
+    def test_sync_global_rejects_file_alias_before_writes(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("file-alias")
+        )
+        source_file = source_skill / "data"
+        source_file.write_text("current\n", encoding="utf-8")
+        external = Path(self.temp.name) / "external-data"
+        external.write_text("current\n", encoding="utf-8")
+        alias = target_skill / "data"
+        try:
+            alias.symlink_to(external)
+        except OSError as exc:
+            self.skipTest(f"file symlinks unavailable: {exc}")
+        try:
+            self.assert_sync_global_rejects_alias_without_writes(
+                args, alias, skills_home
+            )
+            self.assertEqual(external.read_text(encoding="utf-8"), "current\n")
+        finally:
+            if harness.path_is_alias(alias):
+                alias.unlink()
+
+    def test_sync_global_rejects_root_alias_before_writes(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("root-alias")
+        )
+        (source_skill / "data").write_text("current\n", encoding="utf-8")
+        (target_skill / "SKILL.md").unlink()
+        target_skill.rmdir()
+        external = Path(self.temp.name) / "external-skill"
+        external.mkdir()
+        (external / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        (external / "data").write_text("current\n", encoding="utf-8")
+        remove_alias = self.make_directory_alias(external, target_skill)
+        try:
+            self.assert_sync_global_rejects_alias_without_writes(
+                args, target_skill, skills_home
+            )
+            self.assertEqual(
+                (external / "data").read_text(encoding="utf-8"), "current\n"
+            )
+        finally:
+            if harness.path_is_alias(target_skill):
+                remove_alias()
 
     def test_sync_global_preserves_same_second_backup_sets(self) -> None:
         root = Path(self.temp.name)
