@@ -27,6 +27,16 @@ pasted into a command. stdout therefore only ever carries reason strings and
 text is written only to `--json` / `--corpus-cache`, which belong in a scratch
 directory outside any repository. Nothing is copied out of the transcript trees.
 
+"Reason strings" is not automatically safe: several deny reasons interpolate
+command-derived text — `Redirecting output into a secret-looking file ({path})`,
+`Mutating a secret-looking file ({path})`, `{head} can launch an uninspected
+child command`, `rm -rf outside the project: {path}` — so an unfiltered class
+table preferentially prints the names of the `.env` / `id_rsa` / `*.pem` /
+`credentials.json` files in real transcripts. `normalize_reason` replaces those
+interpolations with placeholders before grouping, which also fixes a real
+accounting bug: grouped by the raw string, the secret-file class fragments into
+one row per path and the table understates it. Deltas are unaffected either way.
+
 COVERAGE LIMITS (read before quoting a number)
 ----------------------------------------------
 * Every command is replayed with the same `--project-dir` (this repo by default),
@@ -835,6 +845,65 @@ def invocations(counts: dict[str, int]) -> int:
     return sum(counts.values())
 
 
+# Deny reasons that interpolate command-derived text. Grouping on the raw string
+# both leaks and miscounts: the secret-file class becomes one row per filename,
+# so the class table understates it while printing the name of every `.env`,
+# `id_rsa`, `*.pem` and `credentials.json` the corpus ever touched.
+REASON_NORMALIZERS = (
+    (
+        re.compile(r"(?s)^(.*secret-looking file )\(.*\)( is floor-blocked.*)$"),
+        r"\1(<path>)\2",
+    ),
+    (re.compile(r"(?s)^(Cannot safely resolve .*? target): .*$"), r"\1: <path>"),
+    (re.compile(r"(?s)^(.*? outside the project): .*$"), r"\1: <path>"),
+    (
+        re.compile(r"(?s)^.*(: refusing a filesystem/home root\.)$"),
+        r"<target>\1",
+    ),
+    (
+        re.compile(r"(?s)^.*?( can launch an uninspected child command.*)$"),
+        r"<command>\1",
+    ),
+    (
+        re.compile(r"(?s)^(sensitive_data repo: refusing a push to public remote ).*$"),
+        r"\1<remote>.",
+    ),
+    (
+        re.compile(
+            r"(?s)^(sensitive_data repo: could not verify push remote privacy )\(.*$"
+        ),
+        r"\1(<remote>).",
+    ),
+)
+# Second pass, for reasons this script has not enumerated (including future ones
+# and `error` verdicts carrying an exception message): mask a token only when it
+# looks like a path or URL *and* occurs in the command, so the floor's own
+# wording is never touched and grouping stays meaningful.
+REASON_PATHISH_RE = re.compile(r"[\\/]|^\.[A-Za-z0-9]")
+REASON_TOKEN_TRIM = ".,;:()[]'\"`"
+
+
+def normalize_reason(reason: str, command: str = "") -> str:
+    """Replace command-derived text in a deny reason with a placeholder."""
+    text = reason
+    for pattern, replacement in REASON_NORMALIZERS:
+        text = pattern.sub(replacement, text)
+    if not command:
+        return text
+    masked = []
+    for token in text.split(" "):
+        stripped = token.strip(REASON_TOKEN_TRIM)
+        if (
+            len(stripped) >= 4
+            and stripped in command
+            and REASON_PATHISH_RE.search(stripped)
+        ):
+            masked.append(token.replace(stripped, "<path>"))
+        else:
+            masked.append(token)
+    return " ".join(masked)
+
+
 def summarize_tier(
     commands: Sequence[str],
     corpus: dict[str, dict[str, int]],
@@ -854,8 +923,9 @@ def summarize_tier(
         decisions[decision] += 1
         decision_invocations[decision] += weight
         if decision != "allow":
-            reasons[reason] += 1
-            reason_invocations[reason] += weight
+            grouped = normalize_reason(reason, command)
+            reasons[grouped] += 1
+            reason_invocations[grouped] += weight
             for runtime in RUNTIMES:
                 if counts.get(runtime):
                     by_runtime[runtime] += 1
@@ -934,7 +1004,10 @@ def compare_tier(
         matrix[f"{base_decision}->{cand_decision}"] += 1
         if base_decision == cand_decision:
             if base_decision != "allow" and base_reason != cand_reason:
-                reclassified[f"{base_reason}  =>  {cand_reason}"] += 1
+                reclassified[
+                    f"{normalize_reason(base_reason, command)}"
+                    f"  =>  {normalize_reason(cand_reason, command)}"
+                ] += 1
             continue
         row = {
             "command": command,
@@ -970,7 +1043,9 @@ def compare_tier(
         result[f"{label}_unique"] = len(rows)
         result[f"{label}_invocations"] = sum(row["invocations"] for row in rows)
         result[f"{label}_reasons"] = dict(
-            Counter(row["reason"] for row in rows).most_common()
+            Counter(
+                normalize_reason(row["reason"], row["command"]) for row in rows
+            ).most_common()
         )
         result[f"{label}_top"] = rows[:top]
     return result
