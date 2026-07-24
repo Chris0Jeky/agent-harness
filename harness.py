@@ -1173,24 +1173,82 @@ def same_file(left: Path, right: Path) -> bool:
     )
 
 
-def tree_digest(root: Path) -> str:
+def tree_digest(root: Path) -> str | None:
+    """Digest an ordinary file/directory tree, or decline unsafe equality."""
     digest = hashlib.sha256()
-    if not root.is_dir():
-        return ""
-    paths = sorted(
-        (path for path in root.rglob("*") if path.is_dir() or path.is_file()),
-        key=lambda path: path.relative_to(root).as_posix(),
-    )
-    for path in paths:
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        kind = b"D" if path.is_dir() else b"F"
-        payload = b"" if path.is_dir() else path.read_bytes()
+    if path_is_alias(root):
+        return None
+    try:
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect skill tree {root}: {exc}") from exc
+
+    entries: list[tuple[bytes, bytes, Path | None]] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        if path_is_alias(directory):
+            return None
+        try:
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                return None
+            children = list(directory.iterdir())
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect skill tree {directory}: {exc}") from exc
+        for path in children:
+            if path_is_alias(path):
+                return None
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            if stat.S_ISDIR(mode):
+                entries.append((relative, b"D", None))
+                pending.append(path)
+            elif stat.S_ISREG(mode):
+                entries.append((relative, b"F", path))
+            else:
+                return None
+
+    for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
+        payload = b""
+        if file_path is not None:
+            if path_is_alias(file_path):
+                return None
+            try:
+                if not stat.S_ISREG(file_path.lstat().st_mode):
+                    return None
+                payload = file_path.read_bytes()
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot inspect skill tree {file_path}: {exc}"
+                ) from exc
         digest.update(kind)
         digest.update(len(relative).to_bytes(8, byteorder="big"))
         digest.update(relative)
         digest.update(len(payload).to_bytes(8, byteorder="big"))
         digest.update(payload)
     return digest.hexdigest()
+
+
+def same_tree(left: Path, right: Path) -> bool:
+    left_digest = tree_digest(left)
+    right_digest = tree_digest(right)
+    return (
+        left_digest is not None
+        and right_digest is not None
+        and left_digest == right_digest
+    )
 
 
 def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
@@ -2509,7 +2567,7 @@ def sync_global(args: argparse.Namespace) -> int:
         " (no global Codex deny floor)"
     )
     for source, target in skill_actions:
-        equal = tree_digest(source) == tree_digest(target)
+        equal = same_tree(source, target)
         print(f"{'=' if equal else '->'} {target}")
     if not args.apply:
         print("dry run; pass --apply to install")
@@ -2532,7 +2590,7 @@ def sync_global(args: argparse.Namespace) -> int:
         else:
             hooks_target.unlink(missing_ok=True)
     for source, target in skill_actions:
-        if tree_digest(source) == tree_digest(target):
+        if same_tree(source, target):
             continue
         if target.exists():
             backup = skill_backup / target.name
