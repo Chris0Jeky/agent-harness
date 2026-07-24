@@ -232,10 +232,18 @@ class PushConfigForceTests(unittest.TestCase):
                 decision, reason = self._decide(repo, command)
                 self.assertEqual(decision, "allow", reason)
 
-    def test_explicit_refspec_stays_allowed_after_config_path_reference(self) -> None:
+    def test_explicit_refspec_denied_after_opaque_config_reference(self) -> None:
         repo = self._repo(None)
         decision, reason = self._decide(
             repo, "python -c \"open('.git/config', 'w')\"; git push origin main"
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("push-config-unverifiable", reason)
+
+    def test_explicit_refspec_allowed_after_readonly_config_reference(self) -> None:
+        repo = self._repo(None)
+        decision, reason = self._decide(
+            repo, "Get-Content .git/config; git push origin main"
         )
         self.assertEqual(decision, "allow", reason)
 
@@ -249,12 +257,31 @@ class PushConfigForceTests(unittest.TestCase):
             "python -c \"open('C:/repos/primary/.git/worktrees/issue27/config.worktree', 'w')\"; git push origin",
             "python -c \"open('$GIT_DIR/config', 'w')\"; git push origin",
             "python -c \"open('$GIT_COMMON_DIR/config.worktree', 'w')\"; git push origin",
+            "python -c \"open('.git//config', 'w')\"; git push origin",
+            "python -c \"open('.git/./config', 'w')\"; git push origin",
+            "python -c \"open('.git/cache/../config', 'w')\"; git push origin",
+            "python -c \"open('C:/repo/.git//config', 'w')\"; git push origin",
+            "python -c \"open('$GIT_DIR//config', 'w')\"; git push origin",
+            "python -c \"open('.git/worktrees/x//config.worktree', 'w')\"; git push origin",
+            "python -c \"open('$GIT_COMMON_DIR/worktrees/x/./config.worktree', 'w')\"; git push origin",
         )
         for command in commands:
             with self.subTest(command=command):
                 decision, reason = self._decide(repo, command)
                 self.assertEqual(decision, "deny", reason)
                 self.assertIn("push-config-unverifiable", reason)
+
+    def test_config_like_non_targets_do_not_poison_later_push(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "python -c \"print('.git/configuration')\"; git push origin",
+            "python -c \"print('.git/config/bak')\"; git push origin",
+            "python -c \"print('.git/config.worktree.bak')\"; git push origin",
+            "python -c \"print('.git/worktrees/x/config')\"; git push origin",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "allow", reason)
 
     def test_bare_push_allowed_under_unrelated_env_assignment(self) -> None:
         # A generic PowerShell env assignment (the common wave `$env:WT_PROJECT_DIR`

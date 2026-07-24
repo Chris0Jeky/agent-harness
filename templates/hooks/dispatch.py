@@ -27,6 +27,7 @@ import fnmatch
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -5493,14 +5494,12 @@ def configured_bare_push_is_dangerous(
     return False
 
 
-_REPOSITORY_CONFIG_LITERAL = re.compile(
-    r"(?i)(?<![a-z0-9_.-])\.git[\\/](?:config(?:\.worktree)?|"
-    r"worktrees[\\/][^\\/'\"`\s]+[\\/]config\.worktree)(?![a-z0-9_.-])"
+_REPOSITORY_CONFIG_PATH_CANDIDATE = re.compile(
+    r"(?i)(?<![a-z0-9_.-])\.git(?:/+[^/'\"`\s,;(){}\[\]|&<>]+)+"
 )
-_GIT_CONFIG_DIRECTORY_LITERAL = re.compile(
+_GIT_CONFIG_DIRECTORY_REFERENCE = re.compile(
     r"(?i)(?:\$(?:\{(?:git_dir|git_common_dir)\}|(?:git_dir|git_common_dir))"
     r"|%(?:git_dir|git_common_dir)%|\$env:(?:git_dir|git_common_dir))"
-    r"[\\/]config(?:\.worktree)?(?![a-z0-9_.-])"
 )
 
 
@@ -5514,10 +5513,14 @@ def token_mentions_repository_config(token: str) -> bool:
     attempt to reconstruct encoded, generated, or concatenated paths.
     """
     literal = restore_quoted_literal_markers(token).replace("\\", "/")
-    return bool(
-        _REPOSITORY_CONFIG_LITERAL.search(literal)
-        or _GIT_CONFIG_DIRECTORY_LITERAL.search(literal)
-    )
+    literal = _GIT_CONFIG_DIRECTORY_REFERENCE.sub(".git", literal)
+    for match in _REPOSITORY_CONFIG_PATH_CANDIDATE.finditer(literal):
+        normalized = posixpath.normpath(match.group(0)).lower()
+        if normalized in {".git/config", ".git/config.worktree"}:
+            return True
+        if re.fullmatch(r"\.git/worktrees/[^/]+/config\.worktree", normalized):
+            return True
+    return False
 
 
 def config_reference_is_readonly_or_message(raw: list[str]) -> bool:
@@ -5584,13 +5587,12 @@ def config_reference_is_readonly_or_message(raw: list[str]) -> bool:
 def segment_may_mutate_repository_config(raw: list[str]) -> bool:
     """Return whether a segment leaves later bare-push config unverifiable.
 
-    A literal path alone is allowed.  Recognized writers and redirection retain
+    The reference itself is not denied. Recognized writers and redirection retain
     their precise handling; otherwise an arbitrary interpreter or launcher that
     carries a literal repository config path is conservatively opaque unless its
-    head is explicitly output/read/message-only.  Thus even an opaque inline
-    interpreter that merely prints '.git/config' can poison a later bare push;
-    an explicit refspec remains the narrow escape hatch.  Dynamic, encoded, and
-    constructed paths are outside this bounded temporal check.
+    head is explicitly output/read/message-only. Thus even an opaque inline
+    interpreter that merely prints '.git/config' poisons a later push. Dynamic,
+    encoded, and constructed paths are outside this bounded temporal check.
     """
     if not raw:
         return False
@@ -7597,6 +7599,13 @@ def check(
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
                 )
+                if repository_config_may_have_changed:
+                    return (
+                        "deny",
+                        "[push-config-unverifiable] An earlier command may have rewritten "
+                        "repository config that controls push destination or execution; "
+                        "review the config before running the push separately.",
+                    )
                 if not has_explicit_refspec and not explicit_selector:
                     # Plain `git push` to a configured upstream is the closing move
                     # of nearly every agent loop. Command-line force/lease/`:ref`/
@@ -7624,11 +7633,7 @@ def check(
                         for name in os.environ
                         if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
                     }
-                    if (
-                        bare_push_repository_environment
-                        or repository_config_may_have_changed
-                        or cwd_uncertain
-                    ):
+                    if bare_push_repository_environment or cwd_uncertain:
                         return (
                             "deny",
                             "[push-config-unverifiable] A refspec-less git push inherits remote "
