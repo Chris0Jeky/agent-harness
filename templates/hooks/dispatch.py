@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.4 (2026-07-24)"
+FLOOR_VERSION = "1.6.0 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1702,7 +1702,9 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
-def windows_operator_segments(command: str) -> list[tuple[str, str]]:
+def windows_operator_segments(
+    command: str, *, single_quotes_are_inert: bool = True
+) -> list[tuple[str, str]]:
     """Split Windows command operators without splitting quoted inert text."""
     result: list[tuple[str, str]] = []
     current: list[str] = []
@@ -1716,7 +1718,7 @@ def windows_operator_segments(command: str) -> list[tuple[str, str]]:
             current.append(char)
             index += 1
             continue
-        if char in {'"', "'"}:
+        if char == '"' or (char == "'" and single_quotes_are_inert):
             quote = char
             current.append(char)
         elif char in ";&|\n":
@@ -1740,8 +1742,18 @@ def windows_operator_segments(command: str) -> list[tuple[str, str]]:
     return result
 
 
+_POWERSHELL_PATH_PARAMETER_PREFIXES = sorted(
+    {
+        name[:length]
+        for name in ("path", "literalpath")
+        for length in range(1, len(name) + 1)
+    },
+    key=len,
+    reverse=True,
+)
 _POWERSHELL_BOUND_WINDOWS_QUOTE = re.compile(
-    r'(?i)(?P<prefix>-(?:literal)?path:)"(?P<value>[^"\r\n]*\\)"' r"(?=$|[\s;&|])"
+    rf'(?i)(?P<prefix>-(?:{"|".join(_POWERSHELL_PATH_PARAMETER_PREFIXES)}):)'
+    r'"(?P<value>[^"\r\n]*\\)"(?=$|[\s;&|])'
 )
 
 
@@ -1872,10 +1884,11 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
             r"realtime|abovenormal|belownormal|wait)"
         )
-        wrapper = re.match(
+        cmd_wrapper = re.match(
             r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
             candidate,
         )
+        wrapper = cmd_wrapper
         if not wrapper:
             wrapper = re.match(
                 r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
@@ -1903,7 +1916,9 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
-            child_segments = windows_operator_segments(child)
+            child_segments = windows_operator_segments(
+                child, single_quotes_are_inert=cmd_wrapper is None
+            )
             candidates.extend(segment for segment, _operator in child_segments)
 
     return recovered_deletes
@@ -5418,6 +5433,113 @@ def push_remotes(
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def configured_bare_push_is_dangerous(
+    project_dir: str,
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+    deadline: float | None = None,
+) -> bool:
+    """True when a refspec-less `git push` would FORCE, DELETE, or MIRROR by config.
+
+    A bare push (no command-line refspec) inherits `remote.<name>.push`,
+    `remote.<name>.mirror`, AND `remote.<name>.receivepack`, so it can silently
+    perform charter-blocked updates
+    (BLUEPRINT §2) that no argv token reveals:
+      - a push refspec with a leading '+' -> forced update,
+      - a push refspec with an empty source (':dst') -> remote ref deletion,
+      - `remote.<name>.mirror=true` -> --mirror (force + delete of removed refs).
+      - `remote.<name>.receivepack` -> execution of a configured receiver command.
+    Command-line force/lease/`:ref`/`--mirror` are handled elsewhere; only the
+    CONFIGURED forms reach here. Over-approximates across all remotes. Resolution
+    failure/absence -> "" -> not dangerous, matching git's own
+    non-fast-forward-rejecting default for an unconfigured bare push. This is a
+    deliberate fail-open direction: if the shared resolver deadline is already
+    exhausted the read returns "" and the bare push is graduated — acceptable
+    because the floor's own `git config` reads are local and fast, so a forcing
+    config in practice resolves within budget."""
+    output = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "config",
+            "--get-regexp",
+            r"^remote\..*\.(push|mirror|receivepack)$",
+        ],
+        project_dir,
+        deadline,
+    )
+    for line in output.splitlines():
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        key = parts[0].lower()
+        value = parts[1].strip() if len(parts) == 2 else ""
+        if key.endswith(".mirror"):
+            # git treats a valueless boolean key (`mirror` with no `= value`) as
+            # true, and `--get-regexp` emits it with no value — so empty counts.
+            if value == "" or value.lower() in {"true", "yes", "on", "1"}:
+                return True
+            continue
+        if key.endswith(".receivepack"):
+            return True
+        for refspec in value.split():
+            # A configured push value is a refspec, never a CLI option: a leading
+            # '+' forces and an empty source (':dst') deletes the destination ref.
+            if refspec.startswith("+") or (
+                refspec.startswith(":") and len(refspec) > 1
+            ):
+                return True
+    return False
+
+
+def segment_may_mutate_repository_config(raw: list[str]) -> bool:
+    """Return whether a shell segment may rewrite the current repo's config."""
+    if not raw:
+        return False
+    normalized = [
+        restore_quoted_literal_markers(token).strip("'\"").replace("\\", "/").lower()
+        for token in raw
+    ]
+    config_indexes = [
+        index
+        for index, token in enumerate(normalized)
+        if token == ".git/config" or token.endswith("/.git/config")
+    ]
+    if not config_indexes:
+        return False
+    head, _tokens = command_head(raw)
+    if head in {
+        "add-content",
+        "ac",
+        "clear-content",
+        "clc",
+        "copy",
+        "copy-item",
+        "cp",
+        "cpi",
+        "move",
+        "move-item",
+        "mv",
+        "mi",
+        "new-item",
+        "ni",
+        "out-file",
+        "rename-item",
+        "ren",
+        "rni",
+        "set-content",
+        "sc",
+        "tee",
+        "tee-object",
+    }:
+        return True
+    return any(
+        index > 0 and normalized[index - 1] in {">", ">>", ">|"}
+        for index in config_indexes
+    )
+
+
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
     """Reject remote-name or URL changes that can retarget a later push."""
     action = next((token.lower() for token in args if not token.startswith("-")), "")
@@ -5918,6 +6040,21 @@ def check(
     # T4/wave_mode. Never weakens `strict` — the flag is ignored where guards are walls.
     relaxed = bool(flags.get("relaxed_work_loss_guards")) and not strict
 
+    # Graduated opacity (BLUEPRINT §2 / issue #21). The charter denies the PROVEN
+    # irreversible; a shape the parser merely cannot PROVE safe is scaled by blast
+    # radius instead of hard-denied. This helper is used ONLY for shapes that
+    # cannot conceal a charter irreversible (force spellings, rm -rf outside the
+    # project, secret-file write, pipe-to-shell all keep their unconditional deny):
+    #   below T4/wave  -> allow (the parser's own uncertainty is not the agent's fault)
+    #   T4 or wave     -> deny (blast radius justifies strictness)
+    # Rule id prefixes the reason so smoke cases, ledgers, and overrides can key on
+    # it. A guarded/ask channel (for opaque operands OF a write verb) lands with its
+    # first real caller in a follow-up slice, not speculatively here.
+    def graduated_opacity(rule_id: str, reason: str):
+        if strict:
+            return "deny", f"[{rule_id}] {reason}"
+        return None
+
     command = strip_quoted_heredoc_bodies(remove_shell_line_continuations(command))
     command = mask_inert_powershell_assignment_scriptblocks(command)
     unwrapped = unwrap_powershell_scriptblock(command)
@@ -6006,6 +6143,7 @@ def check(
     environment_provider_context = False
     active_git_process_environment: set[str] = set()
     active_git_repository_environment = set(repository_environment_seed)
+    repository_config_may_have_changed = False
     command_aliases: dict[str, str] = {}
     previous_pass = None
 
@@ -6042,6 +6180,7 @@ def check(
             environment_provider_context = False
             active_git_process_environment = set()
             active_git_repository_environment = set(repository_environment_seed)
+            repository_config_may_have_changed = False
             command_aliases = {}
         previous_pass = current_pass
         if not raw:
@@ -6049,6 +6188,10 @@ def check(
         raw = strip_control_prefixes(raw)
         if not raw:
             continue
+        repository_config_may_have_changed = (
+            repository_config_may_have_changed
+            or segment_may_mutate_repository_config(raw)
+        )
         if dangerous_git_trace_environment_mutation(raw):
             return (
                 "deny",
@@ -6673,7 +6816,10 @@ def check(
                     "A dynamic nested-shell script cannot be inspected safely.",
                 )
             if head == "cmd":
-                nested_script = cmd_unescape(nested_script)
+                # cmd.exe gives single quotes no grouping semantics; leaving them
+                # intact here would make the recursive POSIX/PowerShell-aware pass
+                # hide separators that cmd actually executes.
+                nested_script = cmd_unescape(nested_script).replace("'", "")
             elif head in {"pwsh", "powershell"}:
                 nested_script = unwrap_powershell_scriptblock(nested_script)
             nested_decision = check(
@@ -7346,11 +7492,68 @@ def check(
                     positionals.append(token)
                     index += 1
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
-                if len(positionals) < 2 and not explicit_selector:
-                    return (
-                        "deny",
+                repository_via_option = any(
+                    token == "--repo" or token.startswith("--repo=") for token in args
+                )
+                has_explicit_refspec = len(positionals) >= (
+                    1 if repository_via_option else 2
+                )
+                if not has_explicit_refspec and not explicit_selector:
+                    # Plain `git push` to a configured upstream is the closing move
+                    # of nearly every agent loop. Command-line force/lease/`:ref`/
+                    # `--mirror` spellings are rejected ABOVE this point. The residual
+                    # charter risk is a CONFIGURED force/delete/mirror: a refspec-less
+                    # push inherits `remote.<name>.push` / `.mirror` (PR #23 reviews).
+                    # Resolve that config and deny the dangerous shapes at every tier;
+                    # only a provably-plain bare push is graduated by blast radius.
+                    # If a repository-environment override or an uncertain cwd makes
+                    # the resolver look at the wrong repo, we cannot prove safety ->
+                    # deny (fail closed, mirroring the sensitive_data push handling).
+                    # sensitive_data push-privacy resolution still runs below.
+                    # Only a KNOWN git repository env var (GIT_DIR / GIT_WORK_TREE /
+                    # GIT_COMMON_DIR) actually redirects git to a different repo than
+                    # the resolver's cwd, making the inherited config unverifiable. A
+                    # generic PowerShell `$env:VAR=` assignment is marked with the
+                    # <UNKNOWN> sentinel by the mutation scanner; excluding it keeps
+                    # the common `$env:WT_PROJECT_DIR='...'; git push` wave pattern
+                    # allowed (issue #21 corpus) while still denying the GIT_DIR case.
+                    bare_push_repository_environment = (
+                        effective_git_repository_environment
+                        & _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+                    ) | {
+                        name.upper()
+                        for name in os.environ
+                        if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
+                    }
+                    if (
+                        bare_push_repository_environment
+                        or repository_config_may_have_changed
+                        or cwd_uncertain
+                    ):
+                        return (
+                            "deny",
+                            "[push-config-unverifiable] A refspec-less git push inherits remote "
+                            "config, but a repository-environment override or uncertain cwd "
+                            "prevents verifying it; push an explicit refspec instead.",
+                        )
+                    if configured_bare_push_is_dangerous(
+                        current_cwd,
+                        git_toks[1:subcommand_index] if subcommand_index else None,
+                        deadline=_remote_deadline,
+                    ):
+                        return (
+                            "deny",
+                            "[push-config-force] A refspec-less git push inherits a configured "
+                            "force ('+'), delete (':ref'), mirror update, or receive-pack "
+                            "command from remote config; "
+                            "push an explicit non-forcing refspec instead.",
+                        )
+                    opaque = graduated_opacity(
+                        "push-opaque-refspec",
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
+                    if opaque:
+                        return opaque
                 if lease_requested and (
                     explicit_selector
                     or not force_with_lease_targets_are_features(positionals[1:])

@@ -509,6 +509,12 @@ CASES = [
         {},
         "deny",
     ),
+    (
+        r'''cmd /c "echo 'ok & rd /s /q C:\critical\outside\'"''',
+        1,
+        {},
+        "deny",
+    ),
     (r'''rd /s /q "build\"''', 1, {}, "allow"),
     (r'''cmd /c "cmd /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''cmd /c "cmd /d /c rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
@@ -632,6 +638,12 @@ CASES = [
     ),
     (
         r'''Remove-Item -Recurse -LiteralPath:"C:\critical\outside path\"''',
+        1,
+        {},
+        "deny",
+    ),
+    (
+        r'''Remove-Item -Recurse -Lit:"C:\critical\outside path\"''',
         1,
         {},
         "deny",
@@ -1344,7 +1356,15 @@ CASES = [
     ("git --exec-path=C:/tmp status", 1, {}, "deny"),
     ("git-send-email --sendmail-cmd helper patch.eml", 1, {}, "deny"),
     ("git-filter-branch --tree-filter helper main", 1, {}, "deny"),
-    ("git push origin", 1, {}, "deny"),
+    # Plain push (no explicit refspec) is graduated opacity, not charter: force
+    # spellings are rejected earlier, so a bare push is allowed below T4 and
+    # denied only where blast radius makes opaque config a wall (T4 / wave_mode).
+    ("git push origin", 1, {}, "allow"),
+    ("git push origin", 2, {}, "allow"),
+    ("git push origin", 3, {}, "allow"),
+    ("git push origin", 4, {}, "deny"),
+    ("git push origin", 3, {"wave_mode": True}, "deny"),
+    ("git push", 2, {}, "allow"),
     ("git push origin :main", 1, {}, "deny"),
     ("git push origin :refs/heads/main", 1, {}, "deny"),
     ("git push origin main :old", 1, {}, "deny"),
@@ -2066,7 +2086,9 @@ CASES = [
     ("git push --all origin", 1, {}, "allow"),
     ("git push --push-option harmless origin main", 1, {}, "allow"),
     ("git push --recurse-submodules check origin main", 1, {}, "allow"),
-    ("git push --repo origin main", 1, {}, "deny"),
+    ("git push --repo origin main", 1, {}, "allow"),
+    ("git push --repo=origin main", 1, {}, "allow"),
+    ("git push --repo origin main", 4, {}, "allow"),
     ("git push --repo origin --all", 1, {}, "allow"),
     ("git push -vo harmless origin main", 1, {}, "allow"),
     ("git push -od origin main", 1, {}, "allow"),
