@@ -156,18 +156,29 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   a location change fail closed; only strict descendants of the native OS temp root are scratch.
   On Windows, ambiguous MSYS/WSL `/c/...` and `/mnt/c/...` spellings fail closed because the same
   text has different PowerShell filesystem semantics.
+- `doctor` requires zero deny-floor copies across all statically inspectable global hook sources:
+  user and system `hooks.json`, inline hooks in system/base-user/every stored profile config, and
+  the legacy managed config file. Inactive stored profiles are audited conservatively because the
+  invoking profile is not part of the Python process context. Managed-cloud, MDM, session-flag,
+  managed-requirements, and plugin hooks remain an explicit runtime boundary for exact-session
+  `/hooks`; the static check never represents those sources as inspected.
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
   shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
-  and use a matcher that positively includes Bash. From the checkout root through the requested
-  directory, `doctor --repo` audits every active `.codex` layer and both declaration forms Codex
-  loads: `hooks.json` and inline `[hooks]` in `config.toml`. Across all active sources it requires
-  exactly one candidate, one conservatively recognized execution shape, and one current pin. The
-  recognized current floor must reside in the canonical root `.codex/hooks.json`; nested layers
-  that contain configuration but no hooks are valid. Commented or output-only marker carriers are
-  not valid adapters. This is static topology validation: it does not execute the hook, prove
-  OS-level integrity, or grant Codex trust. Review the adapter and activate it with `/hooks` in a
-  new Codex session, then run a live safe/deny canary.
+  and use a matcher that positively includes Bash. `doctor --repo` uses the Git-root layer walk
+  only when all inspectable system, base-user, nested selectable-profile, and stored profile-file
+  `project_root_markers` declarations are absent or exactly `[".git"]`. Any non-default,
+  conflicting, malformed, or unreadable declaration fails the marker and project-floor checks.
+  CLI and managed-cloud marker overrides are explicitly outside static inspection. Under that
+  qualified topology, `doctor` audits every active `.codex` layer from the checkout root through
+  the requested directory and both declaration forms Codex loads: `hooks.json` and inline
+  `[hooks]` in `config.toml`. Across all active sources it requires exactly one candidate, one
+  conservatively recognized execution shape, and one current pin. The recognized current floor
+  must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
+  but no hooks are valid. Commented or output-only marker carriers are not valid adapters. This is
+  static topology validation: it does not execute the hook, prove OS-level integrity, or grant
+  Codex trust. Review the adapter in the exact CWD and activate it with `/hooks` in a new Codex
+  session, then run a live safe/deny canary.
 - In a linked Git worktree, Codex maps every active hook layer to the same relative `.codex`
   directory in the root checkout that owns Git's common directory. `doctor --repo` discovers that
   root from Git common-dir/worktree facts, reports every mapped source, and fails when a local
