@@ -37,7 +37,10 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
             ("merge", ["--abort"]),
             ("merge", ["--quit"]),
             ("rebase", ["--abort"]),
-            ("rebase", ["--ab"]),  # unambiguous git long-option abbreviation
+            # Prefix abbreviation: the helper treats any --ab… prefix of
+            # --abort as terminal (fail-safe — git itself errors on an
+            # ambiguous abbreviation, so no editor launches either way).
+            ("rebase", ["--ab"]),
             ("cherry-pick", ["--abort"]),
             ("cherry-pick", ["--quit"]),
             ("revert", ["--abort"]),
@@ -58,6 +61,10 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
             ("rebase", ["main"]),
             ("commit", []),
             ("cherry-pick", ["HEAD~1"]),
+            # After a bare -- everything is positional: an --abort-shaped
+            # positional must NOT count as terminal (git errors on the
+            # dash-leading refname; staying reachable keeps the deny).
+            ("merge", ["--", "--abort"]),
         ]
         for subcommand, args in cases:
             with self.subTest(subcommand=subcommand, args=args):
@@ -77,12 +84,17 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
 
     def test_check_allows_recovery_with_inherited_git_editor(self) -> None:
         tier = {"tier": 4, "flags": {"sensitive_data": True}}
-        saved = {
-            name: os.environ.get(name) for name in ("GIT_EDITOR", "EDITOR", "VISUAL")
+        # check() scans live os.environ for the WHOLE process-launch set
+        # (e.g. GIT_EXEC_PATH is reachable for any subcommand), so sanitize
+        # every name in it — not just the editor trio — or a host/CI
+        # exporting one of them turns these allow assertions falsely red.
+        sanitized = set(self.dispatch._GIT_PROCESS_COMMAND_ENVIRONMENT) | {
+            "GIT_SEQUENCE_EDITOR"
         }
+        saved = {name: os.environ.get(name) for name in sanitized}
+        for name in sanitized:
+            os.environ.pop(name, None)
         os.environ["GIT_EDITOR"] = "true"
-        os.environ.pop("EDITOR", None)
-        os.environ.pop("VISUAL", None)
         try:
             with tempfile.TemporaryDirectory() as project:
                 for command in (

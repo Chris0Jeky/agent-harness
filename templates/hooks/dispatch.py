@@ -3667,8 +3667,16 @@ def git_sequencer_flow_is_terminal(args: list[str]) -> bool:
     consult an editor; Git rejects them combined with message/edit options
     rather than launching one. --continue and --skip stay editor-reachable
     (both can open the message editor for the commit being finalized).
+    Tokens after a bare ``--`` are positionals and never options, so the
+    scan stops there. Residual (fail-safe today): a value-consuming option's
+    VALUE that merely spells --abort/--quit still counts as terminal — every
+    such command either errors in Git or launches no editor, because Git
+    forbids dash-leading refnames and rejects --abort combined with a new
+    operation.
     """
     for token in args:
+        if token == "--":
+            return False
         name = token.lower().split("=", 1)[0]
         if name.startswith("--") and (
             git_option_abbreviates(name, "--abort")
