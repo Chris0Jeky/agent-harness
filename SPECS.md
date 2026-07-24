@@ -164,6 +164,13 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   marker carriers are not valid adapters. This is static topology validation: it does not execute
   the hook, prove OS-level integrity, or grant Codex trust. Review the adapter and activate it with
   `/hooks` in a new Codex session, then run a live safe/deny canary.
+- In a linked Git worktree, Codex loads the adapter from the root checkout that owns Git's common
+  directory. `doctor --repo` resolves the requested checkout root (including from a subdirectory),
+  discovers that root checkout from Git common-dir/worktree facts, and audits only its
+  `.codex/hooks.json`. It reports the active root source and fails when a worktree-only copy would
+  false-green or when an ignored worktree copy differs. An identical tracked copy is permitted but
+  is inactive. Configure, review, and trust the root-checkout source with `/hooks`; never alter a
+  trust hash manually or use a bypass flag.
 - Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively
   translates `ask` to `deny`. The historical Claude global adapter still omits `--runtime` and
   therefore selects the Claude default, retaining interactive `ask` behavior; it still passes

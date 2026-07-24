@@ -42,6 +42,13 @@ match a conservative direct/wrapper execution shape and bind the current normali
 hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
 review and live safe/deny canary remain mandatory.
 
+For a linked Git worktree, Codex reads the project adapter from the root checkout that owns the
+Git common directory, not the linked worktree's `.codex/hooks.json`. `doctor --repo` resolves that
+active source even when given a subdirectory, reports it explicitly, and rejects a worktree-only or
+different local copy. An identical tracked worktree copy is allowed but remains inactive. Configure,
+review, and trust the root-checkout adapter through `/hooks`; do not edit trust hashes manually or
+use a bypass flag.
+
 Status (2026-07-24): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
 PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
