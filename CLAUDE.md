@@ -51,11 +51,12 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
 - `seed` — writes a write-once `.agent-harness/tier.json`; refuses to overwrite
 - `sync-global` — diffs (default) or installs (`--apply`) shared global guidance, managed
   skills, and the dispatcher bytes into `~/.claude/hooks`, backing up anything it replaces
-- `doctor` — checks live global floor topology; `--repo` statically verifies one repo-local
-  Codex floor: it parses `.codex/hooks.json` and requires a handler whose POSIX and Windows
-  commands match a conservative direct/wrapper execution shape and bind the pinned dispatcher
-  hash to a named variable. It never executes the hook — a new-session `/hooks` review and a
-  live safe/deny canary remain mandatory after any change.
+- `doctor` — checks inspectable global hook sources; `--repo` conditionally walks every active
+  project `.codex` layer, including JSON and inline TOML hooks and linked-worktree root mappings.
+  It requires the canonical root adapter's POSIX and Windows commands to match a conservative
+  direct/wrapper execution shape and bind the pinned dispatcher hash. Non-default persisted
+  project-root markers fail closed. It never proves runtime/cloud overrides or executes the hook —
+  a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is
