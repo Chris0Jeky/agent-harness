@@ -60,8 +60,10 @@ execution shape, and one current normalized dispatcher pin. That floor must be t
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
 requirements, persisted canonical/legacy hook feature disables, and a disabled canonical handler
-state. CLI, session, and managed-cloud activation can still override that static result, so a
-CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
+state, plus the unsupported stored legacy `profile` selector. Valid feature values inside the
+inactive legacy profile map do not affect activation; malformed hook feature values still fail the
+typed-load boundary. CLI, session, and managed-cloud activation can override the static result, so
+a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
 
 For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
 in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped

@@ -392,14 +392,20 @@ def codex_profile_config_paths(codex_home: Path) -> list[Path]:
     return sorted(paths)
 
 
-def hook_feature_declarations(config_path: Path) -> list[tuple[str, bool]]:
-    """Return inspectable canonical and active-legacy hook feature toggles."""
+def hook_feature_declarations(
+    config_path: Path, *, reject_legacy_profile: bool = False
+) -> list[tuple[str, bool]]:
+    """Return inspectable canonical and legacy-named hook feature toggles."""
     config = toml_config(config_path)
     if config is None:
         return []
+    if reject_legacy_profile and "profile" in config:
+        raise HarnessError(
+            f"legacy profile selection in {config_path} is unsupported by Codex"
+        )
     declarations: list[tuple[str, bool]] = []
 
-    def inspect(container: dict[str, Any], location: str) -> None:
+    def inspect(container: dict[str, Any], location: str, *, active: bool) -> None:
         if "features" not in container:
             return
         features = container["features"]
@@ -413,15 +419,16 @@ def hook_feature_declarations(config_path: Path) -> list[tuple[str, bool]]:
                 raise HarnessError(
                     f"features.{key} in {config_path}:{location} must be a boolean"
                 )
-            declarations.append((f"{config_path}:{location}.features.{key}", value))
+            if active:
+                declarations.append((f"{config_path}:{location}.features.{key}", value))
 
-    inspect(config, "top-level")
-    selected_profile = config.get("profile")
-    profiles = config.get("profiles", {})
-    if isinstance(selected_profile, str) and isinstance(profiles, dict):
-        profile = profiles.get(selected_profile)
-        if isinstance(profile, dict):
-            inspect(profile, f"profiles.{selected_profile}")
+    inspect(config, "top-level", active=True)
+    if reject_legacy_profile:
+        profiles = config.get("profiles")
+        if isinstance(profiles, dict):
+            for name, profile in profiles.items():
+                if isinstance(profile, dict):
+                    inspect(profile, f"profiles.{name}", active=False)
     return declarations
 
 
@@ -472,14 +479,21 @@ def codex_project_hook_activation_status(
         if managed_only:
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
 
-    feature_paths = [
+    stored_feature_paths = [
         system_config,
         codex_home / "config.toml",
         *profile_paths,
         codex_managed_config_path(codex_home),
-        *project_config_paths,
     ]
-    for config_path in dict.fromkeys(feature_paths):
+    for config_path in dict.fromkeys(stored_feature_paths):
+        blockers.extend(
+            location
+            for location, enabled in hook_feature_declarations(
+                config_path, reject_legacy_profile=True
+            )
+            if not enabled
+        )
+    for config_path in dict.fromkeys(project_config_paths):
         blockers.extend(
             location
             for location, enabled in hook_feature_declarations(config_path)

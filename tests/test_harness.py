@@ -973,7 +973,41 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("[FAIL] project Codex floor", output)
 
-    def test_doctor_rejects_selected_legacy_profile_hook_feature_disable(self) -> None:
+    def test_doctor_rejects_legacy_profile_selection(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config='profile = "custom"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("legacy profile selection", output)
+
+    def test_doctor_ignores_project_legacy_profile_selection(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            (
+                'profile = "custom"\n\n'
+                '[profiles.custom.features]\nhooks = "project-denylisted"\n'
+            ),
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_rejects_malformed_inactive_legacy_profile_feature(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
             Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -982,14 +1016,13 @@ class HarnessTests(unittest.TestCase):
 
         result, output = self.run_doctor_with_fixture_globals(
             repo,
-            user_config=(
-                'profile = "custom"\n\n[profiles.custom.features]\nhooks = false\n'
-            ),
+            user_config='[profiles.custom.features]\nhooks = "invalid"\n',
         )
 
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
-        self.assertIn("profiles.custom.features.hooks", output)
+        self.assertIn("profiles.custom", output)
+        self.assertIn("must be a boolean", output)
 
     def test_doctor_ignores_managed_only_key_outside_requirements(self) -> None:
         repo = self.make_repo()
@@ -2679,7 +2712,7 @@ class HarnessTests(unittest.TestCase):
             'hooks = "literal"\n'
             'project_root_markers = "literal"\n\n'
             "[profiles.custom.features]\n"
-            'hooks = "also literal"\n'
+            "hooks = false\n"
             'project_root_markers = "also literal"\n'
         )
 

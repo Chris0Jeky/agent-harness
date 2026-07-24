@@ -191,9 +191,12 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
   but no hooks are valid. The project floor also fails when inspectable system requirements allow
   only managed hooks, an active persisted canonical/legacy feature setting disables hooks, or the
-  exact canonical handler state is disabled. Commented or output-only marker carriers are not
-  valid adapters. This is static topology and activation validation: it does not execute the hook,
-  prove OS-level integrity, grant Codex trust, or inspect CLI/session/managed-cloud overrides.
+  exact canonical handler state is disabled. Stored legacy `profile` selectors are rejected;
+  feature values in their inactive legacy profile maps are schema-checked but never applied.
+  Project-local `profile` and `profiles` values are ignored with Codex's denylist. Commented or
+  output-only marker carriers are not valid adapters. This is static topology and activation
+  validation: it does not execute the hook, prove OS-level integrity, grant Codex trust, or inspect
+  CLI/session/managed-cloud overrides.
   Review the adapter in the exact CWD and activate it with `/hooks` in a new Codex session, then
   run a live safe/deny canary.
 - In a linked Git worktree, Codex maps every active hook layer to the same relative `.codex`

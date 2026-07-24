@@ -56,9 +56,10 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   It validates each complete hook subtree and the hook-specific metadata it interprets before
   requiring the canonical root adapter's POSIX and Windows commands to match a conservative
   direct/wrapper execution shape and bind the pinned dispatcher hash. Non-default persisted
-  project-root markers and inspectable activation blockers fail closed. It does not fully validate
-  unrelated config fields, prove runtime/cloud overrides, or execute the hook — a CWD-specific
-  new-session `/hooks` review and live safe/deny canary remain mandatory.
+  project-root markers, unsupported stored legacy profile selectors, and inspectable activation
+  blockers fail closed. It does not fully validate unrelated config fields, prove runtime/cloud
+  overrides, or execute the hook — a CWD-specific new-session `/hooks` review and live safe/deny
+  canary remain mandatory.
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is
