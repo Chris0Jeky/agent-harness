@@ -5418,21 +5418,28 @@ def push_remotes(
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def configured_push_may_force(
+def configured_bare_push_is_dangerous(
     project_dir: str,
     git_globals: list[str] | None = None,
     command_runner=command_output,
     deadline: float | None = None,
 ) -> bool:
-    """True when any configured remote push refspec forces (leading '+').
+    """True when a refspec-less `git push` would FORCE, DELETE, or MIRROR by config.
 
-    A bare `git push` (no command-line refspec) inherits `remote.<name>.push`, so a
-    configured `+src:dst` silently force-updates a shared branch — the charter
-    force-push case (BLUEPRINT §2) that command-line `+`/`--force`/lease checks miss
-    because no refspec appears in argv. Over-approximates across all remotes (a '+'
-    push refspec anywhere -> refuse the bare push); explicit refspecs never reach
-    here. Resolution failure/absence -> "" -> not forced, matching git's own
-    non-fast-forward-rejecting default for an unconfigured bare push."""
+    A bare push (no command-line refspec) inherits `remote.<name>.push` AND
+    `remote.<name>.mirror`, so it can silently perform charter-blocked updates
+    (BLUEPRINT §2) that no argv token reveals:
+      - a push refspec with a leading '+' -> forced update,
+      - a push refspec with an empty source (':dst') -> remote ref deletion,
+      - `remote.<name>.mirror=true` -> --mirror (force + delete of removed refs).
+    Command-line force/lease/`:ref`/`--mirror` are handled elsewhere; only the
+    CONFIGURED forms reach here. Over-approximates across all remotes. Resolution
+    failure/absence -> "" -> not dangerous, matching git's own
+    non-fast-forward-rejecting default for an unconfigured bare push. This is a
+    deliberate fail-open direction: if the shared resolver deadline is already
+    exhausted the read returns "" and the bare push is graduated — acceptable
+    because the floor's own `git config` reads are local and fast, so a forcing
+    config in practice resolves within budget."""
     output = command_output_before_deadline(
         command_runner,
         [
@@ -5440,7 +5447,7 @@ def configured_push_may_force(
             *(git_globals or []),
             "config",
             "--get-regexp",
-            r"^remote\..*\.push$",
+            r"^remote\..*\.(push|mirror)$",
         ],
         project_dir,
         deadline,
@@ -5449,8 +5456,15 @@ def configured_push_may_force(
         parts = line.split(None, 1)
         if len(parts) != 2:
             continue
-        for refspec in parts[1].split():
-            if refspec.startswith("+") or refspec.startswith("--force"):
+        key, value = parts[0].lower(), parts[1].strip()
+        if key.endswith(".mirror"):
+            if value.lower() in {"true", "yes", "on", "1"}:
+                return True
+            continue
+        for refspec in value.split():
+            # A configured push value is a refspec, never a CLI option: a leading
+            # '+' forces and an empty source (':dst') deletes the destination ref.
+            if refspec.startswith("+") or refspec.startswith(":"):
                 return True
     return False
 
@@ -7400,23 +7414,48 @@ def check(
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
                 if len(positionals) < 2 and not explicit_selector:
                     # Plain `git push` to a configured upstream is the closing move
-                    # of nearly every agent loop. Command-line force spellings
-                    # (-f/--force/+refspec) and force-with-lease are rejected ABOVE
-                    # this point. The remaining charter risk is a CONFIGURED force:
-                    # a bare push inherits `remote.<name>.push`, which can carry a
-                    # leading '+' and force a shared branch (adversarial review of
-                    # PR #23). Resolve that config and deny if it forces; only the
-                    # provably non-force bare push is graduated by blast radius.
+                    # of nearly every agent loop. Command-line force/lease/`:ref`/
+                    # `--mirror` spellings are rejected ABOVE this point. The residual
+                    # charter risk is a CONFIGURED force/delete/mirror: a refspec-less
+                    # push inherits `remote.<name>.push` / `.mirror` (PR #23 reviews).
+                    # Resolve that config and deny the dangerous shapes at every tier;
+                    # only a provably-plain bare push is graduated by blast radius.
+                    # If a repository-environment override or an uncertain cwd makes
+                    # the resolver look at the wrong repo, we cannot prove safety ->
+                    # deny (fail closed, mirroring the sensitive_data push handling).
                     # sensitive_data push-privacy resolution still runs below.
-                    if configured_push_may_force(
+                    # Only a KNOWN git repository env var (GIT_DIR / GIT_WORK_TREE /
+                    # GIT_COMMON_DIR) actually redirects git to a different repo than
+                    # the resolver's cwd, making the inherited config unverifiable. A
+                    # generic PowerShell `$env:VAR=` assignment is marked with the
+                    # <UNKNOWN> sentinel by the mutation scanner; excluding it keeps
+                    # the common `$env:WT_PROJECT_DIR='...'; git push` wave pattern
+                    # allowed (issue #21 corpus) while still denying the GIT_DIR case.
+                    bare_push_repository_environment = (
+                        effective_git_repository_environment
+                        & _GIT_REPOSITORY_ENVIRONMENT
+                    ) | {
+                        name.upper()
+                        for name in os.environ
+                        if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
+                    }
+                    if bare_push_repository_environment or cwd_uncertain:
+                        return (
+                            "deny",
+                            "[push-config-unverifiable] A refspec-less git push inherits remote "
+                            "config, but a repository-environment override or uncertain cwd "
+                            "prevents verifying it; push an explicit refspec instead.",
+                        )
+                    if configured_bare_push_is_dangerous(
                         current_cwd,
                         git_toks[1:subcommand_index] if subcommand_index else None,
                         deadline=_remote_deadline,
                     ):
                         return (
                             "deny",
-                            "[push-config-force] A bare git push can inherit a force ('+') refspec "
-                            "from remote config; push an explicit non-force refspec instead.",
+                            "[push-config-force] A refspec-less git push inherits a configured "
+                            "force ('+'), delete (':ref'), or mirror update from remote config; "
+                            "push an explicit non-forcing refspec instead.",
                         )
                     opaque = graduated_opacity(
                         "push-opaque-refspec",
