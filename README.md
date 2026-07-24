@@ -38,9 +38,10 @@ replacing them. It also prunes the obsolete managed global Codex floor while pre
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
 `doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
-system `hooks.json`, inline system/base/stored-profile hooks, and the legacy managed config file.
-It scans inactive stored profiles conservatively. Managed-cloud, MDM, per-invocation, and plugin
-hooks remain runtime-only evidence and must be reconciled in `/hooks`.
+system `hooks.json`, system `requirements.toml`, inline system/base/stored-profile hooks, and the
+legacy managed config file. It scans inactive stored profiles conservatively and treats unreadable
+sources as failures. Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only
+evidence and must be reconciled in `/hooks`.
 
 `doctor --repo` accepts the Git-root layer walk only when every inspectable system, base-user, and
 stored-profile `project_root_markers` declaration is absent or exactly `[".git"]`; any other,

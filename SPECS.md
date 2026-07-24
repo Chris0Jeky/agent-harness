@@ -157,11 +157,13 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   On Windows, ambiguous MSYS/WSL `/c/...` and `/mnt/c/...` spellings fail closed because the same
   text has different PowerShell filesystem semantics.
 - `doctor` requires zero deny-floor copies across all statically inspectable global hook sources:
-  user and system `hooks.json`, inline hooks in system/base-user/every stored profile config, and
-  the legacy managed config file. Inactive stored profiles are audited conservatively because the
-  invoking profile is not part of the Python process context. Managed-cloud, MDM, session-flag,
-  managed-requirements, and plugin hooks remain an explicit runtime boundary for exact-session
-  `/hooks`; the static check never represents those sources as inspected.
+  user and system `hooks.json`, managed hooks in system `requirements.toml`, inline hooks in
+  system/base-user/every stored profile config, and the legacy managed config file. Missing files
+  are absent; unreadable or malformed sources fail closed. Inactive stored profiles are audited
+  conservatively because the invoking profile is not part of the Python process context.
+  Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
+  runtime boundary for exact-session `/hooks`; the static check never represents those sources as
+  inspected.
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
   shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
