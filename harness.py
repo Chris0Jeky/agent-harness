@@ -2180,16 +2180,12 @@ def powershell_file_operand_is_wrapper(
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
         return False
-    option, separator, attached = tokens[1].lstrip("-/").lower().partition(":")
-    if not option or not "file".startswith(option):
+    option = tokens[1].lstrip("-/").lower()
+    if ":" in option or not option or not "file".startswith(option):
         return False
-    if separator:
-        file_value = attached
-    elif len(tokens) >= 3:
-        file_value = tokens[2]
-    else:
+    if len(tokens) < 3:
         return False
-    return token_is_wrapper(file_value, wrapper_variables)
+    return token_is_wrapper(tokens[2], wrapper_variables)
 
 
 def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:

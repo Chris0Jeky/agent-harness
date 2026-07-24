@@ -2368,6 +2368,12 @@ allow_local_binding = true
                 "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
                 "saps -File .codex/invoke_deny_floor.ps1",
             ),
+            (
+                good_posix,
+                f"$expected='{pin}'; "
+                "$d=$env:USERPROFILE+'/.claude/hooks/dispatch.py'; "
+                "powershell -File:.codex/invoke_deny_floor.ps1",
+            ),
         )
         for command, command_windows in invalid_pairs:
             with self.subTest(command=command, command_windows=command_windows):
@@ -2498,6 +2504,10 @@ allow_local_binding = true
             (
                 windows_prefix
                 + "powershell -Version -File .codex/invoke_deny_floor.ps1",
+                True,
+            ),
+            (
+                windows_prefix + "powershell -File:.codex/invoke_deny_floor.ps1",
                 True,
             ),
         )
