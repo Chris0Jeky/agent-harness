@@ -74,8 +74,15 @@ RUNTIMES = ("codex", "claude")
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
-EMBEDDED_CALL_RE = re.compile(r"tools\s*\.\s*shell_command\s*\(\s*\{")
+# The argument brace is matched separately from the call so that a non-object
+# argument (`tools.shell_command(opts)`) is *counted* rather than ignored.
+EMBEDDED_CALL_RE = re.compile(r"tools\s*\.\s*shell_command\s*\(")
+EMBEDDED_OPEN_BRACE_RE = re.compile(r"\s*\{")
 EMBEDDED_KEY_RE = re.compile(r"""\s*(?:"command"|'command'|command)\s*:\s*""")
+# What may legally follow a complete `command:` literal inside the object.
+# Anything else (`+`, a template tag, a method call) means the literal was only
+# one fragment of a larger expression.
+EMBEDDED_TAIL_RE = re.compile(r"\s*[,}]")
 JS_SIMPLE_ESCAPES = {
     "b": "\b",
     "f": "\f",
@@ -83,8 +90,9 @@ JS_SIMPLE_ESCAPES = {
     "r": "\r",
     "t": "\t",
     "v": "\v",
-    "0": "\0",
 }
+JS_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
+JS_LINE_TERMINATORS = "\n\r\u2028\u2029"
 
 
 # --------------------------------------------------------------------------- #
@@ -92,13 +100,32 @@ JS_SIMPLE_ESCAPES = {
 # --------------------------------------------------------------------------- #
 
 
+def js_code_point(digits: str, width: int | None = None) -> str | None:
+    """Decode one hex escape payload, or None when it is not representable.
+
+    `int(..., 16)` accepts surrounding whitespace and a leading sign, so the
+    digits are validated explicitly. Lone surrogates are refused rather than
+    materialised: `chr(0xD83D)` is a str no encoder will accept, so it would
+    raise `UnicodeEncodeError` on the first write hours into a run.
+    """
+    if width is not None and len(digits) != width:
+        return None
+    if not JS_HEX_RE.fullmatch(digits):
+        return None
+    value = int(digits, 16)
+    if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+        return None
+    return chr(value)
+
+
 def decode_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
     """Decode the JS string literal at `text[start]`; return (value, end index).
 
     Returns None when the literal is not decodable as a constant: an
-    interpolated template literal, or an unterminated literal. Codex writes the
-    embedded command as a plain double-quoted literal in ~93% of calls; the rest
-    are variables or interpolations and are counted, not guessed at.
+    interpolated template literal, an unterminated literal, or an escape whose
+    value cannot be recovered unambiguously. Codex writes the embedded command
+    as a plain double-quoted literal in ~93% of calls; the rest are variables or
+    interpolations and are counted, not guessed at.
     """
     if start >= len(text):
         return None
@@ -115,29 +142,62 @@ def decode_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
                 return None
             escape = text[index]
             if escape == "u":
-                if index + 1 < len(text) and text[index + 1] == "{":
+                if text[index + 1 : index + 2] == "{":
                     close = text.find("}", index + 2)
                     if close == -1:
                         return None
-                    try:
-                        out.append(chr(int(text[index + 2 : close], 16)))
-                    except ValueError:
+                    decoded = js_code_point(text[index + 2 : close])
+                    if decoded is None:
                         return None
+                    out.append(decoded)
                     index = close + 1
                     continue
-                try:
-                    out.append(chr(int(text[index + 1 : index + 5], 16)))
-                except ValueError:
+                digits = text[index + 1 : index + 5]
+                if len(digits) != 4 or not JS_HEX_RE.fullmatch(digits):
                     return None
+                value = int(digits, 16)
                 index += 5
+                if 0xD800 <= value <= 0xDBFF:
+                    # A supplementary character is written as a surrogate pair;
+                    # combine it. A high surrogate with no low surrogate after
+                    # it is not a character at all -> refuse the literal.
+                    tail = text[index : index + 6]
+                    if not tail.startswith("\\u") or not JS_HEX_RE.fullmatch(tail[2:]):
+                        return None
+                    low = int(tail[2:], 16)
+                    if not 0xDC00 <= low <= 0xDFFF:
+                        return None
+                    out.append(chr(0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00)))
+                    index += 6
+                    continue
+                if 0xDC00 <= value <= 0xDFFF:
+                    return None
+                out.append(chr(value))
                 continue
             if escape == "x":
-                try:
-                    out.append(chr(int(text[index + 1 : index + 3], 16)))
-                except ValueError:
+                decoded = js_code_point(text[index + 1 : index + 3], width=2)
+                if decoded is None:
                     return None
+                out.append(decoded)
                 index += 3
                 continue
+            if escape in JS_LINE_TERMINATORS:
+                # LineContinuation: the terminator is elided, not emitted.
+                # Emitting a newline here would manufacture a shell statement
+                # separator that the agent never wrote -- exactly the class of
+                # thing this corpus is used to measure.
+                index += (
+                    2 if escape == "\r" and text[index + 1 : index + 2] == "\n" else 1
+                )
+                continue
+            if escape in "01234567":
+                if escape == "0" and not text[index + 1 : index + 2].isdigit():
+                    out.append("\0")
+                    index += 1
+                    continue
+                # Legacy octal (`\012`): decoding it here would disagree with
+                # a strict-mode runtime that rejects the literal outright.
+                return None
             out.append(JS_SIMPLE_ESCAPES.get(escape, escape))
             index += 1
             continue
@@ -153,10 +213,21 @@ def decode_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
 
 
 def extract_embedded_commands(source: str, stats: Counter[str]) -> list[str]:
-    """Pull literal `tools.shell_command({command: "..."})` bodies out of JS."""
+    """Pull literal `tools.shell_command({command: "..."})` bodies out of JS.
+
+    Every call site that cannot be reduced to a single constant string is
+    counted in the unparsed ledger and dropped. Fabricating a command is far
+    worse than failing to extract one: a counted failure is honest, whereas a
+    plausible-but-wrong command enters the corpus as a *success* and its verdict
+    is then quoted as evidence about a command no agent ever ran.
+    """
     found: list[str] = []
     for match in EMBEDDED_CALL_RE.finditer(source):
-        key = EMBEDDED_KEY_RE.match(source, match.end())
+        brace = EMBEDDED_OPEN_BRACE_RE.match(source, match.end())
+        if brace is None:
+            stats["unparsed-codex-embedded-non-object-argument"] += 1
+            continue
+        key = EMBEDDED_KEY_RE.match(source, brace.end())
         if key is None:
             stats["unparsed-codex-embedded-shorthand-or-reordered"] += 1
             continue
@@ -164,7 +235,15 @@ def extract_embedded_commands(source: str, stats: Counter[str]) -> list[str]:
         if decoded is None:
             stats["unparsed-codex-embedded-non-literal-command"] += 1
             continue
-        found.append(decoded[0])
+        value, end = decoded
+        if EMBEDDED_TAIL_RE.match(source, end) is None:
+            # `{command: "@'\n" + script + "\n'@ | python -"}`: the literal is
+            # one fragment of a concatenation, so the decoded text is not the
+            # command. Without this check the corpus gains `@'\n` as a
+            # three-character "success".
+            stats["unparsed-codex-embedded-concatenated"] += 1
+            continue
+        found.append(value)
     return found
 
 
@@ -640,8 +719,18 @@ def compare_tier(
 
 
 def clip(text: str, width: int) -> str:
-    """One-line, width-bounded rendering: stdout never carries a whole command."""
+    """One-line, width-bounded rendering: stdout never carries a whole command.
+
+    Commands really do contain emoji, and a Windows console is cp1252, so the
+    text is forced through the stream's own encoding first: a report that dies
+    with `UnicodeEncodeError` after an hour of replay loses the whole run.
+    """
     flat = " ".join(text.split())
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        flat = flat.encode(encoding, "replace").decode(encoding, "replace")
+    except (LookupError, UnicodeError):  # pragma: no cover - exotic stream
+        flat = flat.encode("ascii", "replace").decode("ascii")
     if len(flat) <= width:
         return flat
     return flat[: width - 3] + "..."
