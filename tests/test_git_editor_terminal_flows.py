@@ -303,6 +303,14 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         if self.dispatch.declared_project_dirs(os.path.expanduser("~")):
             self.skipTest("user home inherits a tier declaration")
 
+    def test_temp_backed_home_skips_neutral_home_cases(self) -> None:
+        with (
+            mock.patch.object(self.dispatch, "declared_project_dirs", return_value=[]),
+            mock.patch.object(self.dispatch, "is_within_temp", return_value=True),
+            self.assertRaises(unittest.SkipTest),
+        ):
+            self._require_neutral_home()
+
     def test_candidate_under_declared_authority_is_rejected(self) -> None:
         self._require_neutral_home()
         # Home-anchored (non-temp) so the authority walk, not the temp
