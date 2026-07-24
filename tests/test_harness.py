@@ -77,10 +77,10 @@ class HarnessTests(unittest.TestCase):
             'matcher = "^Bash$"\n\n'
             "[[hooks.PreToolUse.hooks]]\n"
             'type = "command"\n'
-            f"command = 'expected={pin}; python3 \"$HOME/.claude/hooks/dispatch.py\" "
+            f'command = \'expected={pin}; python3 "$HOME/.claude/hooks/dispatch.py" '
             "--event pre --runtime codex'\n"
             f"commandWindows = \"$expected='{pin}'; py -3 "
-            "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex\"\n"
+            '$env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex"\n'
             "timeout = 5\n",
             encoding="utf-8",
         )
@@ -1798,6 +1798,31 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+
+    def test_doctor_requires_canonical_root_hooks_json_adapter(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        nested = repo / "nested"
+        nested.mkdir()
+        self.write_hooks(nested, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 1)
+        self.assertIn("1 project floor handler(s)", output)
+        self.assertIn("0 canonical root hooks.json handler(s)", output)
+
+    def test_doctor_rejects_inline_only_root_floor(self) -> None:
+        repo = self.make_repo()
+        self.write_inline_floor(repo)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("1 project floor handler(s)", output)
+        self.assertIn("0 canonical root hooks.json handler(s)", output)
 
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
