@@ -164,9 +164,7 @@ class LiteralScriptblockBodyTests(unittest.TestCase):
         ]
         body, body_tokens = dispatch.powershell_literal_scriptblock_bodies(toks)[0]
         self.assertEqual(body, "bash -c 'rm -rf /critical/outside' 1")
-        self.assertEqual(
-            body_tokens, ["bash", "-c", "rm -rf /critical/outside", "1"]
-        )
+        self.assertEqual(body_tokens, ["bash", "-c", "rm -rf /critical/outside", "1"])
 
 
 class RequoteArgvTokenTests(unittest.TestCase):
@@ -195,9 +193,7 @@ class RequoteArgvTokenTests(unittest.TestCase):
         for argv in self.ROUND_TRIPS:
             text = dispatch.rejoin_argv_as_command(argv)
             recovered: list[str] = []
-            for segment, operator in dispatch.quote_aware_segments_with_operators(
-                text
-            ):
+            for segment, operator in dispatch.quote_aware_segments_with_operators(text):
                 recovered.extend(
                     dispatch.restore_quoted_literal_markers(token).replace(
                         dispatch._QUOTED_GROUP_LITERAL_PREFIX, ""
@@ -381,6 +377,74 @@ class SegmentSeparatorTokenTests(unittest.TestCase):
         self.assertEqual(
             dispatch.requote_argv_token(dispatch.segment_separator_token("|")), "|"
         )
+
+
+class BodyStatementSplitTests(unittest.TestCase):
+    """A body is a statement list, not one command."""
+
+    def test_splits_on_a_synthesized_separator_only(self):
+        semi = dispatch.segment_separator_token(";")
+        self.assertEqual(
+            dispatch.powershell_body_statements(
+                ["Write-Host", "a", semi, "$null", "=", "iex", "payload"]
+            ),
+            ([(["Write-Host", "a"], ";"), (["$null", "=", "iex", "payload"], "")]),
+        )
+
+    def test_a_quoted_separator_cannot_start_a_statement(self):
+        # `git commit -m 'a; b'` restores to ONE token holding a `;`. Splitting
+        # on token text there would let quoted prose trip a rule.
+        self.assertEqual(
+            dispatch.powershell_body_statements(["git", "commit", "-m", "a; b"]),
+            [(["git", "commit", "-m", "a; b"], "")],
+        )
+
+    def test_a_pipeline_stays_one_statement(self):
+        pipe = dispatch.segment_separator_token("|")
+        self.assertEqual(
+            dispatch.powershell_body_statements(
+                ["curl", "-q", "https://x", pipe, "sh"]
+            ),
+            [(["curl", "-q", "https://x", pipe, "sh"], "")],
+        )
+
+    def test_the_operator_that_joined_them_is_reported(self):
+        # `&&` and `;` differ to the cwd tracking, so the caller must be able to
+        # rebuild the program with the operator that was actually written.
+        andand = dispatch.segment_separator_token("&&")
+        self.assertEqual(
+            dispatch.powershell_body_statements(["cd", "/x", andand, "rm", "-rf", "y"]),
+            [(["cd", "/x"], "&&"), (["rm", "-rf", "y"], "")],
+        )
+
+
+class MaskedPayloadInBodyTests(unittest.TestCase):
+    """`strip_quotes` hides `iex '<payload>'` from the sanitized pass, so the
+    scriptblock body is the ONLY place the floor can still see it."""
+
+    DENIED = (
+        "1 | ForEach-Object { Write-Host a; iex 'git push --force origin main' }",
+        "1 | ForEach-Object { Write-Host a; $null = iex 'rm -rf /critical/outside' }",
+        "1 | ForEach-Object { $x=1; iex 'rm -rf /critical/outside' }",
+        "Invoke-Command -ScriptBlock { Write-Host a; iex 'git push --force origin main' }",
+        "1 | ForEach-Object { $env:GIT_TRACE_REDACT='false'; git fetch }",
+    )
+    ALLOWED = (
+        "1 | ForEach-Object { $i++; Write-Output $i }",
+        "Invoke-Command -ScriptBlock { $i++; git status }",
+        "1 | % { $i++; git commit -m 'a; rm -rf /critical/outside' }",
+        "1 | ForEach-Object { 'cd /tmp/bad'; 'noop' }",
+    )
+
+    def test_a_later_statement_is_reachable(self):
+        for command in self.DENIED:
+            with self.subTest(command=command):
+                self.assertEqual(check(command)[0], "deny")
+
+    def test_inert_statements_do_not_become_false_positives(self):
+        for command in self.ALLOWED:
+            with self.subTest(command=command):
+                self.assertEqual(check(command)[0], "allow")
 
 
 class PowershellExpressionOperatorTests(unittest.TestCase):

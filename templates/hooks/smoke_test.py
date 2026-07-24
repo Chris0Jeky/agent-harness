@@ -1179,6 +1179,47 @@ CASES = [
     # subexpression can still execute.
     ("1 | % { $_ } -Frobnicate x", 1, {}, "deny"),
     ("1 | % { $_ } -join (iex 'rm -rf /critical/outside')", 1, {}, "deny"),
+    # A body is a STATEMENT LIST. Classifying it by one command_head made every
+    # statement after the first unreachable, and a quoted evaluator payload is
+    # invisible to the sanitized pass, so the body is the only place it shows.
+    (
+        "1 | ForEach-Object { Write-Host a; iex 'git push --force origin main' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object { Write-Host a; $null = iex 'rm -rf /critical/outside' }",
+        1,
+        {},
+        "deny",
+    ),
+    ("1 | ForEach-Object { $x=1; iex 'rm -rf /critical/outside' }", 1, {}, "deny"),
+    (
+        "Invoke-Command -ScriptBlock { Write-Host a; iex 'git push --force origin main' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "Get-Process | Where-Object { $_ ; iex 'rm -rf /critical/outside' }",
+        1,
+        {},
+        "deny",
+    ),
+    # An assignment stays in the reconstructed program because it can set the
+    # environment a LATER statement runs in.
+    (
+        "1 | ForEach-Object { $env:GIT_TRACE_REDACT='false'; git fetch }",
+        1,
+        {},
+        "deny",
+    ),
+    # ...while a pure expression is dropped instead of handed to check(), which
+    # would read `$i++` as an uninspectable dynamic executable name.
+    ("1 | ForEach-Object { $i++; Write-Output $i }", 1, {}, "allow"),
+    ("Invoke-Command -ScriptBlock { $i++; git status }", 1, {}, "allow"),
+    ("1 | % { $_.Name; git status }", 1, {}, "allow"),
     # Truncation must not launder the dynamic-payload branches either.
     (
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",

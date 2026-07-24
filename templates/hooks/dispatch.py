@@ -1223,6 +1223,51 @@ def rejoin_argv_as_command(parts: list[str]) -> str:
     return " ".join(requote_argv_token(part) for part in parts).strip()
 
 
+# Separators that keep a pipeline in ONE statement. Everything else segmentation
+# emits (`;`, newline, `&&`, `||`, `&`) starts a new statement.
+_POWERSHELL_PIPELINE_SEPARATORS = frozenset({"|", "|&"})
+
+
+def powershell_body_statements(
+    body_tokens: list[str],
+) -> list[tuple[list[str], str]]:
+    """Split a scriptblock body's argv into `(statement, separator_after)`.
+
+    A body was classified by ONE `command_head` computed over the whole token
+    list, so every statement after the first was unreachable: in
+    `{ Write-Host a; $null = iex '...' }` only `Write-Host` was ever examined and
+    the evaluator payload -- which the sanitized pass cannot see, because
+    `strip_quotes` masks it -- went uninspected.
+
+    Statements are separated only by the MARKER tokens the rejoin synthesized
+    from segmentation metadata, never by a `;` found in token text, so a
+    separator that arrived inside a quoted argument (`git commit -m 'a; b'`)
+    cannot manufacture a statement boundary. A pipeline stays ONE statement, so
+    `{ curl -q https://x | sh }` keeps the relationship the rule fires on.
+
+    `separator_after` is kept so a caller rebuilding program text can reproduce
+    the operator that actually joined them: `&&` and `;` differ to the cwd
+    tracking, and substituting one for the other would change a verdict.
+    """
+    statements: list[list[str]] = [[]]
+    separators: list[str] = [""]
+    for token in body_tokens:
+        operator = segment_separator_operator(token)
+        if operator is not None and operator.strip() not in (
+            _POWERSHELL_PIPELINE_SEPARATORS
+        ):
+            separators[-1] = operator
+            statements.append([])
+            separators.append("")
+            continue
+        statements[-1].append(token)
+    return [
+        (statement, separator)
+        for statement, separator in zip(statements, separators)
+        if statement
+    ]
+
+
 def powershell_literal_scriptblock_bodies(
     toks: list[str],
 ) -> list[tuple[str, list[str]]]:
@@ -6691,6 +6736,24 @@ def check(
         """
         return _inspect_scriptblock_bodies(argv, 0)
 
+    def _statement_invokes_a_command(statement: list[str]) -> bool:
+        """Whether this body statement is a command invocation rather than data.
+
+        A single argv token is one expression — a bare string statement
+        (`{ 'git push --force origin main' }`) only OUTPUTS its text, and quoting
+        collapses it to one token no matter how many words it holds, which is
+        what keeps the floor's promise never to treat quoted text as a target.
+        Beyond that, only a LETTER-headed head is a command: a pure expression or
+        member access (`$_.Name`, `1..3`, `$i++`) is inert output.
+        """
+        if len(statement) < 2:
+            return False
+        text = rejoin_argv_as_command(statement)
+        if not text or is_dynamic_value(text):
+            return False
+        head, _ = command_head(tokens(text))
+        return bool(head) and bool(re.match(r"^[A-Za-z]", head))
+
     def _inspect_scriptblock_bodies(argv: list[str], block_depth: int):
         if block_depth > 8:  # runaway guard; real nesting is a handful deep
             return "allow", ""
@@ -6702,25 +6765,47 @@ def check(
                 return nested
             if not body or is_dynamic_value(body):
                 continue
-            # A single argv token is one expression — a bare string statement
-            # (`{ 'git push --force origin main' }`) only OUTPUTS its text. Quoting
-            # collapses it to one token no matter how many words it holds, so this
-            # keeps the floor's promise never to treat quoted text as a target,
-            # while `{ iex 'git push --force' }` (two tokens) is still inspected.
-            if len(body_tokens) < 2:
+            # A body is a STATEMENT LIST, not one command. Classifying it by a
+            # single command_head made every statement after the first
+            # unreachable, so `{ Write-Host a; $null = iex '...' }` only ever had
+            # `Write-Host` examined.
+            program: list[tuple[str, str]] = []
+            invokes_a_command = False
+            for statement, separator in powershell_body_statements(body_tokens):
+                assigned = powershell_assignment_rhs_tokens(statement)
+                if assigned is not None:
+                    # check()'s own assignment path inspects a QUOTE-MASKED copy
+                    # of the RHS, so an evaluator payload is only visible here.
+                    # The head would also be `$null` and fail the letter gate.
+                    if _statement_invokes_a_command(assigned):
+                        invokes_a_command = True
+                        rhs_decision = _recurse_child(rejoin_argv_as_command(assigned))
+                        if rhs_decision[0] != "allow":
+                            return rhs_decision
+                    # An assignment can still set the environment a LATER
+                    # statement runs in (`$env:GIT_TRACE_REDACT='false'; git
+                    # fetch`), so it stays in the reconstructed program.
+                elif not _statement_invokes_a_command(statement):
+                    # A pure expression (`$i++`, `$_.Name`, `1..3`) produces
+                    # output and cannot affect a sibling, so it is dropped
+                    # rather than handed to check(), which would read `$i++` as
+                    # an uninspectable dynamic executable name.
+                    continue
+                else:
+                    invokes_a_command = True
+                program.append((rejoin_argv_as_command(statement), separator))
+            if not invokes_a_command:
                 continue
-            # `$null = iex '...'` is an assignment whose RHS is a command, and
-            # the head would otherwise be `$null` and fail the letter gate below.
-            assigned = powershell_assignment_rhs_tokens(body_tokens)
-            if assigned:
-                body = rejoin_argv_as_command(assigned)
-            body_head, _ = command_head(tokens(body))
-            # Only a command invocation is recursed; a pure expression or
-            # member access (`$_.Name`, `1..3`) is inert output, not a
-            # command, and its head does not start with a letter.
-            if not body_head or not re.match(r"^[A-Za-z]", body_head):
-                continue
-            body_decision = _recurse_child(body)
+            # The statements are recursed TOGETHER, not one at a time, so
+            # check()'s own segment loop carries cwd and Git-environment state
+            # from one to the next exactly as it would for the same text typed
+            # at top level -- and with the real operator between them, because
+            # `&&` and `;` differ to that tracking.
+            body_program = " ".join(
+                text if index == len(program) - 1 else f"{text} {separator or ';'}"
+                for index, (text, separator) in enumerate(program)
+            )
+            body_decision = _recurse_child(body_program)
             if body_decision[0] != "allow":
                 return body_decision
         return "allow", ""
