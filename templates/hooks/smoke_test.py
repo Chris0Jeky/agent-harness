@@ -69,9 +69,7 @@ def neutral_fixture_root(candidates: list[str] | None = None) -> str:
     if candidates is None:
         candidates = [
             HERE,
-            os.path.join(
-                os.path.expanduser("~"), ".agent-harness-smoke-fixtures"
-            ),
+            os.path.join(os.path.expanduser("~"), ".agent-harness-smoke-fixtures"),
         ]
     for candidate in candidates:
         created = False
@@ -81,9 +79,7 @@ def neutral_fixture_root(candidates: list[str] | None = None) -> str:
                 created = True
             except OSError:
                 continue
-        if module.declared_project_dirs(candidate) or module.is_within_temp(
-            candidate
-        ):
+        if module.declared_project_dirs(candidate) or module.is_within_temp(candidate):
             if created:
                 os.rmdir(candidate)
             continue
