@@ -55,6 +55,26 @@ class HarnessTests(unittest.TestCase):
         )
         return root
 
+    def make_directory_alias(self, target: Path, alias: Path):
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+            return alias.unlink
+        except OSError as exc:
+            if sys.platform != "win32":
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            junction = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if junction.returncode:
+                self.skipTest(
+                    "directory aliases unavailable: "
+                    f"{exc}; {junction.stderr or junction.stdout}"
+                )
+            return alias.rmdir
+
     @staticmethod
     def write_hooks(checkout: Path, text: str) -> Path:
         hooks = checkout / ".codex" / "hooks.json"
@@ -1341,24 +1361,7 @@ allow_local_binding = true
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         alias = Path(self.temp.name) / "repo-alias"
-        junction_created = False
-        try:
-            alias.symlink_to(repo, target_is_directory=True)
-        except OSError as exc:
-            if sys.platform != "win32":
-                self.skipTest(f"directory symlinks unavailable: {exc}")
-            junction = subprocess.run(
-                ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(repo)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if junction.returncode:
-                self.skipTest(
-                    "directory aliases unavailable: "
-                    f"{exc}; {junction.stderr or junction.stdout}"
-                )
-            junction_created = True
+        remove_alias = self.make_directory_alias(repo, alias)
         try:
             logical_hooks = alias / ".codex" / "hooks.json"
             self.assertNotEqual(logical_hooks, logical_hooks.resolve())
@@ -1375,8 +1378,33 @@ allow_local_binding = true
             self.assertIn("enabled=false", output)
             self.assertIn("[FAIL] project Codex floor", output)
         finally:
-            if junction_created:
-                alias.rmdir()
+            remove_alias()
+
+    def test_doctor_rejects_cross_repo_logical_alias_topology(self) -> None:
+        root = Path(self.temp.name)
+        repo_a = root / "repo-a"
+        repo_b = root / "repo-b"
+        for repo in (repo_a, repo_b):
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo_b, valid_adapter)
+        target = repo_b / "subdir"
+        target.mkdir()
+        alias = repo_a / "linked-into-b"
+        remove_alias = self.make_directory_alias(target, alias)
+        try:
+            result, output = self.run_doctor_with_fixture_globals(alias)
+
+            self.assertEqual(result, 1)
+            self.assertIn("[FAIL] Codex hook source", output)
+            self.assertIn("logical Codex project root disagrees", output)
+            self.assertIn(str(repo_a), output)
+            self.assertIn(str(repo_b), output)
+            self.assertIn("[FAIL] project Codex floor", output)
+        finally:
+            remove_alias()
 
     def test_doctor_ignores_unrelated_disabled_hook_state(self) -> None:
         repo = self.make_repo()

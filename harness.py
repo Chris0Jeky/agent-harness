@@ -2578,6 +2578,13 @@ def doctor(args: argparse.Namespace) -> int:
                     f"{requested_logical_path}"
                 )
             requested_checkout, authoritative_checkout = root_checkout(requested_path)
+            if requested_logical_checkout.resolve() != requested_checkout:
+                raise HarnessError(
+                    "logical Codex project root disagrees with resolved Git checkout: "
+                    f"{requested_logical_checkout} -> "
+                    f"{requested_logical_checkout.resolve()}; Git -> "
+                    f"{requested_checkout}"
+                )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
                 for layer in codex_project_layer_dirs(
