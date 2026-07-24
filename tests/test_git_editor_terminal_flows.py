@@ -1,4 +1,4 @@
-"""Floor v1.5.3 regressions for agent-harness#12 (F3 + F5).
+"""Floor v1.5.4 regressions for agent-harness#12 (F3 + F5).
 
 F3: --abort/--quit sequencer flows never consult an editor, so an inherited
 GIT_EDITOR must not deny the estate's always-safe recovery commands.
@@ -67,6 +67,9 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
             # positional must NOT count as terminal (git errors on the
             # dash-leading refname; staying reachable keeps the deny).
             ("merge", ["--", "--abort"]),
+            # Git's named end-of-options marker has the same effect.
+            ("merge", ["--end-of-options", "--abort"]),
+            ("merge", ["--end-of-options", "--quit"]),
         ]
         for subcommand, args in cases:
             with self.subTest(subcommand=subcommand, args=args):
@@ -267,6 +270,16 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
                 # still reaches the inherited editor, so the check must deny.
                 decision, _ = self.dispatch.check(
                     "git merge -m --abort --edit --no-ff side",
+                    tier,
+                    project,
+                    project,
+                )
+                self.assertEqual(decision, "deny")
+                # --abort is a ref operand after Git's named option
+                # terminator, so the preceding --edit still reaches the
+                # inherited editor and must remain denied.
+                decision, _ = self.dispatch.check(
+                    "git merge --edit --no-ff --end-of-options --abort",
                     tier,
                     project,
                     project,
