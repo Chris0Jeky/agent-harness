@@ -1764,6 +1764,24 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("authoritative root source is absent", output)
         self.assertIn("[FAIL] project Codex floor: 1 project floor handler(s)", output)
 
+    def test_doctor_audits_mapped_nested_root_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(root, valid_adapter)
+        self.write_hooks(linked, valid_adapter)
+        nested = linked / "nested"
+        (nested / ".codex").mkdir(parents=True)
+        authoritative_hooks = self.write_hooks(root / "nested", valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 1)
+        self.assertIn("2 active Codex hook layer(s)", output)
+        self.assertIn(str(authoritative_hooks.resolve()), output)
+        self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
     def test_doctor_floor_status_fails_with_divergent_worktree_copy(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
