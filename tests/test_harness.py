@@ -1334,6 +1334,50 @@ allow_local_binding = true
         self.assertIn("enabled=false", output)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_doctor_rejects_disabled_logical_alias_floor_state(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        alias = Path(self.temp.name) / "repo-alias"
+        junction_created = False
+        try:
+            alias.symlink_to(repo, target_is_directory=True)
+        except OSError as exc:
+            if sys.platform != "win32":
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            junction = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(repo)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if junction.returncode:
+                self.skipTest(
+                    "directory aliases unavailable: "
+                    f"{exc}; {junction.stderr or junction.stdout}"
+                )
+            junction_created = True
+        try:
+            logical_hooks = alias / ".codex" / "hooks.json"
+            self.assertNotEqual(logical_hooks, logical_hooks.resolve())
+            key = f"{logical_hooks}:pre_tool_use:0:0"
+            user_config = f"[hooks.state.{json.dumps(key)}]\nenabled = false\n"
+
+            result, output = self.run_doctor_with_fixture_globals(
+                alias, user_config=user_config
+            )
+
+            self.assertEqual(result, 1)
+            self.assertIn("[FAIL] Codex project hook activation", output)
+            self.assertIn(repr(key), output)
+            self.assertIn("enabled=false", output)
+            self.assertIn("[FAIL] project Codex floor", output)
+        finally:
+            if junction_created:
+                alias.rmdir()
+
     def test_doctor_ignores_unrelated_disabled_hook_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (

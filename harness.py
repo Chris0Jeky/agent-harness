@@ -87,6 +87,21 @@ def git_root(path: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
+def lexical_git_root(path: Path) -> Path | None:
+    """Find the default-marker root without resolving path aliases."""
+    current = Path(os.path.abspath(path))
+    for candidate in (current, *current.parents):
+        marker = candidate / ".git"
+        try:
+            if marker.exists():
+                return candidate
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect project root marker {marker}: {exc}"
+            ) from exc
+    return None
+
+
 def git_common_dir(path: Path) -> Path:
     """Return the shared Git directory for the checkout containing ``path``."""
     result = run(["git", "rev-parse", "--git-common-dir"], path)
@@ -2554,7 +2569,14 @@ def doctor(args: argparse.Namespace) -> int:
         activation_ok = False
         activation_detail = "project hook sources were not resolved"
         try:
+            requested_logical_path = Path(os.path.abspath(args.repo))
             requested_path = Path(args.repo).resolve()
+            requested_logical_checkout = lexical_git_root(requested_logical_path)
+            if requested_logical_checkout is None:
+                raise HarnessError(
+                    "requested logical path has no .git project-root marker: "
+                    f"{requested_logical_path}"
+                )
             requested_checkout, authoritative_checkout = root_checkout(requested_path)
             project_config_paths = [
                 layer / ".codex" / "config.toml"
@@ -2604,8 +2626,16 @@ def doctor(args: argparse.Namespace) -> int:
                 for entry in repo_codex_floor_entries(hooks_text, expected_pin)
             ]
             canonical_root_floor_count = len(canonical_root_floor_entries)
+            # Hook IDs use Codex's lexical source path. Preserve an explicit
+            # symlink/junction -C path for normal checkouts; linked worktrees
+            # source hooks from the authoritative root checkout instead.
+            canonical_state_hooks = (
+                requested_logical_checkout / ".codex" / "hooks.json"
+                if requested_checkout == authoritative_checkout
+                else canonical_hooks
+            )
             canonical_hook_keys = {
-                f"{canonical_hooks.resolve()}:pre_tool_use:{group_index}:{handler_index}"
+                f"{canonical_state_hooks}:pre_tool_use:{group_index}:{handler_index}"
                 for group_index, handler_index, _group in canonical_root_floor_entries
             }
             try:
