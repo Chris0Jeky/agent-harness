@@ -97,6 +97,7 @@ class HarnessTests(unittest.TestCase):
         profile_configs: dict[str, str] | None = None,
         system_config: str | None = None,
         system_hooks: str | None = None,
+        system_requirements: str | None = None,
         managed_config: str | None = None,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
@@ -113,6 +114,10 @@ class HarnessTests(unittest.TestCase):
             (root / "system-config.toml").write_text(system_config, encoding="utf-8")
         if system_hooks is not None:
             (root / "hooks.json").write_text(system_hooks, encoding="utf-8")
+        if system_requirements is not None:
+            (root / "requirements.toml").write_text(
+                system_requirements, encoding="utf-8"
+            )
         if managed_config is not None:
             (root / "managed-config.toml").write_text(managed_config, encoding="utf-8")
         harness_root = Path(harness.__file__).resolve().parent
@@ -2076,6 +2081,21 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("system-config.toml", output)
+
+    def test_doctor_rejects_system_requirements_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements=self.inline_floor_config_text()
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("requirements.toml", output)
 
     def test_doctor_rejects_managed_inline_global_floor(self) -> None:
         repo = self.make_repo()
