@@ -362,6 +362,19 @@ def inert_powershell_scriptblock(value: str) -> bool:
     return candidate.startswith("{") and candidate.endswith("}")
 
 
+def powershell_block_is_bound_value(previous: str) -> bool:
+    """Whether a literal `{` following this token is BOUND rather than invoked.
+
+    `$sb = { ... }` and `@{ key = { ... } }` construct a scriptblock OBJECT;
+    PowerShell does not run it at that point. Every route from a stored block
+    back to execution goes through a dynamic call operator (`& $sb`, `. $sb`,
+    `& @{x=...}.x`) or `$sb.Invoke()`, and check() hard-denies all of those, so
+    treating a bound block as data cannot open a path the floor does not still
+    cover.
+    """
+    return previous == "=" or previous.endswith("=")
+
+
 _POWERSHELL_SCRIPTBLOCK_ASSIGNMENT = re.compile(
     r"(?i)(?:\[[^\[\]\r\n]+\]\s*)*" r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*\s*=\s*\{"
 )
@@ -1230,6 +1243,14 @@ def requote_argv_token(token: str) -> str:
     """
     if not token:
         return "''"
+    if _ARGV_REDIRECTION_TOKEN.fullmatch(token):
+        # shlex splits `>`/`>>`/`2>&1` into their own punctuation token, and
+        # segmentation only ever CONSUMES a run made purely of `;&|` -- so a run
+        # that still holds a `<` or `>` reached the argv as real structure and
+        # must stay structure. A quoted `>` never looks like this: protect()
+        # rewrites it to a literal-redirect marker precisely so it cannot be
+        # read as one. Quoting it hid `echo secret > .env` inside a scriptblock.
+        return token
     separator = segment_separator_operator(token)
     if separator is not None:
         # Synthesized by the rejoin from segmentation metadata, so it really is
@@ -1245,6 +1266,9 @@ def requote_argv_token(token: str) -> str:
 # whitespace ends a token, the quote characters open a span, and shlex's
 # punctuation_chars end a segment.
 _ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
+# A punctuation run that still holds a redirection character. Segmentation only
+# consumes runs made purely of `;&|\n`, so anything matching this is structure.
+_ARGV_REDIRECTION_TOKEN = re.compile(r"[;&|<>]*[<>][;&|<>]*")
 
 
 def rejoin_argv_as_command(parts: list[str]) -> str:
@@ -1264,12 +1288,44 @@ def rejoin_argv_as_command(parts: list[str]) -> str:
     scriptblock, because `strip_quotes` masks quoted text from the sanitized
     pass and the rejoin then destroyed it in the quote-aware pass too.
     """
-    return " ".join(requote_argv_token(part) for part in parts).strip()
+    rendered: list[str] = []
+    for part in parts:
+        text = requote_argv_token(part)
+        if (
+            rendered
+            and text.startswith("(")
+            and _ARGV_REDIRECTION_TOKEN.fullmatch(rendered[-1])
+        ):
+            # shlex splits `<(wget ...)` into the punctuation run `<` and the
+            # token `(wget`. Re-inserting a space breaks the process
+            # substitution apart, and `. < (wget -qO- x)` is not the program
+            # that was written -- the download-into-shell rule then has nothing
+            # to fire on. A space there is not valid syntax anyway.
+            rendered[-1] += text
+            continue
+        rendered.append(text)
+    return " ".join(rendered).strip()
 
 
 # Separators that keep a pipeline in ONE statement. Everything else segmentation
 # emits (`;`, newline, `&&`, `||`, `&`) starts a new statement.
 _POWERSHELL_PIPELINE_SEPARATORS = frozenset({"|", "|&"})
+
+# Parameters that BIND a scriptblock as data instead of running it. Only the
+# exact names are listed: an abbreviated or unknown parameter stays inspected,
+# so this can only ever narrow a false positive, never open a blind spot.
+_POWERSHELL_DATA_BINDING_PARAMETERS = frozenset({"argumentlist", "inputobject"})
+
+# Expression spellings that EXECUTE despite having a non-letter command head:
+# `$(...)` and backtick command substitution, `<(...)`/`>(...)` process
+# substitution, and a .NET static method call. Member access (`$_.Name`) and
+# ranges (`1..3`) match none of them and stay inert.
+_POWERSHELL_EXECUTING_EXPRESSION = re.compile(r"\$\(|`[^`]+`|[<>]\(|::[A-Za-z_]")
+
+# Deepest literal `{ ... }` nesting the body inspector will walk. The repo's own
+# 1500-command smoke corpus tops out at 2, so this is a 4x margin; past it the
+# floor fails CLOSED rather than returning allow.
+_SCRIPTBLOCK_INSPECTION_DEPTH = 8
 
 
 def powershell_body_statements(
@@ -1292,18 +1348,35 @@ def powershell_body_statements(
     `separator_after` is kept so a caller rebuilding program text can reproduce
     the operator that actually joined them: `&&` and `;` differ to the cwd
     tracking, and substituting one for the other would change a verdict.
+
+    A separator INSIDE a nested `{ ... }`, or inside an unclosed backtick
+    substitution, belongs to that construct rather than to this statement list.
+    Splitting there cut `Invoke-Command -ScriptBlock { $_ ; } -FilePath
+    payload.ps1` in half and left the `-FilePath` fragment headed by an option,
+    so it was classified inert and dropped; and it split
+    ``VAR=`printf .en; printf v` git status`` so the environment mutation and the
+    command that inherits it landed in different statements.
     """
     statements: list[list[str]] = [[]]
     separators: list[str] = [""]
+    depth = 0
+    open_substitution = False
     for token in body_tokens:
         operator = segment_separator_operator(token)
-        if operator is not None and operator.strip() not in (
-            _POWERSHELL_PIPELINE_SEPARATORS
+        if (
+            operator is not None
+            and depth <= 0
+            and not open_substitution
+            and operator.strip() not in _POWERSHELL_PIPELINE_SEPARATORS
         ):
             separators[-1] = operator
             statements.append([])
             separators.append("")
             continue
+        if operator is None:
+            depth += powershell_block_depth(token)
+            if token.count("`") % 2:
+                open_substitution = not open_substitution
         statements[-1].append(token)
     return [
         (statement, separator)
@@ -1335,18 +1408,41 @@ def powershell_literal_scriptblock_bodies(
 
     `body_text` re-quotes those tokens rather than joining them with a bare
     space: the text is handed to check() as a command, and a flattened quoted
-    argument re-parses as a different program (see rejoin_argv_as_command)."""
+    argument re-parses as a different program (see rejoin_argv_as_command).
+
+    A block in DATA position is skipped: bound to a data-sink parameter, or
+    following an `=`, PowerShell constructs the scriptblock and never runs it.
+    Both tests enumerate the INERT case by exact spelling, so an unknown
+    parameter or an unexpected preceding token stays inspected -- this can
+    narrow a false positive, never open a blind spot."""
     bodies: list[tuple[str, list[str]]] = []
     index = 0
     while index < len(toks):
         token = toks[index]
         opening = token
         if not token.startswith("{") and token.startswith("-") and ":{" in token:
+            parameter = token[: token.index(":{")].lstrip("-").lower()
+            if parameter in _POWERSHELL_DATA_BINDING_PARAMETERS:
+                index += 1
+                continue
             opening = token[token.index(":{") + 1 :]
         if opening.startswith("{"):
             state, end = scan_powershell_literal_block(toks, index + 1, opening)
             if state == _BLOCK_MALFORMED:
                 break
+            # `$sb = { ... }` / `@{ k = { ... } }` BIND the block; PowerShell does
+            # not run it here, and `& $sb` / `$sb.Invoke()` / `& @{x=..}.x`
+            # already hard-deny. `opening is token` restricts this to the
+            # standalone `{` spelling -- a block reached through the `-Name:{`
+            # reader is governed by the data-sink test above, not by whatever
+            # token happened to precede the parameter.
+            if (
+                opening is token
+                and index
+                and powershell_block_is_bound_value(toks[index - 1])
+            ):
+                index = end
+                continue
             inner = [opening[1:], *toks[index + 1 : end]]
             if inner and inner[-1].endswith("}"):
                 inner[-1] = inner[-1][:-1]
@@ -6687,8 +6783,12 @@ def check(
             frozenset(repository_environment_seed),
         )
     call_normalized = normalize_literal_call_operators(command)
+    # `@` belongs in the alternation: `& @{x={...}}.x` is as dynamic a call
+    # target as `& $sb`, and it was the ONE route from a bound scriptblock back
+    # to execution that did not already deny -- which is what the data-position
+    # rule in powershell_literal_scriptblock_bodies rests on.
     if re.search(
-        r"(?:^|[;|{}\n])\s*[&.]\s*(?:\$|%|!|\()",
+        r"(?:^|[;|{}\n])\s*[&.]\s*(?:\$|%|!|@|\()",
         call_normalized,
     ):
         return "deny", "A dynamic call-operator target cannot be inspected safely."
@@ -6805,24 +6905,62 @@ def check(
     def _statement_invokes_a_command(statement: list[str]) -> bool:
         """Whether this body statement is a command invocation rather than data.
 
-        A single argv token is one expression — a bare string statement
-        (`{ 'git push --force origin main' }`) only OUTPUTS its text, and quoting
-        collapses it to one token no matter how many words it holds, which is
-        what keeps the floor's promise never to treat quoted text as a target.
+        A lone token HOLDING WHITESPACE can only have come from a quoted span —
+        `tokens()` and shlex both split on whitespace, so nothing else puts it
+        back — and a bare quoted string statement (`{ 'git push --force origin
+        main' }`) only OUTPUTS its text. That keeps the floor's promise never to
+        treat quoted text as a target. A lone BAREWORD is a real invocation
+        (`{ Pop-Location }`), and reading it as inert dropped the relocation a
+        sibling statement then depended on.
+
         Beyond that, only a LETTER-headed head is a command: a pure expression or
         member access (`$_.Name`, `1..3`, `$i++`) is inert output.
+
+        The letter gate alone is too narrow, because four spellings EXECUTE with
+        a non-letter head: command substitution (`$(echo git) push --force`),
+        its backtick form, process substitution (`. <(wget -qO- ...)`), and a
+        .NET static call (`[IO.File]::WriteAllText('.env','x')`). check() already
+        denies all four at top level, so refusing to recurse them made the floor
+        contradict its own verdict. Member access is excluded by construction:
+        `$_.Name` has no `$(`, no backtick pair, and no `::`.
         """
-        if len(statement) < 2:
+        if not statement:
+            return False
+        if len(statement) == 1 and any(char.isspace() for char in statement[0]):
             return False
         text = rejoin_argv_as_command(statement)
         if not text or is_dynamic_value(text):
             return False
+        if _POWERSHELL_EXECUTING_EXPRESSION.search(text):
+            return True
         head, _ = command_head(tokens(text))
         return bool(head) and bool(re.match(r"^[A-Za-z]", head))
 
     def _inspect_scriptblock_bodies(argv: list[str], block_depth: int):
-        if block_depth > 8:  # runaway guard; real nesting is a handful deep
-            return "allow", ""
+        if block_depth > _SCRIPTBLOCK_INSPECTION_DEPTH:
+            # Fail CLOSED, mirroring check()'s own `_depth > 4` deny. Spelling
+            # "give up" as `return "allow"` inverted the floor's contract: a
+            # nine-deep dot-source chain walked an `iex` force-push straight
+            # through.
+            return (
+                "deny",
+                "Scriptblock nesting exceeds the deny-floor inspection limit, so "
+                "the floor cannot prove what the innermost block runs. Split the "
+                "one-liner into separate statements.",
+            )
+        # `-Begin`, `-Process` and `-End` are three bodies of ONE pipeline
+        # invocation and run in sequence in the same shell, as do multiple
+        # `-ScriptBlock` bindings on Invoke-Command. Accumulating them into one
+        # program is what lets check()'s segment loop carry a relocation, a Git
+        # environment mutation or an alias definition from an earlier body into
+        # a later one: `-Begin { Set-Location /tmp/bad } -Process { git push
+        # origin }` was decided as two independent commands, each against the
+        # ORIGINAL state, so the push never saw the relocation. Argv order is
+        # execution order for these bindings, so writing `-Process` before
+        # `-Begin` still reads them in the written order -- a residual noted in
+        # the PR rather than guessed at here.
+        program: list[tuple[str, str]] = []
+        invokes_a_command = False
         for body, body_tokens in powershell_literal_scriptblock_bodies(argv):
             # A NESTED literal block executes too, and its own quoted payload is
             # equally masked: `. { iex '...' }`, `& { ... }`, `if ($x) { ... }`.
@@ -6835,15 +6973,16 @@ def check(
             # single command_head made every statement after the first
             # unreachable, so `{ Write-Host a; $null = iex '...' }` only ever had
             # `Write-Host` examined.
-            program: list[tuple[str, str]] = []
-            invokes_a_command = False
             for statement, separator in powershell_body_statements(body_tokens):
                 assigned = powershell_assignment_rhs_tokens(statement)
                 if assigned is not None:
                     # check()'s own assignment path inspects a QUOTE-MASKED copy
                     # of the RHS, so an evaluator payload is only visible here.
                     # The head would also be `$null` and fail the letter gate.
-                    if _statement_invokes_a_command(assigned):
+                    # `$sb = { ... }` BINDS a scriptblock rather than running it.
+                    if not inert_powershell_scriptblock(
+                        rejoin_argv_as_command(assigned)
+                    ) and _statement_invokes_a_command(assigned):
                         invokes_a_command = True
                         rhs_decision = _recurse_child(rejoin_argv_as_command(assigned))
                         if rhs_decision[0] != "allow":
@@ -6860,21 +6999,18 @@ def check(
                 else:
                     invokes_a_command = True
                 program.append((rejoin_argv_as_command(statement), separator))
-            if not invokes_a_command:
-                continue
-            # The statements are recursed TOGETHER, not one at a time, so
-            # check()'s own segment loop carries cwd and Git-environment state
-            # from one to the next exactly as it would for the same text typed
-            # at top level -- and with the real operator between them, because
-            # `&&` and `;` differ to that tracking.
-            body_program = " ".join(
-                text if index == len(program) - 1 else f"{text} {separator or ';'}"
-                for index, (text, separator) in enumerate(program)
-            )
-            body_decision = _recurse_child(body_program)
-            if body_decision[0] != "allow":
-                return body_decision
-        return "allow", ""
+        if not invokes_a_command:
+            return "allow", ""
+        # The statements are recursed TOGETHER, not one at a time, so check()'s
+        # own segment loop carries cwd and Git-environment state from one to the
+        # next exactly as it would for the same text typed at top level -- and
+        # with the real operator between them, because `&&` and `;` differ to
+        # that tracking.
+        body_program = " ".join(
+            text if index == len(program) - 1 else f"{text} {separator or ';'}"
+            for index, (text, separator) in enumerate(program)
+        )
+        return _recurse_child(body_program)
 
     for (
         raw,
