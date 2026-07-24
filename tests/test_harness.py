@@ -446,6 +446,18 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(harness.managed_codex_floor_groups(malformed)), 1)
         self.assertEqual(len(harness.repo_codex_floor_candidates(malformed)), 1)
         self.assertEqual(harness.repo_codex_floor_groups(malformed), [])
+        for command in (
+            f"powershell -EncodedCommand:{encoded}",
+            f"powershell -NoProfile:true -EncodedCommand {encoded}",
+            f"powershell -ExecutionPolicy:Bypass -EncodedCommand {encoded}",
+            f"powershell -NoLogo: -EncodedCommand {encoded}",
+            f"powershell -n -EncodedCommand {encoded}",
+            f"powershell -i -EncodedCommand {encoded}",
+        ):
+            with self.subTest(command=command):
+                self.assertNotIn(
+                    "dispatch.py", harness.decode_windows_hook_command(command)
+                )
 
     def test_windows_hook_command_alias_is_audited(self) -> None:
         alias_only_global = json.dumps(
@@ -1661,6 +1673,12 @@ allow_local_binding = true
             "C:\\evil\\payload.exe",
             "calc.exe",
             "-WindowStyle Hidden calc.exe",
+            "-EncodedCommand:",
+            "-NoProfile:true",
+            "-ExecutionPolicy:Bypass",
+            "-NoLogo:",
+            "-n",
+            "-i",
         ):
             with self.subTest(prefix=prefix):
                 group = {
@@ -1675,11 +1693,14 @@ allow_local_binding = true
                 }
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
-        # inert options before -EncodedCommand are fine and still certify
+        # Even familiar options before -EncodedCommand are outside the strict
+        # two-token proof shape and must fail closed.
         for prefix in (
             "-NoProfile",
             "-NoLogo -NonInteractive",
             "-ExecutionPolicy Bypass",
+            "-NoExit",
+            "-OutputFormat XML",
         ):
             with self.subTest(prefix=prefix):
                 group = {
@@ -1693,7 +1714,20 @@ allow_local_binding = true
                     ],
                 }
                 current = json.dumps({"hooks": {"PreToolUse": [group]}})
-                self.assertEqual(len(harness.repo_codex_floor_groups(current, pin)), 1)
+                self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
+
+        attached_group = {
+            "matcher": "^Bash$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": f"powershell -EncodedCommand:{encoded}",
+                }
+            ],
+        }
+        attached = json.dumps({"hooks": {"PreToolUse": [attached_group]}})
+        self.assertEqual(harness.repo_codex_floor_groups(attached, pin), [])
 
     def test_repo_floor_requires_both_platforms_and_positive_matcher(self) -> None:
         handler = {

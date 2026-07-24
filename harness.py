@@ -1647,35 +1647,6 @@ def managed_codex_floor_groups(current: str, *, source_kind: str = "json") -> li
     return [group for group in existing_groups if is_managed(group)]
 
 
-# PowerShell's own options. Only these may precede -EncodedCommand without
-# changing what actually executes: a code directive (-Command/-File/-cwa), a
-# bare positional (binds to the implicit -Command), or any UNKNOWN option would
-# slurp/redefine the command line so the encoded payload never runs as
-# PowerShell — the decoded inner text would then diverge from runtime.
-_POWERSHELL_INERT_SWITCHES = {
-    "noprofile",
-    "noprofileloadtime",
-    "noninteractive",
-    "nologo",
-    "noexit",
-    "sta",
-    "mta",
-    "interactive",
-}
-_POWERSHELL_INERT_VALUE_OPTIONS = {
-    "executionpolicy",
-    "version",
-    "windowstyle",
-    "inputformat",
-    "outputformat",
-    "configurationname",
-    "psconsolefile",
-    "settingsfile",
-    "custompipename",
-    "workingdirectory",
-}
-
-
 def _is_encoded_switch(token: str) -> bool:
     if not token.startswith(("-", "/")):
         return False
@@ -1701,49 +1672,22 @@ def _powershell_encoded_payload(rest: str) -> str | None:
         return "" if re.search(r"(?i)(?:^|\s)[-/]e", rest) else None
     if not any(_is_encoded_switch(token) for token in tokens):
         return None
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        raw = token.lstrip("-/")
-        option = raw.partition(":")[0].lower()
-        separator = ":" in raw
-        attached = raw.partition(":")[2]  # original case (base64 is case-sensitive)
-        if _is_encoded_switch(token):
-            if separator:
-                payload, consumed_end = attached, index + 1
-            else:
-                payload = tokens[index + 1] if index + 1 < len(tokens) else None
-                consumed_end = index + 2
-            # The payload must be a bare base64 string AND the LAST token, so no
-            # sibling statement follows and nothing precedes that would slurp it.
-            # It must also appear VERBATIM in the raw argv: if shlex stripped a
-            # backslash/quote (`SQ\Bu` -> `SQBu`), the bytes we decode differ
-            # from what PowerShell receives, so decode a payload it can't.
-            if (
-                payload is None
-                or consumed_end != len(tokens)
-                or not re.fullmatch(r"[A-Za-z0-9+/=]+", payload)
-                or payload not in rest
-            ):
-                return ""
-            return payload
-        if not token.startswith(("-", "/")):
-            return ""  # bare positional binds to the implicit -Command
-        if (
-            "command".startswith(option)
-            or "file".startswith(option)
-            or "commandwithargs".startswith(option)
-            or option == "cwa"
-        ):
-            return ""  # code directive redefines execution
-        if any(name.startswith(option) for name in _POWERSHELL_INERT_SWITCHES):
-            index += 1
-            continue
-        if any(name.startswith(option) for name in _POWERSHELL_INERT_VALUE_OPTIONS):
-            index += 1 if separator else 2  # consume the option's value token
-            continue
-        return ""  # unknown option
-    return ""
+    # Certify only the exact terminal two-token form. Even otherwise familiar
+    # PowerShell options can alter stdout, termination, or parser precedence;
+    # a conservative hook proof must not infer across those behaviors.
+    if (
+        len(tokens) != 2
+        or not _is_encoded_switch(tokens[0])
+        or ":" in tokens[0].lstrip("-/")
+    ):
+        return ""
+    payload = tokens[1]
+    # The payload must be a bare base64 string AND appear VERBATIM in the raw
+    # argv: if shlex stripped a backslash/quote (`SQ\Bu` -> `SQBu`), the bytes
+    # we decode differ from what PowerShell receives.
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", payload) or payload not in rest:
+        return ""
+    return payload
 
 
 def decode_windows_hook_command(command: str) -> str:
