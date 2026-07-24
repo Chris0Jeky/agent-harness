@@ -1626,7 +1626,7 @@ class HarnessTests(unittest.TestCase):
                     requested, authoritative
                 )
                 self.assertTrue(ok)
-                self.assertEqual(hooks, repo / ".codex" / "hooks.json")
+                self.assertEqual(hooks, (repo / ".codex" / "hooks.json").resolve())
                 self.assertIn("normal checkout", detail)
 
     def test_root_checkout_supports_separate_git_dir(self) -> None:
@@ -1662,7 +1662,7 @@ class HarnessTests(unittest.TestCase):
         hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
         self.assertEqual(requested, linked.resolve())
         self.assertEqual(authoritative, root.resolve())
-        self.assertEqual(hooks, root_hooks)
+        self.assertEqual(hooks, root_hooks.resolve())
         self.assertTrue(ok)
         self.assertIn("Codex uses root checkout source", detail)
         self.assertIn("no worktree-local copy", detail)
@@ -1674,7 +1674,7 @@ class HarnessTests(unittest.TestCase):
         self.write_hooks(linked, text)
         requested, authoritative = harness.root_checkout(linked)
         hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
-        self.assertEqual(hooks, root_hooks)
+        self.assertEqual(hooks, root_hooks.resolve())
         self.assertTrue(ok)
         self.assertIn("identical worktree copy is ignored", detail)
 
@@ -1683,9 +1683,9 @@ class HarnessTests(unittest.TestCase):
         local_hooks = self.write_hooks(linked, '{"hooks": {}}\n')
         requested, authoritative = harness.root_checkout(linked)
         hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
-        self.assertEqual(hooks, root / ".codex" / "hooks.json")
+        self.assertEqual(hooks, (root / ".codex" / "hooks.json").resolve())
         self.assertFalse(ok)
-        self.assertIn(str(local_hooks), detail)
+        self.assertIn(str(local_hooks.resolve()), detail)
         self.assertIn("authoritative root source is absent", detail)
 
     def test_linked_worktree_rejects_divergent_hook_copy(self) -> None:
@@ -1694,9 +1694,9 @@ class HarnessTests(unittest.TestCase):
         local_hooks = self.write_hooks(linked, '{"hooks": {"worktree": []}}\n')
         requested, authoritative = harness.root_checkout(linked)
         hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
-        self.assertEqual(hooks, root_hooks)
+        self.assertEqual(hooks, root_hooks.resolve())
         self.assertFalse(ok)
-        self.assertIn(str(local_hooks), detail)
+        self.assertIn(str(local_hooks.resolve()), detail)
         self.assertIn("ignored worktree copy differs", detail)
 
     def test_doctor_rejects_valid_looking_worktree_only_hook(self) -> None:
@@ -1706,10 +1706,10 @@ class HarnessTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.write_hooks(linked, valid_adapter)
         result, output = self.run_doctor_with_fixture_globals(linked)
-        root_hooks = root / ".codex" / "hooks.json"
+        root_hooks = (root / ".codex" / "hooks.json").resolve()
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex hook source", output)
-        self.assertIn(str(root_hooks), output)
+        self.assertIn(str(root_hooks.resolve()), output)
         self.assertIn("authoritative root source is absent", output)
         self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
 
@@ -1723,7 +1723,7 @@ class HarnessTests(unittest.TestCase):
         result, output = self.run_doctor_with_fixture_globals(linked)
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex hook source: linked worktree", output)
-        self.assertIn(str(root_hooks), output)
+        self.assertIn(str(root_hooks.resolve()), output)
         self.assertIn("identical worktree copy is ignored", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
 
