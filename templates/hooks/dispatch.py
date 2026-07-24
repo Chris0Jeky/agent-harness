@@ -665,17 +665,29 @@ def scan_powershell_literal_block(
       inner `;`). That is a segmentation artifact, not an opaque payload: the
       remainder is inspected as its own sibling segments, and the in-segment
       remainder is recursed by powershell_literal_scriptblock_bodies.
-    - `_BLOCK_MALFORMED` — the opening token closes more braces than it opens,
-      which no literal block can do.
+    - `_BLOCK_MALFORMED` — the scan never saw an opening brace at all, so this is
+      not a literal block.
+
+    A SURPLUS `}` closes an enclosing construct, not just this block:
+    `if ($x) { $y | ForEach-Object {"$_"}}` ends the cmdlet's argv at that token,
+    because everything after it belongs to the `if`. The scan therefore reports
+    the argv as finished rather than treating the extra brace as malformed —
+    reading it as malformed denied a real corpus one-liner.
     """
-    depth = powershell_block_depth(opening)
-    if depth < 0:
+    if not opening.startswith("{"):
+        # Callers only scan a token that opens a literal block; anything else is
+        # not one, and is rejected rather than guessed at.
         return _BLOCK_MALFORMED, index
+    depth = powershell_block_depth(opening)
     while depth > 0:
         if index >= len(toks):
             return _BLOCK_TRUNCATED, index
         depth += powershell_block_depth(toks[index])
         index += 1
+    if depth < 0:
+        # A surplus `}` closed an enclosing construct, so the cmdlet's argv ended
+        # at that token — nothing after it is still one of its arguments.
+        return _BLOCK_CLOSED, len(toks)
     return _BLOCK_CLOSED, index
 
 
@@ -2482,6 +2494,19 @@ _WRAPPERS = {
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
 _OPAQUE_WRAPPER = "__harness_opaque_wrapper__"
+# Cmdlets whose scriptblock argument may be written glued to the name (`%{ ... }`,
+# `?{ ... }`). Splitting the head is restricted to these so an unrelated token that
+# happens to contain a brace keeps its current head resolution.
+_POWERSHELL_SCRIPTBLOCK_CMDLETS = {
+    "foreach-object",
+    "foreach",
+    "%",
+    "where-object",
+    "where",
+    "?",
+    "invoke-command",
+    "icm",
+}
 
 
 def _after_separate_value(toks: list[str], index: int) -> int | None:
@@ -3111,6 +3136,18 @@ def command_head(toks):
         if _ASSIGN.match(t):
             i += 1
             continue
+        # `%{ ... }` / `?{ ... }` glue the scriptblock straight onto the alias.
+        # lstrip/rstrip below only strips a LEADING brace and a TRAILING `}`, so
+        # the head read as `%{`, matched no rule, and every pipeline-scriptblock
+        # guard was skipped — the spaced `% { ... }` denied correctly. Split the
+        # block into its own token so both spellings parse identically. (#28)
+        block_at = t.find("{")
+        if block_at > 0:
+            glued_head = _EXE_SUFFIX.sub(
+                "", t[:block_at].replace("\\", "/").split("/")[-1]
+            ).lower()
+            if glued_head in _POWERSHELL_SCRIPTBLOCK_CMDLETS:
+                return glued_head, [t[:block_at], t[block_at:], *toks[i + 1 :]]
         executable = t.lstrip("({").rstrip(")}")
         if not executable:
             i += 1
@@ -5589,6 +5626,53 @@ def configured_bare_push_is_dangerous(
     return False
 
 
+_SCRIPT_INTERPRETER_HEADS = {
+    "awk",
+    "bash",
+    "gawk",
+    "node",
+    "perl",
+    "php",
+    "pwsh",
+    "python",
+    "python3",
+    "powershell",
+    "ruby",
+    "sh",
+    "zsh",
+}
+_REPOSITORY_CONFIG_READER_HEADS = {
+    "bat",
+    "cat",
+    "cmp",
+    "diff",
+    "findstr",
+    "gc",
+    "get-content",
+    "get-filehash",
+    "get-item",
+    "gi",
+    "grep",
+    "egrep",
+    "fgrep",
+    "head",
+    "less",
+    "ls",
+    "md5sum",
+    "more",
+    "rg",
+    "select-string",
+    "sha1sum",
+    "sha256sum",
+    "sls",
+    "stat",
+    "tail",
+    "test-path",
+    "type",
+    "wc",
+}
+
+
 def segment_may_mutate_repository_config(raw: list[str]) -> bool:
     """Return whether a shell segment may rewrite the current repo's config."""
     if not raw:
@@ -5602,9 +5686,18 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
         for index, token in enumerate(normalized)
         if token == ".git/config" or token.endswith("/.git/config")
     ]
+    head, _tokens = command_head(raw)
+    # An interpreter carries the path INSIDE a larger argument
+    # (`python -c "open('.git/config','a').write(...)"`), so it needs a substring
+    # test. That test is confined to interpreter heads on purpose: applying it
+    # everywhere would make `git commit -m 'touched .git/config'` look like a
+    # write, and the floor never treats message text as a target.
+    if head in _SCRIPT_INTERPRETER_HEADS and any(
+        ".git/config" in token for token in normalized
+    ):
+        return True
     if not config_indexes:
         return False
-    head, _tokens = command_head(raw)
     if head in {
         "add-content",
         "ac",
@@ -5630,10 +5723,19 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
         "tee-object",
     }:
         return True
-    return any(
+    if any(
         index > 0 and normalized[index - 1] in {">", ">>", ">|"}
         for index in config_indexes
-    )
+    ):
+        return True
+    # Anything else that names .git/config as an operand is treated as a possible
+    # writer. Enumerating writers cannot work: an in-place editor rewrites the file
+    # with no redirect and no recognizable cmdlet head (`sed -i '$a[remote "origin"]
+    # \n\tpush = +HEAD:refs/heads/main' .git/config`), and the same is true of perl
+    # -i, ed, awk -i inplace, or a python one-liner (PR #23 review). This flag only
+    # forces a later refspec-less push to resolve its config instead of graduating,
+    # so a false "maybe" costs a resolution, while a false "no" costs the guard.
+    return head not in _REPOSITORY_CONFIG_READER_HEADS
 
 
 def dangerous_git_remote_mutation(args: list[str]) -> bool:
@@ -7599,24 +7701,40 @@ def check(
                         )
 
                 push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
+                # `--all`/`--tags`/`--repo` are recognized DURING the option walk,
+                # never by a flat scan of args: as the value of `-o`/`--push-option`
+                # they are server-side push-option data, not selectors, and the push
+                # is still refspec-less. `git push -o --all origin` used to skip the
+                # bare-push guard entirely (PR #23 review).
                 positionals = []
+                explicit_selector = False
+                repository_via_option = False
                 index = 0
                 while index < len(args):
                     token = args[index]
                     if token == "--":
                         positionals.extend(args[index + 1 :])
                         break
-                    if token in push_value_options:
+                    if token == "--repo":
+                        repository_via_option = True
                         index += 2
                         continue
                     if token.startswith("--repo="):
+                        repository_via_option = True
                         index += 1
+                        continue
+                    if token in push_value_options:
+                        index += 2
                         continue
                     _short_flags, short_consumes_next = git_push_short_option_shape(
                         token
                     )
                     if short_consumes_next:
                         index += 2
+                        continue
+                    if token in {"--all", "--tags"}:
+                        explicit_selector = True
+                        index += 1
                         continue
                     if token.startswith("--") or (
                         token.startswith("-") and len(token) > 1
@@ -7625,10 +7743,6 @@ def check(
                         continue
                     positionals.append(token)
                     index += 1
-                explicit_selector = any(token in {"--all", "--tags"} for token in args)
-                repository_via_option = any(
-                    token == "--repo" or token.startswith("--repo=") for token in args
-                )
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
                 )

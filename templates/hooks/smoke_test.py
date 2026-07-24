@@ -941,6 +941,48 @@ CASES = [
         {},
         "deny",
     ),
+    # issue #28: `%{ ... }` / `?{ ... }` glue the scriptblock onto the alias. The
+    # head read as `%{`, matched no rule, and every pipeline-scriptblock guard was
+    # skipped — while the spaced `% { ... }` denied correctly.
+    ("gci | %{ iex 'git push --force origin main' }", 1, {}, "deny"),
+    ("gci | %{ Remove-Item -Recurse -Force '/critical/outside' }", 1, {}, "deny"),
+    ("1 | %{ rm -rf /critical/outside }", 1, {}, "deny"),
+    ("gci | ?{ iex 'git push --force origin main' }", 1, {}, "deny"),
+    ("gci | ForEach-Object{ iex 'git push --force origin main' }", 1, {}, "deny"),
+    ("gci | Where-Object{ rm -rf /critical/outside }", 1, {}, "deny"),
+    ("Invoke-Command{ iex 'git push --force origin main' }", 1, {}, "deny"),
+    ("$sb={ rm -rf /critical/outside }; 1 | %{ $_ } $sb", 1, {}, "deny"),
+    ("1 | %{ $_ } -MemberName Delete", 1, {}, "deny"),
+    (
+        "powershell -Command \"gci | %{ iex 'git push --force origin main' }\"",
+        1,
+        {},
+        "deny",
+    ),
+    # PR #23 review P1: `--all`/`--tags`/`--repo` as the VALUE of `-o`/`--push-option`
+    # is server-side push-option data, so the push is still refspec-less and must
+    # not skip the bare-push guard. Genuine selectors keep their meaning.
+    ("git push -o --all origin", 4, {}, "deny"),
+    ("git push --push-option --all origin", 4, {}, "deny"),
+    ("git push -o --tags origin", 4, {}, "deny"),
+    ("git push -o --repo origin", 4, {}, "deny"),
+    ("git push --all origin", 4, {}, "allow"),
+    ("git push --tags origin", 4, {}, "allow"),
+    # PR #23 review P1: an in-place editor rewrites .git/config with no redirect and
+    # no recognizable cmdlet head, so a later refspec-less push must not graduate.
+    ("sed -i 's/x/y/' .git/config; git push origin", 1, {}, "deny"),
+    ("perl -i -pe 's/x/y/' .git/config; git push origin", 1, {}, "deny"),
+    ("awk -i inplace '{print}' .git/config; git push origin", 1, {}, "deny"),
+    (
+        "python -c \"open('.git/config','a').write('x')\"; git push origin",
+        1,
+        {},
+        "deny",
+    ),
+    # ...but reading it is not a write, and message text is never a target.
+    ("cat .git/config; git push origin", 1, {}, "allow"),
+    ("grep url .git/config && git push origin", 1, {}, "allow"),
+    ("git commit -m 'touched .git/config'; git push origin", 1, {}, "allow"),
     # Adversarial review round 2: relaxing "malformed" removed an ACCIDENTAL
     # blanket deny that had been covering quoted evaluator payloads inside split
     # blocks. Every case below was deny under v1.6.0, allow under the first cut

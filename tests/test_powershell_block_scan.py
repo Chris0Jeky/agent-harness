@@ -319,6 +319,60 @@ class ForeachLoopStatementTests(unittest.TestCase):
         self.assertEqual(decision, "allow", reason)
 
 
+class GluedAliasHeadTests(unittest.TestCase):
+    """issue #28: `%{ ... }` glues the scriptblock onto the alias.
+
+    `command_head` stripped a leading brace and a trailing `}` but not a trailing
+    `{`, so the head read as `%{`. That matched no rule, so every
+    pipeline-scriptblock guard was skipped — while the spaced `% { ... }` denied.
+    """
+
+    DENY = (
+        "gci | %{ iex 'git push --force origin main' }",
+        "gci | %{ Remove-Item -Recurse -Force '/critical/outside' }",
+        "1 | %{ rm -rf /critical/outside }",
+        "gci | ?{ iex 'git push --force origin main' }",
+        "gci | ForEach-Object{ iex 'git push --force origin main' }",
+        "gci | Where-Object{ rm -rf /critical/outside }",
+        "Invoke-Command{ iex 'git push --force origin main' }",
+        "$sb={ rm -rf /critical/outside }; 1 | %{ $_ } $sb",
+        "1 | %{ $_ } -MemberName Delete",
+        "powershell -Command \"gci | %{ iex 'git push --force origin main' }\"",
+    )
+    ALLOW = (
+        "gci | %{ $a=1; $b=2 }",
+        "gci | %{ $_.Name }",
+        "1 | %{ $_ }",
+        "gci | ?{ $_.Length -gt 10 }",
+        "gci | %{ Write-Output $_ }",
+    )
+
+    def test_glued_alias_payloads_deny(self):
+        for command in self.DENY:
+            with self.subTest(command=command):
+                self.assertEqual(check(command)[0], "deny")
+
+    def test_benign_glued_aliases_allow(self):
+        for command in self.ALLOW:
+            with self.subTest(command=command):
+                decision, reason = check(command)
+                self.assertEqual(decision, "allow", reason)
+
+    def test_head_splits_the_attached_block(self):
+        self.assertEqual(
+            dispatch.command_head(["%{", "iex", "payload", "}"]),
+            ("%", ["%", "{", "iex", "payload", "}"]),
+        )
+        self.assertEqual(
+            dispatch.command_head(["ForEach-Object{$_}"])[0], "foreach-object"
+        )
+
+    def test_unrelated_braced_token_keeps_its_head(self):
+        # Only the scriptblock cmdlets split; anything else resolves as before.
+        self.assertEqual(dispatch.command_head(["@{Name=1}"])[0], "@{name=1")
+        self.assertEqual(dispatch.command_head(["git", "commit"])[0], "git")
+
+
 class AttachedParameterBlockTests(unittest.TestCase):
     def test_attached_parameter_block_body_is_extracted(self):
         bodies = dispatch.powershell_literal_scriptblock_bodies(
