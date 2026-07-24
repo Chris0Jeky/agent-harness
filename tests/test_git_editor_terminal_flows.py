@@ -300,8 +300,11 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         cls.dispatch = cls.smoke.load_dispatch_module()
 
     def _require_neutral_home(self) -> None:
-        if self.dispatch.declared_project_dirs(os.path.expanduser("~")):
+        home = os.path.expanduser("~")
+        if self.dispatch.declared_project_dirs(home):
             self.skipTest("user home inherits a tier declaration")
+        if self.dispatch.is_within_temp(home):
+            self.skipTest("user home sits inside the temp allowance")
 
     def test_temp_backed_home_skips_neutral_home_cases(self) -> None:
         with (
