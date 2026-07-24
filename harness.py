@@ -405,6 +405,138 @@ def codex_profile_config_paths(codex_home: Path) -> list[Path]:
     return sorted(paths)
 
 
+_CODEX_STRUCTURED_FEATURE_FIELDS = {
+    "code_mode": {
+        "enabled": "boolean",
+        "excluded_tool_namespaces": "array of strings",
+        "direct_only_tool_namespaces": "array of strings",
+    },
+    "multi_agent_v2": {
+        "enabled": "boolean",
+        "max_concurrent_threads_per_session": "usize",
+        "min_wait_timeout_ms": "integer",
+        "max_wait_timeout_ms": "integer",
+        "default_wait_timeout_ms": "integer",
+        "usage_hint_enabled": "boolean",
+        "usage_hint_text": "string",
+        "root_agent_usage_hint_text": "string",
+        "subagent_usage_hint_text": "string",
+        "multi_agent_mode_hint_text": "string",
+        "tool_namespace": "string",
+        "hide_spawn_agent_metadata": "boolean",
+        "expose_spawn_agent_model_overrides": "boolean",
+        "non_code_mode_only": "boolean",
+    },
+    "token_budget": {
+        "enabled": "boolean",
+        "reminder_threshold_tokens": "integer",
+        "reminder_message_template": "string",
+        "guidance_message": "string",
+        "auto_compact_fallback_prompt": "string",
+        "auto_compact_fallback_buffer_tokens": "integer",
+    },
+    "rollout_budget": {
+        "enabled": "boolean",
+        "limit_tokens": "integer",
+        "reminder_at_remaining_tokens": "array of integers",
+        "sampling_token_weight": "number",
+        "prefill_token_weight": "number",
+    },
+    "current_time_reminder": {
+        "enabled": "boolean",
+        "reminder_interval_seconds": "u64",
+        "clock_source": "current time source",
+        "delivery_mode": "current time delivery mode",
+        "sleep_tool": "boolean",
+    },
+    "apps_mcp_path_override": {
+        "enabled": "boolean",
+        "path": "string",
+    },
+    "network_proxy": {
+        "enabled": "boolean",
+        "proxy_url": "string",
+        "enable_socks5": "boolean",
+        "socks_url": "string",
+        "enable_socks5_udp": "boolean",
+        "allow_upstream_proxy": "boolean",
+        "dangerously_allow_non_loopback_proxy": "boolean",
+        "dangerously_allow_all_unix_sockets": "boolean",
+        "mode": "network proxy mode",
+        "domains": "network permission table",
+        "unix_sockets": "network permission table",
+        "allow_local_binding": "boolean",
+    },
+}
+
+
+def codex_feature_field_matches(value: Any, expected: str) -> bool:
+    """Match the Serde value shapes used by Codex's structured feature tables."""
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "integer":
+        return type(value) is int
+    if expected == "usize":
+        return type(value) is int and 0 <= value <= USIZE_MAX
+    if expected == "u64":
+        return type(value) is int and 0 <= value <= U64_MAX
+    if expected == "number":
+        return type(value) in {int, float}
+    if expected == "array of strings":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if expected == "array of integers":
+        return isinstance(value, list) and all(type(item) is int for item in value)
+    if expected == "current time source":
+        return isinstance(value, str) and value in {"system", "external"}
+    if expected == "current time delivery mode":
+        return isinstance(value, str) and value in {
+            "any_inference",
+            "after_user_or_tool_output",
+        }
+    if expected == "network proxy mode":
+        return isinstance(value, str) and value in {"limited", "full"}
+    if expected == "network permission table":
+        return isinstance(value, dict) and all(
+            isinstance(key, str)
+            and isinstance(permission, str)
+            and permission in {"allow", "deny"}
+            for key, permission in value.items()
+        )
+    raise AssertionError(f"unknown Codex feature field type: {expected}")
+
+
+def validate_codex_feature_value(
+    key: str, value: Any, config_path: Path, location: str
+) -> None:
+    """Validate FeaturesToml's bool-or-typed-table Serde union."""
+    if isinstance(value, bool):
+        return
+    fields = _CODEX_STRUCTURED_FEATURE_FIELDS.get(key)
+    if fields is None:
+        raise HarnessError(
+            f"features.{key} in {config_path}:{location} must be a boolean"
+        )
+    if not isinstance(value, dict):
+        raise HarnessError(
+            f"features.{key} in {config_path}:{location} must be a boolean or table"
+        )
+    unknown = sorted(set(value) - set(fields))
+    if unknown:
+        raise HarnessError(
+            f"features.{key} in {config_path}:{location} has unsupported fields: "
+            + ", ".join(unknown)
+        )
+    for field, field_value in value.items():
+        expected = fields[field]
+        if not codex_feature_field_matches(field_value, expected):
+            raise HarnessError(
+                f"features.{key}.{field} in {config_path}:{location} "
+                f"must be {expected}"
+            )
+
+
 def hook_feature_declarations(
     config_path: Path, *, reject_legacy_profile: bool = False
 ) -> list[tuple[str, bool]]:
@@ -425,10 +557,7 @@ def hook_feature_declarations(
         if not isinstance(features, dict):
             raise HarnessError(f"features in {config_path}:{location} must be a table")
         for key, value in features.items():
-            if not isinstance(value, bool):
-                raise HarnessError(
-                    f"features.{key} in {config_path}:{location} must be a boolean"
-                )
+            validate_codex_feature_value(key, value, config_path, location)
         if active:
             key = "hooks" if "hooks" in features else "codex_hooks"
             if key in features:

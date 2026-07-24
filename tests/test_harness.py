@@ -1153,6 +1153,110 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("features.future_feature", output)
         self.assertIn("must be a boolean", output)
 
+    def test_hook_feature_schema_accepts_structured_codex_features(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            """
+[features]
+hooks = true
+future_feature = false
+
+[features.code_mode]
+enabled = true
+excluded_tool_namespaces = ["mcp"]
+direct_only_tool_namespaces = ["functions"]
+
+[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 4
+min_wait_timeout_ms = 10000
+max_wait_timeout_ms = 3600000
+default_wait_timeout_ms = 30000
+usage_hint_enabled = false
+usage_hint_text = "hint"
+root_agent_usage_hint_text = "root"
+subagent_usage_hint_text = "subagent"
+multi_agent_mode_hint_text = "mode"
+tool_namespace = "collaboration"
+hide_spawn_agent_metadata = true
+expose_spawn_agent_model_overrides = true
+non_code_mode_only = false
+
+[features.token_budget]
+enabled = true
+reminder_threshold_tokens = 12000
+reminder_message_template = "{n_remaining} remain"
+guidance_message = "wrap up"
+auto_compact_fallback_prompt = "record state"
+auto_compact_fallback_buffer_tokens = 1000
+
+[features.rollout_budget]
+enabled = true
+limit_tokens = 100000
+reminder_at_remaining_tokens = [50000, 10000]
+sampling_token_weight = 1.0
+prefill_token_weight = 0.5
+
+[features.current_time_reminder]
+enabled = true
+reminder_interval_seconds = 60
+clock_source = "system"
+delivery_mode = "after_user_or_tool_output"
+sleep_tool = true
+
+[features.apps_mcp_path_override]
+enabled = false
+path = "apps.json"
+
+[features.network_proxy]
+enabled = true
+proxy_url = "http://127.0.0.1:8080"
+enable_socks5 = true
+socks_url = "socks5://127.0.0.1:1080"
+enable_socks5_udp = false
+allow_upstream_proxy = false
+dangerously_allow_non_loopback_proxy = false
+dangerously_allow_all_unix_sockets = false
+mode = "limited"
+allow_local_binding = true
+
+[features.network_proxy.domains]
+"example.com" = "allow"
+
+[features.network_proxy.unix_sockets]
+"/tmp/example.sock" = "deny"
+""",
+            encoding="utf-8",
+        )
+
+        declarations = harness.hook_feature_declarations(config)
+
+        self.assertEqual(len(declarations), 1)
+        self.assertTrue(declarations[0][1])
+
+    def test_hook_feature_schema_rejects_malformed_structured_features(
+        self,
+    ) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        invalid_documents = (
+            "[features.code_mode]\nunknown = true\n",
+            ("[features.multi_agent_v2]\n" "max_concurrent_threads_per_session = -1\n"),
+            '[features.token_budget]\nreminder_threshold_tokens = "many"\n',
+            (
+                "[features.rollout_budget]\n"
+                "reminder_at_remaining_tokens = [100, true]\n"
+            ),
+            '[features.current_time_reminder]\nclock_source = "local"\n',
+            "[features.apps_mcp_path_override]\npath = 7\n",
+            ("[features.network_proxy.domains]\n" '"example.com" = "prompt"\n'),
+            "[features.network_proxy]\nunknown = true\n",
+        )
+        for document in invalid_documents:
+            with self.subTest(document=document):
+                config.write_text(document, encoding="utf-8")
+                with self.assertRaises(harness.HarnessError):
+                    harness.hook_feature_declarations(config)
+
     def test_doctor_ignores_managed_only_key_outside_requirements(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
