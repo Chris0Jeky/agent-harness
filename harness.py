@@ -265,31 +265,18 @@ def codex_managed_config_path(codex_home: Path) -> Path:
     return Path("/etc/codex/managed_config.toml")
 
 
-def direct_codex_config_values(
-    config_path: Path, key: str, *, include_profiles: bool = True
-) -> list[tuple[str, Any]]:
-    """Return top-level and direct legacy-profile values for one config key."""
+def top_level_codex_config_values(config_path: Path, key: str) -> list[tuple[str, Any]]:
+    """Return a config layer's top-level value for one key, when present."""
     config = toml_config(config_path)
     if config is None:
         return []
-
-    values = [(key, config[key])] if key in config else []
-    profiles = config.get("profiles")
-    if include_profiles and isinstance(profiles, dict):
-        for name, profile in profiles.items():
-            if isinstance(profile, dict) and key in profile:
-                values.append((f"profiles.{name}.{key}", profile[key]))
-    return values
+    return [(key, config[key])] if key in config else []
 
 
-def inline_hook_documents_from_config(
-    config_path: Path, *, include_profiles: bool = True
-) -> list[tuple[str, str]]:
+def inline_hook_documents_from_config(config_path: Path) -> list[tuple[str, str]]:
     """Return active stored inline-hook declarations in one config document."""
     declarations: list[tuple[str, str]] = []
-    for location, hooks in direct_codex_config_values(
-        config_path, "hooks", include_profiles=include_profiles
-    ):
+    for location, hooks in top_level_codex_config_values(config_path, "hooks"):
         if not isinstance(hooks, dict):
             raise HarnessError(f"{location} in {config_path} must be a table")
         try:
@@ -307,7 +294,7 @@ def project_root_markers_from_config(
 ) -> list[tuple[str, list[str]]]:
     """Return active stored marker declarations with Codex-compatible shapes."""
     declarations: list[tuple[str, list[str]]] = []
-    for location, markers in direct_codex_config_values(
+    for location, markers in top_level_codex_config_values(
         config_path, "project_root_markers"
     ):
         if not isinstance(markers, list) or any(
@@ -323,14 +310,34 @@ def project_root_markers_from_config(
 def codex_profile_config_paths(codex_home: Path) -> list[Path]:
     """Enumerate stored profile-v2 configs without suppressing I/O errors."""
     try:
-        with os.scandir(codex_home) as entries:
-            paths = [
-                codex_home / entry.name
-                for entry in entries
-                if entry.name.endswith(".config.toml")
-            ]
+        entries = os.scandir(codex_home)
     except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot enumerate Codex profile configs in {codex_home}: {exc}"
+        ) from exc
+    suffix = ".config.toml"
+    paths: list[Path] = []
+    try:
+        with entries:
+            for entry in entries:
+                candidate = codex_home / entry.name
+                profile_name = entry.name[: -len(suffix)]
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", profile_name):
+                    continue
+                if entry.name.endswith(suffix):
+                    paths.append(candidate)
+                    continue
+                if not entry.name.casefold().endswith(suffix):
+                    continue
+                exact_suffix_alias = codex_home / f"{entry.name[:-len(suffix)]}{suffix}"
+                try:
+                    alias_stat = exact_suffix_alias.stat()
+                except FileNotFoundError:
+                    continue
+                if os.path.samestat(alias_stat, candidate.stat()):
+                    paths.append(candidate)
     except OSError as exc:
         raise HarnessError(
             f"cannot enumerate Codex profile configs in {codex_home}: {exc}"
@@ -343,7 +350,7 @@ def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
 
     Codex determines its project root before loading project-local layers. The
     Git-root audit below is exact only for the default ``[\".git\"]`` marker
-    topology, so any stored base, system, or profile override is an explicit
+    topology, so any stored base, system, or profile-v2 override is an explicit
     static-verification boundary rather than a guessed layer walk.
     """
     config_paths = [
@@ -406,10 +413,7 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
         if groups:
             sources.append(f"{hooks_path} ({len(groups)})")
     for config_path in dict.fromkeys(config_paths):
-        include_profiles = config_path != system_config.with_name("requirements.toml")
-        for location, document in inline_hook_documents_from_config(
-            config_path, include_profiles=include_profiles
-        ):
+        for location, document in inline_hook_documents_from_config(config_path):
             groups = managed_codex_floor_groups(document)
             count += len(groups)
             if groups:

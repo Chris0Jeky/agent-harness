@@ -1952,6 +1952,28 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] Codex project root markers", output)
         self.assertIn("custom.config.toml", output)
 
+    def test_doctor_audits_mixed_case_profile_marker_when_loadable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            profile_configs={
+                "custom.CONFIG.TOML": 'project_root_markers = ["workspace.toml"]\n'
+            },
+        )
+
+        exact_alias = Path(self.temp.name) / "codex-home" / "custom.config.toml"
+        if exact_alias.is_file():
+            self.assertEqual(result, 1)
+            self.assertIn("[FAIL] Codex project root markers", output)
+            self.assertIn("custom.CONFIG.TOML", output)
+        else:
+            self.assertEqual(result, 0, output)
+
     def test_doctor_rejects_invalid_project_root_marker_shape(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -2018,7 +2040,7 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("0 explicit inspectable declaration(s)", output)
         self.assertIn("cloud/MDM/session/plugin hooks require /hooks", output)
 
-    def test_doctor_rejects_nested_profile_project_root_markers(self) -> None:
+    def test_doctor_ignores_unsupported_legacy_profile_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
             Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -2032,9 +2054,9 @@ class HarnessTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(result, 1)
-        self.assertIn("[FAIL] Codex project root markers", output)
-        self.assertIn("profiles.custom.project_root_markers", output)
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project root markers", output)
+        self.assertIn("0 explicit inspectable declaration(s)", output)
 
     def test_doctor_rejects_multiple_project_root_markers(self) -> None:
         repo = self.make_repo()
@@ -2131,7 +2153,50 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] no inspectable global Codex floor", output)
         self.assertIn("custom.config.toml", output)
 
-    def test_doctor_rejects_direct_legacy_profile_inline_global_floor(self) -> None:
+    def test_doctor_audits_mixed_case_profile_floor_when_loadable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            profile_configs={"custom.CONFIG.TOML": self.inline_floor_config_text()},
+        )
+
+        exact_alias = Path(self.temp.name) / "codex-home" / "custom.config.toml"
+        if exact_alias.is_file():
+            self.assertEqual(result, 1)
+            self.assertIn("[FAIL] no inspectable global Codex floor", output)
+            self.assertIn("custom.CONFIG.TOML", output)
+        else:
+            self.assertEqual(result, 0, output)
+
+    def test_doctor_ignores_unselectable_profile_filenames(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        unselectable_config = (
+            'project_root_markers = ["workspace.toml"]\n'
+            + self.inline_floor_config_text()
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            profile_configs={
+                ".config.toml": unselectable_config,
+                "backup.old.config.toml": unselectable_config,
+            },
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] no inspectable global Codex floor", output)
+        self.assertIn("[ok] Codex project root markers", output)
+
+    def test_doctor_ignores_unsupported_legacy_profile_inline_hooks(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
             Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -2145,9 +2210,8 @@ class HarnessTests(unittest.TestCase):
             repo, user_config=profile_floor
         )
 
-        self.assertEqual(result, 1)
-        self.assertIn("[FAIL] no inspectable global Codex floor", output)
-        self.assertIn("profiles.custom.hooks", output)
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] no inspectable global Codex floor", output)
 
     def test_doctor_fails_closed_when_profile_enumeration_is_denied(self) -> None:
         repo = self.make_repo()
@@ -2188,6 +2252,28 @@ class HarnessTests(unittest.TestCase):
                 "cannot enumerate Codex profile configs.*fixture denied",
             ):
                 harness.codex_profile_config_paths(codex_home)
+
+    def test_profile_config_enumeration_matches_loadable_filename_aliases(
+        self,
+    ) -> None:
+        codex_home = Path(self.temp.name) / "codex-home-filenames"
+        codex_home.mkdir()
+        ordinary = codex_home / "ordinary.config.toml"
+        mixed_case = codex_home / "mixed.CONFIG.TOML"
+        unselectable = codex_home / "backup.old.config.toml"
+        for path in (ordinary, mixed_case, unselectable):
+            path.write_text("", encoding="utf-8")
+
+        paths = harness.codex_profile_config_paths(codex_home)
+
+        self.assertIn(ordinary, paths)
+        self.assertNotIn(unselectable, paths)
+        exact_alias = codex_home / "mixed.config.toml"
+        try:
+            mixed_case_is_loadable = exact_alias.samefile(mixed_case)
+        except FileNotFoundError:
+            mixed_case_is_loadable = False
+        self.assertEqual(mixed_case in paths, mixed_case_is_loadable)
 
     def test_doctor_rejects_system_hooks_json_global_floor(self) -> None:
         repo = self.make_repo()

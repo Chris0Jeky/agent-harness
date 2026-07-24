@@ -38,16 +38,16 @@ replacing them. It also prunes the obsolete managed global Codex floor while pre
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
 `doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
-system `hooks.json`, system `requirements.toml`, inline system/base/stored-profile hooks, and the
-legacy managed config file. On Windows it resolves the system layer through the ProgramData known
-folder, as Codex does. It scans inactive profile files and direct legacy-profile tables
-conservatively; unreadable sources or profile enumeration fail closed. Managed-cloud, MDM,
-per-invocation, and plugin hooks remain runtime-only evidence and must be reconciled in `/hooks`.
+system `hooks.json`, system `requirements.toml`, inline system/base and selectable profile-v2
+hooks, and the legacy managed config file. On Windows it resolves the system layer through the
+ProgramData known folder, as Codex does. It scans every selectable profile-v2 file conservatively; unreadable sources
+or profile enumeration fail closed. Managed-cloud, MDM, per-invocation, and plugin hooks remain
+runtime-only evidence and must be reconciled in `/hooks`.
 
-`doctor --repo` accepts the Git-root layer walk only when every inspectable top-level or direct
-legacy-profile `project_root_markers` declaration in the system, base-user, and stored-profile
-configs is absent or exactly `[".git"]`; any other, conflicting, malformed, or unreadable
-declaration fails closed. CLI and managed-cloud overrides are not statically inspectable. Under
+`doctor --repo` accepts the Git-root layer walk only when every inspectable top-level
+`project_root_markers` declaration in the system, base-user, and stored profile-v2 configs is
+absent or exactly `[".git"]`; any other, conflicting, malformed, or unreadable declaration fails
+closed. CLI and managed-cloud overrides are not statically inspectable. Under
 that qualified default topology, it walks every active `.codex` layer from the checkout root
 through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
 because Codex loads both forms. Across those sources it
