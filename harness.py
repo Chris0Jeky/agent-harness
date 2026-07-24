@@ -328,13 +328,7 @@ def inline_hook_documents_from_config(config_path: Path) -> list[tuple[str, str]
     for location, hooks in top_level_codex_config_values(config_path, "hooks"):
         if not isinstance(hooks, dict):
             raise HarnessError(f"{location} in {config_path} must be a table")
-        try:
-            document = json.dumps({"hooks": hooks}, default=toml_json_default)
-        except (TypeError, ValueError) as exc:
-            raise HarnessError(
-                f"unsupported inline hooks value in {config_path}: {exc}"
-            ) from exc
-        declarations.append((location, document))
+        declarations.append((location, inline_hooks_json_document(hooks, config_path)))
     return declarations
 
 
@@ -343,6 +337,16 @@ def toml_json_default(value: Any) -> dict[str, str]:
     if isinstance(value, (datetime, date, time)):
         return {"__agent_harness_toml_scalar__": type(value).__name__}
     raise TypeError(f"unsupported TOML value: {type(value).__name__}")
+
+
+def inline_hooks_json_document(hooks: dict[str, Any], config_path: Path) -> str:
+    """Serialize a validated TOML hook table into the JSON adapter shape."""
+    try:
+        return json.dumps({"hooks": hooks}, default=toml_json_default)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise HarnessError(
+            f"unsupported inline hooks value in {config_path}: {exc}"
+        ) from exc
 
 
 def project_root_markers_from_config(
@@ -668,12 +672,9 @@ def inline_hooks_document(config_path: Path) -> str:
     hooks = inline_hooks_from_config(config_path)
     if hooks is None:
         return ""
-    try:
-        return json.dumps({"hooks": hooks}, default=toml_json_default)
-    except (TypeError, ValueError) as exc:
-        raise HarnessError(
-            f"unsupported inline hooks value in {config_path}: {exc}"
-        ) from exc
+    if not isinstance(hooks, dict):
+        raise HarnessError(f"hooks in {config_path} must be a table")
+    return inline_hooks_json_document(hooks, config_path)
 
 
 def codex_inline_hook_source_status(

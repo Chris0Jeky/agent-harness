@@ -806,6 +806,15 @@ class HarnessTests(unittest.TestCase):
             1,
         )
 
+    def test_inline_hook_conversions_normalize_serializer_recursion(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
+
+        with self.assertRaises(harness.HarnessError):
+            harness.inline_hooks_document(config)
+        with self.assertRaises(harness.HarnessError):
+            harness.inline_hook_documents_from_config(config)
+
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
         adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
