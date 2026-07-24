@@ -861,16 +861,29 @@ def summarize_tier(
                     by_runtime[runtime] += 1
     total = len(commands)
     blocked = total - decisions["allow"]
+    refused = blocked - decisions["ask"]
     total_invocations = sum(decision_invocations.values())
     blocked_invocations = total_invocations - decision_invocations["allow"]
+    refused_invocations = blocked_invocations - decision_invocations["ask"]
     return {
         "unique_commands": total,
+        # "blocked" is Codex semantics: respond() converts `ask` to `deny` for
+        # Codex, so every non-allow is a refusal there. For Claude an `ask` is a
+        # prompt the human answers, so "refused" (deny + error) is the honest
+        # Claude number and is reported alongside rather than folded in.
         "unique_blocked": blocked,
         "unique_block_rate": (blocked / total) if total else 0.0,
+        "unique_refused": refused,
+        "unique_refuse_rate": (refused / total) if total else 0.0,
+        "unique_ask": decisions["ask"],
         "invocations": total_invocations,
         "invocations_blocked": blocked_invocations,
+        "invocations_refused": refused_invocations,
         "invocation_block_rate": (
             (blocked_invocations / total_invocations) if total_invocations else 0.0
+        ),
+        "invocation_refuse_rate": (
+            (refused_invocations / total_invocations) if total_invocations else 0.0
         ),
         "decisions": dict(decisions),
         "decision_invocations": dict(decision_invocations),
@@ -894,16 +907,27 @@ def compare_tier(
     tier_index: int,
     top: int,
 ) -> dict[str, Any]:
-    """Newly-blocked / newly-allowed deltas plus the full transition matrix.
+    """Bucket every decision change; the buckets partition the transitions.
 
-    `reclassified` matters when reading the block-class tables side by side: a
-    rule whose count grows in the candidate has not necessarily started blocking
-    anything new — it may have inherited commands another rule used to claim.
+    A changed verdict lands in exactly one of: newly_blocked (allow -> anything
+    else), newly_allowed (anything else -> allow), ask_gained (a refusal becomes
+    a prompt: a genuine relaxation for Claude, still a deny for Codex),
+    ask_lost (a prompt becomes a refusal), or crash_moved (deny <-> error).
+    Bucketing only the two allow-edges, as this did, left `deny -> ask` and
+    `ask -> deny` in no reported bucket at all.
+
+    `reclassified` is a different axis — same decision, different rule — and
+    matters when reading the block-class tables side by side: a rule whose count
+    grows in the candidate has not necessarily started blocking anything new, it
+    may have inherited commands another rule used to claim.
     """
     matrix: Counter[str] = Counter()
     reclassified: Counter[str] = Counter()
     newly_blocked: list[dict[str, Any]] = []
     newly_allowed: list[dict[str, Any]] = []
+    ask_gained: list[dict[str, Any]] = []
+    ask_lost: list[dict[str, Any]] = []
+    crash_moved: list[dict[str, Any]] = []
     for position, command in enumerate(commands):
         base_decision, base_reason = baseline[position][tier_index]
         cand_decision, cand_reason = candidate[position][tier_index]
@@ -912,44 +936,44 @@ def compare_tier(
             if base_decision != "allow" and base_reason != cand_reason:
                 reclassified[f"{base_reason}  =>  {cand_reason}"] += 1
             continue
-        weight = invocations(corpus[command])
-        if base_decision == "allow" and cand_decision != "allow":
-            newly_blocked.append(
-                {
-                    "command": command,
-                    "invocations": weight,
-                    "decision": cand_decision,
-                    "reason": cand_reason,
-                }
-            )
-        elif base_decision != "allow" and cand_decision == "allow":
-            newly_allowed.append(
-                {
-                    "command": command,
-                    "invocations": weight,
-                    "was": base_decision,
-                    "reason": base_reason,
-                }
-            )
-    newly_blocked.sort(key=lambda row: (-row["invocations"], row["command"]))
-    newly_allowed.sort(key=lambda row: (-row["invocations"], row["command"]))
-    return {
+        row = {
+            "command": command,
+            "invocations": invocations(corpus[command]),
+            "was": base_decision,
+            "decision": cand_decision,
+            "reason": cand_reason if cand_decision != "allow" else base_reason,
+        }
+        if base_decision == "allow":
+            newly_blocked.append(row)
+        elif cand_decision == "allow":
+            newly_allowed.append(row)
+        elif cand_decision == "ask":
+            ask_gained.append(row)
+        elif base_decision == "ask":
+            ask_lost.append(row)
+        else:
+            crash_moved.append(row)
+    buckets = {
+        "newly_blocked": newly_blocked,
+        "newly_allowed": newly_allowed,
+        "ask_gained": ask_gained,
+        "ask_lost": ask_lost,
+        "crash_moved": crash_moved,
+    }
+    result: dict[str, Any] = {
         "transitions": dict(matrix),
         "reclassified_unique": sum(reclassified.values()),
         "reclassified_top": reclassified.most_common(top),
-        "newly_blocked_unique": len(newly_blocked),
-        "newly_blocked_invocations": sum(r["invocations"] for r in newly_blocked),
-        "newly_allowed_unique": len(newly_allowed),
-        "newly_allowed_invocations": sum(r["invocations"] for r in newly_allowed),
-        "newly_blocked_reasons": dict(
-            Counter(row["reason"] for row in newly_blocked).most_common()
-        ),
-        "newly_allowed_reasons": dict(
-            Counter(row["reason"] for row in newly_allowed).most_common()
-        ),
-        "newly_blocked_top": newly_blocked[:top],
-        "newly_allowed_top": newly_allowed[:top],
     }
+    for label, rows in buckets.items():
+        rows.sort(key=lambda row: (-row["invocations"], row["command"]))
+        result[f"{label}_unique"] = len(rows)
+        result[f"{label}_invocations"] = sum(row["invocations"] for row in rows)
+        result[f"{label}_reasons"] = dict(
+            Counter(row["reason"] for row in rows).most_common()
+        )
+        result[f"{label}_top"] = rows[:top]
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -1032,9 +1056,14 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     print()
     print("block rate by tier (unique commands)")
     print("-" * 78)
+    print(
+        "  'blocked' = any non-allow, i.e. Codex semantics: respond() converts\n"
+        "  ask -> deny for Codex. For Claude an ask is a prompt, not a refusal;\n"
+        "  the Claude-semantics refusal rate (deny + error) is per tier below."
+    )
     header = (
         f"  {'tier':<5}{'baseline':>18}{'candidate':>18}"
-        f"{'new blocks':>13}{'new allows':>13}"
+        f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}"
     )
     print(header)
     for tier_key in result["tier_order"]:
@@ -1045,8 +1074,16 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
             f"  T{tier_key:<4}"
             f"{base['unique_blocked']:>8} {base['unique_block_rate'] * 100:>8.2f}%"
             f"{cand['unique_blocked']:>8} {cand['unique_block_rate'] * 100:>8.2f}%"
-            f"{delta['newly_blocked_unique']:>13}{delta['newly_allowed_unique']:>13}"
+            f"{delta['newly_blocked_unique']:>9}{delta['newly_allowed_unique']:>9}"
+            f"{delta['ask_gained_unique']:>7}{delta['ask_lost_unique']:>7}"
         )
+    asked = any(
+        result["tiers"][tier_key][label]["unique_ask"]
+        for tier_key in result["tier_order"]
+        for label in ("baseline", "candidate")
+    )
+    if not asked:
+        print("  no ask decisions at any replayed tier in either version")
     print()
     for tier_key in result["tier_order"]:
         tier = result["tiers"][tier_key]
@@ -1065,10 +1102,23 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f" / {summary['invocations']}"
                 f" ({summary['invocation_block_rate'] * 100:.2f}%)"
             )
+            print(
+                f"             blocked unique (codex semantics, ask counted)"
+                f" = {summary['unique_blocked']}"
+                f" ({summary['unique_block_rate'] * 100:.2f}%)"
+                f"; refused unique (claude semantics, deny+error)"
+                f" = {summary['unique_refused']}"
+                f" ({summary['unique_refuse_rate'] * 100:.2f}%)"
+            )
             runtimes = summary["blocked_unique_by_runtime"]
             print(
                 "             blocked unique by runtime: "
                 + ", ".join(f"{name}={runtimes.get(name, 0)}" for name in RUNTIMES)
+            )
+        if not (tier["baseline"]["unique_ask"] or tier["candidate"]["unique_ask"]):
+            print(
+                "  no ask decisions at this tier in either version, so the two "
+                "rates above coincide"
             )
         print()
         print(f"  top block classes ({result['candidate']['version']}, candidate):")
@@ -1110,14 +1160,42 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"{clip(row['command'], width)}"
             )
             print(f"           was: {clip(row['reason'], width)}")
-        other = {
+        for label, caption in (
+            (
+                "ask_gained",
+                "ASK GAINED (baseline refused -> candidate asks; a relaxation "
+                "for Claude, still deny for Codex)",
+            ),
+            (
+                "ask_lost",
+                "ASK LOST (baseline asked -> candidate refuses; a tightening "
+                "for Claude, no change for Codex)",
+            ),
+            (
+                "crash_moved",
+                "CRASH MOVED (deny <-> error: a rule-evaluation exception "
+                "changed side)",
+            ),
+        ):
+            if not delta[f"{label}_unique"]:
+                continue
+            print(
+                f"  {caption}: {delta[f'{label}_unique']} unique / "
+                f"{delta[f'{label}_invocations']} invocations"
+            )
+            for row in delta[f"{label}_top"]:
+                print(
+                    f"    [{row['invocations']:>4}x {row['was']}->{row['decision']}] "
+                    f"{clip(row['command'], width)}"
+                )
+                print(f"           reason: {clip(row['reason'], width)}")
+        residual = {
             key: value
             for key, value in delta["transitions"].items()
             if key.split("->")[0] != key.split("->")[1]
-            and not (key.startswith("allow->") or key.endswith("->allow"))
         }
-        if other:
-            print(f"  other transitions: {other}")
+        if residual:
+            print(f"  full transition matrix (changed verdicts only): {residual}")
         if delta["reclassified_unique"]:
             print(
                 f"  RECLASSIFIED (still blocked, different rule): "
