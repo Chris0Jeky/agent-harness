@@ -580,7 +580,7 @@ CASES = [
         {},
         "deny",
     ),
-    # --- v1.5.3 late review: preserve the Windows fallback boundary ---
+    # --- v1.5.4: preserve the Windows fallback boundary ---
     (
         r'''cmd /c "if /I x EQU x rd /s /q C:\critical\outside path\"''',
         1,
