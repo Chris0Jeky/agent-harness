@@ -603,5 +603,104 @@ class OverlayFlagTests(EndToEndTestCase):
         self.assertEqual(replay.tier_label(3, ["wave_mode"]), "T3+wave_mode")
 
 
+class CheckErrorGuardTests(EndToEndTestCase):
+    """A crashing version counts as blocked, which zeroes the regression number."""
+
+    ERRORS_ON_ONE = """
+    if command == "boom":
+        raise TypeError("check() got an unexpected keyword argument")
+    return "allow", ""
+    """
+
+    def scenario(self, *extra):
+        corpus = self.write_corpus("boom", "git status")
+        baseline = self.write_dispatch("crashing", "1.0.0", self.ERRORS_ON_ONE)
+        candidate = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_an_erroring_version_exits_non_zero_with_a_banner(self):
+        code, text, err = self.scenario()
+        self.assertEqual(code, replay.EXIT_ERRORS_PRESENT)
+        self.assertNotEqual(replay.EXIT_ERRORS_PRESENT, 0)
+        self.assertIn("check() RAISED", text)
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("check() RAISED", err)
+
+    def test_the_error_count_is_in_the_headline_table(self):
+        _, text, _ = self.scenario()
+        headline = text.split("block rate by tier")[1].split("=" * 78)[0]
+        self.assertIn("err b/c", headline)
+        # baseline raised once, candidate never: exactly the shape that turns a
+        # real regression into a NEWLY ALLOWED row. Previously the count showed
+        # up only in the per-tier detail and the block-class table.
+        tier_row = next(line for line in headline.splitlines() if "T2" in line)
+        self.assertTrue(tier_row.rstrip().endswith("1/0"), tier_row)
+
+    def test_the_crash_still_inflates_newly_allowed_which_is_why_it_aborts(self):
+        # Documents the mechanism the exit code protects against: the error is
+        # counted as blocked, so error -> allow is reported as a relaxation.
+        _, text, _ = self.scenario()
+        self.assertIn("NEWLY ALLOWED", text)
+        self.assertIn("1 unique", text.split("NEWLY ALLOWED")[1][:60])
+
+    def test_allow_errors_is_the_only_way_back_to_zero(self):
+        code, text, _ = self.scenario("--allow-errors")
+        self.assertEqual(code, 0)
+        self.assertNotIn("check() RAISED", text)
+
+    def test_a_clean_run_reports_zero_errors_and_exits_zero(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("clean", "1.0.0", 'return "allow", ""')
+        json_path = self.dir / "clean.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("check() RAISED", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["errors"], {"baseline": 0, "candidate": 0})
+
+    def test_count_errors_sums_every_replayed_tier(self):
+        result = {
+            "tier_order": [1, 2],
+            "tiers": {
+                1: {
+                    "baseline": {"decisions": {"error": 2, "allow": 1}},
+                    "candidate": {"decisions": {"allow": 3}},
+                },
+                2: {
+                    "baseline": {"decisions": {"error": 5}},
+                    "candidate": {"decisions": {"error": 1}},
+                },
+            },
+        }
+        self.assertEqual(replay.count_errors(result), {"baseline": 7, "candidate": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

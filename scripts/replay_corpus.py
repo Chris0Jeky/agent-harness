@@ -19,6 +19,15 @@ actually ran, replays each one through `dispatch.check()` offline, and reports:
     (baseline refused, candidate allows: a relaxation needing security review);
   * blocks grouped by deny reason, reproducing issue #21's block-class table.
 
+EXIT CODES
+----------
+0 clean; 1 nothing to replay; 2 at least one command made `check()` raise in
+one of the two versions. 2 is not cosmetic: an exception becomes an `error`
+decision, `error` counts as blocked, and the two allow-edge buckets then move in
+opposite unsafe directions — NEWLY ALLOWED is inflated and NEWLY BLOCKED is
+suppressed to zero. `--allow-errors` downgrades it to a report for a deliberate
+crash census.
+
 PRIVACY
 -------
 The corpus is real work: repository paths, branch names, occasionally a token
@@ -118,6 +127,11 @@ OVERLAY_FLAGS = (
     "dormant_production",
     "relaxed_work_loss_guards",
 )
+# Exit code when a replayed version raised inside `check()`. Distinct from 1
+# ("nothing to replay") so a caller can tell an unusable corpus from an
+# unusable comparison.
+EXIT_ERRORS_PRESENT = 2
+
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
 # The argument brace is matched separately from the call so that a non-object
@@ -1208,23 +1222,32 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         "  ask -> deny for Codex. For Claude an ask is a prompt, not a refusal;\n"
         "  the Claude-semantics refusal rate (deny + error) is per tier below."
     )
+    print(
+        "  'err' = check() raised. Any non-zero value invalidates the deltas on\n"
+        "  that row: an error counts as blocked, so error->allow inflates 'new\n"
+        "  alw' and error->deny never reaches 'new blk'."
+    )
     labels = {key: tier_label(key, overlays) for key in result["tier_order"]}
     label_width = max([len("tier")] + [len(text) for text in labels.values()]) + 2
     header = (
         f"  {'tier':<{label_width}}{'baseline':>18}{'candidate':>18}"
-        f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}"
+        f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}{'err b/c':>10}"
     )
     print(header)
     for tier_key in result["tier_order"]:
         base = result["tiers"][tier_key]["baseline"]
         cand = result["tiers"][tier_key]["candidate"]
         delta = result["tiers"][tier_key]["delta"]
+        errors = (
+            f"{base['decisions'].get('error', 0)}/{cand['decisions'].get('error', 0)}"
+        )
         print(
             f"  {labels[tier_key]:<{label_width}}"
             f"{base['unique_blocked']:>8} {base['unique_block_rate'] * 100:>8.2f}%"
             f"{cand['unique_blocked']:>8} {cand['unique_block_rate'] * 100:>8.2f}%"
             f"{delta['newly_blocked_unique']:>9}{delta['newly_allowed_unique']:>9}"
             f"{delta['ask_gained_unique']:>7}{delta['ask_lost_unique']:>7}"
+            f"{errors:>10}"
         )
     asked = any(
         result["tiers"][tier_key][label]["unique_ask"]
@@ -1358,6 +1381,50 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
+
+
+def count_errors(result: dict[str, Any]) -> dict[str, int]:
+    """Per-version total of `check()` exceptions across every replayed tier."""
+    return {
+        version: sum(
+            int(result["tiers"][tier][version]["decisions"].get("error", 0))
+            for tier in result["tier_order"]
+        )
+        for version in ("baseline", "candidate")
+    }
+
+
+def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
+    """Refuse to let a crashing version be read as a clean comparison.
+
+    `decide()` turns an exception into an `error` decision and `summarize_tier`
+    counts every non-allow as blocked, so a version that crashes looks maximally
+    strict. That corrupts both gate numbers in the unsafe direction at once:
+    error -> allow lands in NEWLY ALLOWED (a relaxation looks larger and better
+    evidenced than it is) and error -> deny lands in `crash_moved`, never in
+    NEWLY BLOCKED — so a crashing baseline drives the regression count to zero.
+    A stub baseline with a pre-`remote_resolver` `check()` signature produced
+    `new blocks 0 / new allows 1` and exit 0 before this guard existed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            "!! check() RAISED: baseline "
+            f"{errors['baseline']} / candidate {errors['candidate']} error "
+            "decisions.",
+            file=stream,
+        )
+        print(
+            "!! Every delta above is unusable. An error counts as blocked, so "
+            "NEWLY ALLOWED\n"
+            "!! is inflated and NEWLY BLOCKED is suppressed. The exception "
+            "texts are the\n"
+            "!! `error` rows of the block-class tables. Fix the version, or "
+            "pass --allow-errors\n"
+            f"!! to accept the numbers anyway. Exiting {EXIT_ERRORS_PRESENT}.",
+            file=stream,
+        )
+        print("!" * 78, file=stream)
 
 
 def default_codex_root() -> Path:
@@ -1609,6 +1676,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.top,
             ),
         }
+    errors = count_errors(result)
+    result["run"]["errors"] = errors
+    result["run"]["allow_errors"] = bool(args.allow_errors)
+
     print_report(result, args.top, args.sample_width)
     if args.json_path:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1616,6 +1687,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
+    if sum(errors.values()) and not args.allow_errors:
+        print_error_banner(result, errors)
+        return EXIT_ERRORS_PRESENT
     return 0
 
 
