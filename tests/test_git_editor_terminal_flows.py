@@ -72,6 +72,155 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
             with self.subTest(subcommand=subcommand, args=args):
                 self.assertTrue(self.dispatch.git_editor_is_reachable(subcommand, args))
 
+    def test_option_values_named_like_terminal_flows_stay_reachable(self) -> None:
+        cases = [
+            ("merge", ["-m", "--abort", "--edit", "--no-ff", "side"]),
+            ("merge", ["-m--abort", "--edit", "--no-ff", "side"]),
+            ("merge", ["--message", "--quit", "--edit", "side"]),
+            ("merge", ["--message=--abort", "--edit", "side"]),
+            ("merge", ["-s", "--abort", "--edit", "side"]),
+            ("merge", ["-X--quit", "--edit", "side"]),
+            ("merge", ["-S--abort", "--edit", "side"]),
+            ("merge", ["--gpg-sign=--quit", "--edit", "side"]),
+            ("rebase", ["--onto", "--abort", "main"]),
+            ("rebase", ["-x--quit", "main"]),
+            ("cherry-pick", ["-m", "--abort", "--edit", "HEAD"]),
+            ("revert", ["--mainline", "--quit", "--edit", "HEAD"]),
+            ("am", ["--quoted-cr", "--abort", "--interactive", "patch"]),
+            ("am", ["-C--quit", "--interactive", "patch"]),
+        ]
+        for subcommand, args in cases:
+            with self.subTest(subcommand=subcommand, args=args):
+                self.assertTrue(self.dispatch.git_editor_is_reachable(subcommand, args))
+
+    def test_terminal_flows_after_option_values_stay_unreachable(self) -> None:
+        cases = [
+            ("merge", ["-m", "message", "--abort"]),
+            ("merge", ["-mmessage", "--quit"]),
+            ("merge", ["--message=message", "--abort"]),
+            ("merge", ["-S", "--abort"]),
+            ("merge", ["--gpg-sign", "--quit"]),
+            ("rebase", ["--onto", "main", "--abort"]),
+            ("rebase", ["-xtrue", "--quit"]),
+            ("cherry-pick", ["-m", "1", "--abort"]),
+            ("revert", ["--mainline=1", "--quit"]),
+            ("am", ["--quoted-cr", "nowarn", "--abort"]),
+            ("am", ["-C1", "--quit"]),
+        ]
+        for subcommand, args in cases:
+            with self.subTest(subcommand=subcommand, args=args):
+                self.assertFalse(
+                    self.dispatch.git_editor_is_reachable(subcommand, args)
+                )
+
+    def test_sequencer_value_option_arity(self) -> None:
+        required_options = {
+            "merge": {
+                "short": ["-m", "-F", "-s", "-X"],
+                "long": [
+                    "--cleanup",
+                    "--strategy",
+                    "--strategy-option",
+                    "--message",
+                    "--file",
+                    "--into-name",
+                ],
+            },
+            "rebase": {
+                "short": ["-C", "-x", "-s", "-X"],
+                "long": [
+                    "--onto",
+                    "--whitespace",
+                    "--empty",
+                    "--exec",
+                    "--strategy",
+                    "--strategy-option",
+                ],
+            },
+            "cherry-pick": {
+                "short": ["-m", "-X"],
+                "long": [
+                    "--cleanup",
+                    "--mainline",
+                    "--strategy",
+                    "--strategy-option",
+                    "--empty",
+                ],
+            },
+            "revert": {
+                "short": ["-m", "-X"],
+                "long": [
+                    "--cleanup",
+                    "--mainline",
+                    "--strategy",
+                    "--strategy-option",
+                ],
+            },
+            "am": {
+                "short": ["-C", "-p"],
+                "long": [
+                    "--quoted-cr",
+                    "--whitespace",
+                    "--directory",
+                    "--exclude",
+                    "--include",
+                    "--patch-format",
+                    "--resolvemsg",
+                    "--empty",
+                ],
+            },
+        }
+        terminal = self.dispatch.git_sequencer_flow_is_terminal
+        for subcommand, options in required_options.items():
+            for option in options["short"]:
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="separate"
+                ):
+                    self.assertFalse(terminal(subcommand, [option, "--abort"]))
+                    self.assertTrue(terminal(subcommand, [option, "value", "--abort"]))
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="attached"
+                ):
+                    self.assertFalse(terminal(subcommand, [option + "--quit"]))
+                    self.assertTrue(terminal(subcommand, [option + "value", "--quit"]))
+            for option in options["long"]:
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="separate"
+                ):
+                    self.assertFalse(terminal(subcommand, [option, "--abort"]))
+                    self.assertTrue(terminal(subcommand, [option, "value", "--abort"]))
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="attached"
+                ):
+                    self.assertFalse(terminal(subcommand, [option + "=--quit"]))
+                    self.assertTrue(terminal(subcommand, [option + "=value", "--quit"]))
+
+    def test_sequencer_optional_values_only_consume_attached_text(self) -> None:
+        optional_long = {
+            "merge": ["--log", "--gpg-sign"],
+            "rebase": ["--gpg-sign", "--rebase-merges"],
+            "cherry-pick": ["--gpg-sign"],
+            "revert": ["--gpg-sign"],
+            "am": ["--gpg-sign", "--show-current-patch"],
+        }
+        terminal = self.dispatch.git_sequencer_flow_is_terminal
+        for subcommand, options in optional_long.items():
+            with self.subTest(subcommand=subcommand, option="-S", form="separate"):
+                self.assertTrue(terminal(subcommand, ["-S", "--abort"]))
+            with self.subTest(subcommand=subcommand, option="-S", form="attached"):
+                self.assertFalse(terminal(subcommand, ["-S--abort"]))
+                self.assertTrue(terminal(subcommand, ["-Skey", "--quit"]))
+            for option in options:
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="separate"
+                ):
+                    self.assertTrue(terminal(subcommand, [option, "--abort"]))
+                with self.subTest(
+                    subcommand=subcommand, option=option, form="attached"
+                ):
+                    self.assertFalse(terminal(subcommand, [option + "=--abort"]))
+                    self.assertTrue(terminal(subcommand, [option + "=value", "--quit"]))
+
     def test_abort_does_not_leak_into_non_sequencer_subcommands(self) -> None:
         # config/add have no --abort; the terminal check must not change them.
         self.assertFalse(self.dispatch.git_editor_is_reachable("config", ["--list"]))
@@ -112,6 +261,15 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
                 # A flow that genuinely reaches the editor stays denied.
                 decision, _ = self.dispatch.check(
                     "git merge main", tier, project, project
+                )
+                self.assertEqual(decision, "deny")
+                # --abort is the separate value of -m here. The later --edit
+                # still reaches the inherited editor, so the check must deny.
+                decision, _ = self.dispatch.check(
+                    "git merge -m --abort --edit --no-ff side",
+                    tier,
+                    project,
+                    project,
                 )
                 self.assertEqual(decision, "deny")
         finally:
