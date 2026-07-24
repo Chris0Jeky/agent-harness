@@ -1177,9 +1177,19 @@ def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     if not root.is_dir():
         return ""
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(path.read_bytes())
+    paths = sorted(
+        (path for path in root.rglob("*") if path.is_dir() or path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    for path in paths:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        kind = b"D" if path.is_dir() else b"F"
+        payload = b"" if path.is_dir() else path.read_bytes()
+        digest.update(kind)
+        digest.update(len(relative).to_bytes(8, byteorder="big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, byteorder="big"))
+        digest.update(payload)
     return digest.hexdigest()
 
 

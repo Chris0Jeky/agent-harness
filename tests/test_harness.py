@@ -109,6 +109,28 @@ class HarnessTests(unittest.TestCase):
         config.write_text(cls.inline_floor_config_text(), encoding="utf-8")
         return config
 
+    def make_sync_global_skill_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        source_skill = config_root / "codex" / "skills" / "sample"
+        target_skill = root / "skills-home" / "sample"
+        source_skill.mkdir(parents=True)
+        target_skill.mkdir(parents=True)
+        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        for skill in (source_skill, target_skill):
+            (skill / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        skills_home = root / "skills-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        return source_skill, target_skill, skills_home, args
+
     def run_doctor_with_fixture_globals(
         self,
         repo: Path,
@@ -1577,22 +1599,8 @@ allow_local_binding = true
         self.assertEqual(hooks_path.read_text(encoding="utf-8"), original)
 
     def test_sync_global_does_not_replace_identical_skill(self) -> None:
-        root = Path(self.temp.name)
-        config_root = root / "config"
-        source_skill = config_root / "codex" / "skills" / "sample"
-        target_skill = root / "skills-home" / "sample"
-        source_skill.mkdir(parents=True)
-        target_skill.mkdir(parents=True)
-        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
-        for skill in (source_skill, target_skill):
-            (skill / "SKILL.md").write_text("# sample\n", encoding="utf-8")
-
-        args = SimpleNamespace(
-            config_root=str(config_root),
-            codex_home=str(root / "codex-home"),
-            claude_home=str(root / "claude-home"),
-            skills_home=str(root / "skills-home"),
-            apply=True,
+        _source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("identical-skill")
         )
         with mock.patch.object(
             harness.shutil,
@@ -1604,6 +1612,42 @@ allow_local_binding = true
         self.assertEqual(
             (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
         )
+
+    def test_sync_global_replaces_path_content_digest_alias(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("digest-alias")
+        )
+        (source_skill / "ab").write_bytes(b"c")
+        (target_skill / "a").write_bytes(b"bc")
+
+        self.assertNotEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual((target_skill / "ab").read_bytes(), b"c")
+        self.assertFalse((target_skill / "a").exists())
+        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "a").read_bytes(), b"bc")
+
+    def test_sync_global_replaces_mismatched_empty_directories(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("empty-directories")
+        )
+        (source_skill / "assets").mkdir()
+        (target_skill / "obsolete").mkdir()
+
+        self.assertNotEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue((target_skill / "assets").is_dir())
+        self.assertFalse((target_skill / "obsolete").exists())
+        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / "obsolete").is_dir())
 
     def test_sync_global_preserves_same_second_backup_sets(self) -> None:
         root = Path(self.temp.name)
