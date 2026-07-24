@@ -245,8 +245,14 @@ def is_dynamic_value(text: str) -> bool:
 _POWERSHELL_TYPE_PREFIX = re.compile(r"^(?:\[[^\[\]\r\n]+\])+")
 
 
-def powershell_assignment_rhs(raw: list[str]) -> str | None:
-    """Return a PowerShell assignment RHS; None means this is not an assignment."""
+def powershell_assignment_rhs_tokens(raw: list[str]) -> list[str] | None:
+    """Return a PowerShell assignment's RHS ARGV TOKENS; None means not one.
+
+    Token structure is what separates a BOUND VALUE from an INVOKED COMMAND, and
+    it is also what a caller needs in order to rebuild the RHS as command text
+    without flattening a quoted argument, so the tokens are the primary result
+    and the joined text is derived from them.
+    """
     if not raw:
         return None
     parts = list(raw)
@@ -257,15 +263,26 @@ def powershell_assignment_rhs(raw: list[str]) -> str | None:
     parts[0] = _POWERSHELL_TYPE_PREFIX.sub("", parts[0])
     attached = re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*=(.*)", parts[0])
     if attached:
-        rhs_parts = [attached.group(1), *parts[1:]]
-        return " ".join(part for part in rhs_parts if part)
+        return [part for part in (attached.group(1), *parts[1:]) if part]
     if (
         len(parts) > 1
         and parts[1] == "="
         and re.fullmatch(r"\$(?:env:)?[A-Za-z_][A-Za-z0-9_:{}]*", parts[0])
     ):
-        return " ".join(parts[2:])
+        return list(parts[2:])
     return None
+
+
+def powershell_assignment_rhs(raw: list[str]) -> str | None:
+    """Return a PowerShell assignment RHS; None means this is not an assignment.
+
+    The joined spelling is kept for callers that only compare or re-split the
+    text. A caller that hands the result to check() as a COMMAND must join with
+    rejoin_argv_as_command instead, or a quoted argument is flattened into
+    separate words and a different program is inspected.
+    """
+    rhs = powershell_assignment_rhs_tokens(raw)
+    return None if rhs is None else " ".join(rhs)
 
 
 def inert_powershell_scriptblock(value: str) -> bool:
@@ -985,6 +1002,55 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     return None
 
 
+def requote_argv_token(token: str) -> str:
+    """Re-quote one argv token so re-tokenizing it yields the SAME token.
+
+    `quote_aware_segments_with_operators` recognizes `'...'` with no embedded
+    `'` and `"..."` with backslash escapes, and adjacent quoted spans are
+    concatenated by shlex into a single token. Encoding as alternating `'...'`
+    and `"'"` spans therefore round-trips any text exactly, which is the only
+    property that matters here: the floor's own tokenizer is what re-reads this
+    text, so the encoding has to satisfy that tokenizer, not a PowerShell host.
+    PowerShell's own `''` doubling would NOT round-trip — `_QUOTED` matches
+    `'a''b'` as two separate spans and silently drops the quote.
+
+    A token with no character the tokenizer treats as structure is emitted
+    verbatim, so ordinary argv and the synthesized `;`/`|` separators stay
+    byte-identical and every head, path and flag match is unaffected.
+    """
+    if not token:
+        return "''"
+    if not _ARGV_TOKEN_NEEDS_QUOTING.search(token):
+        return token
+    return "'" + token.replace("'", "'\"'\"'") + "'"
+
+
+# Characters the child tokenizer treats as structure rather than as text:
+# whitespace ends a token, the quote characters open a span, and shlex's
+# punctuation_chars end a segment.
+_ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
+
+
+def rejoin_argv_as_command(parts: list[str]) -> str:
+    """Rebuild command TEXT from argv tokens without losing argument boundaries.
+
+    A quoted argument is ONE argv token that holds whitespace, so joining with a
+    bare space flattened it into separate words and the recursed child parsed a
+    DIFFERENT, usually harmless command:
+
+        body argv  : ['bash', '-c', 'rm -rf /critical/outside', '1']
+        ' '.join   : bash -c rm -rf /critical/outside 1   -> the -c payload is `rm`
+        re-quoted  : bash -c 'rm -rf /critical/outside' 1 -> the real payload
+
+    That flattening was the single largest source of coverage loss when the
+    blanket "a split literal scriptblock is malformed" deny was relaxed: the
+    blanket had been accidentally covering every quoted payload inside a
+    scriptblock, because `strip_quotes` masks quoted text from the sanitized
+    pass and the rejoin then destroyed it in the quote-aware pass too.
+    """
+    return " ".join(requote_argv_token(part) for part in parts).strip()
+
+
 def powershell_literal_scriptblock_bodies(
     toks: list[str],
 ) -> list[tuple[str, list[str]]]:
@@ -1004,7 +1070,11 @@ def powershell_literal_scriptblock_bodies(
     quoted string is a single argv token however many words it holds, which is
     what lets the caller tell an inert string statement (`{ 'git push --force' }`)
     from a command (`{ iex 'git push --force' }`) without re-inspecting quoted
-    text the floor promised never to treat as a target."""
+    text the floor promised never to treat as a target.
+
+    `body_text` re-quotes those tokens rather than joining them with a bare
+    space: the text is handed to check() as a command, and a flattened quoted
+    argument re-parses as a different program (see rejoin_argv_as_command)."""
     bodies: list[tuple[str, list[str]]] = []
     index = 0
     while index < len(toks):
@@ -1020,7 +1090,7 @@ def powershell_literal_scriptblock_bodies(
             if inner and inner[-1].endswith("}"):
                 inner[-1] = inner[-1][:-1]
             inner = [restore_quoted_literal_markers(part) for part in inner if part]
-            bodies.append((" ".join(inner).strip(), inner))
+            bodies.append((rejoin_argv_as_command(inner), inner))
             index = end
             continue
         index += 1
@@ -6461,9 +6531,9 @@ def check(
                 continue
             # `$null = iex '...'` is an assignment whose RHS is a command, and
             # the head would otherwise be `$null` and fail the letter gate below.
-            assigned = powershell_assignment_rhs(body_tokens)
+            assigned = powershell_assignment_rhs_tokens(body_tokens)
             if assigned:
-                body = assigned
+                body = rejoin_argv_as_command(assigned)
             body_head, _ = command_head(tokens(body))
             # Only a command invocation is recursed; a pure expression or
             # member access (`$_.Name`, `1..3`) is inert output, not a

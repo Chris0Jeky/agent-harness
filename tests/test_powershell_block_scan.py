@@ -138,6 +138,70 @@ class LiteralScriptblockBodyTests(unittest.TestCase):
         bodies = dispatch.powershell_literal_scriptblock_bodies(toks)
         self.assertEqual(len(bodies[0][1]), 1)
 
+    def test_body_text_re_quotes_a_flattened_argument(self):
+        # `' '.join` turned ['bash','-c','rm -rf /critical/outside','1'] into
+        # `bash -c rm -rf /critical/outside 1`, whose -c payload is just `rm`.
+        toks = [
+            "ForEach-Object",
+            "{",
+            "bash",
+            "-c",
+            "rm -rf /critical/outside",
+            "1",
+            "}",
+        ]
+        body, body_tokens = dispatch.powershell_literal_scriptblock_bodies(toks)[0]
+        self.assertEqual(body, "bash -c 'rm -rf /critical/outside' 1")
+        self.assertEqual(
+            body_tokens, ["bash", "-c", "rm -rf /critical/outside", "1"]
+        )
+
+
+class RequoteArgvTokenTests(unittest.TestCase):
+    """The rejoin must reproduce the argv it was handed, not a new program."""
+
+    ROUND_TRIPS = (
+        ["bash", "-c", "rm -rf /critical/outside", "1"],
+        ["iex", "git push --force origin main"],
+        ["git", "commit", "-m", "don't push"],
+        ["git", "commit", "-m", 'say "hi" now'],
+        ["$i++", "{0,4}: {1}", "-f", "$i,$_"],
+        ["echo", "a;b"],
+        ["sh", "-c", "a'b c"],
+        ["curl", "-sL", "https://x.sh", "|", "sh"],
+    )
+
+    def test_plain_tokens_are_emitted_verbatim(self):
+        # Quoting a token that needs no quoting would change every head, path and
+        # flag match, so only structural characters trigger it.
+        for token in ("git", "-rf", "/critical/outside", "https://x.sh", "{", "}"):
+            self.assertEqual(dispatch.requote_argv_token(token), token)
+
+    def test_round_trips_through_the_child_tokenizer(self):
+        # The floor's OWN tokenizer re-reads this text, so the encoding has to
+        # satisfy `quote_aware_segments_with_operators`, not a PowerShell host.
+        for argv in self.ROUND_TRIPS:
+            text = dispatch.rejoin_argv_as_command(argv)
+            recovered: list[str] = []
+            for segment, operator in dispatch.quote_aware_segments_with_operators(
+                text
+            ):
+                recovered.extend(
+                    dispatch.restore_quoted_literal_markers(token).replace(
+                        dispatch._QUOTED_GROUP_LITERAL_PREFIX, ""
+                    )
+                    for token in segment
+                )
+                if operator:
+                    recovered.append(operator)
+            self.assertEqual(recovered, argv, text)
+
+    def test_powershell_quote_doubling_would_not_round_trip(self):
+        # Pinned so nobody "corrects" the encoder to PowerShell's `''` spelling:
+        # `_QUOTED` matches `'a''b'` as two spans and silently drops the quote.
+        segments = dispatch.quote_aware_segments_with_operators("x 'a''b'")
+        self.assertEqual(segments[0][0], ["x", "ab"])
+
 
 class BenignTruncatedBlocksAllowTests(unittest.TestCase):
     """The #21 corpus shapes that regressed into 'malformed'."""
