@@ -428,6 +428,7 @@ CASES = [
     (r'''rmdir/s "C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''del/f/s "C:\critical\outside path\"''', 1, {}, "deny"),
     (r'''cmd /c rd/s/q "C:\critical\outside path\"''', 1, {}, "deny"),
+    (r'''cmd /c "rd /s /q C:\critical\outside path\"''', 1, {}, "deny"),
     ("rmdir /s /q C:/critical/outside", 1, {}, "deny"),
     ("Remove-Item -R FileSystem::C:/critical/outside", 1, {}, "deny"),
     (
