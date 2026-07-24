@@ -1406,6 +1406,32 @@ allow_local_binding = true
         finally:
             remove_alias()
 
+    def test_doctor_rejects_same_repo_alias_with_different_ancestry(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        logical_parent = repo / "container"
+        logical_config = logical_parent / ".codex" / "config.toml"
+        logical_config.parent.mkdir(parents=True)
+        logical_config.write_text("[features]\nhooks = false\n", encoding="utf-8")
+        target = repo / "elsewhere" / "target"
+        target.mkdir(parents=True)
+        alias = logical_parent / "linked-target"
+        remove_alias = self.make_directory_alias(target, alias)
+        try:
+            result, output = self.run_doctor_with_fixture_globals(alias)
+
+            self.assertEqual(result, 1)
+            self.assertIn("[FAIL] Codex hook source", output)
+            self.assertIn("different project-layer ancestry", output)
+            self.assertIn("container", output)
+            self.assertIn("elsewhere", output)
+            self.assertIn("[FAIL] project Codex floor", output)
+        finally:
+            remove_alias()
+
     def test_doctor_ignores_unrelated_disabled_hook_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -2893,6 +2919,24 @@ allow_local_binding = true
                 self.assertTrue(ok)
                 self.assertEqual(hooks, (repo / ".codex" / "hooks.json").resolve())
                 self.assertIn("normal checkout", detail)
+
+    def test_codex_existing_cwd_preserves_only_nested_aliases(self) -> None:
+        anchor = Path(Path.cwd().anchor)
+        top_level_alias = anchor / "repo-alias"
+        nested_alias = anchor / "parent" / "repo-alias"
+        canonical = anchor / "real-repo"
+        for alias, expected in (
+            (top_level_alias, canonical),
+            (nested_alias, nested_alias),
+        ):
+            with self.subTest(alias=alias):
+                with mock.patch.object(
+                    harness,
+                    "path_is_alias",
+                    side_effect=lambda candidate, alias=alias: candidate == alias,
+                ):
+                    with mock.patch.object(Path, "resolve", return_value=canonical):
+                        self.assertEqual(harness.codex_existing_cwd(alias), expected)
 
     def test_codex_system_config_uses_program_data_known_folder(self) -> None:
         known_folder = Path(self.temp.name) / "known-program-data"

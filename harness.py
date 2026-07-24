@@ -87,6 +87,39 @@ def git_root(path: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
+def path_is_alias(path: Path) -> bool:
+    """Match filesystem aliases relevant to Codex cwd preservation."""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(os.path, "isjunction", None)
+        return bool(is_junction and is_junction(path))
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect path alias {path}: {exc}") from exc
+
+
+def codex_should_preserve_logical_path(path: Path) -> bool:
+    """Mirror Codex v0.145's nested-symlink cwd preservation predicate."""
+    return any(
+        path_is_alias(ancestor) and ancestor.parent != ancestor.parent.parent
+        for ancestor in (path, *path.parents)
+    )
+
+
+def codex_existing_cwd(path: Path) -> Path:
+    """Canonicalize an existing cwd with Codex's nested-alias exception."""
+    logical = Path(os.path.abspath(path))
+    try:
+        canonical = logical.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(
+            f"cannot resolve requested Codex cwd {logical}: {exc}"
+        ) from exc
+    if canonical != logical and codex_should_preserve_logical_path(logical):
+        return logical
+    return canonical
+
+
 def lexical_git_root(path: Path) -> Path | None:
     """Find the default-marker root without resolving path aliases."""
     current = Path(os.path.abspath(path))
@@ -2569,7 +2602,7 @@ def doctor(args: argparse.Namespace) -> int:
         activation_ok = False
         activation_detail = "project hook sources were not resolved"
         try:
-            requested_logical_path = Path(os.path.abspath(args.repo))
+            requested_logical_path = codex_existing_cwd(Path(args.repo))
             requested_path = Path(args.repo).resolve()
             requested_logical_checkout = lexical_git_root(requested_logical_path)
             if requested_logical_checkout is None:
@@ -2584,6 +2617,16 @@ def doctor(args: argparse.Namespace) -> int:
                     f"{requested_logical_checkout} -> "
                     f"{requested_logical_checkout.resolve()}; Git -> "
                     f"{requested_checkout}"
+                )
+            logical_relative_path = requested_logical_path.relative_to(
+                requested_logical_checkout
+            )
+            resolved_relative_path = requested_path.relative_to(requested_checkout)
+            if logical_relative_path != resolved_relative_path:
+                raise HarnessError(
+                    "logical Codex cwd has a different project-layer ancestry than "
+                    "the resolved Git cwd: "
+                    f"{logical_relative_path} != {resolved_relative_path}"
                 )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
