@@ -7,6 +7,7 @@ import functools
 import json
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,7 @@ _FIXTURE_ROOT: str | None = None
 
 
 def neutral_fixture_root(candidates: list[str] | None = None) -> str:
-    """Pick a fixture root with no inherited tier authority, outside temp.
+    """Create a unique fixture root under a neutral, non-temp parent.
 
     When this smoke suite is vendored inside a tiered host repository, HERE
     sits under the host's tier.json, so the dispatcher's ancestor-authority
@@ -64,26 +65,20 @@ def neutral_fixture_root(candidates: list[str] | None = None) -> str:
     and corrupts case expectations. A temp-resident root is equally unusable:
     the floor's explicit temp-path allowance changes containment semantics.
     Refuse to run rather than report bogus verdicts if no candidate is clean.
+    The caller owns the returned directory and must remove it after the run.
     """
     module = load_dispatch_module()
     if candidates is None:
-        candidates = [
-            HERE,
-            os.path.join(os.path.expanduser("~"), ".agent-harness-smoke-fixtures"),
-        ]
+        candidates = [HERE, os.path.expanduser("~")]
     for candidate in candidates:
-        created = False
         if not os.path.isdir(candidate):
-            try:
-                os.makedirs(candidate)
-                created = True
-            except OSError:
-                continue
-        if module.declared_project_dirs(candidate) or module.is_within_temp(candidate):
-            if created:
-                os.rmdir(candidate)
             continue
-        return candidate
+        if module.declared_project_dirs(candidate) or module.is_within_temp(candidate):
+            continue
+        try:
+            return tempfile.mkdtemp(prefix=".agent-harness-smoke-", dir=candidate)
+        except OSError:
+            continue
     raise SystemExit(
         "smoke: no neutral fixture root available — every candidate inherits "
         "a tier declaration or sits inside the temp allowance; fixture "
@@ -96,6 +91,14 @@ def fixture_root() -> str:
     if _FIXTURE_ROOT is None:
         _FIXTURE_ROOT = neutral_fixture_root()
     return _FIXTURE_ROOT
+
+
+def cleanup_fixture_root() -> None:
+    """Remove the run-owned neutral fixture root, if one was created."""
+    global _FIXTURE_ROOT
+    if _FIXTURE_ROOT is not None:
+        shutil.rmtree(_FIXTURE_ROOT)
+        _FIXTURE_ROOT = None
 
 
 def parse_decision(proc: subprocess.CompletedProcess[str]):
@@ -2787,7 +2790,7 @@ CASES = [
 ]
 
 
-def main():
+def run_smoke():
     failures = []
     for command, tier, flags, expected in CASES:
         got = run_case(command, tier, flags)
@@ -4784,6 +4787,13 @@ def main():
             print("  ", f)
         sys.exit(1)
     sys.exit(0)
+
+
+def main():
+    try:
+        run_smoke()
+    finally:
+        cleanup_fixture_root()
 
 
 if __name__ == "__main__":

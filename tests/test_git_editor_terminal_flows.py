@@ -9,8 +9,10 @@ tier declaration (or sit inside the floor's temp allowance).
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,9 +70,7 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
         ]
         for subcommand, args in cases:
             with self.subTest(subcommand=subcommand, args=args):
-                self.assertTrue(
-                    self.dispatch.git_editor_is_reachable(subcommand, args)
-                )
+                self.assertTrue(self.dispatch.git_editor_is_reachable(subcommand, args))
 
     def test_abort_does_not_leak_into_non_sequencer_subcommands(self) -> None:
         # config/add have no --abort; the terminal check must not change them.
@@ -79,7 +79,9 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
 
     def test_sequence_editor_unreachable_on_interactive_abort(self) -> None:
         reachable = self.dispatch.inherited_git_process_environment_is_reachable
-        self.assertFalse(reachable("GIT_SEQUENCE_EDITOR", "rebase", ["-i", "--abort"], []))
+        self.assertFalse(
+            reachable("GIT_SEQUENCE_EDITOR", "rebase", ["-i", "--abort"], [])
+        )
         self.assertTrue(reachable("GIT_SEQUENCE_EDITOR", "rebase", ["-i", "main"], []))
 
     def test_check_allows_recovery_with_inherited_git_editor(self) -> None:
@@ -147,11 +149,14 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         try:
             with open(tier_path, "w", encoding="utf-8") as handle:
                 json.dump({"tier": 4, "flags": {"sensitive_data": True}}, handle)
-            selected = self.smoke.neutral_fixture_root(
-                candidates=[nested, clean]
+            selected = self.smoke.neutral_fixture_root(candidates=[nested, clean])
+            self.assertEqual(os.path.dirname(selected), clean)
+            self.assertTrue(
+                os.path.basename(selected).startswith(".agent-harness-smoke-")
             )
-            self.assertEqual(selected, clean)
         finally:
+            if "selected" in locals() and os.path.isdir(selected):
+                shutil.rmtree(selected)
             os.remove(tier_path)
             for path in (
                 os.path.join(declared, ".claude"),
@@ -168,13 +173,16 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         home_candidate = os.path.join(
             os.path.expanduser("~"), ".agent-harness-smoke-fixtures-test"
         )
+        os.makedirs(home_candidate, exist_ok=True)
         with tempfile.TemporaryDirectory() as temp_candidate:
             try:
                 selected = self.smoke.neutral_fixture_root(
                     candidates=[temp_candidate, home_candidate]
                 )
-                self.assertEqual(selected, home_candidate)
+                self.assertEqual(os.path.dirname(selected), home_candidate)
             finally:
+                if "selected" in locals() and os.path.isdir(selected):
+                    shutil.rmtree(selected)
                 if os.path.isdir(home_candidate) and not os.listdir(home_candidate):
                     os.rmdir(home_candidate)
 
@@ -182,6 +190,27 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_only:
             with self.assertRaises(SystemExit):
                 self.smoke.neutral_fixture_root(candidates=[temp_only])
+
+    def test_main_removes_run_owned_fixture_root_on_exit(self) -> None:
+        self._require_neutral_home()
+        parent = os.path.join(
+            os.path.expanduser("~"), ".agent-harness-smoke-cleanup-test"
+        )
+        os.makedirs(parent, exist_ok=True)
+        selected = self.smoke.neutral_fixture_root(candidates=[parent])
+        self.smoke._FIXTURE_ROOT = selected
+        try:
+            with mock.patch.object(self.smoke, "run_smoke", side_effect=SystemExit(7)):
+                with self.assertRaisesRegex(SystemExit, "7"):
+                    self.smoke.main()
+            self.assertFalse(os.path.exists(selected))
+            self.assertIsNone(self.smoke._FIXTURE_ROOT)
+        finally:
+            if os.path.isdir(selected):
+                shutil.rmtree(selected)
+            self.smoke._FIXTURE_ROOT = None
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
 
 
 if __name__ == "__main__":
