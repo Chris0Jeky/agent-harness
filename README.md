@@ -40,9 +40,13 @@ trusted with `/hooks` in a new Codex session; never stack a global and project C
 `doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
 system `hooks.json`, system `requirements.toml`, inline system/base and selectable profile-v2
 hooks, and the legacy managed config file. On Windows it resolves the system layer through the
-ProgramData known folder, as Codex does. It scans every selectable profile-v2 file conservatively; unreadable sources
-or profile enumeration fail closed. Managed-cloud, MDM, per-invocation, and plugin hooks remain
-runtime-only evidence and must be reconciled in `/hooks`.
+ProgramData known folder, as Codex does. Before counting a floor, it validates the complete hook
+subtree and the hook-specific metadata it statically interprets: every supported event, the JSON
+object wrapper and parser constraints, config hook state, and managed requirements hook paths. It
+scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
+profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
+schema-validated. Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only evidence
+and must be reconciled in `/hooks`.
 
 `doctor --repo` accepts the Git-root layer walk only when every inspectable top-level
 `project_root_markers` declaration in the system, base-user, and stored profile-v2 configs is
@@ -54,8 +58,10 @@ because Codex loads both forms. Across those sources it
 requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
 execution shape, and one current normalized dispatcher pin. That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
-execute the hook or grant trust, so a CWD-specific new-session `/hooks` review and live safe/deny
-canary remain mandatory.
+execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
+requirements, persisted canonical/legacy hook feature disables, and a disabled canonical handler
+state. CLI, session, and managed-cloud activation can still override that static result, so a
+CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
 
 For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
 in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped

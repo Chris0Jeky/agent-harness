@@ -163,6 +163,14 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   closed. On Windows the system layer uses the ProgramData known folder with the same default fallback as
   Codex. Every selectable profile-v2 file is audited conservatively because the invoking profile
   is not part of the Python process context.
+  A floor is counted only after the complete hook subtree and the source-specific hook metadata
+  inspected by the harness pass their static boundaries: the supported JSON object form rejects
+  duplicate known fields, non-standard constants, invalid known strings, and invalid wrapper
+  fields while preserving serde's ignored-unknown behavior; every supported event and handler is
+  schema-valid; inline config hook state and managed requirements hook paths have their
+  source-specific shapes. One malformed hook sibling invalidates the layer instead of leaving a
+  countable `PreToolUse` floor. The harness does not fully schema-validate unrelated ConfigToml or
+  requirements fields; exact Codex startup and `/hooks` remain the authority for those fields.
   Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
   runtime boundary for exact-session `/hooks`; the static check never represents those sources as
   inspected.
@@ -181,10 +189,13 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   `[hooks]` in `config.toml`. Across all active sources it requires exactly one candidate, one
   conservatively recognized execution shape, and one current pin. The recognized current floor
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
-  but no hooks are valid. Commented or output-only marker carriers are not valid adapters. This is
-  static topology validation: it does not execute the hook, prove OS-level integrity, or grant
-  Codex trust. Review the adapter in the exact CWD and activate it with `/hooks` in a new Codex
-  session, then run a live safe/deny canary.
+  but no hooks are valid. The project floor also fails when inspectable system requirements allow
+  only managed hooks, an active persisted canonical/legacy feature setting disables hooks, or the
+  exact canonical handler state is disabled. Commented or output-only marker carriers are not
+  valid adapters. This is static topology and activation validation: it does not execute the hook,
+  prove OS-level integrity, grant Codex trust, or inspect CLI/session/managed-cloud overrides.
+  Review the adapter in the exact CWD and activate it with `/hooks` in a new Codex session, then
+  run a live safe/deny canary.
 - In a linked Git worktree, Codex maps every active hook layer to the same relative `.codex`
   directory in the root checkout that owns Git's common directory. `doctor --repo` discovers that
   root from Git common-dir/worktree facts, reports every mapped source, and fails when a local

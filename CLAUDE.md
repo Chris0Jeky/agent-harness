@@ -53,10 +53,12 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   skills, and the dispatcher bytes into `~/.claude/hooks`, backing up anything it replaces
 - `doctor` — checks inspectable global hook sources; `--repo` conditionally walks every active
   project `.codex` layer, including JSON and inline TOML hooks and linked-worktree root mappings.
-  It requires the canonical root adapter's POSIX and Windows commands to match a conservative
+  It validates each complete hook subtree and the hook-specific metadata it interprets before
+  requiring the canonical root adapter's POSIX and Windows commands to match a conservative
   direct/wrapper execution shape and bind the pinned dispatcher hash. Non-default persisted
-  project-root markers fail closed. It never proves runtime/cloud overrides or executes the hook —
-  a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
+  project-root markers and inspectable activation blockers fail closed. It does not fully validate
+  unrelated config fields, prove runtime/cloud overrides, or execute the hook — a CWD-specific
+  new-session `/hooks` review and live safe/deny canary remain mandatory.
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is
