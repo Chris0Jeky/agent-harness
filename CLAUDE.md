@@ -25,7 +25,7 @@ py -3 -m pip install -r requirements-dev.txt   # ruff + black, pinned
 # Full verification (same gates as CI, which runs on Windows/macOS/Linux, Python 3.11)
 py -3 -m unittest discover -s tests -p "test_*.py" -v
 py -3 templates\hooks\smoke_test.py            # deny-floor bypass matrix
-py -3 -m ruff check harness.py tests\test_harness.py tests\test_curl_option_arity.py scripts\generate_curl_option_arity_fixture.py templates\hooks\dispatch.py templates\hooks\smoke_test.py
+py -3 -m ruff check harness.py tests\test_harness.py tests\test_curl_option_arity.py tests\test_git_editor_terminal_flows.py scripts\generate_curl_option_arity_fixture.py templates\hooks\dispatch.py templates\hooks\smoke_test.py
 py -3 -m black --check <same file list as ruff>
 
 # Single test
