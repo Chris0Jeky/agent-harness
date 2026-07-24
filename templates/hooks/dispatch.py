@@ -53,8 +53,16 @@ _LITERAL_BACKTICK = "__HARNESS_LITERAL_BACKTICK_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
+_QUOTED_SPAN_MARK = "__HARNESS_QUOTED_SPAN_5B4E__"
 _SEGMENT_SEPARATOR_PREFIX = "__HARNESS_SEGMENT_SEPARATOR_"
 _SEGMENT_SEPARATOR_SUFFIX = "__"
+
+# Markers the floor itself writes INTO command text before that text is
+# tokenized, so the anti-forgery scrub below must leave them alone.
+_HARNESS_INJECTED_MARKERS = frozenset(
+    {"__HARNESS_ASSIGNMENT_LITERAL__", "__HARNESS_INERT_SCRIPTBLOCK__"}
+)
+_INTERNAL_MARKER = re.compile(r"__HARNESS_[A-Z0-9_]*?__")
 
 
 def restore_quoted_literal_markers(value: str) -> str:
@@ -64,6 +72,29 @@ def restore_quoted_literal_markers(value: str) -> str:
         .replace(_LITERAL_OPEN_BRACE, "{")
         .replace(_LITERAL_CLOSE_BRACE, "}")
         .replace(_LITERAL_BACKTICK, "`")
+        .replace(_QUOTED_SPAN_MARK, "")
+    )
+
+
+def scrub_internal_markers(text: str) -> str:
+    """Remove every internal sentinel from text crossing a trust boundary.
+
+    Used on the incoming command (so a sentinel that CONFERS TRUST -- quote
+    provenance, "this token is program structure" -- cannot be forged by typing
+    it) and on the outgoing reason (so one never reaches a user; `_LITERAL_*`
+    markers leaked into deny reasons verbatim before this existed).
+
+    Restoring first keeps the real punctuation visible: a reason names
+    `/critical/out,side`, not `/critical/outside`. On the input path it also
+    means a typed `__HARNESS_LITERAL_OPEN_BRACE_2D91__` becomes a literal `{`
+    rather than vanishing, which grants nothing -- `{` can be typed directly --
+    but keeps the brace depth honest.
+    """
+    return _INTERNAL_MARKER.sub(
+        lambda match: (
+            match.group(0) if match.group(0) in _HARNESS_INJECTED_MARKERS else ""
+        ),
+        restore_quoted_literal_markers(text),
     )
 
 
@@ -705,24 +736,27 @@ def split_segment_comment(toks: list[str]) -> tuple[list[str], bool]:
     deny->allow regressions, so a scriptblock argv containing one is reported
     unverifiable and the caller fails closed.
 
-    Two narrowings keep this from denying ordinary commands:
+    Case (c) is now decided EXACTLY rather than guessed at: the tokenizer
+    records provenance on the token itself (see `token_holds_restored_quote`),
+    so `'^#include'`, `'#29'` and `'# start'` — quoted spans holding no
+    punctuation that needed masking, and therefore byte-identical to bare text
+    once restored — are known to be data.
 
-    - A token holding a literal marker was produced by restoring a quoted span,
-      so it cannot be a comment. That keeps format strings such as
-      `'#{0} | draft={1}' -f ...` inspectable, and their braces are masked
-      anyway so they cannot affect the count.
-    - A comment only MATTERS if the text it swallows carries something other than
-      closing braces. When only a `}` follows, both readings agree about the
-      cmdlet's arguments and there is nothing to fail closed over. That keeps
-      `Where-Object { $_ -match '^#' }` allowed: the cmd-escape inspection
-      variant strips the `^`, leaving a bare `#` token followed only by `}`.
+    One narrowing keeps this from denying ordinary commands: a comment only
+    MATTERS if the text it swallows carries something other than closing braces.
+    When only a `}` follows, both readings agree about the cmdlet's arguments and
+    there is nothing to fail closed over. That keeps `Where-Object { $_ -match
+    '^#' }` allowed even on the cmd-escape inspection variant, which strips the
+    `^` before tokenizing and so never sees a quote at all.
 
     Returns `(kept_tokens, opaque)`.
     """
     for index, token in enumerate(toks):
-        if not (token.startswith("#") or token.startswith("<#")):
-            continue
         if token_holds_restored_quote(token):
+            # Recorded provenance: this token opens with a restored quoted span,
+            # so its leading `#` is data, not a comment introducer.
+            continue
+        if not (token.startswith("#") or token.startswith("<#")):
             continue
         swallowed = toks[index + 1 :]
         return toks[:index], any(part.strip("{}") for part in swallowed)
@@ -730,17 +764,27 @@ def split_segment_comment(toks: list[str]) -> tuple[list[str], bool]:
 
 
 def token_holds_restored_quote(token: str) -> bool:
-    """Whether this token was produced by restoring a quoted span."""
-    return any(
-        marker in token
-        for marker in (
-            _LITERAL_OPEN_BRACE,
-            _LITERAL_CLOSE_BRACE,
-            _LITERAL_COMMA,
-            _LITERAL_BACKTICK,
-            _QUOTED_GROUP_LITERAL_PREFIX,
-        )
-    )
+    """Whether this token STARTS with text restored from a quoted span.
+
+    The tokenizer stamps `_QUOTED_SPAN_MARK` on exactly the tokens whose first
+    character came out of a quoted span AND reads as a comment introducer, so
+    this is a RECORDED fact rather than one re-derived from the token's contents.
+
+    The predicate it replaces scanned for `_LITERAL_*` marker substrings, which
+    is unsound in both directions. It was incomplete: those markers exist to
+    protect `,{}` from brace analysis, so a quoted span containing none of them
+    (`'^#include'`, `'#29'`, `'# start'`) restored to text indistinguishable from
+    a bare comment and the fail-closed branch fired on everyday commands. It was
+    also FORGEABLE: marker text is ordinary characters, so typing
+    `#__HARNESS_LITERAL_OPEN_BRACE_2D91__` bought a token the "trusted quote"
+    reading.
+
+    Forgery is now structurally impossible: the test is anchored at position 0
+    and the stamp is only ever PREPENDED, so a token cannot both carry the stamp
+    and lead with `#`. `scrub_internal_markers` removes typed sentinels from the
+    incoming command as a second, independent guarantee.
+    """
+    return token.startswith(_QUOTED_SPAN_MARK)
 
 
 def powershell_block_depth(token: str) -> int:
@@ -2383,7 +2427,16 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
 
     This preserves quoted flags and paths for policy checks without mistaking
     inert commit messages or quoted separators for additional commands.
+
+    Note the fallback tokenizers reached on a shlex ValueError below do not pass
+    through the substitution loop, so nothing on that path carries the quote
+    provenance stamp. A `#`-leading quoted token there stays unmarked and is read
+    as a comment — the fail-CLOSED direction, never a bypass.
     """
+    # Scrub before anything parses: a sentinel that confers trust must not be
+    # forgeable by typing it. Placed here rather than at check() entry so the
+    # ValueError fallback below, which re-reads `command`, is covered too.
+    command = scrub_internal_markers(command)
     quoted: dict[str, str] = {}
 
     def protect(match: "re.Match[str]") -> str:
@@ -2474,6 +2527,19 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             if raw_token == placeholder and value in (">", ">>"):
                 replacement = f"__HARNESS_LITERAL_REDIRECT_{len(value)}__"
             token = token.replace(placeholder, replacement)
+        # Record quote provenance for exactly the tokens whose leading character
+        # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
+        # identical bare one is a comment introducer. The stamp is scoped to that
+        # one question so every other token stays byte-identical for head, path
+        # and flag matching — stamping every restored span instead lets
+        # `'git' push --force` and `'rm' -rf /` escape head resolution entirely.
+        # `raw_token.startswith(placeholder)` is unambiguous because placeholders
+        # end in `__` (`__HARNESS_QUOTED_10__` does not start with
+        # `__HARNESS_QUOTED_1__`).
+        if token.startswith(("#", "<#")) and any(
+            raw_token.startswith(placeholder) for placeholder in quoted
+        ):
+            token = f"{_QUOTED_SPAN_MARK}{token}"
         current.append(token)
     if current:
         result.append((current, ""))
@@ -9344,6 +9410,11 @@ def check(
 
 
 def respond(decision: str, reason: str, runtime: str = "claude"):
+    # One scrub point for everything a human reads, before the Codex ask->deny
+    # rewrite below interpolates it. Reasons quote token text, and an internal
+    # marker used to leak straight through: `rm -rf '/critical/out,side'`
+    # reported `/critical/out__HARNESS_LITERAL_COMMA_8F3A__side`.
+    reason = scrub_internal_markers(reason)
     if runtime == "codex" and decision == "ask":
         decision = "deny"
         reason = f"Codex does not support ask decisions; conservative deny. {reason}"

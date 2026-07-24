@@ -1220,6 +1220,66 @@ CASES = [
     ("1 | ForEach-Object { $i++; Write-Output $i }", 1, {}, "allow"),
     ("Invoke-Command -ScriptBlock { $i++; git status }", 1, {}, "allow"),
     ("1 | % { $_.Name; git status }", 1, {}, "allow"),
+    # A `#` that came out of a QUOTED span is data. Provenance is recorded by
+    # the tokenizer, so a quoted span with no `,{}` to mask -- which restores to
+    # text byte-identical to a bare comment -- is still known to be one.
+    ("1 | ForEach-Object { git log --grep '#29' --oneline }", 1, {}, "allow"),
+    ("1..5 | ForEach-Object { '#' * $_ }", 1, {}, "allow"),
+    (
+        "Get-Content f | Where-Object { $_ -match '#' -and $_.Length -gt 3 }",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "1..3 | ForEach-Object -Begin { Write-Host '# start' } -Process { $_ } "
+        "-End { Write-Host '# done' }",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "Get-Content f | Where-Object { $_ -match '^#include' -and $_.Length -gt 1 }",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        "Invoke-Command -ScriptBlock { Write-Output '<#notacomment' ; git status }",
+        1,
+        {},
+        "allow",
+    ),
+    # ...but a BARE `#` is still a real comment and still fails closed, and a
+    # typed sentinel must not confer provenance.
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { Write-Host a # }\n$sb",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
+        "{ Write-Host a __HARNESS_QUOTED_SPAN_5B4E__#x }\n} $sb",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
+        "{ Write-Host a #__HARNESS_LITERAL_OPEN_BRACE_2D91__ }\n} $sb",
+        1,
+        {},
+        "deny",
+    ),
+    # A quoted `#` reclassified as data must not launder a sibling block.
+    (
+        "1 | ForEach-Object -Begin { '#a' } -Process { git push --force origin main }",
+        1,
+        {},
+        "deny",
+    ),
+    ("1 | ForEach-Object { '#a' } -MemberName Delete", 1, {}, "deny"),
     # Truncation must not launder the dynamic-payload branches either.
     (
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",

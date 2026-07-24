@@ -539,12 +539,72 @@ class ScriptblockCommentTests(unittest.TestCase):
             dispatch.split_segment_comment(["a", "#", "}"]), (["a"], False)
         )
 
-    def test_restored_quote_is_not_a_comment(self):
-        # A literal marker proves the token came from a quoted span.
-        token = "#" + dispatch._LITERAL_OPEN_BRACE + "0" + dispatch._LITERAL_CLOSE_BRACE
+    def test_tokenizer_records_a_quoted_comment_introducer(self):
+        # Provenance is CARRIED now, not re-derived: build the token through the
+        # tokenizer and the stamp is on exactly the ambiguous one.
+        toks = dispatch.quote_aware_segments_with_operators(
+            "1 | ForEach-Object { '#{0}' -f $_ }"
+        )[-1][0]
+        stamped = [t for t in toks if t.startswith(dispatch._QUOTED_SPAN_MARK)]
+        self.assertEqual(len(stamped), 1, toks)
+        self.assertEqual(dispatch.split_segment_comment(toks), (toks, False))
+
+    def test_a_quoted_span_with_nothing_to_mask_is_still_provenance(self):
+        # The old predicate scanned for `_LITERAL_*` markers, which exist to
+        # protect `,{}`. A quoted span holding none of them restored to text
+        # byte-identical to a bare comment, so everyday `git log --grep '#29'`
+        # inside a scriptblock failed closed.
+        toks = dispatch.quote_aware_segments_with_operators(
+            "1 | ForEach-Object { git log --grep '#29' --oneline }"
+        )[-1][0]
+        self.assertTrue(any(dispatch.token_holds_restored_quote(t) for t in toks), toks)
+        self.assertEqual(dispatch.split_segment_comment(toks), (toks, False))
+
+    def test_a_hand_forged_marker_is_not_provenance(self):
+        # Marker text is ordinary characters an attacker can type. The old
+        # substring predicate trusted this token; the anchored one does not.
+        forged = (
+            "#" + dispatch._LITERAL_OPEN_BRACE + "0" + dispatch._LITERAL_CLOSE_BRACE
+        )
+        self.assertFalse(dispatch.token_holds_restored_quote(forged))
         self.assertEqual(
-            dispatch.split_segment_comment([token, "-f", "$_", "}"]),
-            ([token, "-f", "$_", "}"], False),
+            dispatch.split_segment_comment([forged, "-f", "$_", "}"]), ([], True)
+        )
+
+    def test_a_typed_sentinel_cannot_forge_provenance(self):
+        # The stamp is only ever PREPENDED, so a token cannot both carry it and
+        # lead with `#`; the input scrub is the second, independent guarantee.
+        forged = dispatch._QUOTED_SPAN_MARK + "#x"
+        toks = dispatch.quote_aware_segments_with_operators(
+            f"1 | ForEach-Object {{ Write-Host a {forged} }} $sb"
+        )[-1][0]
+        self.assertFalse(
+            any(t.startswith(dispatch._QUOTED_SPAN_MARK) for t in toks), toks
+        )
+        self.assertEqual(
+            check(
+                "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
+                f"{{ Write-Host a {forged} }} $sb"
+            )[0],
+            "deny",
+        )
+
+    def test_no_internal_marker_reaches_a_reason(self):
+        # Pre-existing leak: `rm -rf '/critical/out,side'` reported
+        # `/critical/out__HARNESS_LITERAL_COMMA_8F3A__side`.
+        for command in (
+            "rm -rf '/critical/out,side'",
+            "rm -rf '/critical/{a}/outside'",
+            "Remove-Item -Recurse -Force '/critical/{x},y'",
+        ):
+            with self.subTest(command=command):
+                decision, reason = check(command)
+                self.assertEqual(decision, "deny")
+                scrubbed = dispatch.scrub_internal_markers(reason)
+                self.assertNotIn("__HARNESS", scrubbed)
+        self.assertIn(
+            "/critical/out,side",
+            dispatch.scrub_internal_markers(check("rm -rf '/critical/out,side'")[1]),
         )
 
     def test_no_comment_is_unchanged(self):
