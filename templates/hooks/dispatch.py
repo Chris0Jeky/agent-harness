@@ -3957,14 +3957,15 @@ def git_sequencer_flow_is_terminal(subcommand: str, args: list[str]) -> bool:
     operands consumed by required-value options before interpreting a token
     as a terminal flag. ``-S`` takes only an attached optional value, so a
     following terminal flag remains active. Tokens after an unconsumed bare
-    ``--`` are positionals and never options, so the scan stops there.
+    ``--`` or exact ``--end-of-options`` are positionals and never options,
+    so the scan stops there.
     """
     required_short = _GIT_SEQUENCER_REQUIRED_VALUE_SHORT_OPTIONS[subcommand]
     required_long = _GIT_SEQUENCER_REQUIRED_VALUE_LONG_OPTIONS[subcommand]
     index = 0
     while index < len(args):
         token = args[index]
-        if token == "--":
+        if token in {"--", "--end-of-options"}:
             return False
         if token.startswith("--"):
             name = token.lower().split("=", 1)[0]

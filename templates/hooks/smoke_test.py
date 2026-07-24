@@ -3654,6 +3654,16 @@ def run_smoke():
             "deny",
         ),
         (
+            "inherited editor applies past named option terminator",
+            run_case(
+                "git merge --edit --no-ff --end-of-options --abort",
+                3,
+                {},
+                env_extra={"GIT_EDITOR": "helper"},
+            ),
+            "deny",
+        ),
+        (
             "inherited editor applies to add edit",
             run_case("git add -e", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
             "deny",
