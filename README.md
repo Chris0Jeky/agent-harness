@@ -37,17 +37,21 @@ up changed global guidance, shared Claude-home hook bytes, and managed skill fol
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor.
-`doctor --repo` statically requires one project-floor candidate whose POSIX and Windows commands
-match a conservative direct/wrapper execution shape and bind the current normalized dispatcher
-hash to a named variable. It does not execute the hook or grant trust, so a new-session `/hooks`
+`doctor --repo` walks every active `.codex` layer from the checkout root through the requested
+directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`, because Codex loads
+both forms. Across those sources it statically requires exactly one project-floor candidate, one
+conservatively recognized POSIX/Windows execution shape, and one current normalized dispatcher
+pin. That floor must be the canonical root `.codex/hooks.json` adapter; nested config-only layers
+are allowed. Static validation does not execute the hook or grant trust, so a new-session `/hooks`
 review and live safe/deny canary remain mandatory.
 
-For a linked Git worktree, Codex reads the project adapter from the root checkout that owns the
-Git common directory, not the linked worktree's `.codex/hooks.json`. `doctor --repo` resolves that
-active source even when given a subdirectory, reports it explicitly, and rejects a worktree-only or
-different local copy. An identical tracked worktree copy is allowed but remains inactive. Configure,
-review, and trust the root-checkout adapter through `/hooks`; do not edit trust hashes manually or
-use a bypass flag.
+For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
+in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped
+sources and rejects worktree-only or different local `hooks.json` and inline-hook declarations. An
+identical tracked worktree copy is allowed but remains inactive. Static root discovery currently
+fails closed for linked worktrees whose primary checkout uses `--separate-git-dir`, and when the
+common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
+the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Status (2026-07-24): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
 portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,

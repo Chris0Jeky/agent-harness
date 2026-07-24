@@ -159,18 +159,23 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
   shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
-  and use a matcher that positively includes Bash. `doctor --repo` requires exactly one candidate,
-  one conservatively recognized execution shape, and one current pin. Commented or output-only
-  marker carriers are not valid adapters. This is static topology validation: it does not execute
-  the hook, prove OS-level integrity, or grant Codex trust. Review the adapter and activate it with
-  `/hooks` in a new Codex session, then run a live safe/deny canary.
-- In a linked Git worktree, Codex loads the adapter from the root checkout that owns Git's common
-  directory. `doctor --repo` resolves the requested checkout root (including from a subdirectory),
-  discovers that root checkout from Git common-dir/worktree facts, and audits only its
-  `.codex/hooks.json`. It reports the active root source and fails when a worktree-only copy would
-  false-green or when an ignored worktree copy differs. An identical tracked copy is permitted but
-  is inactive. Configure, review, and trust the root-checkout source with `/hooks`; never alter a
-  trust hash manually or use a bypass flag.
+  and use a matcher that positively includes Bash. From the checkout root through the requested
+  directory, `doctor --repo` audits every active `.codex` layer and both declaration forms Codex
+  loads: `hooks.json` and inline `[hooks]` in `config.toml`. Across all active sources it requires
+  exactly one candidate, one conservatively recognized execution shape, and one current pin. The
+  recognized current floor must reside in the canonical root `.codex/hooks.json`; nested layers
+  that contain configuration but no hooks are valid. Commented or output-only marker carriers are
+  not valid adapters. This is static topology validation: it does not execute the hook, prove
+  OS-level integrity, or grant Codex trust. Review the adapter and activate it with `/hooks` in a
+  new Codex session, then run a live safe/deny canary.
+- In a linked Git worktree, Codex maps every active hook layer to the same relative `.codex`
+  directory in the root checkout that owns Git's common directory. `doctor --repo` discovers that
+  root from Git common-dir/worktree facts, reports every mapped source, and fails when a local
+  `hooks.json` or inline-hook declaration would false-green or differs from the authoritative
+  source. An identical tracked copy is permitted but is inactive. Static discovery fails closed
+  for a linked worktree whose primary checkout uses `--separate-git-dir`, and when the common Git
+  directory has no checkout, such as a bare repository. Configure, review, and trust the
+  root-checkout source with `/hooks`; never alter a trust hash manually or use a bypass flag.
 - Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively
   translates `ask` to `deny`. The historical Claude global adapter still omits `--runtime` and
   therefore selects the Claude default, retaining interactive `ask` behavior; it still passes
