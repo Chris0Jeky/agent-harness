@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.4 (2026-07-24)"
+FLOOR_VERSION = "1.6.0 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -5918,6 +5918,21 @@ def check(
     # T4/wave_mode. Never weakens `strict` — the flag is ignored where guards are walls.
     relaxed = bool(flags.get("relaxed_work_loss_guards")) and not strict
 
+    # Graduated opacity (BLUEPRINT §2 / issue #21). The charter denies the PROVEN
+    # irreversible; a shape the parser merely cannot PROVE safe is scaled by blast
+    # radius instead of hard-denied. This helper is used ONLY for shapes that
+    # cannot conceal a charter irreversible (force spellings, rm -rf outside the
+    # project, secret-file write, pipe-to-shell all keep their unconditional deny):
+    #   below T4/wave  -> allow (the parser's own uncertainty is not the agent's fault)
+    #   T4 or wave     -> deny (blast radius justifies strictness)
+    # Rule id prefixes the reason so smoke cases, ledgers, and overrides can key on
+    # it. A guarded/ask channel (for opaque operands OF a write verb) lands with its
+    # first real caller in a follow-up slice, not speculatively here.
+    def graduated_opacity(rule_id: str, reason: str):
+        if strict:
+            return "deny", f"[{rule_id}] {reason}"
+        return None
+
     command = strip_quoted_heredoc_bodies(remove_shell_line_continuations(command))
     command = mask_inert_powershell_assignment_scriptblocks(command)
     unwrapped = unwrap_powershell_scriptblock(command)
@@ -7347,10 +7362,18 @@ def check(
                     index += 1
                 explicit_selector = any(token in {"--all", "--tags"} for token in args)
                 if len(positionals) < 2 and not explicit_selector:
-                    return (
-                        "deny",
+                    # Plain `git push` to a configured upstream is the closing move
+                    # of nearly every agent loop. Force spellings (-f/--force/
+                    # +refspec) and force-with-lease are rejected ABOVE this point,
+                    # so a bare push cannot conceal a charter irreversible; the only
+                    # residual is opaque config, which is blast-radius scaled.
+                    # sensitive_data push-privacy resolution still runs below.
+                    opaque = graduated_opacity(
+                        "push-opaque-refspec",
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
+                    if opaque:
+                        return opaque
                 if lease_requested and (
                     explicit_selector
                     or not force_with_lease_targets_are_features(positionals[1:])
