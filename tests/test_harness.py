@@ -280,12 +280,17 @@ class HarnessTests(unittest.TestCase):
         current = json.dumps(
             {
                 "hooks": {
-                    "SessionStart": [{"hooks": [{"command": "keep"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "keep"}]}
+                    ],
                     "PreToolUse": [
                         {
                             "hooks": [
                                 managed_handler,
-                                {"command": "python keep_unrelated.py"},
+                                {
+                                    "type": "command",
+                                    "command": "python keep_unrelated.py",
+                                },
                             ]
                         }
                     ],
@@ -298,7 +303,7 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertEqual(
             result["hooks"]["PreToolUse"][0]["hooks"],
-            [{"command": "python keep_unrelated.py"}],
+            [{"type": "command", "command": "python keep_unrelated.py"}],
         )
 
     def test_remove_managed_floor_deletes_empty_document(self) -> None:
@@ -306,6 +311,17 @@ class HarnessTests(unittest.TestCase):
         managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
         current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [managed_handler]}]}})
         self.assertEqual(harness.remove_managed_codex_floor(current, dispatcher), "")
+
+    def test_remove_managed_floor_refuses_nonfinite_rewrite(self) -> None:
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        current = (
+            '{"hooks":{"FutureEvent":1e400,"PreToolUse":[{"hooks":['
+            f"{json.dumps(managed_handler)}"
+            "]}]}}"
+        )
+        with self.assertRaises(harness.HarnessError):
+            harness.remove_managed_codex_floor(current, dispatcher)
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -316,7 +332,8 @@ class HarnessTests(unittest.TestCase):
                         {
                             "hooks": [
                                 {
-                                    "command": "python D:/custom/dispatch.py --event pre --runtime codex"
+                                    "type": "command",
+                                    "command": "python D:/custom/dispatch.py --event pre --runtime codex",
                                 }
                             ]
                         }
@@ -331,7 +348,7 @@ class HarnessTests(unittest.TestCase):
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         canonical = harness.canonical_legacy_codex_floor_handler(managed)
         for handler in (
-            {"command": canonical["command"]},
+            {"type": "command", "command": canonical["command"]},
             {
                 **canonical,
                 "commandWindows": (
@@ -353,10 +370,23 @@ class HarnessTests(unittest.TestCase):
         encoded_script = "$d='D:/custom/dispatch.py'; & $d --event pre"
         encoded = base64.b64encode(encoded_script.encode("utf-16-le")).decode("ascii")
         for handler in (
-            {"command": "python D:/custom/dispatch.py --event pre"},
-            {"command": "powershell .codex/invoke_deny_floor.ps1"},
-            {"command": "python D:/custom/dispatch.py --event=pre --runtime=codex"},
-            {"commandWindows": f"powershell -EncodedCommand {encoded}"},
+            {
+                "type": "command",
+                "command": "python D:/custom/dispatch.py --event pre",
+            },
+            {
+                "type": "command",
+                "command": "powershell .codex/invoke_deny_floor.ps1",
+            },
+            {
+                "type": "command",
+                "command": "python D:/custom/dispatch.py --event=pre --runtime=codex",
+            },
+            {
+                "type": "command",
+                "command": "echo noop",
+                "commandWindows": f"powershell -EncodedCommand {encoded}",
+            },
         ):
             with self.subTest(handler=handler):
                 current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
@@ -369,7 +399,11 @@ class HarnessTests(unittest.TestCase):
         encoded = base64.b64encode(encoded_script.encode("utf-16-le")).decode("ascii")
         for flag in ("-E", "-Ec", "-En", "-Enco", "-EncodedCommand"):
             with self.subTest(flag=flag):
-                handler = {"commandWindows": f"powershell {flag} {encoded}"}
+                handler = {
+                    "type": "command",
+                    "command": "echo noop",
+                    "commandWindows": f"powershell {flag} {encoded}",
+                }
                 current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
                 self.assertIn(
                     "dispatch.py",
@@ -382,7 +416,15 @@ class HarnessTests(unittest.TestCase):
             {
                 "hooks": {
                     "PreToolUse": [
-                        {"hooks": [{"commandWindows": "powershell -Ec not-base64"}]}
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo noop",
+                                    "commandWindows": "powershell -Ec not-base64",
+                                }
+                            ]
+                        }
                     ]
                 }
             }
@@ -442,20 +484,35 @@ class HarnessTests(unittest.TestCase):
                 json.dumps({"hooks": {"PreToolUse": [{"hooks": None}]}})
             )
         wrong = (
-            {"hooks": {"PreToolUse": [{}]}},
             {"hooks": {"PreToolUse": [{"matcher": 7, "hooks": []}]}},
             {
                 "hooks": {
                     "PreToolUse": [{"hooks": [{"type": 7, "command": "echo safe"}]}]
                 }
             },
-            {"hooks": {"PreToolUse": [{"hooks": [{"command_windows": 7}]}]}},
             {
                 "hooks": {
                     "PreToolUse": [
                         {
                             "hooks": [
                                 {
+                                    "type": "command",
+                                    "command": "echo safe",
+                                    "command_windows": 7,
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo safe",
                                     "commandWindows": "echo one",
                                     "command_windows": "echo two",
                                 }
@@ -469,6 +526,518 @@ class HarnessTests(unittest.TestCase):
             with self.subTest(document=document):
                 with self.assertRaises(harness.HarnessError):
                     harness.repo_codex_floor_groups(json.dumps(document))
+        self.assertEqual(
+            harness.repo_codex_floor_groups(
+                json.dumps({"hooks": {"PreToolUse": [{}]}})
+            ),
+            [],
+        )
+
+    def test_hooks_json_rejects_invalid_whole_document(self) -> None:
+        invalid_documents = (
+            "",
+            '{"hooks": {}, "unknown": true}',
+            '{"description": 7, "hooks": {}}',
+            '{"hooks": {}, "hooks": {}}',
+            '{"hooks": {"SessionStart": [], "SessionStart": []}}',
+            (
+                '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command",'
+                '"command":"echo one","command":"echo two"}]}]}}'
+            ),
+            '{"description": NaN, "hooks": {}}',
+            '{"description": Infinity, "hooks": {}}',
+            '{"description": -Infinity, "hooks": {}}',
+            '{"description": 1e400, "hooks": {}}',
+            '{"description": "\\ud800", "hooks": {}}',
+            (
+                '{"hooks":{"PreToolUse":[{"hooks":[{"type":"prompt",'
+                '"ignored":"\\ud800"}]}]}}'
+            ),
+            (
+                '{"hooks":{"PreToolUse":[{"hooks":[{"type":"agent",'
+                '"ignored":1e400}]}]}}'
+            ),
+        )
+        for current in invalid_documents:
+            with self.subTest(current=current):
+                with self.assertRaises(harness.HarnessError):
+                    harness.parse_hooks_document(current)
+        ignored_value = (
+            '{"hooks":{"FutureEvent":{"duplicate":1,"duplicate":2,'
+            '"value":"\\ud800","overflow":1e400},"PreToolUse":'
+            '[{"hooks":[{"type":"prompt","ignored":1,"ignored":2}]}]}}'
+        )
+        harness.parse_hooks_document(ignored_value)
+        nested: object = 0
+        for _index in range(160):
+            nested = [nested]
+        deeply_nested = {"hooks": {"FutureEvent": nested}}
+        harness.parse_hooks_document(json.dumps(deeply_nested))
+        handler_content: object = 0
+        for _index in range(harness.SERDE_JSON_HANDLER_CONTENT_MAX_CONTAINERS):
+            handler_content = [handler_content]
+        boundary_handler = {
+            "hooks": {
+                "PreToolUse": [
+                    {"hooks": [{"type": "prompt", "ignored": handler_content}]}
+                ]
+            }
+        }
+        harness.parse_hooks_document(json.dumps(boundary_handler))
+        boundary_handler["hooks"]["PreToolUse"][0]["hooks"][0]["ignored"] = [
+            handler_content
+        ]
+        with self.assertRaises(harness.HarnessError):
+            harness.parse_hooks_document(json.dumps(boundary_handler))
+        huge_integer = "9" * 5000
+        harness.parse_hooks_document(f'{{"hooks":{{"FutureEvent":{huge_integer}}}}}')
+        too_deep = '{"hooks":{"FutureEvent":' + ("[" * 1000) + "0" + ("]" * 1000) + "}}"
+        with self.assertRaises(harness.HarnessError):
+            harness.parse_hooks_document(too_deep)
+
+    def test_hooks_schema_validates_every_known_event(self) -> None:
+        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+        for event_name in harness.CODEX_HOOK_EVENT_NAMES:
+            with self.subTest(event_name=event_name):
+                document = json.loads(json.dumps(adapter))
+                document["hooks"][event_name] = [
+                    {"hooks": [{"type": "command", "command": 7}]}
+                ]
+                with self.assertRaises(harness.HarnessError):
+                    harness.repo_codex_floor_groups(json.dumps(document))
+
+    def test_hooks_schema_rejects_malformed_groups_and_handlers(self) -> None:
+        invalid_groups = (
+            7,
+            [7],
+            [{"matcher": 7}],
+            [{"hooks": None}],
+            [{"hooks": [7]}],
+        )
+        for groups in invalid_groups:
+            with self.subTest(groups=groups):
+                document = {"hooks": {"SessionStart": groups}}
+                with self.assertRaises(harness.HarnessError):
+                    harness.parse_hooks_document(json.dumps(document))
+
+        invalid_handlers = (
+            {},
+            {"type": 7},
+            {"type": "unknown"},
+            {"type": "command"},
+            {"type": "command", "command": 7},
+            {"type": "command", "command": "ok", "commandWindows": 7},
+            {
+                "type": "command",
+                "command": "ok",
+                "commandWindows": "one",
+                "command_windows": "two",
+            },
+            {"type": "command", "command": "ok", "timeout": 1.5},
+            {"type": "command", "command": "ok", "timeout": True},
+            {"type": "command", "command": "ok", "timeout": -1},
+            {"type": "command", "command": "ok", "timeout": 1 << 64},
+            {"type": "command", "command": "ok", "async": None},
+            {"type": "command", "command": "ok", "async": 0},
+            {"type": "command", "command": "ok", "async": "false"},
+            {"type": "command", "command": "ok", "statusMessage": 7},
+            {
+                "type": "command",
+                "command": "ok",
+                "additionalContextLimit": True,
+            },
+            {
+                "type": "command",
+                "command": "ok",
+                "additionalContextLimit": 1.5,
+            },
+            {
+                "type": "command",
+                "command": "ok",
+                "additionalContextLimit": -1,
+            },
+            {
+                "type": "command",
+                "command": "ok",
+                "additionalContextLimit": harness.USIZE_MAX + 1,
+            },
+        )
+        for handler in invalid_handlers:
+            with self.subTest(handler=handler):
+                document = {"hooks": {"SessionStart": [{"hooks": [handler]}]}}
+                with self.assertRaises(harness.HarnessError):
+                    harness.parse_hooks_document(json.dumps(document))
+
+    def test_hooks_schema_accepts_codex_defaults_and_nullable_fields(self) -> None:
+        document = {
+            "description": None,
+            "hooks": {
+                "FutureEvent": 7,
+                "SessionStart": [
+                    {},
+                    {"matcher": None},
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {"type": "prompt", "ignored": 7},
+                            {"type": "agent", "command": 7},
+                            {
+                                "type": "command",
+                                "command": "echo ok",
+                                "commandWindows": None,
+                                "timeout": None,
+                                "async": False,
+                                "statusMessage": None,
+                                "additionalContextLimit": None,
+                                "ignored": 7,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+        current_data, hooks, groups = harness.parse_hooks_document(json.dumps(document))
+        self.assertEqual(current_data, document)
+        self.assertIs(hooks, current_data["hooks"])
+        self.assertEqual(groups, [])
+        self.assertEqual(harness.parse_hooks_document('{"description": "ok"}')[1], {})
+
+    def test_non_command_handlers_never_count_as_floor_candidates(self) -> None:
+        for handler in (
+            {
+                "type": "prompt",
+                "command": (
+                    "python $HOME/.claude/hooks/dispatch.py "
+                    "--event pre --runtime codex"
+                ),
+            },
+            {
+                "type": "agent",
+                "command": 7,
+                "commandWindows": "one",
+                "command_windows": "two",
+            },
+        ):
+            with self.subTest(handler=handler):
+                current = json.dumps({"hooks": {"PreToolUse": [{"hooks": [handler]}]}})
+                self.assertEqual(harness.managed_codex_floor_groups(current), [])
+                self.assertEqual(harness.repo_codex_floor_candidates(current), [])
+                self.assertEqual(harness.repo_codex_floor_groups(current), [])
+                self.assertFalse(harness.is_global_floor_handler(handler))
+                self.assertFalse(harness.is_direct_codex_floor_handler(handler))
+
+    def test_inline_hook_metadata_matches_each_codex_source_kind(self) -> None:
+        valid_config = {
+            "hooks": {
+                "state": {
+                    "one": {
+                        "enabled": True,
+                        "trusted_hash": "abc",
+                        "ignored": 7,
+                    }
+                }
+            }
+        }
+        harness.parse_hooks_document(json.dumps(valid_config), source_kind="config")
+        valid_requirements = {
+            "hooks": {
+                "managed_dir": "/managed/hooks",
+                "windows_managed_dir": "C:/managed/hooks",
+            }
+        }
+        harness.parse_hooks_document(
+            json.dumps(valid_requirements), source_kind="requirements"
+        )
+        invalid_config_states = (
+            {"hooks": {"state": 7}},
+            {"hooks": {"state": {"one": 7}}},
+            {"hooks": {"state": {"one": {"enabled": "yes"}}}},
+            {"hooks": {"state": {"one": {"trusted_hash": 7}}}},
+        )
+        for malformed_state in invalid_config_states:
+            with self.assertRaises(harness.HarnessError):
+                harness.parse_hooks_document(
+                    json.dumps(malformed_state), source_kind="config"
+                )
+
+        invalid_requirements = (
+            {"hooks": {"managed_dir": 7}},
+            {"hooks": {"windows_managed_dir": ["bad"]}},
+        )
+        for document in invalid_requirements:
+            with self.subTest(document=document):
+                with self.assertRaises(harness.HarnessError):
+                    harness.parse_hooks_document(
+                        json.dumps(document), source_kind="requirements"
+                    )
+
+    def test_toml_config_rejects_out_of_range_integers(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            f"[hooks]\nignored = {harness.I64_MAX + 1}\n", encoding="utf-8"
+        )
+        with self.assertRaises(harness.HarnessError):
+            harness.toml_config(config)
+
+    def test_inline_hooks_preserve_ignored_toml_datetime(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            "[hooks]\nFutureEvent = 1979-05-27T07:32:00Z\n"
+            + self.inline_floor_config_text(),
+            encoding="utf-8",
+        )
+        document = harness.inline_hooks_document(config)
+        self.assertEqual(
+            len(harness.managed_codex_floor_groups(document, source_kind="config")),
+            1,
+        )
+
+    def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
+        repo = self.make_repo()
+        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+        adapter["hooks"]["SessionStart"] = [
+            {"hooks": [{"type": "command", "command": 7}]}
+        ]
+        self.write_hooks(repo, json.dumps(adapter))
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("SessionStart", output)
+
+    def test_doctor_rejects_malformed_sibling_global_event(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        malformed_global = (
+            "[[hooks.SessionStart]]\n"
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            "command = 7\n"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=malformed_global
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("SessionStart", output)
+
+    def test_doctor_rejects_malformed_user_hook_state(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[hooks.state.floor]\n" 'enabled = "yes"\n' 'trusted_hash = "abc"\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.state.floor.enabled", output)
+
+    def test_doctor_rejects_malformed_project_hook_state(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        config = repo / ".codex" / "config.toml"
+        config.write_text("[hooks.state.floor]\n" 'enabled = "yes"\n', encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("hooks.state.floor.enabled", output)
+
+    def test_doctor_rejects_malformed_requirements_hook_path(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements="[hooks]\nmanaged_dir = 7\n"
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.managed_dir", output)
+
+    def test_doctor_rejects_managed_only_hook_policy(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements="allow_managed_hooks_only = true\n"
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("allow_managed_hooks_only=true", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_accepts_explicit_unmanaged_hook_policy(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements="allow_managed_hooks_only = false\n"
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_rejects_malformed_managed_only_hook_policy(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements='allow_managed_hooks_only = "false"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("must be a boolean", output)
+
+    def test_doctor_accepts_explicit_hook_feature_enable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config="[features]\nhooks = true\n"
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_rejects_persisted_hook_feature_disables(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config="[features]\nhooks = false\n",
+            system_config="[features]\ncodex_hooks = false\n",
+            profile_configs={"custom.config.toml": "[features]\nhooks = false\n"},
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("features.hooks", output)
+        self.assertIn("features.codex_hooks", output)
+
+    def test_doctor_rejects_project_hook_feature_disable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[features]\nhooks = false\n", encoding="utf-8"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_rejects_selected_legacy_profile_hook_feature_disable(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                'profile = "custom"\n\n[profiles.custom.features]\nhooks = false\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("profiles.custom.features.hooks", output)
+
+    def test_doctor_ignores_managed_only_key_outside_requirements(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config="allow_managed_hooks_only = true\n"
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_rejects_disabled_canonical_floor_state(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        hooks_path = self.write_hooks(repo, valid_adapter).resolve()
+        key = f"{hooks_path}:pre_tool_use:0:0"
+        user_config = f"[hooks.state.{json.dumps(key)}]\nenabled = false\n"
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=user_config
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("enabled=false", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_ignores_unrelated_disabled_hook_state(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        user_config = '[hooks.state."C:/other/hooks.json:pre_tool_use:0:0"]\n'
+        user_config += "enabled = false\n"
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=user_config
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
@@ -487,7 +1056,9 @@ class HarnessTests(unittest.TestCase):
             json.dumps(
                 {
                     "hooks": {
-                        "SessionStart": [{"hooks": [{"command": "keep"}]}],
+                        "SessionStart": [
+                            {"hooks": [{"type": "command", "command": "keep"}]}
+                        ],
                         "PreToolUse": [
                             {
                                 "hooks": [
@@ -522,6 +1093,28 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertFalse((codex_home / "hooks" / "dispatch.py").exists())
 
+    def test_sync_global_allows_absent_hooks_file(self) -> None:
+        root = Path(self.temp.name)
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        (codex_source / "skills" / "sample").mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        (codex_source / "skills" / "sample" / "SKILL.md").write_text(
+            "# sample\n", encoding="utf-8"
+        )
+        codex_home = root / "codex-home"
+        codex_home.mkdir()
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(root / "skills-home"),
+            apply=False,
+        )
+
+        self.assertEqual(harness.sync_global(args), 0)
+        self.assertFalse((codex_home / "hooks.json").exists())
+
     def test_sync_global_refuses_retained_custom_floor(self) -> None:
         root = Path(self.temp.name)
         config_root = root / "config"
@@ -540,10 +1133,11 @@ class HarnessTests(unittest.TestCase):
                         {
                             "hooks": [
                                 {
+                                    "type": "command",
                                     "command": (
                                         "python D:/custom/dispatch.py --event pre "
                                         "--runtime codex"
-                                    )
+                                    ),
                                 }
                             ]
                         }
@@ -1652,7 +2246,7 @@ class HarnessTests(unittest.TestCase):
             "refresh .codex/hooks.json after editing templates/hooks/dispatch.py",
         )
 
-    def test_repo_floor_rejects_non_blocking_handler_shapes(self) -> None:
+    def test_repo_floor_matches_blocking_handler_normalization(self) -> None:
         pin = "9" * 64
         posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
         windows = (
@@ -1670,18 +2264,21 @@ class HarnessTests(unittest.TestCase):
             {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [good]}]}}
         )
         self.assertEqual(len(harness.repo_codex_floor_groups(good_doc, pin)), 1)
-        # A handler Codex would not run as a blocking gate must never certify.
-        for bad_field in (
-            {"async": True},
+        async_handler = {**base_handler, "async": True}
+        async_doc = json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [async_handler]}]}}
+        )
+        self.assertEqual(harness.repo_codex_floor_groups(async_doc, pin), [])
+        # Unknown compatibility-looking fields are ignored, and timeout null/0
+        # normalize to blocking defaults rather than disabling the hook.
+        for accepted_field in (
             {"background": True},
             {"nonBlocking": True},
             {"timeout": 0},
-            {"timeout": -1},
-            {"timeout": "5"},
-            {"timeout": True},
+            {"timeout": None},
         ):
-            with self.subTest(bad_field=bad_field):
-                handler = {**base_handler, **bad_field}
+            with self.subTest(accepted_field=accepted_field):
+                handler = {**base_handler, **accepted_field}
                 doc = json.dumps(
                     {
                         "hooks": {
@@ -1689,7 +2286,23 @@ class HarnessTests(unittest.TestCase):
                         }
                     }
                 )
-                self.assertEqual(harness.repo_codex_floor_groups(doc, pin), [])
+                self.assertEqual(len(harness.repo_codex_floor_groups(doc, pin)), 1)
+        for invalid_field in (
+            {"timeout": -1},
+            {"timeout": "5"},
+            {"timeout": True},
+        ):
+            with self.subTest(invalid_field=invalid_field):
+                handler = {**base_handler, **invalid_field}
+                doc = json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [{"matcher": "^Bash$", "hooks": [handler]}]
+                        }
+                    }
+                )
+                with self.assertRaises(harness.HarnessError):
+                    harness.repo_codex_floor_groups(doc, pin)
 
     def test_repo_floor_requires_bound_pin_and_executable_variable_flow(self) -> None:
         pin = "f" * 64

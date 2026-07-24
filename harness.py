@@ -10,6 +10,7 @@ import ctypes
 import filecmp
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -19,11 +20,29 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
+
+CODEX_HOOK_EVENT_NAMES = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+)
+I64_MAX = (1 << 63) - 1
+U64_MAX = (1 << 64) - 1
+USIZE_MAX = (sys.maxsize * 2) + 1
+SERDE_JSON_HANDLER_CONTENT_MAX_CONTAINERS = 121
 
 TIER_NAMES = {
     0: "tombstone",
@@ -195,9 +214,30 @@ def toml_config(config_path: Path) -> dict[str, Any] | None:
     if contents is None:
         return None
     try:
-        return tomllib.loads(contents)
+        config = tomllib.loads(contents)
     except tomllib.TOMLDecodeError as exc:
         raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
+    validate_toml_integer_range(config, str(config_path))
+    return config
+
+
+def validate_toml_integer_range(value: Any, location: str) -> None:
+    """Match Rust TOML's signed 64-bit integer representation."""
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not -(1 << 63) <= value <= I64_MAX:
+            raise HarnessError(
+                f"invalid Codex config {location}: integer is outside signed 64-bit range"
+            )
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            validate_toml_integer_range(nested, f"{location}.{key}")
+        return
+    if isinstance(value, list):
+        for index, nested in enumerate(value):
+            validate_toml_integer_range(nested, f"{location}[{index}]")
 
 
 def inline_hooks_from_config(config_path: Path) -> Any | None:
@@ -280,13 +320,20 @@ def inline_hook_documents_from_config(config_path: Path) -> list[tuple[str, str]
         if not isinstance(hooks, dict):
             raise HarnessError(f"{location} in {config_path} must be a table")
         try:
-            document = json.dumps({"hooks": hooks})
+            document = json.dumps({"hooks": hooks}, default=toml_json_default)
         except (TypeError, ValueError) as exc:
             raise HarnessError(
                 f"unsupported inline hooks value in {config_path}: {exc}"
             ) from exc
         declarations.append((location, document))
     return declarations
+
+
+def toml_json_default(value: Any) -> dict[str, str]:
+    """Preserve ignored TOML-only scalar types without making known fields valid."""
+    if isinstance(value, (datetime, date, time)):
+        return {"__agent_harness_toml_scalar__": type(value).__name__}
+    raise TypeError(f"unsupported TOML value: {type(value).__name__}")
 
 
 def project_root_markers_from_config(
@@ -345,6 +392,123 @@ def codex_profile_config_paths(codex_home: Path) -> list[Path]:
     return sorted(paths)
 
 
+def hook_feature_declarations(config_path: Path) -> list[tuple[str, bool]]:
+    """Return inspectable canonical and active-legacy hook feature toggles."""
+    config = toml_config(config_path)
+    if config is None:
+        return []
+    declarations: list[tuple[str, bool]] = []
+
+    def inspect(container: dict[str, Any], location: str) -> None:
+        if "features" not in container:
+            return
+        features = container["features"]
+        if not isinstance(features, dict):
+            raise HarnessError(f"features in {config_path}:{location} must be a table")
+        for key in ("hooks", "codex_hooks"):
+            if key not in features:
+                continue
+            value = features[key]
+            if not isinstance(value, bool):
+                raise HarnessError(
+                    f"features.{key} in {config_path}:{location} must be a boolean"
+                )
+            declarations.append((f"{config_path}:{location}.features.{key}", value))
+
+    inspect(config, "top-level")
+    selected_profile = config.get("profile")
+    profiles = config.get("profiles", {})
+    if isinstance(selected_profile, str) and isinstance(profiles, dict):
+        profile = profiles.get(selected_profile)
+        if isinstance(profile, dict):
+            inspect(profile, f"profiles.{selected_profile}")
+    return declarations
+
+
+def valid_user_hook_states(config_path: Path) -> list[tuple[str, bool | None]]:
+    """Return valid user hook-state entries; Codex ignores malformed entries."""
+    config = toml_config(config_path)
+    if config is None:
+        return []
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    state = hooks.get("state")
+    if not isinstance(state, dict):
+        return []
+    result: list[tuple[str, bool | None]] = []
+    for key, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        enabled = entry.get("enabled")
+        trusted_hash = entry.get("trusted_hash")
+        if ("enabled" in entry and not isinstance(enabled, bool)) or (
+            "trusted_hash" in entry and not isinstance(trusted_hash, str)
+        ):
+            continue
+        normalized_key = key.strip()
+        if normalized_key:
+            result.append((normalized_key, enabled))
+    return result
+
+
+def codex_project_hook_activation_status(
+    codex_home: Path,
+    project_config_paths: list[Path],
+    canonical_hook_keys: set[str],
+) -> tuple[bool, str]:
+    """Fail closed on inspectable settings that disable the project floor."""
+    profile_paths = codex_profile_config_paths(codex_home)
+    system_config = codex_system_config_path()
+    requirements_path = system_config.with_name("requirements.toml")
+    requirements = toml_config(requirements_path)
+    blockers: list[str] = []
+    if requirements is not None and "allow_managed_hooks_only" in requirements:
+        managed_only = requirements["allow_managed_hooks_only"]
+        if not isinstance(managed_only, bool):
+            raise HarnessError(
+                f"allow_managed_hooks_only in {requirements_path} must be a boolean"
+            )
+        if managed_only:
+            blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
+
+    feature_paths = [
+        system_config,
+        codex_home / "config.toml",
+        *profile_paths,
+        codex_managed_config_path(codex_home),
+        *project_config_paths,
+    ]
+    for config_path in dict.fromkeys(feature_paths):
+        blockers.extend(
+            location
+            for location, enabled in hook_feature_declarations(config_path)
+            if not enabled
+        )
+
+    user_paths = [codex_home / "config.toml", *profile_paths]
+    for config_path in dict.fromkeys(user_paths):
+        blockers.extend(
+            f"{config_path}:hooks.state[{key!r}].enabled=false"
+            for key, enabled in valid_user_hook_states(config_path)
+            if key in canonical_hook_keys and enabled is False
+        )
+
+    boundary = (
+        "CLI/session/managed-cloud feature, policy, and state overrides remain "
+        "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
+    )
+    if blockers:
+        return (
+            False,
+            f"inspectable activation blocker(s): {'; '.join(blockers)}; {boundary}",
+        )
+    return (
+        True,
+        f"no inspectable managed-only, feature-disable, or floor-state blocker; {boundary}",
+    )
+
+
 def codex_project_root_marker_status(codex_home: Path) -> tuple[bool, str]:
     """Fail closed when inspectable config can move Codex's project root.
 
@@ -395,12 +559,12 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
     """Count deny-floor copies in every statically inspectable global layer."""
     system_config = codex_system_config_path()
     json_paths = [system_config.with_name("hooks.json"), codex_home / "hooks.json"]
-    config_paths = [
-        system_config.with_name("requirements.toml"),
-        system_config,
-        codex_home / "config.toml",
-        *codex_profile_config_paths(codex_home),
-        codex_managed_config_path(codex_home),
+    config_sources = [
+        (system_config.with_name("requirements.toml"), "requirements"),
+        (system_config, "config"),
+        (codex_home / "config.toml", "config"),
+        *((path, "config") for path in codex_profile_config_paths(codex_home)),
+        (codex_managed_config_path(codex_home), "config"),
     ]
     sources: list[str] = []
     count = 0
@@ -412,9 +576,9 @@ def inspectable_global_codex_floor_status(codex_home: Path) -> tuple[int, str]:
         count += len(groups)
         if groups:
             sources.append(f"{hooks_path} ({len(groups)})")
-    for config_path in dict.fromkeys(config_paths):
+    for config_path, source_kind in dict(config_sources).items():
         for location, document in inline_hook_documents_from_config(config_path):
-            groups = managed_codex_floor_groups(document)
+            groups = managed_codex_floor_groups(document, source_kind=source_kind)
             count += len(groups)
             if groups:
                 sources.append(f"{config_path}:{location} ({len(groups)})")
@@ -437,7 +601,7 @@ def inline_hooks_document(config_path: Path) -> str:
     if hooks is None:
         return ""
     try:
-        return json.dumps({"hooks": hooks})
+        return json.dumps({"hooks": hooks}, default=toml_json_default)
     except (TypeError, ValueError) as exc:
         raise HarnessError(
             f"unsupported inline hooks value in {config_path}: {exc}"
@@ -780,47 +944,357 @@ def reserve_backup_root(parent: Path, stem: str) -> Path:
             index += 1
 
 
-def parse_hooks_document(
-    current: str,
-) -> tuple[dict[str, Any], dict[str, Any], list[Any]]:
-    """Parse the hooks document and reject ambiguous topology shapes."""
-    try:
-        current_data = json.loads(current) if current.strip() else {"hooks": {}}
-    except json.JSONDecodeError as exc:
-        raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
-    if not isinstance(current_data, dict):
-        raise HarnessError("existing hooks.json must contain an object")
-    hooks = current_data.get("hooks", {})
+class JsonObjectPairs(list[tuple[str, Any]]):
+    """Lossless JSON object pairs used for schema-aware duplicate checks."""
+
+
+class JsonIntegerToken:
+    """Preserve an ignored integer lexeme beyond Python's conversion limit."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+
+def validate_serde_string(value: str, location: str) -> None:
+    if any("\ud800" <= character <= "\udfff" for character in value):
+        raise HarnessError(
+            f"invalid existing hooks.json: {location} contains a lone surrogate"
+        )
+
+
+def validate_tagged_handler_content(value: Any, depth: int = 0) -> None:
+    """Match serde's buffered Content validation for internally tagged handlers."""
+    if isinstance(value, str):
+        validate_serde_string(value, "handler content")
+        return
+    if isinstance(value, JsonIntegerToken):
+        if len(value.raw) <= 21:
+            parsed = int(value.raw)
+            if -(1 << 63) <= parsed <= U64_MAX:
+                return
+        if not math.isfinite(float(value.raw)):
+            raise HarnessError(
+                "invalid existing hooks.json: handler integer is out of range"
+            )
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise HarnessError(
+            "invalid existing hooks.json: handler number is out of range"
+        )
+    if isinstance(value, JsonObjectPairs):
+        if depth >= SERDE_JSON_HANDLER_CONTENT_MAX_CONTAINERS:
+            raise HarnessError(
+                "invalid existing hooks.json: handler content nesting is too deep"
+            )
+        for key, nested in value:
+            validate_tagged_handler_content(key, depth + 1)
+            validate_tagged_handler_content(nested, depth + 1)
+        return
+    if isinstance(value, list):
+        if depth >= SERDE_JSON_HANDLER_CONTENT_MAX_CONTAINERS:
+            raise HarnessError(
+                "invalid existing hooks.json: handler content nesting is too deep"
+            )
+        for nested in value:
+            validate_tagged_handler_content(nested, depth + 1)
+
+
+def json_object_fields(
+    value: JsonObjectPairs,
+    known_fields: set[str],
+    *,
+    location: str,
+    aliases: dict[str, str] | None = None,
+    deny_unknown: bool = False,
+) -> dict[str, Any]:
+    """Collect schema fields while matching serde's ignored-unknown behavior."""
+    fields: dict[str, Any] = {}
+    aliases = aliases or {}
+    for key, nested in value:
+        validate_serde_string(key, f"{location} key")
+        canonical = aliases.get(key, key)
+        if canonical not in known_fields:
+            if deny_unknown:
+                raise HarnessError(
+                    f"existing hooks.json contains unknown {location} field {key!r}"
+                )
+            continue
+        if canonical in fields:
+            raise HarnessError(
+                f"invalid existing hooks.json: duplicate {location} field {key!r}"
+            )
+        fields[canonical] = nested
+    return fields
+
+
+def validate_raw_json_hook_schema(value: Any) -> None:
+    """Reject duplicate known fields before JSON objects collapse to dictionaries."""
+    if not isinstance(value, JsonObjectPairs):
+        return
+    root = json_object_fields(
+        value,
+        {"description", "hooks"},
+        location="top-level",
+        deny_unknown=True,
+    )
+    raw_hooks = root.get("hooks", JsonObjectPairs())
+    if not isinstance(raw_hooks, JsonObjectPairs):
+        return
+    events = json_object_fields(
+        raw_hooks,
+        set(CODEX_HOOK_EVENT_NAMES),
+        location="hook event",
+    )
+    for event_name, raw_groups in events.items():
+        if not isinstance(raw_groups, list):
+            continue
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, JsonObjectPairs):
+                continue
+            group = json_object_fields(
+                raw_group,
+                {"matcher", "hooks"},
+                location=f"hooks.{event_name} group",
+            )
+            raw_handlers = group.get("hooks", [])
+            if not isinstance(raw_handlers, list):
+                continue
+            for raw_handler in raw_handlers:
+                if not isinstance(raw_handler, JsonObjectPairs):
+                    continue
+                for key, raw_value in raw_handler:
+                    if key != "type":
+                        validate_tagged_handler_content(raw_value)
+                tag = json_object_fields(
+                    raw_handler,
+                    {"type"},
+                    location=f"hooks.{event_name} handler",
+                ).get("type")
+                if tag != "command":
+                    continue
+                json_object_fields(
+                    raw_handler,
+                    {
+                        "type",
+                        "command",
+                        "commandWindows",
+                        "timeout",
+                        "async",
+                        "statusMessage",
+                        "additionalContextLimit",
+                    },
+                    aliases={"command_windows": "commandWindows"},
+                    location=f"hooks.{event_name} command handler",
+                )
+
+
+def json_pairs_to_value(value: Any) -> Any:
+    """Collapse lossless object pairs after schema-aware duplicate validation."""
+    if isinstance(value, JsonObjectPairs):
+        return {key: json_pairs_to_value(nested) for key, nested in value}
+    if isinstance(value, list):
+        return [json_pairs_to_value(nested) for nested in value]
+    if isinstance(value, JsonIntegerToken):
+        if len(value.raw) <= 100:
+            return int(value.raw)
+        return value
+    return value
+
+
+def reject_json_constant(value: str) -> None:
+    """Reject Python's non-standard NaN and Infinity JSON extensions."""
+    raise HarnessError(f"invalid existing hooks.json: invalid constant {value!r}")
+
+
+def validate_optional_unsigned(
+    handler: dict[str, Any], field: str, maximum: int
+) -> None:
+    if field not in handler or handler[field] is None:
+        return
+    value = handler[field]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= maximum
+    ):
+        raise HarnessError(
+            f"existing command hook handler {field} must be null or an unsigned integer"
+        )
+
+
+def validate_hook_handler(
+    handler: Any, event_name: str, *, unsigned_maximum: int
+) -> None:
+    """Validate one handler against Codex's tagged HookHandlerConfig schema."""
+    if not isinstance(handler, dict):
+        raise HarnessError(f"existing hooks.{event_name} handlers must be objects")
+    handler_type = handler.get("type")
+    if not isinstance(handler_type, str):
+        raise HarnessError(f"existing hooks.{event_name} handler type must be a string")
+    validate_serde_string(handler_type, f"hooks.{event_name} handler type")
+    if handler_type not in {"command", "prompt", "agent"}:
+        raise HarnessError(
+            f"existing hooks.{event_name} handler has unknown type {handler_type!r}"
+        )
+    if handler_type != "command":
+        return
+
+    command = handler.get("command")
+    if not isinstance(command, str):
+        raise HarnessError(
+            f"existing hooks.{event_name} command handler must contain a string command"
+        )
+    validate_serde_string(command, f"hooks.{event_name} command")
+    if "commandWindows" in handler and "command_windows" in handler:
+        raise HarnessError(
+            "existing command hook handler must not declare both commandWindows "
+            "and command_windows"
+        )
+    for field in ("commandWindows", "command_windows"):
+        if (
+            field in handler
+            and handler[field] is not None
+            and not isinstance(handler[field], str)
+        ):
+            raise HarnessError(
+                f"existing command hook handler {field} must be null or a string"
+            )
+        if isinstance(handler.get(field), str):
+            validate_serde_string(handler[field], f"command handler {field}")
+    validate_optional_unsigned(handler, "timeout", min(U64_MAX, unsigned_maximum))
+    if "async" in handler and not isinstance(handler["async"], bool):
+        raise HarnessError("existing command hook handler async must be a boolean")
+    if (
+        "statusMessage" in handler
+        and handler["statusMessage"] is not None
+        and not isinstance(handler["statusMessage"], str)
+    ):
+        raise HarnessError(
+            "existing command hook handler statusMessage must be null or a string"
+        )
+    if isinstance(handler.get("statusMessage"), str):
+        validate_serde_string(handler["statusMessage"], "command handler statusMessage")
+    validate_optional_unsigned(
+        handler, "additionalContextLimit", min(USIZE_MAX, unsigned_maximum)
+    )
+
+
+def validate_hook_events(
+    hooks: Any, *, unsigned_maximum: int = U64_MAX
+) -> dict[str, Any]:
+    """Validate every known event because one malformed sibling drops the layer."""
     if not isinstance(hooks, dict):
         raise HarnessError("existing hooks.json has a non-object hooks field")
-    groups = hooks.get("PreToolUse", [])
-    if not isinstance(groups, list):
-        raise HarnessError("existing hooks.PreToolUse must be an array")
-    for group in groups:
-        if not isinstance(group, dict):
-            raise HarnessError("existing hooks.PreToolUse entries must be objects")
-        if "hooks" not in group:
-            raise HarnessError("existing PreToolUse groups must contain hooks")
-        if "matcher" in group and not isinstance(group["matcher"], str):
-            raise HarnessError("existing PreToolUse group matcher must be a string")
-        handlers = group["hooks"]
-        if not isinstance(handlers, list):
-            raise HarnessError("existing PreToolUse group hooks must be an array")
-        for handler in handlers:
-            if not isinstance(handler, dict):
-                raise HarnessError("existing hook handlers must be objects")
-            if "type" in handler and not isinstance(handler["type"], str):
-                raise HarnessError("existing hook handler type must be a string")
-            if "commandWindows" in handler and "command_windows" in handler:
+    for event_name in CODEX_HOOK_EVENT_NAMES:
+        if event_name not in hooks:
+            continue
+        groups = hooks[event_name]
+        if not isinstance(groups, list):
+            raise HarnessError(f"existing hooks.{event_name} must be an array")
+        for group in groups:
+            if not isinstance(group, dict):
                 raise HarnessError(
-                    "existing hook handler must not declare both commandWindows "
-                    "and command_windows"
+                    f"existing hooks.{event_name} entries must be objects"
                 )
-            for field in ("command", "commandWindows", "command_windows"):
-                if field in handler and not isinstance(handler[field], str):
-                    raise HarnessError(
-                        f"existing hook handler {field} must be a string"
-                    )
+            if (
+                "matcher" in group
+                and group["matcher"] is not None
+                and not isinstance(group["matcher"], str)
+            ):
+                raise HarnessError(
+                    f"existing hooks.{event_name} group matcher must be null or a string"
+                )
+            if isinstance(group.get("matcher"), str):
+                validate_serde_string(
+                    group["matcher"], f"hooks.{event_name} group matcher"
+                )
+            handlers = group.get("hooks", [])
+            if not isinstance(handlers, list):
+                raise HarnessError(
+                    f"existing hooks.{event_name} group hooks must be an array"
+                )
+            for handler in handlers:
+                validate_hook_handler(
+                    handler, event_name, unsigned_maximum=unsigned_maximum
+                )
+    return hooks
+
+
+def validate_config_hook_state(hooks: dict[str, Any]) -> None:
+    """Validate HooksToml state fields that typed ConfigToml loading requires."""
+    state = hooks.get("state", {})
+    if not isinstance(state, dict):
+        raise HarnessError("existing inline hooks.state must be a table")
+    for name, entry in state.items():
+        if not isinstance(entry, dict):
+            raise HarnessError(f"existing inline hooks.state.{name} must be a table")
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise HarnessError(
+                f"existing inline hooks.state.{name}.enabled must be a boolean"
+            )
+        if "trusted_hash" in entry and not isinstance(entry["trusted_hash"], str):
+            raise HarnessError(
+                f"existing inline hooks.state.{name}.trusted_hash must be a string"
+            )
+
+
+def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
+    """Validate ManagedHooksRequirementsToml's optional path fields."""
+    for field in ("managed_dir", "windows_managed_dir"):
+        if field in hooks and not isinstance(hooks[field], str):
+            raise HarnessError(
+                f"existing requirements hooks.{field} must be a path string"
+            )
+
+
+def parse_hooks_document(
+    current: str, *, source_kind: str = "json"
+) -> tuple[dict[str, Any], dict[str, Any], list[Any]]:
+    """Parse and validate a complete Codex JSON or synthetic TOML hook layer."""
+    if source_kind not in {"json", "config", "requirements"}:
+        raise HarnessError(f"unsupported hook source kind: {source_kind}")
+    json_source = source_kind == "json"
+    try:
+        raw_data = json.loads(
+            current,
+            object_pairs_hook=JsonObjectPairs if json_source else None,
+            parse_constant=reject_json_constant if json_source else None,
+            parse_int=JsonIntegerToken if json_source else int,
+        )
+    except json.JSONDecodeError as exc:
+        raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
+    except (RecursionError, ValueError) as exc:
+        raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
+    if json_source:
+        try:
+            validate_raw_json_hook_schema(raw_data)
+            current_data = json_pairs_to_value(raw_data)
+        except RecursionError as exc:
+            raise HarnessError(f"invalid existing hooks.json: {exc}") from exc
+    else:
+        current_data = raw_data
+    if not isinstance(current_data, dict):
+        raise HarnessError("existing hooks.json must contain an object")
+    if json_source:
+        if (
+            "description" in current_data
+            and current_data["description"] is not None
+            and not isinstance(current_data["description"], str)
+        ):
+            raise HarnessError(
+                "existing hooks.json description must be null or a string"
+            )
+        if isinstance(current_data.get("description"), str):
+            validate_serde_string(current_data["description"], "description")
+    hooks = validate_hook_events(
+        current_data.get("hooks", {}),
+        unsigned_maximum=U64_MAX if json_source else I64_MAX,
+    )
+    if source_kind == "config":
+        validate_config_hook_state(hooks)
+    elif source_kind == "requirements":
+        validate_requirements_hook_paths(hooks)
+    groups = hooks.get("PreToolUse", [])
     return current_data, hooks, groups
 
 
@@ -830,7 +1304,7 @@ def windows_hook_command(handler: dict[str, Any]) -> str:
         raise HarnessError(
             "hook handler must not declare both commandWindows and command_windows"
         )
-    return handler.get("commandWindows", handler.get("command_windows", ""))
+    return handler.get("commandWindows", handler.get("command_windows")) or ""
 
 
 def command_has_flag_value(command: str, flag: str, value: str) -> bool:
@@ -865,6 +1339,8 @@ def command_points_to_dispatcher(
 def is_direct_codex_floor_handler(
     handler: dict[str, Any], managed_dispatcher: Path | None = None
 ) -> bool:
+    if handler.get("type") != "command":
+        return False
     for command in (handler.get("command", ""), windows_hook_command(handler)):
         if (
             command
@@ -878,6 +1354,8 @@ def is_direct_codex_floor_handler(
 
 def is_global_floor_handler(handler: dict[str, Any]) -> bool:
     """Recognize any global dispatcher/wrapper so doctor cannot false-green."""
+    if handler.get("type") != "command":
+        return False
     return any(
         command
         and (
@@ -914,9 +1392,11 @@ def is_owned_global_floor_handler(
     return handler == canonical_legacy_codex_floor_handler(managed_dispatcher)
 
 
-def managed_codex_floor_groups(current: str) -> list[Any]:
+def managed_codex_floor_groups(current: str, *, source_kind: str = "json") -> list[Any]:
     """Find every direct global Codex floor, including unowned custom copies."""
-    _current_data, _hooks, existing_groups = parse_hooks_document(current)
+    _current_data, _hooks, existing_groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
 
     def is_managed(group: Any) -> bool:
         for handler in group.get("hooks", []):
@@ -1614,12 +2094,18 @@ def platform_project_floor_command(
     )
 
 
-def repo_codex_floor_candidates(current: str) -> list[Any]:
+def repo_codex_floor_candidates(
+    current: str, *, source_kind: str = "json"
+) -> list[Any]:
     """Return one entry per handler that could create a project floor dispatch."""
-    _current_data, _hooks, groups = parse_hooks_document(current)
+    _current_data, _hooks, groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
     result = []
     for group in groups:
         for handler in group.get("hooks", []):
+            if handler.get("type") != "command":
+                continue
             commands = (
                 strip_shell_comments(handler.get("command", "")),
                 strip_shell_comments(
@@ -1638,28 +2124,26 @@ def repo_codex_floor_candidates(current: str) -> list[Any]:
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
     """Reject handler shapes Codex would not run as a blocking PreToolUse gate.
 
-    Codex skips async handlers, so an async/background floor never denies. A
-    non-positive or non-numeric timeout is likewise treated as unusable rather
-    than certified, so doctor cannot false-green a hook that will not gate.
+    Codex skips async PreToolUse handlers. Schema validation already rejects
+    invalid timeouts; missing, null, and zero normalize to blocking timeouts.
+    Unknown compatibility-looking fields are ignored by Codex and by this gate.
     """
-    for field in ("async", "background", "nonBlocking", "non_blocking", "detached"):
-        if handler.get(field):
-            return False
-    if "timeout" in handler:
-        timeout = handler["timeout"]
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-            return False
-        if timeout <= 0:
-            return False
-    return True
+    return handler.get("async") is not True
 
 
-def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> list[Any]:
-    """Return one group entry per platform-complete project floor handler."""
-    _current_data, _hooks, groups = parse_hooks_document(current)
+def repo_codex_floor_entries(
+    current: str,
+    expected_pin: str | None = None,
+    *,
+    source_kind: str = "json",
+) -> list[tuple[int, int, Any]]:
+    """Return positions and groups for platform-complete project floor handlers."""
+    _current_data, _hooks, groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
 
     result = []
-    for group in groups:
+    for group_index, group in enumerate(groups):
         if not matcher_targets_bash(group.get("matcher", "")):
             continue
         handlers = group.get("hooks", [])
@@ -1677,8 +2161,23 @@ def repo_codex_floor_groups(current: str, expected_pin: str | None = None) -> li
         ) and platform_project_floor_command(
             windows_command, expected_pin, windows=True
         ):
-            result.append(group)
+            result.append((group_index, 0, group))
     return result
+
+
+def repo_codex_floor_groups(
+    current: str,
+    expected_pin: str | None = None,
+    *,
+    source_kind: str = "json",
+) -> list[Any]:
+    """Return one group entry per platform-complete project floor handler."""
+    return [
+        group
+        for _group_index, _handler_index, group in repo_codex_floor_entries(
+            current, expected_pin, source_kind=source_kind
+        )
+    ]
 
 
 def normalized_text_sha256(path: Path) -> str:
@@ -1722,7 +2221,12 @@ def remove_managed_codex_floor(
         current_data.pop("hooks", None)
     if not current_data:
         return ""
-    return json.dumps(current_data, indent=2) + "\n"
+    try:
+        return json.dumps(current_data, indent=2, allow_nan=False) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise HarnessError(
+            "refusing to rewrite hooks.json with an ignored non-standard number"
+        ) from exc
 
 
 def sync_global(args: argparse.Namespace) -> int:
@@ -1773,7 +2277,7 @@ def sync_global(args: argparse.Namespace) -> int:
     hook_text = remove_managed_codex_floor(
         current_hooks, codex_home / "hooks" / "dispatch.py"
     )
-    remaining_global_floors = managed_codex_floor_groups(hook_text)
+    remaining_global_floors = managed_codex_floor_groups(hook_text) if hook_text else []
     if remaining_global_floors:
         raise HarnessError(
             "refusing global sync: an unowned or ambiguous Codex floor remains in "
@@ -1895,9 +2399,17 @@ def doctor(args: argparse.Namespace) -> int:
             marker_ok = False
             marker_detail = str(exc)
         checks.append(("Codex project root markers", marker_ok, marker_detail))
+        activation_ok = False
+        activation_detail = "project hook sources were not resolved"
         try:
             requested_path = Path(args.repo).resolve()
             requested_checkout, authoritative_checkout = root_checkout(requested_path)
+            project_config_paths = [
+                layer / ".codex" / "config.toml"
+                for layer in codex_project_layer_dirs(
+                    requested_path, requested_checkout
+                )
+            ]
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
                 requested_path, requested_checkout, authoritative_checkout
             )
@@ -1912,26 +2424,45 @@ def doctor(args: argparse.Namespace) -> int:
                 for hooks in repo_hook_paths
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
-            repo_hook_texts = json_hook_texts + inline_hook_texts
+            repo_hook_sources = [(text, "json") for text in json_hook_texts] + [
+                (text, "config") for text in inline_hook_texts
+            ]
             project_floor_count = sum(
-                len(repo_codex_floor_groups(text)) for text in repo_hook_texts
+                len(repo_codex_floor_groups(text, source_kind=source_kind))
+                for text, source_kind in repo_hook_sources
             )
             candidate_floor_count = sum(
-                len(repo_codex_floor_candidates(text)) for text in repo_hook_texts
+                len(repo_codex_floor_candidates(text, source_kind=source_kind))
+                for text, source_kind in repo_hook_sources
             )
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
             current_floor_count = sum(
-                len(repo_codex_floor_groups(text, expected_pin))
-                for text in repo_hook_texts
+                len(
+                    repo_codex_floor_groups(text, expected_pin, source_kind=source_kind)
+                )
+                for text, source_kind in repo_hook_sources
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
-            canonical_root_floor_count = sum(
-                len(repo_codex_floor_groups(hooks_text, expected_pin))
+            canonical_root_floor_entries = [
+                entry
                 for hooks, hooks_text in json_hook_documents
                 if hooks == canonical_hooks
-            )
+                for entry in repo_codex_floor_entries(hooks_text, expected_pin)
+            ]
+            canonical_root_floor_count = len(canonical_root_floor_entries)
+            canonical_hook_keys = {
+                f"{canonical_hooks.resolve()}:pre_tool_use:{group_index}:{handler_index}"
+                for group_index, handler_index, _group in canonical_root_floor_entries
+            }
+            try:
+                activation_ok, activation_detail = codex_project_hook_activation_status(
+                    codex_home, project_config_paths, canonical_hook_keys
+                )
+            except (HarnessError, OSError, UnicodeError) as exc:
+                activation_ok = False
+                activation_detail = str(exc)
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
@@ -1949,10 +2480,14 @@ def doctor(args: argparse.Namespace) -> int:
             project_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
         checks.append(
+            ("Codex project hook activation", activation_ok, activation_detail)
+        )
+        checks.append(
             (
                 "project Codex floor",
                 marker_ok
                 and source_ok
+                and activation_ok
                 and candidate_floor_count == 1
                 and project_floor_count == 1
                 and current_floor_count == 1
