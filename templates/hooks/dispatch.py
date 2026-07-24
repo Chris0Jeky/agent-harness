@@ -6139,15 +6139,11 @@ def check(
     )
     # A literal scriptblock split across segments continues in the segments that
     # follow it within the same pass; complete_scriptblock_argv walks these so a
-    # cmdlet's post-`}` arguments stay inspectable.
+    # cmdlet's post-`}` arguments stay inspectable. Sliced on demand rather than
+    # precomputed per index, so a command with many segments stays linear.
     pass_order: dict[int, list[list[str]]] = {}
     for raw_toks, _aware, _text, _operator, seg_pass, _index in execution_segments:
         pass_order.setdefault(seg_pass, []).append(raw_toks)
-    pass_followers = {
-        (seg_pass, index): entries[index + 1 :]
-        for seg_pass, entries in pass_order.items()
-        for index in range(len(entries))
-    }
     initial_cwd = command_cwd
     current_cwd = command_cwd
     cwd_uncertain = _cwd_uncertain
@@ -6439,7 +6435,7 @@ def check(
                 continue
             invoke_error = powershell_invoke_command_opacity(
                 complete_scriptblock_argv(
-                    toks, pass_followers.get((current_pass, segment_index), [])
+                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
                 )
             )
             if invoke_error:
@@ -6451,7 +6447,7 @@ def check(
             pipeline_error = powershell_pipeline_scriptblock_opacity(
                 head,
                 complete_scriptblock_argv(
-                    toks, pass_followers.get((current_pass, segment_index), [])
+                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
                 ),
             )
             if pipeline_error:
