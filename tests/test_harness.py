@@ -63,16 +63,14 @@ class HarnessTests(unittest.TestCase):
         return hooks
 
     @staticmethod
-    def write_inline_floor(checkout: Path) -> Path:
+    def inline_floor_config_text() -> str:
         pin = harness.normalized_text_sha256(
             Path(harness.__file__).resolve().parent
             / "templates"
             / "hooks"
             / "dispatch.py"
         )
-        config = checkout / ".codex" / "config.toml"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(
+        return (
             "[[hooks.PreToolUse]]\n"
             'matcher = "^Bash$"\n\n'
             "[[hooks.PreToolUse.hooks]]\n"
@@ -81,9 +79,14 @@ class HarnessTests(unittest.TestCase):
             "--event pre --runtime codex'\n"
             f"commandWindows = \"$expected='{pin}'; py -3 "
             '$env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex"\n'
-            "timeout = 5\n",
-            encoding="utf-8",
+            "timeout = 5\n"
         )
+
+    @classmethod
+    def write_inline_floor(cls, checkout: Path) -> Path:
+        config = checkout / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(cls.inline_floor_config_text(), encoding="utf-8")
         return config
 
     def run_doctor_with_fixture_globals(
@@ -92,6 +95,9 @@ class HarnessTests(unittest.TestCase):
         *,
         user_config: str | None = None,
         profile_configs: dict[str, str] | None = None,
+        system_config: str | None = None,
+        system_hooks: str | None = None,
+        managed_config: str | None = None,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -103,6 +109,14 @@ class HarnessTests(unittest.TestCase):
             (codex_home / "config.toml").write_text(user_config, encoding="utf-8")
         for filename, contents in (profile_configs or {}).items():
             (codex_home / filename).write_text(contents, encoding="utf-8")
+        if system_config is not None:
+            (root / "system-config.toml").write_text(system_config, encoding="utf-8")
+        if system_hooks is not None:
+            (root / "hooks.json").write_text(system_hooks, encoding="utf-8")
+        if managed_config is not None:
+            (root / "managed-config.toml").write_text(
+                managed_config, encoding="utf-8"
+            )
         harness_root = Path(harness.__file__).resolve().parent
         for filename in ("dispatch.py", "smoke_test.py"):
             target = claude_home / "hooks" / filename
@@ -1915,6 +1929,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project root markers", output)
         self.assertIn("0 explicit inspectable declaration(s)", output)
+        self.assertIn("cloud/session/plugin hooks require /hooks", output)
 
     def test_doctor_rejects_nested_profile_project_root_markers(self) -> None:
         repo = self.make_repo()
@@ -1997,6 +2012,82 @@ class HarnessTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project root markers: fixture denied", output)
+
+    def test_doctor_rejects_user_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, user_config=self.inline_floor_config_text()
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("codex-home", output)
+
+    def test_doctor_rejects_stored_profile_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            profile_configs={"custom.config.toml": self.inline_floor_config_text()},
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("custom.config.toml", output)
+
+    def test_doctor_rejects_system_hooks_json_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_hooks=valid_adapter
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.json", output)
+
+    def test_doctor_rejects_system_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_config=self.inline_floor_config_text()
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("system-config.toml", output)
+
+    def test_doctor_rejects_managed_inline_global_floor(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, managed_config=self.inline_floor_config_text()
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("managed-config.toml", output)
 
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
