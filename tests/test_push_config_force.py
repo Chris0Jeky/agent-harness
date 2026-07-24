@@ -99,6 +99,10 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo("HEAD:refs/heads/main")
         self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
 
+    def test_helper_ignores_matching_branches_refspec(self) -> None:
+        repo = self._repo(":")
+        self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
+
     def test_helper_ignores_absent_config(self) -> None:
         repo = self._repo(None)
         self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
@@ -125,6 +129,29 @@ class PushConfigForceTests(unittest.TestCase):
         for command in (
             "GIT_DIR=/other/repo/.git git push origin",
             "$env:GIT_DIR='/other/repo/.git'; git push",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("push-config-unverifiable", reason)
+
+    def test_bare_push_denied_under_scoped_home_override(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "HOME=/other/home git push origin",
+            "XDG_CONFIG_HOME=/other/config git push origin",
+            "$env:USERPROFILE='C:/other/home'; git push origin",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("push-config-unverifiable", reason)
+
+    def test_bare_push_denied_after_repository_config_write(self) -> None:
+        repo = self._repo(None)
+        for command in (
+            "printf unsafe >> .git/config; git push origin",
+            "Set-Content .git/config unsafe; git push origin",
         ):
             with self.subTest(command=command):
                 decision, reason = self._decide(repo, command)
