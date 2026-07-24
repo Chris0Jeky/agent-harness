@@ -33,8 +33,15 @@ COVERAGE LIMITS (read before quoting a number)
   not the directory it originally ran in. Rules keyed on "inside/outside the
   project" therefore judge a synthetic cwd. Baseline and candidate see the same
   synthetic cwd, so the *deltas* are sound; the absolute rate is an approximation.
-* The remote resolver is stubbed to "private" so no network is touched, and the
-  ambient `GIT_CONFIG_*` family is cleared so results do not depend on the host.
+* The replay spawns no subprocess and touches no network. `check()` accepts a
+  `remote_resolver` and it is stubbed to "private"; it has no comparable hook
+  for the `git config --get-regexp remote.*` read behind a refspec-less
+  `git push`, so the `command_runner` defaults inside the loaded module are
+  rebound to a stub that returns `""` (see `make_module_offline`). Without that,
+  every such push spawns two real `git.exe` processes per version, the verdict
+  depends on `--project-dir`'s actual git config, and a transient slow spawn on
+  one side of the comparison alone can manufacture a phantom delta row. The run
+  reports how many reads the stub answered.
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -63,7 +70,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from types import ModuleType
+from types import FunctionType, ModuleType
 from typing import Any, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -461,6 +468,115 @@ def stub_resolver(
     return False, "corpus-replay-stub-private"
 
 
+# Incremented by `stub_command_runner`; reported so the run can prove how many
+# subprocesses it did NOT spawn. Per-process under `spawn`, so it is returned
+# with each chunk rather than read from the parent.
+_OFFLINE_READS: dict[str, int] = {"count": 0}
+
+
+def stub_command_runner(
+    argv: Sequence[str],
+    cwd: str = "",
+    timeout: Any = None,
+) -> str:
+    """Stand in for `dispatch.command_output`: resolve nothing, spawn nothing.
+
+    `""` is exactly what the real `command_output` returns when the subprocess
+    fails, and every caller documents that as "unresolved -> not dangerous", so
+    the replay's verdict matches a checkout with no `remote.<name>.push`,
+    `.mirror` or `.receivepack` configured. That is a fixed, stated premise
+    instead of whatever the host's git config happens to say today.
+    """
+    _OFFLINE_READS["count"] += 1
+    return ""
+
+
+class OfflineSubprocess:
+    """Proxy that lets a replayed dispatch module see `subprocess`, not use it.
+
+    Belt and braces behind `make_module_offline`: if a future floor version
+    grows a spawn site the default rebinding does not cover, this turns it into
+    a loud `error` verdict in the report instead of a silent, host-dependent,
+    non-deterministic result.
+    """
+
+    _BLOCKED = frozenset(
+        {
+            "run",
+            "Popen",
+            "call",
+            "check_call",
+            "check_output",
+            "getoutput",
+            "getstatusoutput",
+        }
+    )
+
+    def __init__(self, real: ModuleType) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        if name in OfflineSubprocess._BLOCKED:
+            raise RuntimeError(
+                f"corpus replay is offline but dispatch called subprocess.{name}"
+            )
+        return getattr(self._real, name)
+
+
+def make_module_offline(module: ModuleType) -> int:
+    """Rebind `command_runner` defaults to the stub; return how many were found.
+
+    `check()` takes no `command_runner` parameter, so it cannot simply be passed
+    one the way `remote_resolver` is: it calls
+    `configured_bare_push_is_dangerous(cwd, git_globals, deadline=...)` and that
+    function's `command_runner` default was bound to the real `command_output`
+    object when the module was defined. Assigning `module.command_output`
+    afterwards therefore does NOT change it — the already-captured default is
+    what runs. The defaults are rewritten in place instead, which is the
+    smallest change that makes the offline claim true without touching
+    `dispatch.py` (T4-class shared infrastructure) to add an injection point.
+
+    Raises when nothing was rebound: a floor version that no longer matches this
+    shape must fail loudly rather than quietly resume spawning `git config`.
+    """
+    real = getattr(module, "command_output", None)
+    if real is None:
+        raise RuntimeError(f"{module.__name__} has no command_output to stub")
+    patched = 0
+    for name in dir(module):
+        function = getattr(module, name, None)
+        if not isinstance(function, FunctionType):
+            continue
+        defaults = function.__defaults__
+        if defaults:
+            code = function.__code__
+            names = code.co_varnames[: code.co_argcount]
+            first = code.co_argcount - len(defaults)
+            replaced = list(defaults)
+            changed = False
+            for offset, value in enumerate(defaults):
+                if names[first + offset] == "command_runner" and value is real:
+                    replaced[offset] = stub_command_runner
+                    changed = True
+            if changed:
+                function.__defaults__ = tuple(replaced)
+                patched += 1
+        keyword_defaults = function.__kwdefaults__
+        if keyword_defaults and keyword_defaults.get("command_runner") is real:
+            keyword_defaults["command_runner"] = stub_command_runner
+            patched += 1
+    if not patched:
+        raise RuntimeError(
+            f"{module.__name__}: no command_runner default bound to command_output; "
+            "the replay cannot prove it is offline"
+        )
+    # Any direct call site, plus a hard stop on every other spawn route.
+    module.command_output = stub_command_runner
+    if isinstance(getattr(module, "subprocess", None), ModuleType):
+        module.subprocess = OfflineSubprocess(module.subprocess)
+    return patched
+
+
 def clear_git_config_env() -> dict[str, str]:
     """Remove the ambient `GIT_CONFIG_*` family and return it for restoration.
 
@@ -511,23 +627,30 @@ def _worker_init(
     project_dir: str,
 ) -> None:
     clear_git_config_env()
-    _WORKER["baseline"] = load_dispatch("replay_baseline", Path(baseline_path))
-    _WORKER["candidate"] = load_dispatch("replay_candidate", Path(candidate_path))
+    baseline = load_dispatch("replay_baseline", Path(baseline_path))
+    candidate = load_dispatch("replay_candidate", Path(candidate_path))
+    make_module_offline(baseline)
+    make_module_offline(candidate)
+    _WORKER["baseline"] = baseline
+    _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
     _WORKER["project_dir"] = project_dir
 
 
-def _worker_run(chunk: list[tuple[int, str]]) -> list[tuple[int, list, list]]:
+def _worker_run(
+    chunk: list[tuple[int, str]],
+) -> tuple[list[tuple[int, list, list]], int]:
     tiers = _WORKER["tiers"]
     project_dir = _WORKER["project_dir"]
     baseline = _WORKER["baseline"]
     candidate = _WORKER["candidate"]
+    before = _OFFLINE_READS["count"]
     results = []
     for index, command in chunk:
         base = [decide(baseline, command, tier, project_dir) for tier in tiers]
         cand = [decide(candidate, command, tier, project_dir) for tier in tiers]
         results.append((index, base, cand))
-    return results
+    return results, _OFFLINE_READS["count"] - before
 
 
 def replay(
@@ -538,8 +661,9 @@ def replay(
     project_dir: str,
     jobs: int,
     progress: bool,
-) -> tuple[list[list[tuple[str, str]]], list[list[tuple[str, str]]]]:
-    """Return (baseline, candidate) verdicts, indexed [command][tier]."""
+) -> tuple[list[list[tuple[str, str]]], list[list[tuple[str, str]]], int]:
+    """Return (baseline, candidate) verdicts indexed [command][tier], and the
+    number of git-config reads the offline stub answered instead of spawning."""
     total = len(commands)
     baseline_out: list[Any] = [None] * total
     candidate_out: list[Any] = [None] * total
@@ -548,6 +672,7 @@ def replay(
         for start in range(0, total, 128)
     ]
     done = 0
+    offline_reads = 0
     if jobs > 1:
         context = multiprocessing.get_context("spawn")
         pool = context.Pool(
@@ -561,23 +686,26 @@ def replay(
             ),
         )
         with pool:
-            for batch in pool.imap_unordered(_worker_run, chunks, chunksize=1):
+            for batch, reads in pool.imap_unordered(_worker_run, chunks, chunksize=1):
                 for index, base, cand in batch:
                     baseline_out[index] = base
                     candidate_out[index] = cand
+                offline_reads += reads
                 done += len(batch)
                 if progress:
                     report_progress(done, total)
     else:
         _worker_init(str(baseline_path), str(candidate_path), tiers, project_dir)
         for chunk in chunks:
-            for index, base, cand in _worker_run(chunk):
+            batch, reads = _worker_run(chunk)
+            for index, base, cand in batch:
                 baseline_out[index] = base
                 candidate_out[index] = cand
+            offline_reads += reads
             done += len(chunk)
             if progress:
                 report_progress(done, total)
-    return baseline_out, candidate_out
+    return baseline_out, candidate_out, offline_reads
 
 
 def report_progress(done: int, total: int) -> None:
@@ -1027,7 +1155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     injected = clear_git_config_env()
     try:
-        baseline_verdicts, candidate_verdicts = replay(
+        baseline_verdicts, candidate_verdicts, offline_reads = replay(
             commands,
             args.baseline,
             args.candidate,
@@ -1057,6 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "max_command_chars": args.max_command_chars,
             "jobs": max(1, args.jobs),
             "embedded_codex_exec_included": not args.no_embedded,
+            "offline_git_config_reads": offline_reads,
         },
         "corpus": {
             "source": (
