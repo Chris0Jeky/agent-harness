@@ -1153,6 +1153,39 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("features.future_feature", output)
         self.assertIn("must be a boolean", output)
 
+    def test_doctor_ignores_project_only_system_proxy_feature(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            '[features]\nrespect_system_proxy = "project-denylisted"\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_rejects_malformed_user_system_proxy_feature(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config='[features]\nrespect_system_proxy = "invalid"\n',
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("features.respect_system_proxy", output)
+        self.assertIn("must be a boolean", output)
+
     def test_hook_feature_schema_accepts_structured_codex_features(self) -> None:
         config = Path(self.temp.name) / "config.toml"
         config.write_text(

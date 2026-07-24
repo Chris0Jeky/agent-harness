@@ -538,7 +538,10 @@ def validate_codex_feature_value(
 
 
 def hook_feature_declarations(
-    config_path: Path, *, reject_legacy_profile: bool = False
+    config_path: Path,
+    *,
+    reject_legacy_profile: bool = False,
+    project_local: bool = False,
 ) -> list[tuple[str, bool]]:
     """Return inspectable canonical and legacy-named hook feature toggles."""
     config = toml_config(config_path)
@@ -557,6 +560,10 @@ def hook_feature_declarations(
         if not isinstance(features, dict):
             raise HarnessError(f"features in {config_path}:{location} must be a table")
         for key, value in features.items():
+            # Codex sanitizes this user/system-only feature out of every
+            # project-local layer before typed FeaturesToml deserialization.
+            if project_local and key == "respect_system_proxy":
+                continue
             validate_codex_feature_value(key, value, config_path, location)
         if active:
             key = "hooks" if "hooks" in features else "codex_hooks"
@@ -680,7 +687,9 @@ def codex_project_hook_activation_status(
     for config_path in dict.fromkeys(project_config_paths):
         blockers.extend(
             location
-            for location, enabled in hook_feature_declarations(config_path)
+            for location, enabled in hook_feature_declarations(
+                config_path, project_local=True
+            )
             if not enabled
         )
 
