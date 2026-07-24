@@ -42,6 +42,14 @@ COVERAGE LIMITS (read before quoting a number)
   depends on `--project-dir`'s actual git config, and a transient slow spawn on
   one side of the comparison alone can manufacture a phantom delta row. The run
   reports how many reads the stub answered.
+* The whole ambient `GIT_*` family plus `EDITOR` / `VISUAL` / `PAGER` /
+  `SSH_ASKPASS` is cleared for the duration of the run, because `check()` reads
+  all of them from `os.environ` and any one of them turns a verdict into a
+  property of the host. This is not hypothetical: a plain `GIT_EDITOR=true` in
+  the shell moved a 1.5.3-vs-1.6.0 run's baseline blocked-unique from 11,496 to
+  11,739. `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` are deliberately kept —
+  the floor resolves `~` and home-root comparisons through them. The run prints
+  the names (never the values) of everything it cleared.
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -100,6 +108,17 @@ JS_SIMPLE_ESCAPES = {
 }
 JS_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 JS_LINE_TERMINATORS = "\n\r\u2028\u2029"
+
+# Ambient variables `check()` reads straight from `os.environ`, so leaving any
+# of them set makes a verdict a property of the host, not of the command.
+HOST_ENV_PREFIX = "GIT_"
+HOST_ENV_NAMES = frozenset({"EDITOR", "VISUAL", "PAGER", "SSH_ASKPASS"})
+# Never cleared. The floor resolves `~`, home roots and `$HOME`-style references
+# through these; removing them would not remove host dependence, it would make
+# every path verdict wrong instead.
+HOST_ENV_KEEP = frozenset(
+    {"HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "XDG_CONFIG_HOME"}
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -577,22 +596,47 @@ def make_module_offline(module: ModuleType) -> int:
     return patched
 
 
-def clear_git_config_env() -> dict[str, str]:
-    """Remove the ambient `GIT_CONFIG_*` family and return it for restoration.
+def declared_env_names(modules: Sequence[ModuleType]) -> set[str]:
+    """Env-var names a loaded floor version declares that it inspects.
 
-    `check()` reads the live environment, and an inherited `GIT_CONFIG_COUNT` /
-    `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` family makes it deny with "Git
-    config environment injection is opaque to floor inspection" regardless of
-    the command — which would make every measurement here host-dependent.
+    Harvested from the module's own `_GIT_*_ENVIRONMENT` registries so that a
+    future version reading a variable this script has never heard of is still
+    neutralised, rather than silently reintroducing host dependence.
     """
-    injected = {
+    names: set[str] = set()
+    for module in modules:
+        for attr, value in vars(module).items():
+            if "ENVIRONMENT" not in attr.upper():
+                continue
+            if isinstance(value, (set, frozenset)):
+                names |= {item.upper() for item in value if isinstance(item, str)}
+    return names - HOST_ENV_KEEP
+
+
+def clear_host_git_env(modules: Sequence[ModuleType] = ()) -> dict[str, str]:
+    """Remove every ambient variable `check()` reads; return it for restoration.
+
+    `check()` reads the live environment in a dozen places, not just the
+    `GIT_CONFIG_*` family: `GIT_INDEX_FILE`, the whole `GIT_TRACE*` family,
+    `GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR`, the process-launching
+    `GIT_ASKPASS` / `GIT_EDITOR` / `GIT_SSH_COMMAND` / ... set, and plain
+    `EDITOR` / `VISUAL` / `PAGER` / `SSH_ASKPASS`. Any of them can turn a verdict
+    into a property of the machine: with `GIT_EDITOR=true` merely set in the
+    shell, a 1.5.3-vs-1.6.0 run denied ~243 commands purely because of the host
+    (baseline blocked-unique 11,739 vs 11,496 cleared). The deltas survived that
+    time, which was luck, not design.
+    """
+    declared = declared_env_names(modules)
+    removed = {
         name: value
         for name, value in os.environ.items()
-        if name.startswith("GIT_CONFIG")
+        if name.upper().startswith(HOST_ENV_PREFIX)
+        or name.upper() in HOST_ENV_NAMES
+        or name.upper() in declared
     }
-    for name in injected:
+    for name in removed:
         del os.environ[name]
-    return injected
+    return removed
 
 
 def decide(
@@ -626,9 +670,13 @@ def _worker_init(
     tiers: Sequence[int],
     project_dir: str,
 ) -> None:
-    clear_git_config_env()
+    # Cleared before the modules load, then again with what they declare they
+    # read. Workers are forked/spawned copies, so the parent's clearing does not
+    # reach them under `spawn`; they never restore, they exit.
+    clear_host_git_env()
     baseline = load_dispatch("replay_baseline", Path(baseline_path))
     candidate = load_dispatch("replay_candidate", Path(candidate_path))
+    clear_host_git_env((baseline, candidate))
     make_module_offline(baseline)
     make_module_offline(candidate)
     _WORKER["baseline"] = baseline
@@ -874,6 +922,15 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
     print(f"candidate : floor {candidate['version']}  {candidate['path']}")
     print(f"project   : {result['project_dir']}")
+    cleared = result["run"].get("cleared_host_env") or []
+    print(
+        "host env  : cleared "
+        + (", ".join(cleared) if cleared else "(nothing relevant was set)")
+    )
+    print(
+        f"offline   : {result['run'].get('offline_git_config_reads', 0)} git-config "
+        "reads answered by the stub (0 subprocesses spawned)"
+    )
     print()
     print("corpus")
     print("-" * 78)
@@ -1153,7 +1210,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     baseline_version = module_version(baseline_module)
     candidate_version = module_version(candidate_module)
 
-    injected = clear_git_config_env()
+    injected = clear_host_git_env((baseline_module, candidate_module))
+    if injected and progress:
+        sys.stderr.write(
+            "cleared host environment that would otherwise change verdicts: "
+            + ", ".join(sorted(injected))
+            + "\n"
+        )
     try:
         baseline_verdicts, candidate_verdicts, offline_reads = replay(
             commands,
@@ -1186,6 +1249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "jobs": max(1, args.jobs),
             "embedded_codex_exec_included": not args.no_embedded,
             "offline_git_config_reads": offline_reads,
+            "cleared_host_env": sorted(injected),
         },
         "corpus": {
             "source": (
