@@ -20,6 +20,32 @@ class HarnessTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         return root
 
+    def make_linked_worktree(self) -> tuple[Path, Path]:
+        root = self.make_repo()
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Harness Test"], cwd=root, check=True
+        )
+        (root / "README.md").write_text("fixture\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "create fixture"], cwd=root, check=True)
+        linked = Path(self.temp.name) / "linked"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(linked), "HEAD"],
+            cwd=root,
+            check=True,
+        )
+        return root, linked
+
+    @staticmethod
+    def write_hooks(checkout: Path, text: str) -> Path:
+        hooks = checkout / ".codex" / "hooks.json"
+        hooks.parent.mkdir(parents=True, exist_ok=True)
+        hooks.write_text(text, encoding="utf-8")
+        return hooks
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
 
@@ -1529,6 +1555,76 @@ class HarnessTests(unittest.TestCase):
             harness.normalized_text_sha256(left),
             harness.normalized_text_sha256(right),
         )
+
+    def test_root_checkout_uses_normal_repo_for_root_and_subdirectory(self) -> None:
+        repo = self.make_repo()
+        nested = repo / "nested" / "child"
+        nested.mkdir(parents=True)
+        for requested_path in (repo, nested):
+            with self.subTest(requested_path=requested_path):
+                requested, authoritative = harness.root_checkout(requested_path)
+                self.assertEqual(requested, repo.resolve())
+                self.assertEqual(authoritative, repo.resolve())
+                hooks, ok, detail = harness.codex_hook_source_status(
+                    requested, authoritative
+                )
+                self.assertTrue(ok)
+                self.assertEqual(hooks, repo / ".codex" / "hooks.json")
+                self.assertIn("normal checkout", detail)
+
+    def test_root_checkout_rejects_non_repo(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        not_a_repo = subprocess.CompletedProcess(
+            ["git", "rev-parse", "--show-toplevel"], 128, "", "not a repository"
+        )
+        with mock.patch.object(harness, "run", return_value=not_a_repo):
+            with self.assertRaisesRegex(harness.HarnessError, "not a Git repository"):
+                harness.root_checkout(outside)
+
+    def test_linked_worktree_uses_root_only_hook_source(self) -> None:
+        root, linked = self.make_linked_worktree()
+        root_hooks = self.write_hooks(root, '{"hooks": {}}\n')
+        requested, authoritative = harness.root_checkout(linked)
+        hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
+        self.assertEqual(requested, linked.resolve())
+        self.assertEqual(authoritative, root.resolve())
+        self.assertEqual(hooks, root_hooks)
+        self.assertTrue(ok)
+        self.assertIn("Codex uses root checkout source", detail)
+        self.assertIn("no worktree-local copy", detail)
+
+    def test_linked_worktree_allows_identical_ignored_hook_copy(self) -> None:
+        root, linked = self.make_linked_worktree()
+        text = '{"hooks": {}}\n'
+        root_hooks = self.write_hooks(root, text)
+        self.write_hooks(linked, text)
+        requested, authoritative = harness.root_checkout(linked)
+        hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
+        self.assertEqual(hooks, root_hooks)
+        self.assertTrue(ok)
+        self.assertIn("identical worktree copy is ignored", detail)
+
+    def test_linked_worktree_rejects_worktree_only_hook_copy(self) -> None:
+        root, linked = self.make_linked_worktree()
+        local_hooks = self.write_hooks(linked, '{"hooks": {}}\n')
+        requested, authoritative = harness.root_checkout(linked)
+        hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
+        self.assertEqual(hooks, root / ".codex" / "hooks.json")
+        self.assertFalse(ok)
+        self.assertIn(str(local_hooks), detail)
+        self.assertIn("authoritative root source is absent", detail)
+
+    def test_linked_worktree_rejects_divergent_hook_copy(self) -> None:
+        root, linked = self.make_linked_worktree()
+        root_hooks = self.write_hooks(root, '{"hooks": {"root": []}}\n')
+        local_hooks = self.write_hooks(linked, '{"hooks": {"worktree": []}}\n')
+        requested, authoritative = harness.root_checkout(linked)
+        hooks, ok, detail = harness.codex_hook_source_status(requested, authoritative)
+        self.assertEqual(hooks, root_hooks)
+        self.assertFalse(ok)
+        self.assertIn(str(local_hooks), detail)
+        self.assertIn("ignored worktree copy differs", detail)
 
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])

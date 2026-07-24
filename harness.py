@@ -62,6 +62,88 @@ def git_root(path: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
+def git_common_dir(path: Path) -> Path:
+    """Return the shared Git directory for the checkout containing ``path``."""
+    result = run(["git", "rev-parse", "--git-common-dir"], path)
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError(f"cannot resolve Git common directory: {path}")
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = path / common_dir
+    return common_dir.resolve()
+
+
+def root_checkout(path: Path) -> tuple[Path, Path]:
+    """Resolve a requested checkout and its authoritative root checkout.
+
+    Codex loads project hooks from the checkout that owns Git's common
+    directory. A linked worktree has its own ``.git`` file, so locating the
+    requested worktree alone would silently audit an inactive hook source.
+    """
+    requested_checkout = git_root(path)
+    common_dir = git_common_dir(requested_checkout)
+    if (requested_checkout / ".git").is_dir() and (
+        requested_checkout / ".git"
+    ).resolve() == common_dir:
+        return requested_checkout, requested_checkout
+
+    result = run(["git", "worktree", "list", "--porcelain"], requested_checkout)
+    if result.returncode:
+        raise HarnessError(
+            f"cannot list Git worktrees while resolving root checkout: {requested_checkout}"
+        )
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate = Path(line.removeprefix("worktree ")).resolve()
+        candidate_git_dir = candidate / ".git"
+        if candidate_git_dir.is_dir() and candidate_git_dir.resolve() == common_dir:
+            return requested_checkout, candidate
+    raise HarnessError(
+        "cannot resolve root checkout from Git common directory: " f"{common_dir}"
+    )
+
+
+def codex_hook_source_status(
+    requested_checkout: Path, authoritative_checkout: Path
+) -> tuple[Path, bool, str]:
+    """Return the active Codex hook path and linked-worktree copy status."""
+    authoritative_hooks = authoritative_checkout / ".codex" / "hooks.json"
+    if requested_checkout == authoritative_checkout:
+        return (
+            authoritative_hooks,
+            True,
+            f"normal checkout; Codex source: {authoritative_hooks}",
+        )
+
+    ignored_hooks = requested_checkout / ".codex" / "hooks.json"
+    source_prefix = (
+        "linked worktree; Codex uses root checkout source: " f"{authoritative_hooks}"
+    )
+    if not authoritative_hooks.is_file():
+        if ignored_hooks.is_file():
+            return (
+                authoritative_hooks,
+                False,
+                f"{source_prefix}; ignored worktree copy {ignored_hooks} exists "
+                "but the authoritative root source is absent",
+            )
+        return authoritative_hooks, False, f"{source_prefix}; source is absent"
+    if ignored_hooks.is_file():
+        if authoritative_hooks.read_bytes() != ignored_hooks.read_bytes():
+            return (
+                authoritative_hooks,
+                False,
+                f"{source_prefix}; ignored worktree copy differs: {ignored_hooks}",
+            )
+        return (
+            authoritative_hooks,
+            True,
+            f"{source_prefix}; identical worktree copy is ignored: {ignored_hooks}",
+        )
+    return authoritative_hooks, True, f"{source_prefix}; no worktree-local copy"
+
+
 def tier_path(repo: Path) -> Path | None:
     for candidate in (
         repo / ".agent-harness" / "tier.json",
@@ -1375,8 +1457,13 @@ def doctor(args: argparse.Namespace) -> int:
         ]
     )
     if args.repo:
-        repo_hooks = Path(args.repo).resolve() / ".codex" / "hooks.json"
         try:
+            requested_checkout, authoritative_checkout = root_checkout(
+                Path(args.repo).resolve()
+            )
+            repo_hooks, source_ok, source_detail = codex_hook_source_status(
+                requested_checkout, authoritative_checkout
+            )
             repo_hook_text = (
                 repo_hooks.read_text(encoding="utf-8") if repo_hooks.is_file() else ""
             )
@@ -1393,13 +1480,16 @@ def doctor(args: argparse.Namespace) -> int:
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
                 f"{current_floor_count} current pinned handler(s); "
-                "trust is checked manually in /hooks"
+                f"{source_detail}; trust is checked manually in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
             candidate_floor_count = -1
             current_floor_count = -1
+            source_ok = False
+            source_detail = str(exc)
             project_detail = str(exc)
+        checks.append(("Codex hook source", source_ok, source_detail))
         checks.append(
             (
                 "project Codex floor",
