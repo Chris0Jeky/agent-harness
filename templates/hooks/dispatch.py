@@ -1760,6 +1760,8 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             r"(?:&\s*)?"
             r"(?:(?:powershell|pwsh)(?:\.exe)?\s+-(?:command|c)\s+"
             r"|cmd(?:\.exe)?\s+/[ck]\s+)?"
+            r"[\"']?(?:@\s*)?"
+            r"(?:(?:call)\s+|if\s+(?:not\s+)?(?:\S+\s+){1,3}?)?"
             r"[\"']?(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)"
             r"(?=$|[\s;/\"'])",
             command,
