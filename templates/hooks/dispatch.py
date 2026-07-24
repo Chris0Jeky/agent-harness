@@ -673,6 +673,29 @@ def scan_powershell_literal_block(
     return _BLOCK_CLOSED, index
 
 
+def complete_scriptblock_argv(toks: list[str], following: list[list[str]]) -> list[str]:
+    """Rejoin an argv whose literal scriptblock was cut by segment splitting.
+
+    Segmentation treats `;`, `|`, `&` and newline as separators even inside a
+    `{ ... }` block, so a cmdlet's argv can continue into the following
+    segments. Those trailing tokens are the cmdlet's REAL arguments — they sit
+    after the closing `}` — and a continuation segment led by `}` is otherwise
+    dropped as an inert control token. Rejoining while the block stays open
+    keeps them inspectable, so `ForEach-Object { $_ ; } -MemberName Delete`
+    cannot launder its member invocation through the split.
+    """
+    depth = sum(powershell_block_depth(token) for token in toks)
+    if depth <= 0:
+        return toks
+    joined = list(toks)
+    for segment in following:
+        joined.extend(segment)
+        depth += sum(powershell_block_depth(token) for token in segment)
+        if depth <= 0:
+            break
+    return joined
+
+
 def resolve_powershell_parameter(
     token: str, parameter_names: set[str]
 ) -> tuple[str | None, str | None, bool]:
@@ -6114,6 +6137,17 @@ def check(
         (tokens(segment), False, segment, "", pass_id, index)
         for index, segment in enumerate(segments(sanitized))
     )
+    # A literal scriptblock split across segments continues in the segments that
+    # follow it within the same pass; complete_scriptblock_argv walks these so a
+    # cmdlet's post-`}` arguments stay inspectable.
+    pass_order: dict[int, list[list[str]]] = {}
+    for raw_toks, _aware, _text, _operator, seg_pass, _index in execution_segments:
+        pass_order.setdefault(seg_pass, []).append(raw_toks)
+    pass_followers = {
+        (seg_pass, index): entries[index + 1 :]
+        for seg_pass, entries in pass_order.items()
+        for index in range(len(entries))
+    }
     initial_cwd = command_cwd
     current_cwd = command_cwd
     cwd_uncertain = _cwd_uncertain
@@ -6403,14 +6437,23 @@ def check(
         if head in {"invoke-command", "icm"}:
             if not quote_aware:
                 continue
-            invoke_error = powershell_invoke_command_opacity(toks)
+            invoke_error = powershell_invoke_command_opacity(
+                complete_scriptblock_argv(
+                    toks, pass_followers.get((current_pass, segment_index), [])
+                )
+            )
             if invoke_error:
                 return "deny", invoke_error
             continue
         if head in {"foreach-object", "%", "foreach", "where-object", "?", "where"}:
             if not quote_aware:
                 continue
-            pipeline_error = powershell_pipeline_scriptblock_opacity(head, toks)
+            pipeline_error = powershell_pipeline_scriptblock_opacity(
+                head,
+                complete_scriptblock_argv(
+                    toks, pass_followers.get((current_pass, segment_index), [])
+                ),
+            )
             if pipeline_error:
                 return "deny", pipeline_error
             # A literal ForEach-Object block executes its body per pipeline item,

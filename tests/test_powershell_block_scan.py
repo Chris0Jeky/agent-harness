@@ -148,6 +148,50 @@ class TruncatedBlockStillDeniesThreatsTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
 
 
+class SplitArgvRejoinTests(unittest.TestCase):
+    """A cmdlet's arguments after the block's `}` must stay inspectable.
+
+    Segmentation pushes them into a continuation segment led by `}`, which
+    strip_control_prefixes otherwise discards entirely. Every command here was a
+    live deny->allow regression found by adversarial review of this slice.
+    """
+
+    CASES = (
+        "1 | ForEach-Object { $_ ; } -MemberName Delete",
+        "1 | ForEach-Object { $_ | Out-Null } -MemberName Delete",
+        "1 | ForEach-Object { $_ ; } @args",
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $_ ; } $sb",
+        "Invoke-Command -ScriptBlock { $_ ; } -FilePath payload.ps1",
+        "Invoke-Command { $_ ; } ([scriptblock]::Create('rm -rf /critical/outside'))",
+    )
+
+    def test_payload_after_split_block_still_denies(self):
+        for command in self.CASES:
+            with self.subTest(command=command):
+                decision, _reason = check(command)
+                self.assertEqual(decision, "deny")
+
+    def test_rejoin_stops_once_the_block_closes(self):
+        joined = dispatch.complete_scriptblock_argv(
+            ["ForEach-Object", "{", "$_"],
+            [["}", "-MemberName", "Delete"], ["rm", "-rf", "/critical/outside"]],
+        )
+        self.assertEqual(
+            joined, ["ForEach-Object", "{", "$_", "}", "-MemberName", "Delete"]
+        )
+
+    def test_balanced_argv_is_returned_untouched(self):
+        toks = ["ForEach-Object", "{", "$_", "}"]
+        followers = [["rm", "-rf", "/critical/outside"]]
+        self.assertEqual(dispatch.complete_scriptblock_argv(toks, followers), toks)
+
+    def test_unterminated_block_consumes_all_followers(self):
+        joined = dispatch.complete_scriptblock_argv(
+            ["ForEach-Object", "{", "$_"], [["a"], ["b"]]
+        )
+        self.assertEqual(joined, ["ForEach-Object", "{", "$_", "a", "b"])
+
+
 class DynamicPayloadBranchesUnchangedTests(unittest.TestCase):
     """The branches this slice does NOT touch must keep denying."""
 

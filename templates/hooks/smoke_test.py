@@ -907,6 +907,28 @@ CASES = [
     # A backtick-escaped brace is a literal character, not a block close, so the
     # block stays open — the delete inside it is still caught.
     ("1 | ForEach-Object { rm -rf /critical/outside `}", 1, {}, "deny"),
+    # A cmdlet's REAL arguments sit after the block's `}`, which segmentation
+    # pushes into a continuation segment led by `}` — otherwise dropped as an
+    # inert control token. complete_scriptblock_argv rejoins them, so a dynamic
+    # payload cannot be laundered by putting a `;` inside the block first.
+    # (Found by adversarial review of this slice; every case below was a live
+    # deny->allow regression before the rejoin landed.)
+    ("1 | ForEach-Object { $_ ; } -MemberName Delete", 1, {}, "deny"),
+    ("1 | ForEach-Object { $_ | Out-Null } -MemberName Delete", 1, {}, "deny"),
+    ("1 | ForEach-Object { $_ ; } @args", 1, {}, "deny"),
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $_ ; } $sb",
+        1,
+        {},
+        "deny",
+    ),
+    ("Invoke-Command -ScriptBlock { $_ ; } -FilePath payload.ps1", 1, {}, "deny"),
+    (
+        "Invoke-Command { $_ ; } ([scriptblock]::Create('rm -rf /critical/outside'))",
+        1,
+        {},
+        "deny",
+    ),
     # Truncation must not launder the dynamic-payload branches either.
     (
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",
