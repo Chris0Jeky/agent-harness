@@ -36,6 +36,11 @@ pasted into a command. stdout therefore only ever carries reason strings and
 text is written only to `--json` / `--corpus-cache`, which belong in a scratch
 directory outside any repository. Nothing is copied out of the transcript trees.
 
+That makes `--json` the only place a reviewer can audit the whole of a delta,
+so every bucket is written there untruncated as `<bucket>_all` (`--top` stays a
+stdout display limit). A gate that reports "1,674 newly allowed commands need
+security review" has to be able to produce all 1,674.
+
 "Reason strings" is not automatically safe: several deny reasons interpolate
 command-derived text — `Redirecting output into a secret-looking file ({path})`,
 `Mutating a secret-looking file ({path})`, `{head} can launch an uninspected
@@ -1040,6 +1045,13 @@ def compare_tier(
     matters when reading the block-class tables side by side: a rule whose count
     grows in the candidate has not necessarily started blocking anything new, it
     may have inherited commands another rule used to claim.
+
+    Every bucket is emitted twice: `<bucket>_top` is the `--top` slice stdout
+    prints, and `<bucket>_all` is the complete list. Only `_top` existed, so a
+    reviewer told "1,674 relaxations need security review" could see 15 of them
+    and had no supported way to enumerate the rest. `_all` carries raw command
+    text and therefore only ever reaches `--json`, which the module docstring
+    already restricts to a scratch directory; stdout still prints `_top`.
     """
     matrix: Counter[str] = Counter()
     reclassified: Counter[str] = Counter()
@@ -1087,6 +1099,7 @@ def compare_tier(
         "transitions": dict(matrix),
         "reclassified_unique": sum(reclassified.values()),
         "reclassified_top": reclassified.most_common(top),
+        "reclassified_all": reclassified.most_common(),
     }
     for label, rows in buckets.items():
         rows.sort(key=lambda row: (-row["invocations"], row["command"]))
@@ -1098,6 +1111,7 @@ def compare_tier(
             ).most_common()
         )
         result[f"{label}_top"] = rows[:top]
+        result[f"{label}_all"] = rows
     return result
 
 
@@ -1321,6 +1335,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"{clip(row['command'], width)}"
             )
             print(f"           reason: {clip(row['reason'], width)}")
+        print_rest_of_bucket(delta, "newly_blocked", top, tier_key)
         print(
             f"  NEWLY ALLOWED (baseline block -> candidate allow): "
             f"{delta['newly_allowed_unique']} unique / "
@@ -1332,6 +1347,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"{clip(row['command'], width)}"
             )
             print(f"           was: {clip(row['reason'], width)}")
+        print_rest_of_bucket(delta, "newly_allowed", top, tier_key)
         for label, caption in (
             (
                 "ask_gained",
@@ -1361,6 +1377,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                     f"{clip(row['command'], width)}"
                 )
                 print(f"           reason: {clip(row['reason'], width)}")
+            print_rest_of_bucket(delta, label, top, tier_key)
         residual = {
             key: value
             for key, value in delta["transitions"].items()

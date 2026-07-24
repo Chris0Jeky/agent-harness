@@ -702,5 +702,61 @@ class CheckErrorGuardTests(EndToEndTestCase):
         self.assertEqual(replay.count_errors(result), {"baseline": 7, "candidate": 1})
 
 
+class UntruncatedDeltaTests(EndToEndTestCase):
+    """`--top` is a display limit; the JSON has to hold the whole delta."""
+
+    def test_compare_tier_keeps_the_full_lists_alongside_the_top_slice(self):
+        commands = [f"cmd-{index}" for index in range(9)]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        baseline = [[("deny", "old")] for _ in commands]
+        candidate = [[("allow", "")] for _ in commands]
+        delta = replay.compare_tier(commands, corpus, baseline, candidate, 0, 2)
+        self.assertEqual(delta["newly_allowed_unique"], 9)
+        self.assertEqual(len(delta["newly_allowed_top"]), 2)
+        self.assertEqual(len(delta["newly_allowed_all"]), 9)
+        self.assertEqual(
+            {row["command"] for row in delta["newly_allowed_all"]}, set(commands)
+        )
+        for label in ("newly_blocked", "ask_gained", "ask_lost", "crash_moved"):
+            self.assertIn(f"{label}_all", delta)
+        self.assertIn("reclassified_all", delta)
+
+    def test_the_json_holds_every_row_and_stdout_holds_only_top(self):
+        commands = [f"secret-command-{index}" for index in range(6)]
+        corpus = self.write_corpus(*commands)
+        baseline = self.write_dispatch("blocking", "1.0.0", 'return "deny", "old"')
+        candidate = self.write_dispatch("allowing", "2.0.0", 'return "allow", ""')
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--top",
+            "2",
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        delta = payload["tiers"]["2"]["delta"]
+        self.assertEqual(delta["newly_allowed_unique"], 6)
+        self.assertEqual(
+            sorted(row["command"] for row in delta["newly_allowed_all"]),
+            sorted(commands),
+        )
+        # stdout stays a summary, and says where the rest of the evidence is.
+        self.assertEqual(text.count("secret-command-"), 2)
+        self.assertIn("and 4 more", text)
+        self.assertIn("tiers.2.delta.newly_allowed_all", text)
+
+
 if __name__ == "__main__":
     unittest.main()
