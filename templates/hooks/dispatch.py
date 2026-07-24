@@ -620,27 +620,33 @@ _BLOCK_TRUNCATED = "truncated"
 _BLOCK_MALFORMED = "malformed"
 
 
-def powershell_block_depth(token: str) -> int:
-    """Net `{`/`}` depth of a token, ignoring backtick-escaped braces.
+def strip_powershell_comment_tail(toks: list[str]) -> list[str]:
+    """Drop a `#` comment and everything after it in the same segment.
 
-    In PowerShell an unquoted backtick escapes the next character, so `` `{ ``
-    is a literal brace rather than a block delimiter. Quoted braces are already
-    masked upstream (see the _LITERAL_OPEN_BRACE substitution in
-    quote_aware_segments_with_operators), so only escapes need handling here.
+    A comment runs to end of line and segments never span a newline, so the tail
+    is inert text. It matters because a `}` written inside a comment would
+    otherwise be counted as a real block close, ending the scan early and hiding
+    the cmdlet arguments that genuinely follow the block.
     """
-    depth = 0
-    index = 0
-    while index < len(token):
-        char = token[index]
-        if char == "`":
-            index += 2
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-        index += 1
-    return depth
+    for index, token in enumerate(toks):
+        if token.startswith("#"):
+            return toks[:index]
+    return list(toks)
+
+
+def powershell_block_depth(token: str) -> int:
+    """Net `{`/`}` depth of a token.
+
+    Braces are counted plainly, INCLUDING backtick-escaped ones. PowerShell does
+    treat `` `{ `` as a literal character, but a quote-aware token has already had
+    its quoted spans substituted back in (see quote_aware_segments_with_operators),
+    so a backtick here may be literal data rather than an escape. Honouring it as
+    an escape would let `{'``'}` swallow its own closing brace and hide whatever
+    followed the block. Miscounting toward "still open" only ever costs a
+    truncated read, whose body is inspected anyway; miscounting toward "closed"
+    would drop tokens unexamined.
+    """
+    return token.count("{") - token.count("}")
 
 
 def scan_powershell_literal_block(
@@ -684,11 +690,13 @@ def complete_scriptblock_argv(toks: list[str], following: list[list[str]]) -> li
     keeps them inspectable, so `ForEach-Object { $_ ; } -MemberName Delete`
     cannot launder its member invocation through the split.
     """
+    toks = strip_powershell_comment_tail(toks)
     depth = sum(powershell_block_depth(token) for token in toks)
     if depth <= 0:
         return toks
     joined = list(toks)
     for segment in following:
+        segment = strip_powershell_comment_tail(segment)
         joined.extend(segment)
         depth += sum(powershell_block_depth(token) for token in segment)
         if depth <= 0:
@@ -909,16 +917,23 @@ def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
 
     A block truncated by segment splitting yields the in-segment remainder, so
     `ForEach-Object { Remove-Item -Recurse -Force C:\\ ; echo done }` still has
-    its delete recursed even though the inner `;` ended the segment."""
+    its delete recursed even though the inner `;` ended the segment.
+
+    A block bound with the attached `-Parameter:{ ... }` spelling is picked up
+    too; its opening brace is inside the parameter token rather than starting
+    it."""
     bodies: list[str] = []
     index = 0
     while index < len(toks):
         token = toks[index]
-        if token.startswith("{"):
-            state, end = scan_powershell_literal_block(toks, index + 1, token)
+        opening = token
+        if not token.startswith("{") and token.startswith("-") and ":{" in token:
+            opening = token[token.index(":{") + 1 :]
+        if opening.startswith("{"):
+            state, end = scan_powershell_literal_block(toks, index + 1, opening)
             if state == _BLOCK_MALFORMED:
                 break
-            block = " ".join(toks[index:end]).strip()
+            block = " ".join([opening, *toks[index + 1 : end]]).strip()
             if block.startswith("{"):
                 block = block[1:]
             if block.endswith("}"):
@@ -6241,6 +6256,36 @@ def check(
             frozenset(effective_git_repository_environment),
         )
 
+    def _inspect_literal_scriptblock_bodies(argv: list[str]):
+        """Recurse every literal `{ ... }` body in a scriptblock cmdlet's argv.
+
+        These bodies are program text that executes, and a quoted payload inside
+        one (`iex 'git push --force'`) is masked from the sanitized segment pass,
+        so the body is the only place the floor can still see it. This runs for
+        ForEach-Object, Where-Object (a FilterScript is arbitrary program text,
+        not just a property comparison) and Invoke-Command alike, over the argv
+        completed across segment splits — so a payload in a second block
+        (`-Begin { ... ; } -Process { ... }`) is inspected too.
+        """
+        for body in powershell_literal_scriptblock_bodies(argv):
+            if not body or is_dynamic_value(body):
+                continue
+            # `$null = iex '...'` is an assignment whose RHS is a command, and
+            # the head would otherwise be `$null` and fail the letter gate below.
+            assigned = powershell_assignment_rhs(tokens(body))
+            if assigned:
+                body = assigned
+            body_head, _ = command_head(tokens(body))
+            # Only a command invocation is recursed; a pure expression or
+            # member access (`$_.Name`, `1..3`) is inert output, not a
+            # command, and its head does not start with a letter.
+            if not body_head or not re.match(r"^[A-Za-z]", body_head):
+                continue
+            body_decision = _recurse_child(body)
+            if body_decision[0] != "allow":
+                return body_decision
+        return "allow", ""
+
     for (
         raw,
         quote_aware,
@@ -6507,42 +6552,30 @@ def check(
         if head in {"invoke-command", "icm"}:
             if not quote_aware:
                 continue
-            invoke_error = powershell_invoke_command_opacity(
-                complete_scriptblock_argv(
-                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
-                )
+            complete_argv = complete_scriptblock_argv(
+                toks, pass_order.get(current_pass, [])[segment_index + 1 :]
             )
+            invoke_error = powershell_invoke_command_opacity(complete_argv)
             if invoke_error:
                 return "deny", invoke_error
+            scriptblock_decision = _inspect_literal_scriptblock_bodies(complete_argv)
+            if scriptblock_decision[0] != "allow":
+                return scriptblock_decision
             continue
         if head in {"foreach-object", "%", "foreach", "where-object", "?", "where"}:
             if not quote_aware:
                 continue
+            complete_argv = complete_scriptblock_argv(
+                toks, pass_order.get(current_pass, [])[segment_index + 1 :]
+            )
             pipeline_error = powershell_pipeline_scriptblock_opacity(
-                head,
-                complete_scriptblock_argv(
-                    toks, pass_order.get(current_pass, [])[segment_index + 1 :]
-                ),
+                head, complete_argv
             )
             if pipeline_error:
                 return "deny", pipeline_error
-            # A literal ForEach-Object block executes its body per pipeline item,
-            # so inspect it: a quoted `iex 'git push --force'` inside is masked
-            # from the segment pass. Where-Object blocks are filter expressions
-            # (property comparisons), not command bodies, so they are left inert.
-            if head in {"foreach-object", "%", "foreach"}:
-                for body in powershell_literal_scriptblock_bodies(toks):
-                    if not body or is_dynamic_value(body):
-                        continue
-                    body_head, _ = command_head(tokens(body))
-                    # Only a command invocation is recursed; a pure expression or
-                    # member access (`$_.Name`, `1..3`) is inert output, not a
-                    # command, and its head does not start with a letter.
-                    if not body_head or not re.match(r"^[A-Za-z]", body_head):
-                        continue
-                    body_decision = _recurse_child(body)
-                    if body_decision[0] != "allow":
-                        return body_decision
+            scriptblock_decision = _inspect_literal_scriptblock_bodies(complete_argv)
+            if scriptblock_decision[0] != "allow":
+                return scriptblock_decision
             continue
         if head == "start":
             return (

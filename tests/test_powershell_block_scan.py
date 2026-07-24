@@ -10,6 +10,14 @@ issue #21 corpus (2,659 unique commands / 3,006 invocations).
 (truncated) from a block that closes more braces than it opens (malformed), and
 `powershell_literal_scriptblock_bodies` yields the truncated remainder so the body
 is still recursed. See issue #25.
+
+Relaxing "malformed" also removed an ACCIDENTAL blanket deny: it had been the only
+thing catching a quoted evaluator payload inside a split block. Adversarial review
+found 17 such deny->allow regressions, so this slice additionally rejoins a cmdlet's
+argv across the split (`complete_scriptblock_argv`), recurses literal bodies for
+Where-Object and Invoke-Command as well as ForEach-Object, reads the attached
+`-Parameter:{ ... }` binding, unwraps an assignment-headed body, and refuses to let
+a `}` inside a `#` comment close a block.
 """
 
 import importlib.util
@@ -52,14 +60,16 @@ class PowershellBlockDepthTests(unittest.TestCase):
         self.assertEqual(dispatch.powershell_block_depth("{}"), 0)
         self.assertEqual(dispatch.powershell_block_depth("@{Name=$_.Name}"), 0)
 
-    def test_backtick_escaped_braces_are_literal_characters(self):
-        self.assertEqual(dispatch.powershell_block_depth("a`{b"), 0)
-        self.assertEqual(dispatch.powershell_block_depth("a`}b"), 0)
-        self.assertEqual(dispatch.powershell_block_depth("{a`}"), 1)
-
-    def test_trailing_backtick_does_not_overrun(self):
+    def test_backtick_escaped_braces_are_counted_plainly(self):
+        # A quote-aware token has had its quoted spans substituted back in, so a
+        # backtick here can be literal data rather than an escape. Honouring it
+        # as an escape let `{'``'}` swallow its own closing brace and hide the
+        # tokens after the block, so braces are counted plainly. Erring toward
+        # "still open" only costs a truncated read; the body is inspected anyway.
+        self.assertEqual(dispatch.powershell_block_depth("a`{b"), 1)
+        self.assertEqual(dispatch.powershell_block_depth("a`}b"), -1)
+        self.assertEqual(dispatch.powershell_block_depth("{a`}"), 0)
         self.assertEqual(dispatch.powershell_block_depth("`"), 0)
-        self.assertEqual(dispatch.powershell_block_depth("{`"), 1)
 
 
 class ScanPowershellLiteralBlockTests(unittest.TestCase):
@@ -190,6 +200,85 @@ class SplitArgvRejoinTests(unittest.TestCase):
             ["ForEach-Object", "{", "$_"], [["a"], ["b"]]
         )
         self.assertEqual(joined, ["ForEach-Object", "{", "$_", "a", "b"])
+
+
+class ScriptblockBodyInspectionTests(unittest.TestCase):
+    """Relaxing "malformed" removed an accidental blanket deny.
+
+    The old FP was, by accident, the only thing catching a quoted evaluator
+    payload inside a block that segmentation had split. Every command here was
+    deny under v1.6.0, allow under the first cut of this slice, and must stay
+    deny — found by independent adversarial review.
+    """
+
+    CASES = (
+        # payload in a SECOND block, reachable only via the rejoined argv
+        "1 | ForEach-Object -Begin { Write-Host a; } -Process "
+        "{ iex 'git push --force origin main' }",
+        "1 | ForEach-Object -Begin { Write-Host a; } -Process { Remove-Item '.env' }",
+        "1 | ForEach-Object { $_ ; } -End { iex 'git push --force origin main' }",
+        "1 | ForEach-Object { $_ ; } { iex 'git push --force origin main' }",
+        # Where-Object and Invoke-Command bodies are program text too
+        "Get-Process | Where-Object { iex 'git push --force origin main' ; 1 }",
+        "Invoke-Command -ScriptBlock { iex 'git push --force origin main' ; git status }",
+        # attached `-Parameter:{ ... }` binding
+        "1 | ForEach-Object -Process:{iex 'git push --force origin main' ; Write-Output ok}",
+        # assignment-headed body would fail the letter gate
+        "1 | ForEach-Object { $null = iex 'git push --force origin main' ; 1 }",
+        # `}` inside a `#` comment must not close the block
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object -Begin "
+        "{ Write-Host a; # }\n} -Process $sb",
+        "Invoke-Command -ScriptBlock { Write-Host a; # }\n} @icmArgs",
+    )
+
+    def test_payloads_inside_split_blocks_still_deny(self):
+        for command in self.CASES:
+            with self.subTest(command=command):
+                decision, _reason = check(command)
+                self.assertEqual(decision, "deny")
+
+
+class CommentTailTests(unittest.TestCase):
+    def test_comment_tail_is_dropped(self):
+        self.assertEqual(
+            dispatch.strip_powershell_comment_tail(["a", "#", "}", "b"]), ["a"]
+        )
+        self.assertEqual(
+            dispatch.strip_powershell_comment_tail(["a", "#comment}"]), ["a"]
+        )
+
+    def test_no_comment_returns_a_copy(self):
+        toks = ["a", "{", "b"]
+        result = dispatch.strip_powershell_comment_tail(toks)
+        self.assertEqual(result, toks)
+        self.assertIsNot(result, toks)
+
+    def test_commented_brace_does_not_end_the_rejoin(self):
+        joined = dispatch.complete_scriptblock_argv(
+            ["ForEach-Object", "-Begin", "{", "Write-Host", "a"],
+            [["#", "}"], ["}", "-Process", "$sb"]],
+        )
+        self.assertEqual(
+            joined,
+            [
+                "ForEach-Object",
+                "-Begin",
+                "{",
+                "Write-Host",
+                "a",
+                "}",
+                "-Process",
+                "$sb",
+            ],
+        )
+
+
+class AttachedParameterBlockTests(unittest.TestCase):
+    def test_attached_parameter_block_body_is_extracted(self):
+        bodies = dispatch.powershell_literal_scriptblock_bodies(
+            ["ForEach-Object", "-Process:{iex", "payload", "}"]
+        )
+        self.assertEqual(bodies, ["iex payload"])
 
 
 class DynamicPayloadBranchesUnchangedTests(unittest.TestCase):

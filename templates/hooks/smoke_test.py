@@ -941,6 +941,74 @@ CASES = [
         {},
         "deny",
     ),
+    # Adversarial review round 2: relaxing "malformed" removed an ACCIDENTAL
+    # blanket deny that had been covering quoted evaluator payloads inside split
+    # blocks. Every case below was deny under v1.6.0, allow under the first cut
+    # of this slice, and must stay deny. The body of a literal block is program
+    # text, so it is now recursed for Where-Object and Invoke-Command as well as
+    # ForEach-Object, over the argv rejoined across the split.
+    (
+        "1 | ForEach-Object -Begin { Write-Host a; } -Process "
+        "{ iex 'git push --force origin main' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object -Begin { Write-Host a; } -Process { Remove-Item '.env' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object { $_ ; } -End { iex 'git push --force origin main' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "1 | ForEach-Object { $_ ; } { iex 'git push --force origin main' }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "Get-Process | Where-Object { iex 'git push --force origin main' ; 1 }",
+        1,
+        {},
+        "deny",
+    ),
+    (
+        "Invoke-Command -ScriptBlock { iex 'git push --force origin main' ; git status }",
+        1,
+        {},
+        "deny",
+    ),
+    # `-Parameter:{ ... }` binds the block inside the parameter token, so the
+    # body extractor has to look past the `:` to find the opening brace.
+    (
+        "1 | ForEach-Object -Process:{iex 'git push --force origin main' ; Write-Output ok}",
+        1,
+        {},
+        "deny",
+    ),
+    # An assignment-headed body would fail the "head starts with a letter" gate.
+    (
+        "1 | ForEach-Object { $null = iex 'git push --force origin main' ; 1 }",
+        1,
+        {},
+        "deny",
+    ),
+    # A `}` written inside a `#` comment must not be counted as a block close —
+    # doing so ends the rejoin early and hides the real trailing arguments.
+    (
+        "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object -Begin "
+        "{ Write-Host a; # }\n} -Process $sb",
+        1,
+        {},
+        "deny",
+    ),
+    ("Invoke-Command -ScriptBlock { Write-Host a; # }\n} @icmArgs", 1, {}, "deny"),
     # Truncation must not launder the dynamic-payload branches either.
     (
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object { $i++; & $sb }",
