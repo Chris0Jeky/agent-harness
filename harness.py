@@ -1174,13 +1174,13 @@ def same_file(left: Path, right: Path) -> bool:
 
 
 def tree_digest(root: Path) -> str | None:
-    """Digest an ordinary file/directory tree, or decline unsafe equality."""
+    """Digest an ordinary tree, reject unsafe entries, or return None if absent."""
     digest = hashlib.sha256()
     if path_is_alias(root):
-        return None
+        raise HarnessError(f"unsafe skill tree alias: {root}")
     try:
         if not stat.S_ISDIR(root.lstat().st_mode):
-            return None
+            raise HarnessError(f"skill tree root must be an ordinary directory: {root}")
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1191,22 +1191,26 @@ def tree_digest(root: Path) -> str | None:
     while pending:
         directory = pending.pop()
         if path_is_alias(directory):
-            return None
+            raise HarnessError(f"unsafe skill tree alias: {directory}")
         try:
             if not stat.S_ISDIR(directory.lstat().st_mode):
-                return None
+                raise HarnessError(f"skill tree changed during inspection: {directory}")
             children = list(directory.iterdir())
-        except FileNotFoundError:
-            return None
+        except FileNotFoundError as exc:
+            raise HarnessError(
+                f"skill tree changed during inspection: {directory}"
+            ) from exc
         except OSError as exc:
             raise HarnessError(f"cannot inspect skill tree {directory}: {exc}") from exc
         for path in children:
             if path_is_alias(path):
-                return None
+                raise HarnessError(f"unsafe skill tree alias: {path}")
             try:
                 mode = path.lstat().st_mode
-            except FileNotFoundError:
-                return None
+            except FileNotFoundError as exc:
+                raise HarnessError(
+                    f"skill tree changed during inspection: {path}"
+                ) from exc
             except OSError as exc:
                 raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
             relative = path.relative_to(root).as_posix().encode("utf-8")
@@ -1216,19 +1220,23 @@ def tree_digest(root: Path) -> str | None:
             elif stat.S_ISREG(mode):
                 entries.append((relative, b"F", path))
             else:
-                return None
+                raise HarnessError(f"unsupported skill tree entry: {path}")
 
     for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
         payload = b""
         if file_path is not None:
             if path_is_alias(file_path):
-                return None
+                raise HarnessError(f"unsafe skill tree alias: {file_path}")
             try:
                 if not stat.S_ISREG(file_path.lstat().st_mode):
-                    return None
+                    raise HarnessError(
+                        f"skill tree changed during inspection: {file_path}"
+                    )
                 payload = file_path.read_bytes()
-            except FileNotFoundError:
-                return None
+            except FileNotFoundError as exc:
+                raise HarnessError(
+                    f"skill tree changed during inspection: {file_path}"
+                ) from exc
             except OSError as exc:
                 raise HarnessError(
                     f"cannot inspect skill tree {file_path}: {exc}"
@@ -1243,12 +1251,10 @@ def tree_digest(root: Path) -> str | None:
 
 def same_tree(left: Path, right: Path) -> bool:
     left_digest = tree_digest(left)
+    if left_digest is None:
+        raise HarnessError(f"source skill tree is missing: {left}")
     right_digest = tree_digest(right)
-    return (
-        left_digest is not None
-        and right_digest is not None
-        and left_digest == right_digest
-    )
+    return right_digest is not None and left_digest == right_digest
 
 
 def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
@@ -2543,6 +2549,9 @@ def sync_global(args: argparse.Namespace) -> int:
         for skill in sorted((codex_source / "skills").iterdir())
         if (skill / "SKILL.md").is_file()
     ]
+    skill_states = [
+        (source, target, same_tree(source, target)) for source, target in skill_actions
+    ]
     print(f"Codex home: {codex_home}")
     print(f"Claude home: {claude_home}")
     print(f"Skills home: {skills_home}")
@@ -2566,8 +2575,7 @@ def sync_global(args: argparse.Namespace) -> int:
         f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}"
         " (no global Codex deny floor)"
     )
-    for source, target in skill_actions:
-        equal = same_tree(source, target)
+    for _source, target, equal in skill_states:
         print(f"{'=' if equal else '->'} {target}")
     if not args.apply:
         print("dry run; pass --apply to install")
@@ -2589,8 +2597,8 @@ def sync_global(args: argparse.Namespace) -> int:
             hooks_target.write_text(hook_text, encoding="utf-8")
         else:
             hooks_target.unlink(missing_ok=True)
-    for source, target in skill_actions:
-        if same_tree(source, target):
+    for source, target, equal in skill_states:
+        if equal:
             continue
         if target.exists():
             backup = skill_backup / target.name
