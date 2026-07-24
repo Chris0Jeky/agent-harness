@@ -758,5 +758,31 @@ class UntruncatedDeltaTests(EndToEndTestCase):
         self.assertIn("tiers.2.delta.newly_allowed_all", text)
 
 
+class MaxCommandCharsReportingTests(EndToEndTestCase):
+    """Dropped-for-length commands bias the rate down, so say so up front."""
+
+    def test_the_skipped_count_is_in_the_block_rate_table(self):
+        corpus = self.write_corpus("git status", "x" * 400)
+        floor = self.write_dispatch("allowing", "1.0.0", 'return "allow", ""')
+        _, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--max-command-chars",
+            "100",
+            "--quiet",
+        )
+        headline = text.split("block rate by tier")[1].split("=" * 78)[0]
+        self.assertIn("excluded before replay: 1 command(s)", headline)
+        self.assertIn("--max-command-chars (100)", headline)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,12 @@ COVERAGE LIMITS (read before quoting a number)
   not shell logs, and are not sources.
 * There is no per-command watchdog: a pathological command would stall the run
   rather than being counted as a block. None has been observed.
+* Commands longer than `--max-command-chars` are dropped before replay and are
+  in no rate reported anywhere. Long commands skew blocked (nested
+  scriptblocks, heredocs, dynamic tokens), so the exclusion biases the absolute
+  rate downward — the unsafe direction for a gate. 4 of 80,891 unique commands
+  on the current corpus, so immaterial today; the count is printed with the
+  block-rate table rather than only in the corpus notes.
 
 Usage:
     py -3 scripts/replay_corpus.py --baseline <path> --candidate <path> \
@@ -1235,6 +1241,12 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         "  'blocked' = any non-allow, i.e. Codex semantics: respond() converts\n"
         "  ask -> deny for Codex. For Claude an ask is a prompt, not a refusal;\n"
         "  the Claude-semantics refusal rate (deny + error) is per tier below."
+    )
+    skipped = int(corpus["notes"].get("skipped-over-max-chars", 0))
+    print(
+        f"  excluded before replay: {skipped} command(s) longer than "
+        f"--max-command-chars ({result['run'].get('max_command_chars')}). Long\n"
+        "  commands skew blocked, so every rate below is biased slightly low."
     )
     print(
         "  'err' = check() raised. Any non-zero value invalidates the deltas on\n"
