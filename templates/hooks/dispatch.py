@@ -1702,19 +1702,69 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
-def unparseable_recursive_delete(command: str) -> bool:
-    """Recognize recursive deletes hidden by non-POSIX Windows quoting.
+def windows_operator_segments(command: str) -> list[tuple[str, str]]:
+    """Split Windows command operators without splitting quoted inert text."""
+    result: list[tuple[str, str]] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote and (index == 0 or command[index - 1] != "`"):
+                quote = None
+            current.append(char)
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            current.append(char)
+        elif char in ";&|\n":
+            operator = char
+            if index + 1 < len(command) and (
+                command[index + 1] == char
+                or (char == "|" and command[index + 1] == "&")
+            ):
+                operator += command[index + 1]
+                index += 1
+            segment = "".join(current).strip()
+            if segment:
+                result.append((segment, operator))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    segment = "".join(current).strip()
+    if segment:
+        result.append((segment, ""))
+    return result
+
+
+def windows_fallback_tokens(candidate: str) -> list[str]:
+    """Recover argv using Windows quote semantics after POSIX shlex rejects it."""
+    try:
+        recovered = shlex.split(candidate, posix=False)
+    except ValueError:
+        recovered = shlex.split(candidate.rstrip("\"'"), posix=False)
+    return [
+        token[1:-1]
+        if len(token) >= 2 and (token[0], token[-1]) in {('"', '"'), ("'", "'")}
+        else token
+        for token in recovered
+    ]
+
+
+def unparseable_recursive_delete(command: str) -> list[list[str]]:
+    """Recover recursive deletes hidden by non-POSIX Windows quoting.
 
     A trailing backslash in a double-quoted Windows path is valid to cmd and
     PowerShell but makes POSIX shlex reject the whole command. Peel only
     wrappers that execute their child text; inert commands such as echo and
     Write-Output deliberately stop the walk.
     """
-    candidates = [command]
-    candidates.extend(
-        part for part in re.split(r"[;&|\n]+", command) if part and part != command
-    )
+    candidates = [segment for segment, _operator in windows_operator_segments(command)]
     seen: set[str] = set()
+    recovered_deletes: list[list[str]] = []
 
     # Every recognized wrapper peel shortens the candidate, and ``seen``
     # prevents duplicate work. Do not impose a traversal count that turns a
@@ -1727,12 +1777,14 @@ def unparseable_recursive_delete(command: str) -> bool:
         seen.add(candidate)
 
         delete_head = re.match(
-            r"(?i)(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)" r"(?=$|[\s;/\"'])",
+            r"(?i)(?:[A-Za-z0-9_.-]+\\)?"
+            r"(?P<head>remove-item|ri|rm|del|erase|rd|rmdir)"
+            r"(?=$|[\s;/\"'])",
             candidate,
         )
         if delete_head:
             delete_name = delete_head.group("head").lower()
-            delete_tail = candidate[delete_head.end("head") :]
+            delete_tail = candidate[delete_head.end("head") :].lstrip("\"'")
             option_tokens = re.findall(r"(?<!\S)-[^\s\"']+", delete_tail)
             powershell_recurse = any(
                 is_powershell_recurse_flag(token) for token in option_tokens
@@ -1747,7 +1799,10 @@ def unparseable_recursive_delete(command: str) -> bool:
                 re.search(r"(?i)(?:^|/)s(?=/|\s|$)", delete_tail)
             )
             if powershell_recurse or posix_recurse or cmd_recurse:
-                return True
+                executable = candidate[: delete_head.end("head")]
+                recovered_deletes.append(
+                    windows_fallback_tokens(f"{executable} {delete_tail}")
+                )
             continue
 
         wrapper = re.match(
@@ -1757,7 +1812,7 @@ def unparseable_recursive_delete(command: str) -> bool:
         if not wrapper:
             wrapper = re.match(
                 r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
-                r"\s-(?:command|c)(?:\s+|$)(?P<child>.+)$",
+                r"\s[-/](?:command|c)(?:\s+|$)(?P<child>.+)$",
                 candidate,
             )
         if not wrapper:
@@ -1781,10 +1836,16 @@ def unparseable_recursive_delete(command: str) -> bool:
                 r"remove-item|ri|rm|del|erase|rd|rmdir)\b.+)$",
                 candidate,
             )
+        if not wrapper:
+            wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
         if wrapper:
-            candidates.append(wrapper.group("child"))
+            child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
+            child_segments = windows_operator_segments(child)
+            if len(child_segments) > 1:
+                recovered_deletes.append(["__HARNESS_UNPARSEABLE_QUOTING__"])
+            candidates.extend(segment for segment, _operator in child_segments)
 
-    return False
+    return recovered_deletes
 
 
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
@@ -1840,9 +1901,20 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         # for that irreversible surface; benign PowerShell scriptblocks can
         # also be intentionally non-POSIX and remain inspectable by the other
         # normalization passes below.
-        if unparseable_recursive_delete(command):
-            return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
-        return []
+        windows_segments = windows_operator_segments(command)
+        recovered_segments: list[tuple[list[str], str]] = []
+        if len(windows_segments) > 1:
+            try:
+                recovered_segments.extend(
+                    (windows_fallback_tokens(segment), operator)
+                    for segment, operator in windows_segments
+                )
+            except ValueError:
+                return [(["__HARNESS_UNPARSEABLE_QUOTING__"], "")]
+        recovered_segments.extend(
+            (segment, "") for segment in unparseable_recursive_delete(command)
+        )
+        return recovered_segments
 
     separators = set(";&|\n")
     result: list[tuple[list[str], str]] = []
@@ -4502,7 +4574,7 @@ def protected_git_config_key(token: str) -> bool:
         or re.fullmatch(r"url\..+\.(?:insteadof|pushinsteadof)", token)
         or re.fullmatch(r"include(?:if)?\..+", token)
         or re.fullmatch(r"submodule\..+\.url", token)
-        or token == "push.recursesubmodules"
+        or token.startswith("push.")
         or executable_git_config_key(token)
     )
 
