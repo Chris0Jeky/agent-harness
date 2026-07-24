@@ -7,6 +7,7 @@ import functools
 import json
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,54 @@ def load_dispatch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_FIXTURE_ROOT: str | None = None
+
+
+def neutral_fixture_root(candidates: list[str] | None = None) -> str:
+    """Create a unique fixture root under a neutral, non-temp parent.
+
+    When this smoke suite is vendored inside a tiered host repository, HERE
+    sits under the host's tier.json, so the dispatcher's ancestor-authority
+    walk (correctly) merges the host posture into synthetic fixture projects
+    and corrupts case expectations. A temp-resident root is equally unusable:
+    the floor's explicit temp-path allowance changes containment semantics.
+    Refuse to run rather than report bogus verdicts if no candidate is clean.
+    The caller owns the returned directory and must remove it after the run.
+    """
+    module = load_dispatch_module()
+    if candidates is None:
+        candidates = [HERE, os.path.expanduser("~")]
+    for candidate in candidates:
+        if not os.path.isdir(candidate):
+            continue
+        if module.declared_project_dirs(candidate) or module.is_within_temp(candidate):
+            continue
+        try:
+            return tempfile.mkdtemp(prefix=".agent-harness-smoke-", dir=candidate)
+        except OSError:
+            continue
+    raise SystemExit(
+        "smoke: no neutral fixture root available — every candidate inherits "
+        "a tier declaration or sits inside the temp allowance; fixture "
+        "expectations would be corrupted (agent-harness#12 F5)"
+    )
+
+
+def fixture_root() -> str:
+    global _FIXTURE_ROOT
+    if _FIXTURE_ROOT is None:
+        _FIXTURE_ROOT = neutral_fixture_root()
+    return _FIXTURE_ROOT
+
+
+def cleanup_fixture_root() -> None:
+    """Remove the run-owned neutral fixture root, if one was created."""
+    global _FIXTURE_ROOT
+    if _FIXTURE_ROOT is not None:
+        shutil.rmtree(_FIXTURE_ROOT)
+        _FIXTURE_ROOT = None
 
 
 def parse_decision(proc: subprocess.CompletedProcess[str]):
@@ -531,7 +580,7 @@ CASES = [
         {},
         "deny",
     ),
-    # --- v1.5.3 late review: preserve the Windows fallback boundary ---
+    # --- v1.5.4: preserve the Windows fallback boundary ---
     (
         r'''cmd /c "if /I x EQU x rd /s /q C:\critical\outside path\"''',
         1,
@@ -2998,7 +3047,7 @@ CASES = [
 ]
 
 
-def main():
+def run_smoke():
     failures = []
     for command, tier, flags, expected in CASES:
         got = run_case(command, tier, flags)
@@ -3227,7 +3276,7 @@ def main():
             failures.append(("junction escape", 1, {}, "deny", got))
         print(f"  [{status}] expected=deny got={got}  junction escape")
     else:
-        with tempfile.TemporaryDirectory() as link_fixture:
+        with tempfile.TemporaryDirectory(dir=fixture_root()) as link_fixture:
             temp_env = isolated_dispatch_temp(link_fixture)
             project = os.path.join(link_fixture, "project")
             outside = os.path.join(link_fixture, "outside")
@@ -3357,7 +3406,7 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     authority_cases = []
-    with tempfile.TemporaryDirectory() as project:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
         invalid_authorities = [
             ("malformed tier JSON", "{"),
             ("non-object tier declaration", "[]"),
@@ -3602,6 +3651,16 @@ def main():
         (
             "inherited editor applies to commit",
             run_case("git commit", 3, {}, env_extra={"GIT_EDITOR": "helper"}),
+            "deny",
+        ),
+        (
+            "inherited editor applies past named option terminator",
+            run_case(
+                "git merge --edit --no-ff --end-of-options --abort",
+                3,
+                {},
+                env_extra={"GIT_EDITOR": "helper"},
+            ),
             "deny",
         ),
         (
@@ -3933,7 +3992,7 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     symlink_authority_count = 1
-    with tempfile.TemporaryDirectory() as authority_fixture:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as authority_fixture:
         temp_env = isolated_dispatch_temp(authority_fixture)
         project = os.path.join(authority_fixture, "project")
         outside = os.path.join(authority_fixture, "outside")
@@ -4650,7 +4709,7 @@ def main():
             ["https://github.com/example/public-last.git"],
         ),
     ]
-    with tempfile.TemporaryDirectory() as remote_project:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as remote_project:
         subprocess.run(
             ["git", "init", "--quiet"],
             cwd=remote_project,
@@ -4921,7 +4980,7 @@ def main():
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
     runtime_neutral_cases = []
-    with tempfile.TemporaryDirectory() as project:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
         write_tier(project, 1, {})
         write_agent_tier(project, 4, {"sensitive_data": True})
         runtime_neutral_cases.extend(
@@ -4938,7 +4997,7 @@ def main():
                 ),
             ]
         )
-    with tempfile.TemporaryDirectory() as project:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
         write_agent_tier(project, 1, {})
         write_tier(project, 4, {"sensitive_data": True})
         runtime_neutral_cases.extend(
@@ -4955,7 +5014,7 @@ def main():
                 ),
             ]
         )
-    with tempfile.TemporaryDirectory() as project:
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
         write_agent_tier(project, 3, {"relaxed_work_loss_guards": True})
         write_tier(project, 3, {"relaxed_work_loss_guards": False})
         runtime_neutral_cases.append(
@@ -4998,6 +5057,13 @@ def main():
             print("  ", f)
         sys.exit(1)
     sys.exit(0)
+
+
+def main():
+    try:
+        run_smoke()
+    finally:
+        cleanup_fixture_root()
 
 
 if __name__ == "__main__":

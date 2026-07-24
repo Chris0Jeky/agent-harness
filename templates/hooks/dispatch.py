@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.5.3 (2026-07-24)"
+FLOOR_VERSION = "1.5.4 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3886,8 +3886,124 @@ def git_editor_edit_is_forced(args: list[str]) -> bool:
     )
 
 
+_GIT_SEQUENCER_TERMINAL_SUBCOMMANDS = {
+    "am",
+    "cherry-pick",
+    "merge",
+    "rebase",
+    "revert",
+}
+
+
+_GIT_SEQUENCER_REQUIRED_VALUE_SHORT_OPTIONS = {
+    "am": {"C", "p"},
+    "cherry-pick": {"m", "X"},
+    "merge": {"m", "F", "s", "X"},
+    "rebase": {"C", "x", "s", "X"},
+    "revert": {"m", "X"},
+}
+
+
+_GIT_SEQUENCER_REQUIRED_VALUE_LONG_OPTIONS = {
+    "am": {
+        "--directory",
+        "--empty",
+        "--exclude",
+        "--include",
+        "--patch-format",
+        "--quoted-cr",
+        "--resolvemsg",
+        "--whitespace",
+    },
+    "cherry-pick": {
+        "--cleanup",
+        "--empty",
+        "--mainline",
+        "--strategy",
+        "--strategy-option",
+    },
+    "merge": {
+        "--cleanup",
+        "--file",
+        "--into-name",
+        "--message",
+        "--strategy",
+        "--strategy-option",
+    },
+    "rebase": {
+        "--empty",
+        "--exec",
+        "--onto",
+        "--strategy",
+        "--strategy-option",
+        "--whitespace",
+    },
+    "revert": {
+        "--cleanup",
+        "--mainline",
+        "--strategy",
+        "--strategy-option",
+    },
+}
+
+
+def git_sequencer_flow_is_terminal(subcommand: str, args: list[str]) -> bool:
+    """Return whether --abort/--quit terminates the operation editor-free.
+
+    Abort and quit tear down in-progress sequencer/merge state and never
+    consult an editor; Git rejects them combined with message/edit options
+    rather than launching one. --continue and --skip stay editor-reachable
+    (both can open the message editor for the commit being finalized). Skip
+    operands consumed by required-value options before interpreting a token
+    as a terminal flag. ``-S`` takes only an attached optional value, so a
+    following terminal flag remains active. Tokens after an unconsumed bare
+    ``--`` or exact ``--end-of-options`` are positionals and never options,
+    so the scan stops there.
+    """
+    required_short = _GIT_SEQUENCER_REQUIRED_VALUE_SHORT_OPTIONS[subcommand]
+    required_long = _GIT_SEQUENCER_REQUIRED_VALUE_LONG_OPTIONS[subcommand]
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in {"--", "--end-of-options"}:
+            return False
+        if token.startswith("--"):
+            name = token.lower().split("=", 1)[0]
+            if git_option_abbreviates(name, "--abort") or git_option_abbreviates(
+                name, "--quit"
+            ):
+                return True
+            if "=" not in token and _is_launcher_value_long(name, required_long):
+                index += 2
+            else:
+                index += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            cluster = token[1:]
+            for position, option in enumerate(cluster):
+                if option == "S":
+                    # -S has an optional argument only when text is attached.
+                    index += 1
+                    break
+                if option in required_short:
+                    # A required-value option consumes the cluster tail when
+                    # present, otherwise it consumes the following token.
+                    index += 2 if position == len(cluster) - 1 else 1
+                    break
+            else:
+                index += 1
+            continue
+        index += 1
+    return False
+
+
 def git_editor_is_reachable(subcommand: str, args: list[str]) -> bool:
     """Return whether Git can launch the editor selected by GIT_EDITOR."""
+    if (
+        subcommand in _GIT_SEQUENCER_TERMINAL_SUBCOMMANDS
+        and git_sequencer_flow_is_terminal(subcommand, args)
+    ):
+        return False
     lowered = [token.lower().split("=", 1)[0] for token in args]
     if subcommand == "add":
         return any(
@@ -3961,8 +4077,10 @@ def inherited_git_process_environment_is_reachable(
     if name == "GIT_EDITOR":
         return git_editor_is_reachable(subcommand, args)
     if name == "GIT_SEQUENCE_EDITOR":
-        return subcommand == "rebase" and any(
-            token.lower() in {"-i", "--interactive"} for token in args
+        return (
+            subcommand == "rebase"
+            and any(token.lower() in {"-i", "--interactive"} for token in args)
+            and not git_sequencer_flow_is_terminal(subcommand, args)
         )
     if name == "GIT_EXTERNAL_DIFF":
         return git_external_diff_is_reachable(subcommand, args)

@@ -60,6 +60,11 @@ stdin, and it cannot repair a runtime that fails open on hook spawn/timeout/cras
 Codex-engine limitations, not floor guarantees. Gardener scheduling remains intentionally deferred
 until the bootstrap/audit loop has earned trust through real use.
 
+Release provenance (v1.5.4, 2026-07-24): combines PR #15's Windows recursive-delete
+fallback and protected Git-config mutation hardening with PR #16's value-aware sequencer
+terminal-flow parsing and self-cleaning neutral smoke fixtures. Both surfaces retain their
+focused regressions in the self-counting matrix and harness unit suite.
+
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
 laws: one home per policy, budgets with rotation, no speculative scaffolding.
