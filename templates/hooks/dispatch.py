@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.0 (2026-07-24)"
+FLOOR_VERSION = "1.6.1 (2026-07-24)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -615,19 +615,62 @@ _POWERSHELL_COMMON_TOKEN_PARAMETERS = {
 }
 
 
-def skip_powershell_literal_block(
+_BLOCK_CLOSED = "closed"
+_BLOCK_TRUNCATED = "truncated"
+_BLOCK_MALFORMED = "malformed"
+
+
+def powershell_block_depth(token: str) -> int:
+    """Net `{`/`}` depth of a token, ignoring backtick-escaped braces.
+
+    In PowerShell an unquoted backtick escapes the next character, so `` `{ ``
+    is a literal brace rather than a block delimiter. Quoted braces are already
+    masked upstream (see the _LITERAL_OPEN_BRACE substitution in
+    quote_aware_segments_with_operators), so only escapes need handling here.
+    """
+    depth = 0
+    index = 0
+    while index < len(token):
+        char = token[index]
+        if char == "`":
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
+
+
+def scan_powershell_literal_block(
     toks: list[str], index: int, opening: str
-) -> int | None:
-    """Skip a literal { ... } block; return the next index, None when unbalanced."""
-    depth = opening.count("{") - opening.count("}")
+) -> tuple[str, int]:
+    """Scan a literal `{ ... }` block and report how it ended.
+
+    Returns (state, next_index):
+
+    - `_BLOCK_CLOSED` — the block balanced within this segment; next_index is
+      the token after its `}`.
+    - `_BLOCK_TRUNCATED` — the segment ran out of tokens with the block still
+      open. Segmentation treats `;`, `|`, `&` and newline as separators even
+      inside a scriptblock, so a perfectly well-formed literal block is
+      routinely cut in half (`... | ForEach-Object { $i++; "$_" }` splits at the
+      inner `;`). That is a segmentation artifact, not an opaque payload: the
+      remainder is inspected as its own sibling segments, and the in-segment
+      remainder is recursed by powershell_literal_scriptblock_bodies.
+    - `_BLOCK_MALFORMED` — the opening token closes more braces than it opens,
+      which no literal block can do.
+    """
+    depth = powershell_block_depth(opening)
     if depth < 0:
-        return None
+        return _BLOCK_MALFORMED, index
     while depth > 0:
         if index >= len(toks):
-            return None
-        depth += toks[index].count("{") - toks[index].count("}")
+            return _BLOCK_TRUNCATED, index
+        depth += powershell_block_depth(toks[index])
         index += 1
-    return index
+    return _BLOCK_CLOSED, index
 
 
 def resolve_powershell_parameter(
@@ -723,8 +766,8 @@ def powershell_invoke_command_opacity(toks: list[str]) -> str | None:
                         "A dynamic Invoke-Command scriptblock cannot be "
                         "inspected safely."
                     )
-                next_index = skip_powershell_literal_block(toks, index, attached)
-                if next_index is None:
+                state, next_index = scan_powershell_literal_block(toks, index, attached)
+                if state == _BLOCK_MALFORMED:
                     return "An Invoke-Command scriptblock is malformed."
                 index = next_index
                 continue
@@ -732,8 +775,8 @@ def powershell_invoke_command_opacity(toks: list[str]) -> str | None:
                 index += 1
             continue
         if token.startswith("{"):
-            next_index = skip_powershell_literal_block(toks, index + 1, token)
-            if next_index is None:
+            state, next_index = scan_powershell_literal_block(toks, index + 1, token)
+            if state == _BLOCK_MALFORMED:
                 return "An Invoke-Command scriptblock is malformed."
             index = next_index
             continue
@@ -807,8 +850,8 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
                     index += 1
                 if not attached.startswith("{"):
                     return "A dynamic pipeline scriptblock cannot be inspected safely."
-                next_index = skip_powershell_literal_block(toks, index, attached)
-                if next_index is None:
+                state, next_index = scan_powershell_literal_block(toks, index, attached)
+                if state == _BLOCK_MALFORMED:
                     return "A pipeline scriptblock is malformed."
                 index = next_index
                 continue
@@ -816,8 +859,8 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
                 index += 1
             continue
         if token.startswith("{"):
-            next_index = skip_powershell_literal_block(toks, index + 1, token)
-            if next_index is None:
+            state, next_index = scan_powershell_literal_block(toks, index + 1, token)
+            if state == _BLOCK_MALFORMED:
                 return "A pipeline scriptblock is malformed."
             index = next_index
             continue
@@ -839,14 +882,18 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
 def powershell_literal_scriptblock_bodies(toks: list[str]) -> list[str]:
     """Return the restored inner text of each literal `{ ... }` scriptblock in a
     pipeline cmdlet's argv, so quoted evaluator payloads inside the block (which
-    the sanitized segment pass masks) can be recursively inspected."""
+    the sanitized segment pass masks) can be recursively inspected.
+
+    A block truncated by segment splitting yields the in-segment remainder, so
+    `ForEach-Object { Remove-Item -Recurse -Force C:\\ ; echo done }` still has
+    its delete recursed even though the inner `;` ended the segment."""
     bodies: list[str] = []
     index = 0
     while index < len(toks):
         token = toks[index]
         if token.startswith("{"):
-            end = skip_powershell_literal_block(toks, index + 1, token)
-            if end is None:
+            state, end = scan_powershell_literal_block(toks, index + 1, token)
+            if state == _BLOCK_MALFORMED:
                 break
             block = " ".join(toks[index:end]).strip()
             if block.startswith("{"):
