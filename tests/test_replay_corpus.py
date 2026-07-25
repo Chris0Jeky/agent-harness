@@ -10,7 +10,12 @@ extraction channel that was skipped without being counted, and a sample that
 had to stay stable across runs for a smoke run and a full run to be comparable.
 """
 
+import contextlib
 import importlib.util
+import io
+import json
+import tempfile
+import textwrap
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -20,6 +25,28 @@ REPLAY_PATH = ROOT / "scripts" / "replay_corpus.py"
 
 BACKSLASH = chr(92)
 QUOTE = chr(34)
+
+# A dispatch.py stand-in with the two shapes the replay harness requires: a
+# `check()` with the current signature, and a `command_output` bound as some
+# function's `command_runner` default so `make_module_offline` can prove the run
+# spawns nothing. `DECIDE` is spliced in as the body of the verdict rule.
+STUB_DISPATCH = """
+FLOOR_VERSION = "{version}"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+    tier = tier_cfg["tier"]
+    flags = tier_cfg["flags"]
+{decide}
+"""
 
 
 def load_module(name: str, path: Path):
@@ -421,6 +448,340 @@ class OfflineStubTests(unittest.TestCase):
         bare.command_output = command_output
         with self.assertRaises(RuntimeError):
             replay.make_module_offline(bare)
+
+
+class EndToEndTestCase(unittest.TestCase):
+    """Drive `main()` over throwaway stub floors, as a gate caller would.
+
+    The findings these cover are all about what the CLI does with a run, not
+    about a pure function, so they are only reachable through `main()`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def write_corpus(self, *commands):
+        path = self.dir / "corpus.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"command": command, "codex": 1, "claude": 0}) + "\n"
+                for command in commands
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def write_dispatch(self, name, version, decide):
+        path = self.dir / f"{name}.py"
+        body = "\n".join(
+            "    " + line for line in textwrap.dedent(decide).strip().splitlines()
+        )
+        path.write_text(
+            STUB_DISPATCH.format(version=version, decide=body), encoding="utf-8"
+        )
+        return path
+
+    def run_main(self, *argv):
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = replay.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+
+class OverlayFlagTests(EndToEndTestCase):
+    """Overlays were hard-coded off, so a T2 row described no estate repo."""
+
+    def test_decide_passes_the_flag_set_into_check(self):
+        seen = []
+
+        class RecordingModule:
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                seen.append(tier_cfg)
+                return "allow", ""
+
+        replay.decide(RecordingModule, "git push", 2, ".", {"wave_mode": True})
+        self.assertEqual(seen[-1], {"tier": 2, "flags": {"wave_mode": True}})
+        # Omitted entirely, the floor must see a declared-no-flags repo.
+        replay.decide(RecordingModule, "git push", 2, ".")
+        self.assertEqual(seen[-1], {"tier": 2, "flags": {}})
+
+    def test_each_call_gets_its_own_flags_dict(self):
+        # A floor version that normalises its config in place must not be able
+        # to carry a flag from one replayed command into the next.
+        seen = []
+
+        class MutatingModule:
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                seen.append(dict(tier_cfg["flags"]))
+                tier_cfg["flags"]["sensitive_data"] = True
+                return "allow", ""
+
+        flags = {"wave_mode": True}
+        replay.decide(MutatingModule, "a", 2, ".", flags)
+        replay.decide(MutatingModule, "b", 2, ".", flags)
+        self.assertEqual(seen, [{"wave_mode": True}, {"wave_mode": True}])
+        self.assertEqual(flags, {"wave_mode": True})
+
+    def test_cli_flag_reaches_the_replay_and_changes_the_verdict(self):
+        corpus = self.write_corpus("git reset --hard HEAD~1")
+        floor = self.write_dispatch(
+            "wave_aware",
+            "9.9.9",
+            """
+            if flags.get("wave_mode"):
+                return "deny", "work-loss guard is a wall under wave_mode"
+            return "allow", ""
+            """,
+        )
+        common = [
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        ]
+        code, plain, _ = self.run_main(*common)
+        self.assertEqual(code, 0)
+        code, waved, _ = self.run_main(*common, "--flag", "wave_mode")
+        self.assertEqual(code, 0)
+        # Same command, same tier, opposite verdict: the overlay is load-bearing
+        # and a run that cannot set it cannot speak for a wave_mode repo.
+        self.assertIn("deny=0", plain)
+        self.assertIn("deny=1", waved)
+
+    def test_active_overlays_label_the_report_and_the_json(self):
+        corpus = self.write_corpus("git push")
+        floor = self.write_dispatch("allowing", "9.9.9", 'return "allow", ""')
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            "--flag",
+            "wave_mode",
+            "--flag",
+            "sensitive_data",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("overlays  : sensitive_data, wave_mode", text)
+        # The tier row itself carries the overlay; a bare "T2" would claim to
+        # describe repos this run never measured.
+        self.assertIn("T2+sensitive_data+wave_mode", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["overlays"], ["sensitive_data", "wave_mode"])
+        self.assertEqual(run["flags"], {"sensitive_data": True, "wave_mode": True})
+
+    def test_an_unknown_overlay_is_rejected(self):
+        # Silently measuring the no-overlay case under a misspelt overlay name
+        # is the exact under-count this option exists to remove.
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            replay.build_parser().parse_args(["--flag", "wave-mode"])
+
+    def test_tier_label_is_stable_without_overlays(self):
+        self.assertEqual(replay.tier_label(3, []), "T3")
+        self.assertEqual(replay.tier_label(3, ["wave_mode"]), "T3+wave_mode")
+
+
+class CheckErrorGuardTests(EndToEndTestCase):
+    """A crashing version counts as blocked, which zeroes the regression number."""
+
+    ERRORS_ON_ONE = """
+    if command == "boom":
+        raise TypeError("check() got an unexpected keyword argument")
+    return "allow", ""
+    """
+
+    def scenario(self, *extra):
+        corpus = self.write_corpus("boom", "git status")
+        baseline = self.write_dispatch("crashing", "1.0.0", self.ERRORS_ON_ONE)
+        candidate = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_an_erroring_version_exits_non_zero_with_a_banner(self):
+        code, text, err = self.scenario()
+        self.assertEqual(code, replay.EXIT_ERRORS_PRESENT)
+        self.assertNotEqual(replay.EXIT_ERRORS_PRESENT, 0)
+        self.assertIn("check() RAISED", text)
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("check() RAISED", err)
+
+    def test_the_error_count_is_in_the_headline_table(self):
+        _, text, _ = self.scenario()
+        headline = text.split("block rate by tier")[1].split("=" * 78)[0]
+        self.assertIn("err b/c", headline)
+        # baseline raised once, candidate never: exactly the shape that turns a
+        # real regression into a NEWLY ALLOWED row. Previously the count showed
+        # up only in the per-tier detail and the block-class table.
+        tier_row = next(line for line in headline.splitlines() if "T2" in line)
+        self.assertTrue(tier_row.rstrip().endswith("1/0"), tier_row)
+
+    def test_the_crash_still_inflates_newly_allowed_which_is_why_it_aborts(self):
+        # Documents the mechanism the exit code protects against: the error is
+        # counted as blocked, so error -> allow is reported as a relaxation.
+        _, text, _ = self.scenario()
+        self.assertIn("NEWLY ALLOWED", text)
+        self.assertIn("1 unique", text.split("NEWLY ALLOWED")[1][:60])
+
+    def test_allow_errors_is_the_only_way_back_to_zero(self):
+        code, text, _ = self.scenario("--allow-errors")
+        self.assertEqual(code, 0)
+        self.assertNotIn("check() RAISED", text)
+
+    def test_a_clean_run_reports_zero_errors_and_exits_zero(self):
+        corpus = self.write_corpus("git status")
+        floor = self.write_dispatch("clean", "1.0.0", 'return "allow", ""')
+        json_path = self.dir / "clean.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("check() RAISED", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["errors"], {"baseline": 0, "candidate": 0})
+
+    def test_count_errors_sums_every_replayed_tier(self):
+        result = {
+            "tier_order": [1, 2],
+            "tiers": {
+                1: {
+                    "baseline": {"decisions": {"error": 2, "allow": 1}},
+                    "candidate": {"decisions": {"allow": 3}},
+                },
+                2: {
+                    "baseline": {"decisions": {"error": 5}},
+                    "candidate": {"decisions": {"error": 1}},
+                },
+            },
+        }
+        self.assertEqual(replay.count_errors(result), {"baseline": 7, "candidate": 1})
+
+
+class UntruncatedDeltaTests(EndToEndTestCase):
+    """`--top` is a display limit; the JSON has to hold the whole delta."""
+
+    def test_compare_tier_keeps_the_full_lists_alongside_the_top_slice(self):
+        commands = [f"cmd-{index}" for index in range(9)]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        baseline = [[("deny", "old")] for _ in commands]
+        candidate = [[("allow", "")] for _ in commands]
+        delta = replay.compare_tier(commands, corpus, baseline, candidate, 0, 2)
+        self.assertEqual(delta["newly_allowed_unique"], 9)
+        self.assertEqual(len(delta["newly_allowed_top"]), 2)
+        self.assertEqual(len(delta["newly_allowed_all"]), 9)
+        self.assertEqual(
+            {row["command"] for row in delta["newly_allowed_all"]}, set(commands)
+        )
+        for label in ("newly_blocked", "ask_gained", "ask_lost", "crash_moved"):
+            self.assertIn(f"{label}_all", delta)
+        self.assertIn("reclassified_all", delta)
+
+    def test_the_json_holds_every_row_and_stdout_holds_only_top(self):
+        commands = [f"secret-command-{index}" for index in range(6)]
+        corpus = self.write_corpus(*commands)
+        baseline = self.write_dispatch("blocking", "1.0.0", 'return "deny", "old"')
+        candidate = self.write_dispatch("allowing", "2.0.0", 'return "allow", ""')
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--top",
+            "2",
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        delta = payload["tiers"]["2"]["delta"]
+        self.assertEqual(delta["newly_allowed_unique"], 6)
+        self.assertEqual(
+            sorted(row["command"] for row in delta["newly_allowed_all"]),
+            sorted(commands),
+        )
+        # stdout stays a summary, and says where the rest of the evidence is.
+        self.assertEqual(text.count("secret-command-"), 2)
+        self.assertIn("and 4 more", text)
+        self.assertIn("tiers.2.delta.newly_allowed_all", text)
+
+
+class MaxCommandCharsReportingTests(EndToEndTestCase):
+    """Dropped-for-length commands bias the rate down, so say so up front."""
+
+    def test_the_skipped_count_is_in_the_block_rate_table(self):
+        corpus = self.write_corpus("git status", "x" * 400)
+        floor = self.write_dispatch("allowing", "1.0.0", 'return "allow", ""')
+        _, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--max-command-chars",
+            "100",
+            "--quiet",
+        )
+        headline = text.split("block rate by tier")[1].split("=" * 78)[0]
+        self.assertIn("excluded before replay: 1 command(s)", headline)
+        self.assertIn("--max-command-chars (100)", headline)
 
 
 if __name__ == "__main__":
