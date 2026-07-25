@@ -130,6 +130,96 @@ class AggregateConfigRedirectTests(unittest.TestCase):
                 self.assertIn("push-config-unverifiable", reason)
 
 
+class DangerousPrefixTests(unittest.TestCase):
+    """The prefix itself can carry the irreversible act.
+
+    Stripping the leading redirection to expose the head must not also discard
+    the redirect target.  The argv rule is the only check that sees an
+    inert-QUOTED target, because the whole-command text scan runs on
+    ``strip_quotes`` output where ``'.env'`` is already a placeholder.
+    """
+
+    SECRET_TARGETS = ("'.env'", '".env"', "'~/.ssh/id_rsa'", '"my.credentials"')
+    WRITE_OPERATORS = ("> ", ">> ", "2> ", "2>> ", "&> ", "&>> ", ">| ", ">&")
+
+    def test_quoted_secret_redirect_in_the_prefix_is_denied(self):
+        for target in self.SECRET_TARGETS:
+            for operator in self.WRITE_OPERATORS:
+                for tail in ("", " echo hi", " git status"):
+                    command = f"{operator}{target}{tail}"
+                    with self.subTest(command=command):
+                        decision, reason = decide(command)
+                        self.assertEqual(decision, "deny", reason)
+                        self.assertIn("secret-looking file", reason)
+
+    def test_split_descriptor_spelling_is_denied(self):
+        for command in ("2 > '.env' true", "2 >> '.env' true", "* > '.env' true"):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_bare_secret_redirect_in_the_prefix_stays_denied(self):
+        for command in ("> .env echo hi", "2>.env git status", "&>.env echo hi"):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "deny")
+
+    def test_reading_a_secret_file_through_the_prefix_stays_allowed(self):
+        # The floor blocks the irreversible, not disclosure by read.  Denying
+        # `< '.env' cat` would be a new false positive, not a charter win.
+        for command in ("< '.env' cat", "< .env cat", "<& 3 cat"):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "allow")
+
+
+class PrefixAllowSideTests(unittest.TestCase):
+    """Legitimate commands must survive every prefix form.
+
+    ``PrefixCrossProductTests`` only proves denies stay denied.  A prefix change
+    that starts blocking ordinary work is as serious a defect as one that lets a
+    charter shape through, so the allow direction needs its own gate.
+    """
+
+    BENIGN = (
+        "git status",
+        "git log --oneline -5",
+        "git diff HEAD~1",
+        "ls -la",
+        "cat README.md",
+        "py -3 -m pytest tests",
+        "npm run build",
+        "make -j4 all",
+        "grep -rn TODO src",
+        "echo hello",
+        "git commit -m 'ship it'",
+        "gh pr view 53",
+    )
+
+    def test_every_benign_command_allows_behind_each_prefix(self):
+        for command in self.BENIGN:
+            with self.subTest(prefix="<direct>", command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "allow", reason)
+            for prefix in PrefixCrossProductTests.PREFIXES:
+                with self.subTest(prefix=prefix, command=command):
+                    decision, reason = decide(prefix + command, 1)
+                    self.assertEqual(decision, "allow", reason)
+
+    def test_benign_redirect_targets_are_not_secret_looking(self):
+        commands = (
+            "> build.log make all",
+            ">> build.log make all",
+            "2> errors.txt git fetch origin",
+            "&> combined.log npm test",
+            ">| out.txt ls",
+            "> /dev/null git gc",
+            "< input.txt sort -u",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "allow", reason)
+
+
 class CmdAggregateSeparatorTests(unittest.TestCase):
     def test_cmd_aggregate_spelling_exposes_the_following_delete(self):
         for switch in ("c", "k"):

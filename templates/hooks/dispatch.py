@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.6 (2026-07-25)"
+FLOOR_VERSION = "1.6.7 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3996,6 +3996,50 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
     return target_index + 1
 
 
+_WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>"})
+
+
+def leading_redirection_write_targets(toks: list[str]) -> list[str]:
+    """Return the write targets inside a command's leading redirection prefix.
+
+    :func:`strip_leading_command_redirections` deletes that prefix so the real
+    executable resolves.  The deletion also removes the only argv an
+    inert-QUOTED redirect target ever appears in: the whole-command text scan
+    reads :func:`strip_quotes` output, where ``'.env'`` has already collapsed to
+    a placeholder.  Collect the targets here so the caller can enforce the
+    secret-path rule BEFORE the prefix is dropped, the same way repository-config
+    redirect state is recorded from the original argv.
+
+    Read-only operands (``<``, ``<&``, ``<<``) are excluded: reading a file is
+    not the irreversible act the floor blocks.
+    """
+    targets: list[str] = []
+    index = 0
+    while index < len(toks):
+        token = toks[index]
+        if _ASSIGN.match(token) or token == "--%":
+            index += 1
+            continue
+        redirect_end = leading_redirection_end(toks, index)
+        if redirect_end is None:
+            break
+        operator: str | None = None
+        for consumed in toks[index:redirect_end]:
+            combined = command_prefix_redirection_token(consumed)
+            if combined is not None:
+                operator, glued_target, _has_descriptor = combined
+                if glued_target and operator in _WRITING_REDIRECTION_OPERATORS:
+                    targets.append(glued_target)
+                continue
+            if re.fullmatch(r"(?:\d+|\*)", consumed):
+                # A bare file descriptor, never a path.
+                continue
+            if operator in _WRITING_REDIRECTION_OPERATORS:
+                targets.append(consumed)
+        index = redirect_end
+    return targets
+
+
 def strip_leading_command_redirections(toks: list[str]) -> list[str]:
     """Remove command-leading redirects/``--%`` while retaining assignments.
 
@@ -4004,9 +4048,11 @@ def strip_leading_command_redirections(toks: list[str]) -> list[str]:
     ask for the head, so fixing head resolution alone still let the same prefix
     hide environment mutation, wrapper, and Windows-fallback cases.
 
-    Redirect targets are validated before this runs, and repository-config
-    redirect state is recorded from the original argv.  Removing the prefix
-    here therefore exposes the executable without discarding either policy.
+    Redirect targets are validated before this runs -- by the whole-command text
+    scan for bare targets and by :func:`leading_redirection_write_targets` for
+    inert-quoted ones -- and repository-config redirect state is recorded from
+    the original argv.  Removing the prefix here therefore exposes the
+    executable without discarding either policy.
     """
     assignments: list[str] = []
     index = 0
@@ -7804,6 +7850,12 @@ def check(
             repository_config_may_have_changed
             or segment_may_mutate_repository_config(raw)
         )
+        for redirect_target in leading_redirection_write_targets(raw):
+            if token_mentions_secret_path(redirect_target):
+                return (
+                    "deny",
+                    f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
+                )
         raw = strip_leading_command_redirections(raw)
         if not raw:
             continue

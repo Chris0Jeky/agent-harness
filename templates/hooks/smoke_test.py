@@ -329,6 +329,21 @@ CASES = [
     ("runas /savecred /user:x whoami", 1, {}, "deny"),
     ("echo secret123 > .env", 1, {}, "deny"),
     ("echo tok >> config/credentials.json", 1, {}, "deny"),
+    # Command-LEADING redirects: the prefix is stripped so the real head
+    # resolves, so the target must be judged before the strip.  A quoted target
+    # is only ever visible in argv -- the text pass sees a placeholder.
+    ("> '.env'", 1, {}, "deny"),
+    ("> '.env' echo hi", 1, {}, "deny"),
+    ('2> ".env" git status', 1, {}, "deny"),
+    ('>> "~/.ssh/id_rsa" echo x', 1, {}, "deny"),
+    ("&> '.env' echo x", 1, {}, "deny"),
+    ("2 > '.env' true", 1, {}, "deny"),
+    ("FOO=bar > '.env' git status", 1, {}, "deny"),
+    ("2>&1 > '.env' git status", 1, {}, "deny"),
+    ("2>err.log git status", 1, {}, "allow"),
+    ("&>combined.log npm test", 1, {}, "allow"),
+    ("> build.log make all", 1, {}, "allow"),
+    ("< '.env' cat", 1, {}, "allow"),
     ("echo secret > .{env,notes}", 1, {}, "deny"),
     ("echo secret > 'dir,one/'.{env,txt}", 1, {}, "deny"),
     ("rm .env", 1, {}, "deny"),
