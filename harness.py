@@ -1238,10 +1238,14 @@ def tree_digest(root: Path) -> str | None:
                 # drifted (source 0755, installed 0644) is NOT the same tree: the
                 # installed skill cannot run it, and same_tree would otherwise make
                 # `sync-global --apply` skip the copy that would restore the mode.
-                # Only the executable bit is digested — the rest of the mode is
-                # umask/filesystem noise and Windows reports no meaningful bits.
-                if entry_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                    executable = b"X"
+                # Only the executable-bit tuple is digested — the rest of the
+                # mode is umask/filesystem noise and Windows reports no meaningful
+                # bits. The three bits must stay distinct: 0750 and 0705 grant
+                # different users execution even though both have an executable bit.
+                executable = bytes(
+                    int(bool(entry_mode & bit))
+                    for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+                )
                 payload = file_path.read_bytes()
             except FileNotFoundError as exc:
                 raise HarnessError(
