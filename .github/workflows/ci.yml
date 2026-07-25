@@ -51,8 +51,9 @@ jobs:
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
           tests/test_git_editor_terminal_flows.py tests/test_push_config_force.py
           tests/test_powershell_block_scan.py tests/test_push_guard_review_gaps.py
-          tests/test_skill_tree_mode_digest.py
+          tests/test_skill_tree_mode_digest.py tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Check Black formatting
@@ -61,8 +62,9 @@ jobs:
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
           tests/test_git_editor_terminal_flows.py tests/test_push_config_force.py
           tests/test_powershell_block_scan.py tests/test_push_guard_review_gaps.py
-          tests/test_skill_tree_mode_digest.py
+          tests/test_skill_tree_mode_digest.py tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Compile Python sources
@@ -71,6 +73,7 @@ jobs:
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
           tests/test_git_editor_terminal_flows.py tests/test_push_config_force.py
           tests/test_powershell_block_scan.py tests/test_push_guard_review_gaps.py
-          tests/test_skill_tree_mode_digest.py
+          tests/test_skill_tree_mode_digest.py tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
