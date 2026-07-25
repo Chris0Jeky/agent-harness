@@ -15,7 +15,8 @@ option in a subcommand that cannot parse it:
 * issue #44 -- `git push --force-with-lease origin fix/x 2>&1` was refused
   because the redirection survived into the lease destination list, so
   `--force-with-lease` denied the only spelling agents type while `--force`
-  was unaffected.
+  was unaffected. Only an UNQUOTED redirection is structure the shell eats:
+  quoted, `"2>&1"` is an ordinary argv entry and stays a lease destination.
 
 The risk in all three is the one from #25/#29: a relaxation removes whatever
 coverage the over-broad rule was providing by accident. So every case is pinned
@@ -294,6 +295,34 @@ LEASE_NON_FEATURE_STILL_DENIED = (
     "git push --force origin fix/x > out.txt",
 )
 
+# The other direction of the SAME fix. Quoting turns a redirection into data:
+# the shell hands git the literal argv entry `2>&1`, `git check-ref-format
+# --branch '2>&1'` accepts that name, and the push creates `refs/heads/2>&1`.
+# So a quoted redirect lookalike is a lease DESTINATION and must be judged as
+# one -- stripping it would smuggle a non-feature branch past the guard, which
+# is what the first cut of the #44 fix did (PR #70 review).
+LEASE_QUOTED_REDIRECT_LOOKALIKES_DENIED = (
+    'git push --force-with-lease origin fix/x "2>&1"',
+    "git push --force-with-lease origin fix/x '2>&1'",
+    'git push --force-with-lease origin fix/x "2>/dev/null"',
+    'git push --force-with-lease origin fix/x "> out.txt"',
+    "git push --force-with-lease origin fix/x '>out'",
+    'git push --force-with-lease origin fix/x ">>push.log"',
+    'git push --force-with-lease origin "2>&1"',
+    'git push --force-with-lease origin fix/x "2>&1" | tail -4',
+    # provenance has to survive the recursion into a nested shell too
+    "bash -c 'git push --force-with-lease origin fix/x \"2>&1\"'",
+)
+
+# ...and quoting an ordinary feature branch must not start denying it: the fix
+# only stops treating quoted text as shell structure.
+LEASE_QUOTED_FEATURE_STILL_ALLOWED = (
+    'git push --force-with-lease origin "fix/x"',
+    "git push --force-with-lease origin 'feat/y' 2>&1",
+    'git push --force-with-lease origin "chore/z" > out.txt',
+    "bash -c 'git push --force-with-lease origin fix/x 2>&1'",
+)
+
 
 class UpdateIndexAndSparseCheckoutArityTests(unittest.TestCase):
     """Issue #45: read/write-mixed verbs admitted by arity, never by name."""
@@ -547,6 +576,48 @@ class PushRedirectionTests(unittest.TestCase):
         # commands without redirects are untouched
         self.assertEqual(strip(["origin", "main"]), ["origin", "main"])
         self.assertEqual(strip([]), [])
+
+    def test_a_quoted_redirect_lookalike_stays_a_lease_destination(self):
+        for command in LEASE_QUOTED_REDIRECT_LOOKALIKES_DENIED:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, _reason = decide(command, tier)
+                    self.assertNotEqual(decision, "allow", command)
+
+    def test_quoting_a_feature_branch_does_not_start_denying_it(self):
+        for command in LEASE_QUOTED_FEATURE_STILL_ALLOWED:
+            for tier in (1, 2, 3):
+                with self.subTest(command=command, tier=tier):
+                    decision, reason = decide(command, tier)
+                    self.assertEqual(decision, "allow", f"{command} -> {reason}")
+
+    def test_the_strip_runs_before_quoted_spans_are_decoded(self):
+        """The masked token carries no redirection character, so it survives.
+
+        This is the mechanism the two directions above rest on: `strip_quotes`
+        replaces an inert quoted span with a placeholder that holds no `<`/`>`,
+        so running the strip over the MASKED operands removes exactly the
+        structure the shell consumed. Decoding afterwards restores the real
+        argv, quoted literals included.
+        """
+        masked, placeholders = dispatch.strip_quotes(
+            'git push --force-with-lease origin fix/x "2>&1"'
+        )
+        quoted_token = masked.split()[-1]
+        self.assertNotIn(">", quoted_token)
+        self.assertEqual(
+            dispatch.decode_inert_git_token(quoted_token, placeholders), "2>&1"
+        )
+        kept = dispatch.strip_shell_redirections(["origin", "fix/x", quoted_token])
+        self.assertEqual(
+            [dispatch.decode_inert_git_token(t, placeholders) for t in kept],
+            ["origin", "fix/x", "2>&1"],
+        )
+        # the same helper, given the UNQUOTED token, still drops it
+        self.assertEqual(
+            dispatch.strip_shell_redirections(["origin", "fix/x", "2>&1"]),
+            ["origin", "fix/x"],
+        )
 
     def test_dropping_operands_fails_closed(self):
         """An emptied destination list must refuse, not vacuously pass."""

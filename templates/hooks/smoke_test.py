@@ -414,6 +414,20 @@ CASES = [
     ("git push --force-with-lease 2>&1", 2, {}, "deny"),
     ("git push --force origin fix/x 2>&1", 2, {}, "deny"),
     ("git push -f origin fix/x 2>&1", 2, {}, "deny"),
+    # QUOTED, the same text is not structure: the shell hands git the literal
+    # argv entry `2>&1` and the push creates `refs/heads/2>&1`, so it is a lease
+    # destination like any other and stripping it smuggled a non-feature branch
+    # past the guard (PR #70 review). Provenance also has to survive the
+    # recursion into a nested shell.
+    ('git push --force-with-lease origin fix/x "2>&1"', 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x '2>&1'", 2, {}, "deny"),
+    ('git push --force-with-lease origin fix/x "> out.txt"', 2, {}, "deny"),
+    ('git push --force-with-lease origin "2>&1"', 2, {}, "deny"),
+    ("bash -c 'git push --force-with-lease origin fix/x \"2>&1\"'", 2, {}, "deny"),
+    # ...and quoting a feature branch must not start denying it.
+    ('git push --force-with-lease origin "fix/x"', 2, {}, "allow"),
+    ("git push --force-with-lease origin 'fix/x' 2>&1", 2, {}, "allow"),
+    ("bash -c 'git push --force-with-lease origin fix/x 2>&1'", 2, {}, "allow"),
     # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
