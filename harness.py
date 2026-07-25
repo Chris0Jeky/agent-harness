@@ -21,7 +21,7 @@ import sys
 import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -1644,19 +1644,33 @@ def validate_config_hook_state(hooks: dict[str, Any]) -> None:
             )
 
 
-def requirements_hook_path_resolves_here(value: str) -> bool:
-    """Return whether the running platform can resolve this managed hook path.
+# Codex reads `managed_dir` on POSIX hosts and `windows_managed_dir` on
+# Windows, and each field carries its own path flavour. Validating a field
+# under the other flavour false-greens a value Codex will reject as relative.
+_REQUIREMENTS_HOOK_PATH_FIELDS: tuple[tuple[str, type[PurePath], str, str], ...] = (
+    ("managed_dir", PurePosixPath, "POSIX", "posix"),
+    ("windows_managed_dir", PureWindowsPath, "Windows", "nt"),
+)
 
-    The two fields carry different path flavours, and which one Codex consumes
-    depends on the host. Absoluteness is therefore accepted under either
-    flavour, but existence is only asserted for a value that is unambiguously
-    absolute under THIS platform's rules — a Windows path audited on Linux (or
-    a POSIX path audited on Windows) is a different machine's fact, so probing
-    it would produce a portability-dependent verdict rather than a check.
+
+def requirements_hook_field_is_active_here(field: str) -> bool:
+    """Return whether THIS host is the one that consumes this managed field.
+
+    Existence is only asserted for the field the running platform actually
+    reads — the other field describes a different machine's filesystem, so
+    probing it would produce a portability-dependent verdict rather than a
+    check.
     """
-    if os.name == "nt":
-        return PureWindowsPath(value).is_absolute()
-    return PurePosixPath(value).is_absolute()
+    for name, _flavour, _label, os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if name == field:
+            return os.name == os_name
+    return False
+
+
+# `\\?\C:\dir` and `\\.\C:\dir` are the extended-length/device spellings of a
+# LOCAL drive: they carry a `\\`-prefixed drive but never leave the machine.
+# `\\?\UNC\server\share` is the device spelling of a real network share.
+_WINDOWS_LOCAL_DEVICE_DRIVE = re.compile(r"(?i)^[\\/]{2}[?.][\\/](?!unc[\\/])")
 
 
 def requirements_hook_path_is_locally_probeable(value: str) -> bool:
@@ -1669,8 +1683,15 @@ def requirements_hook_path_is_locally_probeable(value: str) -> bool:
     UNPROVEN for those paths; absoluteness is still asserted. POSIX network
     mounts are indistinguishable from local paths, so this narrowing can only
     recognize the UNC spelling.
+
+    Only a genuine server/share is exempted: the `\\\\?\\C:\\...` and
+    `\\\\.\\C:\\...` device spellings address a local drive and are still
+    probed, so `doctor` cannot certify a missing directory written that way.
     """
-    return not PureWindowsPath(value).drive.startswith(("\\\\", "//"))
+    drive = PureWindowsPath(value).drive
+    if not drive.startswith(("\\\\", "//")):
+        return True
+    return bool(_WINDOWS_LOCAL_DEVICE_DRIVE.match(drive))
 
 
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
@@ -1680,7 +1701,7 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
     hooks from a relative or missing directory, so a `str` type check alone
     false-greens a managed hook source Codex would reject. Fail closed instead.
     """
-    for field in ("managed_dir", "windows_managed_dir"):
+    for field, flavour, flavour_label, _os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
         if field not in hooks:
             continue
         value = hooks[field]
@@ -1688,14 +1709,12 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
             raise HarnessError(
                 f"existing requirements hooks.{field} must be a path string"
             )
-        if not (
-            PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
-        ):
+        if not flavour(value).is_absolute():
             raise HarnessError(
-                f"existing requirements hooks.{field} must be an absolute path: "
-                f"{value!r}"
+                f"existing requirements hooks.{field} must be an absolute path "
+                f"in {flavour_label} form: {value!r}"
             )
-        if not requirements_hook_path_resolves_here(value):
+        if not requirements_hook_field_is_active_here(field):
             continue
         if not requirements_hook_path_is_locally_probeable(value):
             continue

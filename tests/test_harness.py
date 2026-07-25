@@ -991,6 +991,50 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
             harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
 
+    def test_local_windows_device_paths_are_still_probed(self) -> None:
+        # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
+        # a LOCAL device: skipping the existence probe would let doctor certify
+        # a managed hook directory Codex will reject.
+        for value in ("//?/C:/managed", "\\\\?\\C:\\managed", "//./C:/managed"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The device spelling of a real share stays unprobeable.
+        for value in ("//?/UNC/fileserver/codex", "\\\\?\\UNC\\fileserver\\codex"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_missing_windows_device_managed_dir_is_rejected(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.windows_managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": f"//?/{missing.as_posix()}"}
+            )
+
+    def test_requirements_managed_dirs_are_validated_per_platform_flavor(self) -> None:
+        # Codex resolves `managed_dir` on POSIX and `windows_managed_dir` on
+        # Windows. Accepting either flavour for either field false-greens a
+        # value the consuming host will treat as relative.
+        wrong_flavour = (
+            ("managed_dir", "C:/managed/hooks"),
+            ("managed_dir", "\\\\fileserver\\codex\\hooks"),
+            ("windows_managed_dir", "/managed/hooks"),
+        )
+        for field, value in wrong_flavour:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    harness.HarnessError,
+                    rf"requirements hooks\.{field} must be an absolute path",
+                ):
+                    harness.validate_requirements_hook_paths({field: value})
+
     def test_requirements_hook_paths_reject_managed_file(self) -> None:
         not_a_directory = Path(self.temp.name) / "managed-hooks-file"
         not_a_directory.write_text("", encoding="utf-8")
