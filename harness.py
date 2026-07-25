@@ -1687,6 +1687,11 @@ def requirements_hook_path_is_locally_probeable(value: str) -> bool:
     Only a genuine server/share is exempted: the `\\\\?\\C:\\...` and
     `\\\\.\\C:\\...` device spellings address a local drive and are still
     probed, so `doctor` cannot certify a missing directory written that way.
+
+    This answers about WINDOWS path semantics, so callers must apply it only to
+    a value in the Windows flavour. On POSIX `//missing/share` is an ordinary
+    absolute path, not a share, and reparsing it here would skip the probe and
+    let `doctor` certify a directory Codex cannot load.
     """
     drive = PureWindowsPath(value).drive
     if not drive.startswith(("\\\\", "//")):
@@ -1716,7 +1721,10 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
             )
         if not requirements_hook_field_is_active_here(field):
             continue
-        if not requirements_hook_path_is_locally_probeable(value):
+        if (
+            flavour is PureWindowsPath
+            and not requirements_hook_path_is_locally_probeable(value)
+        ):
             continue
         try:
             resolvable = Path(value).is_dir()

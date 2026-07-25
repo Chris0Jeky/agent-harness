@@ -978,18 +978,29 @@ class HarnessTests(unittest.TestCase):
                 self.assertTrue(
                     harness.requirements_hook_path_is_locally_probeable(value)
                 )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_a_unc_windows_managed_dir_is_never_stat_probed(self) -> None:
         with mock.patch.object(
             harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
         ):
             harness.validate_requirements_hook_paths(
-                {
-                    "managed_dir": "//fileserver/codex/hooks",
-                    "windows_managed_dir": "\\\\fileserver\\codex\\hooks",
-                }
+                {"windows_managed_dir": "\\\\fileserver\\codex\\hooks"}
             )
-        # The absoluteness rule still applies to a UNC-looking relative value.
-        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
-            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX-only managed field")
+    def test_a_double_slash_posix_managed_dir_is_probed(self) -> None:
+        # The UNC exemption answers about WINDOWS path semantics. On POSIX
+        # `//missing/share` is an ordinary absolute path, so reparsing it as a
+        # share would skip the probe and certify a directory Codex cannot load.
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths({"managed_dir": "//missing/share"})
 
     def test_local_windows_device_paths_are_still_probed(self) -> None:
         # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
