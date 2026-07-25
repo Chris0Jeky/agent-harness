@@ -4076,7 +4076,20 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
     return target_index + 1
 
 
-_WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>"})
+# `<>` belongs here: POSIX `n<>file` opens the file for READ AND WRITE on
+# descriptor n, and creates it when absent. It reads like a read-only operator
+# and is spelled with `<`, which is exactly why it was missed.
+_WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>", "<>"})
+
+
+def descriptor_duplication_operand(operator: str | None, target: str) -> bool:
+    """Return True when ``operator target`` duplicates or closes a descriptor.
+
+    ``2>&1`` and ``>&-`` name no file; only a non-numeric word after ``>&``
+    (``>&out.log``) is a path.  Reading the numeric form as a write target
+    would put ``1`` in front of every secret-path heuristic that ever ships.
+    """
+    return operator in {">&", "<&"} and re.fullmatch(r"-|\d+-?", target) is not None
 
 
 def leading_redirection_write_targets(toks: list[str]) -> list[str]:
@@ -4090,8 +4103,9 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
     secret-path rule BEFORE the prefix is dropped, the same way repository-config
     redirect state is recorded from the original argv.
 
-    Read-only operands (``<``, ``<&``, ``<<``) are excluded: reading a file is
-    not the irreversible act the floor blocks.
+    Genuinely read-only operands (``<``, ``<&``, ``<<``, ``<<<``) are excluded:
+    reading a file is not the irreversible act the floor blocks.  ``<>`` is NOT
+    one of them -- it opens for read-write -- so it is collected.
     """
     targets: list[str] = []
     index = 0
@@ -4110,13 +4124,19 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
             combined = command_prefix_redirection_token(consumed)
             if combined is not None:
                 operator, glued_target, _has_descriptor = combined
-                if glued_target and operator in _WRITING_REDIRECTION_OPERATORS:
+                if (
+                    glued_target
+                    and operator in _WRITING_REDIRECTION_OPERATORS
+                    and not descriptor_duplication_operand(operator, glued_target)
+                ):
                     targets.append(glued_target)
                 continue
             if re.fullmatch(r"(?:\d+|\*)", consumed):
                 # A bare file descriptor, never a path.
                 continue
-            if operator in _WRITING_REDIRECTION_OPERATORS:
+            if operator in _WRITING_REDIRECTION_OPERATORS and not (
+                descriptor_duplication_operand(operator, consumed)
+            ):
                 targets.append(consumed)
         index = redirect_end
     return targets

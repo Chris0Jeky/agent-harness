@@ -212,6 +212,48 @@ class DangerousPrefixTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(decide(command)[0], "deny")
 
+    def test_read_write_open_of_a_secret_file_is_denied(self):
+        # `n<>file` opens for READ AND WRITE and creates the file when absent.
+        # Its `<` spelling is the only thing about it that looks read-only, and
+        # the quoted target is invisible to the whole-command text scan.
+        for command in (
+            "1<> '.env' echo x",
+            "<> '.env' echo x",
+            "1<>'.env' echo x",
+            '2<> ".env" git status',
+            "<> '~/.ssh/id_rsa' true",
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("secret-looking file", reason)
+
+    def test_read_write_open_of_an_ordinary_file_stays_allowed(self):
+        for command in ("1<> build.log echo x", "<> 'notes.txt' git status"):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "allow")
+
+    def test_descriptor_duplication_is_not_a_write_target(self):
+        # `2>&1` duplicates a descriptor; `1` is not a path, in either spelling.
+        for argv in (
+            ["2>&1", "git", "status"],
+            ["2", ">&", "1", "git", "status"],
+            [">&", "2", "git", "status"],
+            ["2>&-", "git", "status"],
+            ["1<&0", "git", "status"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(dispatch.leading_redirection_write_targets(argv), [])
+        # A non-numeric word after `>&` is still a real file, still collected.
+        self.assertEqual(
+            dispatch.leading_redirection_write_targets(["2>&out.log", "git", "status"]),
+            ["out.log"],
+        )
+        for command in ("2>&1 git status", "2 >& 1 git status", "2>&- git status"):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "allow")
+        self.assertEqual(decide("2>&'.env' git status")[0], "deny")
+
     def test_reading_a_secret_file_through_the_prefix_stays_allowed(self):
         # The floor blocks the irreversible, not disclosure by read.  Denying
         # `< '.env' cat` would be a new false positive, not a charter win.
