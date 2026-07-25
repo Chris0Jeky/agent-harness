@@ -3778,6 +3778,30 @@ allow_local_binding = true
         self.assertIn("authoritative root source is absent", output)
         self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
 
+    def test_doctor_reports_a_relative_wrapper_in_a_linked_worktree(self) -> None:
+        # Codex sources the adapter from the root checkout but runs it from the
+        # linked worktree, so a repo-relative wrapper path never resolves.
+        root, linked = self.make_linked_worktree()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        adapter = self.wrapper_adapter_text(
+            pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+        )
+        root_hooks = self.write_hooks(root, adapter)
+        self.write_hooks(linked, adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(linked)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex hook source: linked worktree", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
+
     def test_doctor_uses_identical_root_checkout_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
