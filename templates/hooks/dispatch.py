@@ -2712,7 +2712,7 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             r"realtime|abovenormal|belownormal|wait)"
         )
         cmd_wrapper = re.match(
-            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
+            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck]\s*(?P<child>.+)$",
             candidate,
         )
         wrapper = cmd_wrapper

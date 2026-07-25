@@ -132,14 +132,21 @@ class AggregateConfigRedirectTests(unittest.TestCase):
 
 class CmdAggregateSeparatorTests(unittest.TestCase):
     def test_cmd_aggregate_spelling_exposes_the_following_delete(self):
-        for operator in ("&>", "&>>"):
-            command = (
-                rf"""cmd /c "echo harmless {operator}nul rd /s /q """
-                r'''C:\critical\outside path\"'''
-            )
-            with self.subTest(operator=operator):
-                decision, reason = decide(command)
-                self.assertEqual(decision, "deny", reason)
+        for launcher in ("cmd", "cmd.exe /d"):
+            for switch in ("c", "k"):
+                for operator in ("&>", "&>>"):
+                    commands = (
+                        rf"""{launcher} /{switch} "echo harmless {operator}nul """
+                        r'''rd /s /q C:\critical\outside path\"''',
+                        rf"""{launcher} /{switch}"echo harmless {operator}nul """
+                        r'''rd /s /q C:\critical\outside path\"''',
+                        rf"""{launcher} /{switch}echo harmless {operator}nul """
+                        r'''rd /s /q "C:\critical\outside path\"''',
+                    )
+                    for command in commands:
+                        with self.subTest(command=command):
+                            decision, reason = decide(command)
+                            self.assertEqual(decision, "deny", reason)
 
 
 if __name__ == "__main__":
