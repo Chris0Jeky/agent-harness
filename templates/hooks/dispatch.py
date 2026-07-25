@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.11 (2026-07-25)"
+FLOOR_VERSION = "1.6.12 (2026-07-26)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1441,6 +1441,94 @@ _ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
 # A punctuation run that still holds a redirection character. Segmentation only
 # consumes runs made purely of `;&|\n`, so anything matching this is structure.
 _ARGV_REDIRECTION_TOKEN = re.compile(r"[;&|<>]*[<>][;&|<>]*")
+# The file-descriptor prefix of a redirection (`2>&1`, `1>out`, `&>log`), plus
+# bash's named form (`{log}>out`), which bash consumes exactly like a numeric
+# one -- so leaving it in argv made `git push --force-with-lease origin fix/x
+# {log}>out` read as a third positional and deny a lease push bash would have
+# handed Git as two.
+#
+# PowerShell's all-stream `*>` is deliberately ABSENT. `*` is a descriptor there
+# but a glob in POSIX, where `cmd *> f` passes `*` as an argument, and the floor
+# cannot know which shell will run the text. Keeping `*` as an operand is the
+# fail-closed reading of that ambiguity (PR #70 review). The named form carries
+# no such ambiguity: `{name}` is not a glob in either shell.
+_ARGV_REDIRECTION_DESCRIPTOR = re.compile(r"[0-9]+|&|\{[A-Za-z_][A-Za-z0-9_]*\}")
+_ARGV_REDIRECTION_CHARACTER = re.compile(r"[<>]")
+# Characters that continue a redirection OPERATOR rather than start its target:
+# the duplication `&` (`2>&1`), a second angle (`>>`), and bash's noclobber
+# override `>|`. `|` is only ever operator text here -- a pipe is consumed by
+# segmentation long before argv, and no redirection target starts with one.
+_ARGV_REDIRECTION_OPERATOR_CHARACTERS = "<>&|"
+
+
+def strip_shell_redirections(
+    tokens: list[str], descriptor_may_be_detached: bool = False
+) -> list[str]:
+    """Drop redirection operators, their descriptors and their targets.
+
+    The SHELL consumes redirections; the program never sees them in its argv.
+    A guard that classifies operands therefore has to see the same argv git
+    does, or `git push --force-with-lease origin fix/x 2>&1` reads as a push to
+    the two destinations `fix/x` and `2>&1`, and the lease guard refuses the one
+    spelling every agent actually types (issue #44).
+
+    Both of the floor's tokenizers are handled, because they disagree here:
+    the quote-aware pass runs shlex with punctuation characters and yields
+    ``['2', '>&', '1']``, while the sanitized pass splits on whitespace and
+    yields ``['2>&1']``. So a redirection is recognised from the first ``<``/
+    ``>`` inside a token: text before it is an operand and is kept
+    (``fix/x>out`` really is the operand ``fix/x`` plus a redirect), a bare
+    file-descriptor prefix is dropped with the operator, and the target is
+    dropped whether it is glued on (``2>/dev/null``) or the next token
+    (``> out.txt``).
+
+    A DETACHED descriptor is only ever popped when the caller says its tokenizer
+    could have detached one, because the two passes differ exactly there. The
+    whitespace pass keeps `2>f` glued as one token, so a separate `2` in front of
+    `>f` really was a separate argv word -- bash passes `2` to the program in
+    `cmd 2 >f` -- and popping it dropped a real operand. The shlex pass cannot
+    tell the two spellings apart (both yield ``['2', '>&', '1']``), so it still
+    pops. Since a deny in EITHER pass denies, the unambiguous pass decides:
+    `git push --force-with-lease origin fix/x 2 >out.txt` now keeps `2` as the
+    refspec it is and the lease guard refuses it (PR #70 review), while
+    `... fix/x 2>&1` is stripped by both and stays allowed.
+
+    QUOTING IS STRUCTURE, so this MUST be given tokens whose inert quoted spans
+    are still MASKED as `strip_quotes` placeholders -- never tokens already
+    decoded by `decode_inert_git_token`. In `git push --force-with-lease origin
+    fix/x "2>&1"` the quotes make `2>&1` an ordinary argv entry: git really does
+    push to `refs/heads/2>&1` (`git check-ref-format --branch '2>&1'` accepts
+    the name), so it is a lease destination and must be classified as one. A
+    placeholder holds no `<`/`>`, so running the search over the masked tokens
+    removes exactly the redirection structure the SHELL consumed and leaves
+    every quoted literal intact; decoding afterwards restores the real argv.
+    """
+    kept: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        match = _ARGV_REDIRECTION_CHARACTER.search(token)
+        if match is None:
+            kept.append(token)
+            index += 1
+            continue
+        prefix = token[: match.start()]
+        target = token[match.start() :].lstrip(_ARGV_REDIRECTION_OPERATOR_CHARACTERS)
+        if prefix and not _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(prefix):
+            kept.append(prefix)
+        elif (
+            descriptor_may_be_detached
+            and not prefix
+            and kept
+            and _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(kept[-1])
+        ):
+            # shlex emitted the descriptor as its own token before the operator.
+            kept.pop()
+        index += 1
+        if not target:
+            # The redirection target is the following token.
+            index += 1
+    return kept
 
 
 def rejoin_argv_as_command(parts: list[str]) -> str:
@@ -4391,9 +4479,17 @@ def git_subcommand(toks):
 
 
 def git_option_values(
-    args: list[str], long_option: str, short_options: set[str] | None = None
+    args: list[str],
+    long_option: str,
+    short_options: set[str] | None = None,
+    subcommand: str | None = None,
 ) -> list[str | None]:
-    """Return values for a Git option, including attached/abbreviated spellings."""
+    """Return values for a Git option, including attached/abbreviated spellings.
+
+    ``subcommand`` only widens the terminator proof, and only for the families
+    the valueless-flag allowlist was swept against; omitting it is the
+    conservative reading (see git_terminator_is_provable).
+    """
     short_options = short_options or set()
     values: list[str | None] = []
     index = 0
@@ -4401,7 +4497,16 @@ def git_option_values(
         token = args[index]
         lowered = token.lower()
         if token == "--":
-            break
+            # Only a PROVEN terminator ends the walk. An option this scan does
+            # not know is stepped over as if valueless, so a `--` behind one may
+            # really be that option's value: `git format-patch --cc --
+            # --output=.env -1` sets Cc to `--` and then writes .env (measured,
+            # git 2.45.1). Keep scanning rather than stop short of the guard's
+            # own option -- the fail-closed direction.
+            if git_terminator_is_provable(args, index, subcommand):
+                break
+            index += 1
+            continue
         option_name, separator, attached = lowered.partition("=")
         if option_name == long_option or git_option_abbreviates(
             option_name, long_option
@@ -4429,9 +4534,239 @@ def git_option_values(
 
 
 def git_option_is_present(
-    args: list[str], long_option: str, short_options: set[str] | None = None
+    args: list[str],
+    long_option: str,
+    short_options: set[str] | None = None,
+    subcommand: str | None = None,
 ) -> bool:
-    return bool(git_option_values(args, long_option, short_options))
+    return bool(git_option_values(args, long_option, short_options, subcommand))
+
+
+# Flags that Git's revision / diff / grep parsers treat as COMPLETE: none of
+# them consumes the following argv entry, so a bare `--` after one really is the
+# end-of-options marker rather than that option's value.
+#
+# It is an allowlist because the failure directions are not symmetric: a missing
+# entry costs a false positive on a shape nobody types (a file literally named
+# `--ext-diff` behind an unlisted flag), while a wrong entry is a bypass of an
+# at-every-tier deny. It is matched CASE-SENSITIVELY, because Git short options
+# are case-sensitive and lowercasing conflates `-I` (`git diff -I <regex>`,
+# which takes a value) with `-i`.
+#
+# One shared set serves the SWEPT families (_GIT_TERMINATOR_SWEPT_SUBCOMMANDS),
+# so an entry has to be valueless in all of those. Subcommands outside that set
+# never consult it at all -- `git clone -b <branch>` proved a cross-family
+# entry cannot be trusted globally. That is why these are absent even here:
+#   -n  --line-number for grep, but --max-count=<n> for log
+#   -l  --files-with-matches for grep, but <num> for diff
+#   -m  -m for log, but --max-count=<num> for grep
+#   -v  --invert-match for grep, but --reroll-count=<n> for format-patch
+#   -G  --basic-regexp for grep, but -G<regex> for diff
+#   -A -B -C  context counts for grep
+#   --cc  the dense-combined-diff flag for log/diff, but `--cc <email>` (an
+#         extra Cc: header) for format-patch, which IS an external-diff family
+#         member.  Measured on git 2.45.1: `git format-patch --cc -- -1
+#         --stdout` emits `Cc: --`, and the token after the swallowed `--` is
+#         then parsed as an OPTION (`--name-only` there fails with "does not
+#         make sense" instead of being taken as a pathspec).  Listing it would
+#         have let `git format-patch --cc -- --ext-diff` truncate the scan and
+#         reach the helper -- the exact bypass this allowlist exists to stop.
+#
+# Every entry below was checked the same way, by sweeping each flag through
+# `git <family> <flag> -- --zzz-sentinel-opt` for log, diff, show, grep,
+# whatchanged, format-patch, rev-list, diff-tree, diff-index and diff-files and
+# asserting the sentinel never comes back as a parsed option.  `--cc` under
+# format-patch was the only swallow the sweep found.
+_GIT_TERMINATOR_SAFE_FLAGS = {
+    "-E",
+    "-F",
+    "-P",
+    "-R",
+    "-a",
+    "-b",
+    "-i",
+    "-p",
+    "-q",
+    "-r",
+    "-s",
+    "-t",
+    "-u",
+    "-w",
+    "-z",
+    "--abbrev-commit",
+    "--all",
+    "--author-date-order",
+    "--basic-regexp",
+    "--binary",
+    "--boundary",
+    "--cached",
+    "--check",
+    "--cherry-pick",
+    "--children",
+    "--color",
+    "--compact-summary",
+    "--count",
+    "--date-order",
+    "--decorate",
+    "--exit-code",
+    "--extended-regexp",
+    "--files-with-matches",
+    "--files-without-match",
+    "--find-copies-harder",
+    "--first-parent",
+    "--fixed-strings",
+    "--follow",
+    "--full-history",
+    "--full-index",
+    "--function-context",
+    "--graph",
+    "--histogram",
+    "--ignore-all-space",
+    "--ignore-blank-lines",
+    "--ignore-case",
+    "--ignore-cr-at-eol",
+    "--ignore-space-at-eol",
+    "--ignore-space-change",
+    "--indent-heuristic",
+    "--invert-match",
+    "--irreversible-delete",
+    "--left-right",
+    "--merges",
+    "--minimal",
+    "--name-only",
+    "--name-status",
+    "--no-abbrev-commit",
+    "--no-color",
+    "--no-commit-id",
+    "--no-decorate",
+    "--no-ext-diff",
+    "--no-index",
+    "--no-indent-heuristic",
+    "--no-merges",
+    "--no-patch",
+    "--no-prefix",
+    "--no-renames",
+    "--no-textconv",
+    "--null",
+    "--numstat",
+    "--oneline",
+    "--parents",
+    "--patch",
+    "--patch-with-raw",
+    "--patch-with-stat",
+    "--patience",
+    "--perl-regexp",
+    "--quiet",
+    "--raw",
+    "--recurse-submodules",
+    "--reverse",
+    "--root",
+    "--shortstat",
+    "--show-function",
+    "--show-signature",
+    "--simplify-merges",
+    "--staged",
+    "--stat",
+    "--stdout",
+    "--summary",
+    "--text",
+    "--textconv",
+    "--untracked",
+    "--word-regexp",
+}
+
+
+# The subcommand families the flag allowlist above was actually swept against.
+# Outside them the SAME short spelling takes a value -- `git clone -b <branch>`
+# and `-u <upload-pack>`, `git merge -s <strategy>` and `-F <file>`,
+# `git apply -p <n>`, `patch -z <suffix>` -- so a `--` behind a short flag there
+# proves nothing. Measured: `git init -b -- --separate-git-dir=zzz repo` really
+# created `zzz`, and `git clone -b -- --upload-pack=helper src dst` really
+# parsed the upload-pack option (git 2.45.1); both were `allow` before this gate
+# (PR #70 review). Restricting the allowlist to the swept families is a strict
+# TIGHTENING: elsewhere the scan simply keeps going, which is fail-closed.
+_GIT_TERMINATOR_SWEPT_SUBCOMMANDS = {
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "format-patch",
+    "grep",
+    "log",
+    "rev-list",
+    "show",
+    "stash",
+    "whatchanged",
+}
+
+
+def git_terminator_is_provable(
+    args: list[str], index: int, subcommand: str | None = None
+) -> bool:
+    """Return True when the bare ``--`` at ``index`` really ends option parsing.
+
+    ``--`` only ends option parsing when the parser is BETWEEN options. When an
+    option is still waiting for a separate value, Git hands it the ``--``
+    instead. Measured on git 2.45.1: ``git format-patch --cc -- -1 --stdout``
+    emits ``Cc: --``, and ``git grep -f -- pattern`` reports ``cannot open
+    '--'``. In both cases the tokens AFTER the ``--`` are then parsed as
+    options, so truncating there would hide the very token a scan is looking
+    for. (Not every option behaves this way -- the diff/revision parser rejects
+    it outright, ``git diff --output --`` errors with "requires a value" -- but
+    the floor cannot tell those apart from argv alone.)
+
+    Proof is therefore required, not assumed: ``--`` is the first token, the
+    token before it is an operand (an option waiting for a value would have
+    eaten that operand instead), the token before it carries its value glued
+    with ``=``, the token before it is ITSELF a bare ``--``, or the token before
+    it is a known valueless flag of a swept family. Anything else is unprovable,
+    and the caller keeps scanning -- the fail-closed direction.
+
+    The ``--`` before ``--`` case is proof under both readings, which is why it
+    needs no arity knowledge: if the earlier marker really terminated options
+    then this one is an ordinary operand and stopping here scans a SUPERSET of
+    the true option region, and if the earlier marker was swallowed as some
+    option's value then the parser is between options again and this one really
+    does terminate. Measured: ``git grep -e -- -- -Osh`` searches the file
+    ``-Osh`` without a pager (git 2.43/2.45.1), and refusing to look past the
+    first marker denied it (PR #70 review).
+    """
+    if index == 0:
+        return True
+    previous = args[index - 1]
+    if previous == "-" or not previous.startswith("-"):
+        return True
+    if previous == "--" or "=" in previous:
+        return True
+    if subcommand not in _GIT_TERMINATOR_SWEPT_SUBCOMMANDS:
+        return False
+    return previous in _GIT_TERMINATOR_SAFE_FLAGS
+
+
+def git_end_of_options_index(
+    args: list[str], subcommand: str | None = None
+) -> int | None:
+    """Return the index of the bare ``--`` Git would treat as end-of-options.
+
+    Scanning does not stop at the first unprovable ``--``: an option may have
+    swallowed it, in which case a LATER marker is the real terminator (see
+    git_terminator_is_provable). None when no marker can be proved, which makes
+    the caller scan the whole of argv.
+    """
+    for index, token in enumerate(args):
+        if token != "--":
+            continue
+        if git_terminator_is_provable(args, index, subcommand):
+            return index
+    return None
+
+
+def git_options_before_terminator(
+    args: list[str], subcommand: str | None = None
+) -> list[str]:
+    """Return the argv slice Git parses as options, per the proven terminator."""
+    terminator = git_end_of_options_index(args, subcommand)
+    return args if terminator is None else args[:terminator]
 
 
 _BUILTIN_GIT_MERGE_STRATEGIES = {
@@ -4446,7 +4781,7 @@ _BUILTIN_GIT_MERGE_STRATEGIES = {
 
 def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
     """Return a reason when Git argv can select an arbitrary child process."""
-    grep_option_args = args[: args.index("--")] if "--" in args else args
+    grep_option_args = git_options_before_terminator(args, subcommand)
     if subcommand == "grep" and any(
         token == "-O"
         or token.startswith("-O")
@@ -4474,20 +4809,25 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             args,
             "--upload-pack",
             {"-u"} if subcommand == "clone" else None,
+            subcommand,
         )
     ):
         return "A custom git upload-pack program can execute outside floor inspection."
     if subcommand == "clone":
         # clone --config takes effect before fetch: core.sshCommand and friends
         # run during the clone itself, exactly like a global `git -c` override.
-        for config in git_option_values(args, "--config", {"-c"}):
+        for config in git_option_values(args, "--config", {"-c"}, subcommand):
             if config is None or has_dynamic_shell_token(config.split("=", 1)[0]):
                 return "A git clone --config value is opaque to floor inspection."
             if protected_git_config_key(config.split("=", 1)[0].lower()):
                 return "Git clone --config can inject execution or destination config."
-    if subcommand == "archive" and git_option_is_present(args, "--exec"):
+    if subcommand == "archive" and git_option_is_present(
+        args, "--exec", subcommand=subcommand
+    ):
         return "A custom git archive program can execute outside floor inspection."
-    if subcommand == "rebase" and git_option_is_present(args, "--exec", {"-x"}):
+    if subcommand == "rebase" and git_option_is_present(
+        args, "--exec", {"-x"}, subcommand
+    ):
         return "A git rebase exec command is opaque to floor inspection."
     if subcommand == "bisect" and args and args[0].lower() == "run":
         return "A git bisect run command is opaque to floor inspection."
@@ -4504,7 +4844,7 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         if action == "set-url":
             return "Git submodule destination mutation is floor-blocked."
     if subcommand in {"merge", "rebase"}:
-        strategies = git_option_values(args, "--strategy", {"-s"})
+        strategies = git_option_values(args, "--strategy", {"-s"}, subcommand)
         if any(
             strategy is None or strategy.lower() not in _BUILTIN_GIT_MERGE_STRATEGIES
             for strategy in strategies
@@ -4520,23 +4860,29 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             "show",
             "whatchanged",
         }
-        # Every admitted read-only plumbing subcommand gets the same guard. The
-        # diff plumbing (diff-files/diff-index/diff-tree) takes --ext-diff just
-        # like porcelain diff, and naming the family rather than listing members
-        # means admitting a new subcommand to _GIT_READ_ONLY_PLUMBING cannot
-        # silently leave it unguarded -- which is exactly how `rev-list
-        # --output=` slipped through.
-        or subcommand in _GIT_READ_ONLY_PLUMBING
+        # The admitted plumbing that Git routes through the same revision/diff
+        # option parser takes --ext-diff exactly like porcelain diff. The
+        # plumbing that does NOT parse diff options is excluded: there
+        # `--ext-diff` is an operand git can never act on (issue #55).
+        or subcommand in _GIT_PLUMBING_WITH_DIFF_OPTIONS
     ):
         diff_args = args
     elif subcommand == "stash" and args and args[0].lower() == "show":
         diff_args = args[1:]
-    if diff_args is not None and any(
-        token.lower() == "--ext-diff"
-        or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
-        for token in diff_args
-    ):
-        return "Git external-diff execution is floor-blocked."
+    if diff_args is not None:
+        # `--` ends option parsing, so `git diff -- --ext-diff` names a FILE and
+        # cannot select a helper. Same treatment `git grep -O` already gets.
+        # Only a PROVEN terminator counts: an option still waiting for a
+        # separate value swallows `--` instead (`git diff --output --
+        # --ext-diff` writes to a file named `--` and then runs the helper), so
+        # an unprovable `--` leaves the whole of argv in the scan.
+        diff_args = git_options_before_terminator(diff_args, subcommand)
+        if any(
+            token.lower() == "--ext-diff"
+            or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
+            for token in diff_args
+        ):
+            return "Git external-diff execution is floor-blocked."
     return None
 
 
@@ -5133,11 +5479,14 @@ _GIT_EXTERNAL_DIFF_SUBCOMMANDS = {
 #                     editor or pager it can name
 #   verify-pack       validates a packfile; reads only
 #
-# `symbolic-ref` is admitted separately because it is arity-dependent (see
-# git_symbolic_ref_is_read_only).  Deliberately NOT admitted, though they look
-# adjacent: update-index / checkout-index / write-tree / sparse-checkout (they
-# write the index or the working tree), credential and credential-* (a secret
-# surface), and everything already excluded by name elsewhere in this block.
+# `symbolic-ref`, `update-index` and `sparse-checkout` are admitted separately,
+# by ARITY rather than by name, because each is a read/write-mixed verb: only
+# the read spellings pass (see git_symbolic_ref_is_read_only,
+# git_update_index_is_read_only, git_sparse_checkout_is_read_only, and the
+# guards that call them in check()).  Deliberately NOT admitted at all, though
+# they look adjacent: checkout-index / write-tree (they write the index or the
+# working tree), credential and credential-* (a secret surface), and everything
+# already excluded by name elsewhere in this block.
 _GIT_READ_ONLY_PLUMBING = {
     "check-attr",
     "check-ignore",
@@ -5149,6 +5498,38 @@ _GIT_READ_ONLY_PLUMBING = {
     "merge-base",
     "merge-tree",
     "rev-list",
+    "var",
+    "verify-pack",
+}
+
+# Option profiles for the admitted plumbing (issue #55). `--ext-diff` and
+# `--output=<file>` are options of Git's revision/diff option parser, so they
+# only mean anything for the subcommands that route argv through it. For every
+# other verb the same token is an OPERAND -- `git hash-object --path --output
+# .env` hashes the file `.env` while `--output` is `--path`'s value, and
+# `git hash-object -- --ext-diff` hashes a file called `--ext-diff` -- and
+# guarding those spellings denies a plainly read-only command for a helper git
+# would never launch and a file git would never truncate.
+#
+# The two sets partition _GIT_READ_ONLY_PLUMBING and tests pin that, so
+# admitting a new plumbing verb cannot silently leave it unguarded (which is
+# exactly how `git rev-list --output=` slipped through before #34) and cannot
+# silently inherit a guard that does not apply to it either.
+_GIT_PLUMBING_WITH_DIFF_OPTIONS = {
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    # rev-list runs setup_revisions(), so `--output=<file>` really is parsed and
+    # really does truncate the named file before any revision is written.
+    "rev-list",
+}
+_GIT_PLUMBING_WITHOUT_DIFF_OPTIONS = {
+    "check-attr",
+    "check-ignore",
+    "count-objects",
+    "hash-object",
+    "merge-base",
+    "merge-tree",
     "var",
     "verify-pack",
 }
@@ -5193,6 +5574,54 @@ def git_symbolic_ref_is_read_only(args: list[str]) -> bool:
         operands.append(token)
         index += 1
     return len(operands) <= 1
+
+
+# `git update-index` is a read/write-mixed verb, so it cannot be admitted by
+# NAME the way `merge-base` can: --add / --force-remove / --cacheinfo / --chmod /
+# --skip-worktree / --assume-unchanged / --index-info / --again all rewrite the
+# index, and a bare pathspec operand updates that path's index entry too.
+#
+# The refresh forms are the exception worth admitting (issue #45): they only
+# re-stat files whose content already matches the index, which is the standard
+# way to make a following `git status` / `git diff` accurate after a checkout or
+# an mtime-churning build. `--really-refresh` gets its own sentence because it
+# is the stronger form: it ignores the stat cache and re-reads the files, so it
+# can rewrite MORE stat entries -- but a file whose content differs is reported
+# as needing an update rather than staged, so it still cannot change any staged
+# content, ref, or working-tree file.
+_GIT_UPDATE_INDEX_READ_ONLY_OPTIONS = {
+    "--ignore-missing",
+    "--ignore-submodules",
+    "--really-refresh",
+    "--refresh",
+    "--unmerged",
+    "-q",
+}
+_GIT_UPDATE_INDEX_REFRESH_OPTIONS = {"--refresh", "--really-refresh"}
+
+
+def git_update_index_is_read_only(args: list[str]) -> bool:
+    """Return whether `git update-index` only refreshes cached stat data.
+
+    Every token must be a recognised refresh-family option and at least one must
+    actually request the refresh. Anything else -- an unknown option, an
+    abbreviation, an operand, `--` -- counts as a write, so an unrecognised
+    shape fails closed the way `git_symbolic_ref_is_read_only` does.
+    """
+    lowered = [token.lower() for token in args]
+    if not all(token in _GIT_UPDATE_INDEX_READ_ONLY_OPTIONS for token in lowered):
+        return False
+    return any(token in _GIT_UPDATE_INDEX_REFRESH_OPTIONS for token in lowered)
+
+
+def git_sparse_checkout_is_read_only(args: list[str]) -> bool:
+    """Return whether `git sparse-checkout` only prints the current patterns.
+
+    `list` reads the sparse patterns to stdout. Every other action
+    (`init`/`set`/`add`/`reapply`/`disable`) rewrites the working tree, so only
+    the bare `list` arity is admitted (issue #45).
+    """
+    return [token.lower() for token in args] == ["list"]
 
 
 _GIT_PAGER_SUBCOMMANDS = {
@@ -5247,7 +5676,7 @@ def git_network_helper_is_reachable(subcommand: str, args: list[str]) -> bool:
     if subcommand in {"clone", "fetch", "ls-remote", "pull", "push"}:
         return True
     if subcommand == "archive":
-        return git_option_is_present(args, "--remote")
+        return git_option_is_present(args, "--remote", subcommand=subcommand)
     if subcommand == "remote":
         action = next(
             (token.lower() for token in args if not token.startswith("-")), ""
@@ -8873,7 +9302,7 @@ def check(
             if launcher_reason:
                 return "deny", launcher_reason
             if sub == "archive":
-                archive_outputs = git_option_values(args, "--output", {"-o"})
+                archive_outputs = git_option_values(args, "--output", {"-o"}, sub)
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -8888,6 +9317,7 @@ def check(
                 fake_ancestor_outputs = git_option_values(
                     args,
                     "--build-fake-ancestor",
+                    subcommand=sub,
                 )
                 if any(
                     target is None
@@ -8906,7 +9336,7 @@ def check(
                     "floor-blocked.",
                 )
             if sub in {"apply", "am"}:
-                directory_roots = git_option_values(args, "--directory")
+                directory_roots = git_option_values(args, "--directory", subcommand=sub)
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -8917,19 +9347,24 @@ def check(
                         "deny",
                         "Git patch application under an opaque or secret-looking directory root is floor-blocked.",
                     )
-            # The admitted read-only plumbing is guarded here too. `--output` is a
-            # revision-walking option, not a diff-only one: `git rev-list
-            # --output=<file>` opens the file with "w" during option parsing and
-            # TRUNCATES it before writing any revisions, so it destroys a secret
-            # just as `git diff --output=` would. Verified against real git: a
-            # 35-byte file became 0 bytes with rc=0. Guarding a subcommand that
-            # does not accept --output costs nothing, so the set is deliberately
-            # wider than the options each subcommand documents.
-            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in _GIT_READ_ONLY_PLUMBING:
-                diff_outputs = git_option_values(args, "--output")
+            # `--output` is a revision-walking option, not a diff-only one: `git
+            # rev-list --output=<file>` opens the file with "w" during option
+            # parsing and TRUNCATES it before writing any revisions, so it
+            # destroys a secret just as `git diff --output=` would. Verified
+            # against real git: a 35-byte file became 0 bytes with rc=0.
+            #
+            # The scan is scoped to the subcommands whose argv Git actually
+            # routes through that parser. Guarding a subcommand that does not
+            # accept --output is NOT free: for `git hash-object --path --output
+            # .env` the token is `--path`'s value and `.env` is the file being
+            # read, so the blanket scan denied a read-only hash (issue #55).
+            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in (
+                _GIT_PLUMBING_WITH_DIFF_OPTIONS
+            ):
+                diff_outputs = git_option_values(args, "--output", subcommand=sub)
                 if sub == "format-patch":
                     diff_outputs = diff_outputs + git_option_values(
-                        args, "--output-directory", {"-o"}
+                        args, "--output-directory", {"-o"}, sub
                     )
                 if any(
                     target is None
@@ -8974,7 +9409,9 @@ def check(
                     "",
                 )
                 if action in {"register", "unregister"}:
-                    config_outputs = git_option_values(args, "--config-file")
+                    config_outputs = git_option_values(
+                        args, "--config-file", subcommand=sub
+                    )
                     if any(
                         target is None
                         or has_dynamic_shell_token(target)
@@ -8986,7 +9423,9 @@ def check(
                             "Git maintenance config output to an opaque or secret-looking file is floor-blocked.",
                         )
             if sub == "clone":
-                separate_git_dirs = git_option_values(args, "--separate-git-dir")
+                separate_git_dirs = git_option_values(
+                    args, "--separate-git-dir", subcommand=sub
+                )
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -9022,7 +9461,9 @@ def check(
                         "Git clone into an opaque or secret-looking destination is floor-blocked.",
                     )
             if sub == "init":
-                init_targets = git_option_values(args, "--separate-git-dir")
+                init_targets = git_option_values(
+                    args, "--separate-git-dir", subcommand=sub
+                )
                 for token in args:
                     if not token.startswith("-"):
                         init_targets.append(token)  # optional [<directory>] operand
@@ -9327,10 +9768,25 @@ def check(
                     "Git symbolic-ref rewrites a ref in this form; "
                     "only the read form is admitted through the floor.",
                 )
+            if sub == "update-index" and not git_update_index_is_read_only(args):
+                return (
+                    "deny",
+                    "Git update-index writes the index in this form; "
+                    "only the refresh form is admitted through the floor.",
+                )
+            if sub == "sparse-checkout" and not git_sparse_checkout_is_read_only(args):
+                return (
+                    "deny",
+                    "Git sparse-checkout rewrites the working tree in this form; "
+                    "only the list form is admitted through the floor.",
+                )
+            # These three are read/write-MIXED verbs, admitted by arity rather
+            # than by name: the guards above have already refused every writing
+            # spelling by the time the opacity check runs.
             admitted_git_subcommands = (
                 known_git_subcommands
                 | _GIT_READ_ONLY_PLUMBING
-                | {"push", "symbolic-ref"}
+                | {"push", "sparse-checkout", "symbolic-ref", "update-index"}
             )
             if sub not in admitted_git_subcommands:
                 return (
@@ -9437,6 +9893,11 @@ def check(
                 # is still refspec-less. `git push -o --all origin` used to skip the
                 # bare-push guard entirely (PR #23 review).
                 positionals = []
+                # The same operands with their quoted spans still masked, kept
+                # in step with `positionals`, so the redirection strip below can
+                # tell shell structure from a quoted literal (see
+                # strip_shell_redirections).
+                masked_positionals = []
                 explicit_selector = False
                 repository_via_option = False
                 index = 0
@@ -9444,6 +9905,7 @@ def check(
                     token = args[index]
                     if token == "--":
                         positionals.extend(args[index + 1 :])
+                        masked_positionals.extend(raw_args[index + 1 :])
                         break
                     if token == "--repo":
                         repository_via_option = True
@@ -9472,6 +9934,7 @@ def check(
                         index += 1
                         continue
                     positionals.append(token)
+                    masked_positionals.append(raw_args[index])
                     index += 1
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
@@ -9551,9 +10014,35 @@ def check(
                     )
                     if opaque:
                         return opaque
+                # The SHELL consumes redirections; git never sees them in argv.
+                # Leaving them in the destination list made `git push
+                # --force-with-lease origin fix/x 2>&1` a push to the two
+                # destinations `fix/x` and `2>&1`, so the guard refused the one
+                # spelling agents type while plain `--force` was unaffected --
+                # steering toward the MORE dangerous verb (issue #44).
+                #
+                # Deliberately scoped to the lease destinations. `positionals`
+                # also decides `has_explicit_refspec`, and stripping there is a
+                # tightening: a corpus replay measured 135 unique commands
+                # (`cd <repo> && git push 2>&1 | tail -3`) moving allow ->
+                # [push-config-unverifiable]. That bypass is real and tracked in
+                # issue #65; closing it belongs with the work on that rule's
+                # own false-positive rate, not in this fix.
+                #
+                # The strip runs over the MASKED operands and decodes after,
+                # because only an unquoted `2>&1` is structure the shell eats:
+                # quoted, it is a refspec git pushes to `refs/heads/2>&1`, and
+                # stripping it there let a non-feature destination through the
+                # lease guard (PR #70 review).
+                lease_destinations = [
+                    decode_inert_git_token(token, inert_placeholders)
+                    for token in strip_shell_redirections(
+                        masked_positionals, descriptor_may_be_detached=quote_aware
+                    )
+                ]
                 if lease_requested and (
                     explicit_selector
-                    or not force_with_lease_targets_are_features(positionals[1:])
+                    or not force_with_lease_targets_are_features(lease_destinations[1:])
                     or (
                         lease_selectors
                         and not force_with_lease_targets_are_features(lease_selectors)
@@ -9946,6 +10435,10 @@ def check(
                 )
         if head == "patch":
             # patch -o/--output FILE and -r/--reject-file FILE write named files.
+            # No `subcommand` is passed on purpose: GNU patch is not a swept
+            # family and gives several of git's valueless short flags a value
+            # (`-z <suffix>`, `-i <file>`, `-p <num>`), so only the arity-free
+            # terminator proofs apply here.
             for value in git_option_values(
                 toks[1:], "--output", {"-o"}
             ) + git_option_values(toks[1:], "--reject-file", {"-r"}):
