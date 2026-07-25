@@ -329,6 +329,34 @@ CASES = [
     ("runas /savecred /user:x whoami", 1, {}, "deny"),
     ("echo secret123 > .env", 1, {}, "deny"),
     ("echo tok >> config/credentials.json", 1, {}, "deny"),
+    # QUOTED secret redirect targets. PR #53's charter regression was exactly this
+    # shape going deny -> allow (a command-leading redirect into a quoted secret file),
+    # and until now the matrix held no case where the secret path itself was quoted:
+    # every recorded secret redirect had a bare target, so a change that stopped
+    # restoring a quoted redirect target into the token scan looked green.
+    ("echo secret123 > '.env'", 1, {}, "deny"),
+    ('echo secret123 > ".env"', 1, {}, "deny"),
+    ("echo secret123 >'.env'", 1, {}, "deny"),
+    ("echo secret123 >> '.env'", 1, {}, "deny"),
+    ("echo tok > 'config/credentials.json'", 1, {}, "deny"),
+    ('echo tok > "id_rsa"', 1, {}, "deny"),
+    ("> '.env' echo hi", 1, {}, "deny"),
+    ('> ".env" echo hi', 1, {}, "deny"),
+    (">'.env' echo hi", 1, {}, "deny"),
+    (">> '.env' echo hi", 1, {}, "deny"),
+    ("2> '.env' echo hi", 1, {}, "deny"),
+    # `>|` and `&>` bind their destination the same way `>` does; the quote-aware
+    # token scan used to know only `>`/`>>`, so these two spellings reached a quoted
+    # secret file unblocked while their unquoted twins denied.
+    (">| '.env' echo hi", 1, {}, "deny"),
+    ("&> '.env' echo hi", 1, {}, "deny"),
+    ("echo hi >| '.env'", 1, {}, "deny"),
+    ("echo hi &> '.env'", 1, {}, "deny"),
+    ("> 'out file.txt' echo secret123 > '.env'", 1, {}, "deny"),
+    # descriptor duplication binds a descriptor, not a path: the token after `>&`
+    # is `1`, so the quoted `.env` here is an argument and stays allowed.
+    ("2>&1 '.env' echo hi", 1, {}, "allow"),
+    ("git commit -m 'redirect &> .env is blocked'", 1, {}, "allow"),
     ("echo secret > .{env,notes}", 1, {}, "deny"),
     ("echo secret > 'dir,one/'.{env,txt}", 1, {}, "deny"),
     ("rm .env", 1, {}, "deny"),

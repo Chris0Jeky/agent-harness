@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.5 (2026-07-25)"
+FLOOR_VERSION = "1.6.6 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3171,6 +3171,15 @@ def brace_expansion_mentions_secret_path(token: str) -> bool:
         if not changed:
             break
     return expanded and any(is_secret_path(variant) for variant in variants)
+
+
+#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
+#: destination file. The quote-aware token scan has to recognise the same grammar the
+#: text-mode fallback regex below already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it
+#: only knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked
+#: while their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a
+#: descriptor number rather than a path, so it decides on the token that follows.
+_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
 
 
 def token_mentions_secret_path(token: str) -> bool:
@@ -7317,10 +7326,22 @@ def check(
             r"^[<>]?\(", redirect_target
         ):
             return "deny", "A dynamic redirect target cannot be inspected safely."
-        if token_mentions_secret_path(redirect_target):
+        # A QUOTED destination is still a destination. `strip_quotes` has already
+        # rewritten `> '.env'` to `> <placeholder>`, so testing the placeholder text
+        # let the quoted spelling outrun its unquoted twin: `taskset -c 0 echo x >
+        # '.env'` allowed while `taskset -c 0 echo x > .env` denied. That divergence
+        # is the exact shape of the PR #53 charter regression. Only the token in
+        # REDIRECT-TARGET POSITION is resolved -- a quoted span anywhere else stays
+        # inert, so commit-message and PR-body prose is still never program text
+        # (`git commit -m "echo secret > .env"` has no bare `>` in `sanitized` at
+        # all, so this loop never sees it). The dynamic-target test above keeps
+        # reading the UNRESOLVED token on purpose: `> "%TARGET%"` is deliberately
+        # left quoted by strip_quotes and is decided by the per-segment rules.
+        resolved_target = decode_inert_git_token(redirect_target, inert_placeholders)
+        if token_mentions_secret_path(resolved_target):
             return (
                 "deny",
-                f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
+                f"Redirecting output into a secret-looking file ({resolved_target}) is floor-blocked.",
             )
 
     # Pipe rules run on the full sanitized text (the pipe IS the signal).
@@ -10084,7 +10105,9 @@ def check(
             )
         if quote_aware:
             for index, token in enumerate(raw[:-1]):
-                if token in (">", ">>") and token_mentions_secret_path(raw[index + 1]):
+                if _OUTPUT_REDIRECT_OPERATOR.fullmatch(
+                    token
+                ) and token_mentions_secret_path(raw[index + 1]):
                     return (
                         "deny",
                         f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
