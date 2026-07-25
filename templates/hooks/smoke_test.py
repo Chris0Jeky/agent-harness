@@ -2075,6 +2075,24 @@ CASES = [
     ("git hash-object -- --ext-diff", 1, {}, "allow"),
     ("git diff -- --ext-diff", 1, {}, "allow"),
     ("git diff --ext-diff -- file", 1, {}, "deny"),
+    # A `--` is only the end of options when nothing was waiting to consume it.
+    # `--output` and `-O` are OPT_FILENAME: they take the `--` as the file name
+    # (git writes a file literally called `--`) and then parse `--ext-diff` as
+    # an option, launching the external-diff helper. Truncating at the first
+    # `--` hid exactly the token this scan exists to find, so an unprovable
+    # terminator now leaves the whole of argv in the scan.
+    ("git diff --output -- --ext-diff", 1, {}, "deny"),
+    ("git log -O -- --ext-diff", 1, {}, "deny"),
+    ("git diff -I -- --ext-diff", 1, {}, "deny"),
+    ("git stash show --output -- --ext-diff", 1, {}, "deny"),
+    ("git rev-list --output -- --ext-diff HEAD", 1, {}, "deny"),
+    ("git diff --output -- --ext-dif", 1, {}, "deny"),
+    ("git diff --not-a-known-option -- --ext-diff", 1, {}, "deny"),
+    # ... and a PROVEN terminator still ends option parsing, so the false
+    # positive #55 fixed stays fixed.
+    ("git diff --cached -- --ext-diff", 1, {}, "allow"),
+    ("git log --graph --oneline -- --ext-diff", 1, {}, "allow"),
+    ("git stash show -- --ext-diff", 1, {}, "allow"),
     # The read-only admission itself must survive the guard.
     ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
     ("git rev-list HEAD --count", 1, {}, "allow"),
@@ -2168,6 +2186,11 @@ CASES = [
     ("git grep --open-files-in-pager=sh needle", 1, {}, "deny"),
     ("git grep --open-files-in-pager needle", 1, {}, "deny"),
     ("git grep --open-files-in-pag=sh needle", 1, {}, "deny"),
+    # `-f` and `-e` and `-m` all take a separate value, so they swallow the
+    # `--` and `-O` is still parsed as the pager option.
+    ("git grep -f -- -O needle", 1, {}, "deny"),
+    ("git grep -e -- -Osh", 1, {}, "deny"),
+    ("git grep -m -- -Osh needle", 1, {}, "deny"),
     ("GIT_EDITOR=helper git branch --edit-description", 1, {}, "deny"),
     ("git rebase -x 'git push --force origin main' HEAD~1", 1, {}, "deny"),
     ("git bisect run helper", 1, {}, "deny"),
@@ -3620,6 +3643,7 @@ CASES = [
     ("git grep -n needle", 1, {}, "allow"),
     ("git grep -- -Osh", 1, {}, "allow"),
     ("git grep -e needle -- -Osh", 1, {}, "allow"),
+    ("git grep -i -- -Osh", 1, {}, "allow"),
     ("Rename-Item notes.txt -NewName report.txt", 1, {}, "allow"),
     ("ren notes.txt -NewN report.txt", 1, {}, "allow"),
     ("New-Item -ItemType File notes.txt -Force", 1, {}, "allow"),

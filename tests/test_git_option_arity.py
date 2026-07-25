@@ -151,6 +151,14 @@ PLUMBING_OPERANDS_ARE_NOT_OPTIONS = (
     "git diff -- --ext-diff",
     "git diff-tree -r HEAD -- --ext-diff",
     "git log --oneline -- --ext-diff",
+    # a proven terminator behind a valueless flag still ends option parsing
+    "git diff --cached -- --ext-diff",
+    "git diff --stat -- --ext-diff",
+    "git log --graph --oneline -- --ext-diff",
+    "git stash show -- --ext-diff",
+    "git grep -- -Osh",
+    "git grep -e needle -- -Osh",
+    "git grep -i -- -Osh",
     # `--path` consumes `--output`; `.env` is the file being hashed
     "git hash-object --path --output .env",
     "git hash-object --path config/.env docs/manual.md",
@@ -186,6 +194,36 @@ EXTERNAL_DIFF_AND_OUTPUT_STILL_DENIED = (
     "git log --output=.env",
     "git format-patch --output=.env -1",
     "git format-patch -o $OUT -1",
+)
+
+# The `--` truncation above is a RELAXATION, and a relaxation only stops
+# covering what it can prove. Git's parse-options gives a bare `--` to whatever
+# option is still waiting for a separate value, so these all reach a real
+# option parser and a real child process despite the `--`.
+SWALLOWED_TERMINATOR_ATTACKS = (
+    # --output is OPT_FILENAME: it eats `--` (a file called `--`), then
+    # --ext-diff is parsed and the external-diff helper runs
+    "git diff --output -- --ext-diff",
+    "git log --output -- --ext-diff",
+    "git show --output -- --ext-diff",
+    "git format-patch --output -- --ext-diff -1",
+    "git diff-tree --output -- --ext-diff -r HEAD",
+    "git rev-list --output -- --ext-diff HEAD",
+    "git stash show --output -- --ext-diff",
+    # -O is the orderfile, also OPT_FILENAME
+    "git log -O -- --ext-diff",
+    "git diff -O -- --ext-diff",
+    # -I <regex> for diff is NOT grep's valueless -I; case must not be folded
+    "git diff -I -- --ext-diff",
+    # abbreviations survive the swallow too
+    "git diff --output -- --ext-dif",
+    # an unknown option is unprovable, so it fails closed rather than truncating
+    "git diff --not-a-known-option -- --ext-diff",
+    # same hole in the grep scan: -f reads patterns from a file named `--`,
+    # then -O opens the pager on the matches
+    "git grep -f -- -O needle",
+    "git grep -e -- -Osh",
+    "git grep -m -- -Osh needle",
 )
 
 # ---------------------------------------------------------------- issue #44
@@ -329,6 +367,51 @@ class PlumbingOptionProfileTests(unittest.TestCase):
         # `stash show` keeps its guard, and its terminator
         self.assertIsNotNone(launcher("stash", ["show", "--ext-diff"]))
         self.assertIsNone(launcher("stash", ["show", "--", "--ext-diff"]))
+        # ... but only a PROVEN terminator: --output eats the `--`
+        self.assertIsNotNone(launcher("diff", ["--output", "--", "--ext-diff"]))
+        self.assertIsNotNone(launcher("stash", ["show", "--output", "--", "--ext-diff"]))
+
+
+class SwallowedOptionTerminatorTests(unittest.TestCase):
+    """A `--` an option consumed as its value is not the end of options."""
+
+    def test_swallowed_terminator_attacks_deny_at_every_tier(self):
+        for command in SWALLOWED_TERMINATOR_ATTACKS:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, _reason = decide(command, tier)
+                    self.assertNotEqual(decision, "allow", command)
+
+    def test_terminator_index_is_only_returned_when_argv_proves_it(self):
+        index = dispatch.git_end_of_options_index
+        # provable: first token, an operand, a glued value, a valueless flag
+        self.assertEqual(index(["--", "--ext-diff"]), 0)
+        self.assertEqual(index(["HEAD", "--", "path"]), 1)
+        self.assertEqual(index(["--output=out.txt", "--", "path"]), 1)
+        self.assertEqual(index(["--cached", "--", "path"]), 1)
+        self.assertEqual(index(["-", "--", "path"]), 1)
+        # unprovable: an option that takes a separate value swallows the `--`
+        self.assertIsNone(index(["--output", "--", "--ext-diff"]))
+        self.assertIsNone(index(["-O", "--", "--ext-diff"]))
+        self.assertIsNone(index(["-f", "--", "-O"]))
+        # unknown options fail closed rather than guessing an arity
+        self.assertIsNone(index(["--not-a-known-option", "--", "path"]))
+        # no terminator at all
+        self.assertIsNone(index(["--ext-diff"]))
+        self.assertIsNone(index([]))
+
+    def test_the_flag_allowlist_is_case_sensitive(self):
+        """`-I <regex>` for diff must never inherit grep's valueless `-I`."""
+        index = dispatch.git_end_of_options_index
+        self.assertEqual(index(["-i", "--", "path"]), 1)
+        self.assertIsNone(index(["-I", "--", "path"]))
+        self.assertIsNone(index(["--CACHED", "--", "path"]))
+
+    def test_the_allowlist_excludes_flags_whose_arity_differs_by_family(self):
+        """One shared set, so an entry has to be valueless in every family."""
+        for flag in ("-n", "-l", "-m", "-v", "-G", "-A", "-B", "-C", "-S", "-U"):
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, dispatch._GIT_TERMINATOR_SAFE_FLAGS)
 
 
 class PushRedirectionTests(unittest.TestCase):
