@@ -2175,9 +2175,30 @@ _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
 # wrapper, HOME-anchored: `~/work/repo/invoke_deny_floor.sh` resolves to the
 # same file from every session cwd, so it belongs with the cwd-independent
 # shapes even though it names the project's own wrapper script.
-_HOME_ANCHORED_WRAPPER_VALUE_SOURCE = (
-    rf"['\"]?{_HOME_VAR}/(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
-)
+#
+# Unlike the dispatcher shapes above, this one is built PER PLATFORM and
+# refuses single quotes, because "cwd-independent" is only true if the anchor
+# actually expands where the command runs:
+#   * `$env:USERPROFILE` is PowerShell-only. A POSIX shell expands `$env` to
+#     nothing and runs `:USERPROFILE/...`, so the floor never starts.
+#   * single quotes suppress expansion in BOTH sh and PowerShell, so
+#     `w='$HOME/…/invoke_deny_floor.sh'` invokes a literal `$HOME` directory.
+#   * `~` is expanded by the shell only when it is unquoted; inside double
+#     quotes sh keeps it literal.
+_POSIX_HOME_ENV_VAR = r"\$\{?home\}?"
+_WINDOWS_HOME_ENV_VAR = rf"(?:{_POSIX_HOME_ENV_VAR}|\$\{{?env:userprofile\}}?)"
+_WRAPPER_TAIL = rf"/(?:[\w.-]+/)*{_FLOOR_WRAPPER}"
+
+
+def _home_anchored_wrapper_source(windows: bool) -> str:
+    home_var = _WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR
+    return rf'(?:~{_WRAPPER_TAIL}|"?{home_var}{_WRAPPER_TAIL}"?)'
+
+
+_HOME_ANCHORED_WRAPPER_VALUE_PATTERNS = {
+    windows: re.compile(_home_anchored_wrapper_source(windows))
+    for windows in (False, True)
+}
 # wrapper, relative: a repo-relative path whose final component is the wrapper
 # script (the project's own adapter, trusted via a /hooks review). Being
 # relative, it only resolves when Codex's session cwd is the hook source root,
@@ -2188,14 +2209,14 @@ _WRAPPER_FLOOR_VALUE_SOURCE = (
 
 _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
     re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
-) + (re.compile(_HOME_ANCHORED_WRAPPER_VALUE_SOURCE),)
+)
 _FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
     re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
 )
 
 
 def value_binds_anchored_floor_path(
-    value: str, *, reject_relative_wrapper: bool = False
+    value: str, *, reject_relative_wrapper: bool = False, windows: bool = False
 ) -> bool:
     """Return whether an assignment value resolves to a genuine floor path.
 
@@ -2209,7 +2230,8 @@ def value_binds_anchored_floor_path(
     ``reject_relative_wrapper`` additionally drops the RELATIVE wrapper shape,
     which is only meaningful when the session cwd is the hook source root. A
     HOME-anchored wrapper path survives, because it names the same file from
-    every cwd.
+    every cwd — but only under an anchor ``windows`` says this command's shell
+    actually expands, and never single-quoted.
     """
     normalized = value.lower().replace("\\", "/")
     patterns = (
@@ -2217,7 +2239,9 @@ def value_binds_anchored_floor_path(
         if reject_relative_wrapper
         else _FLOOR_VALUE_PATTERNS
     )
-    return any(pattern.fullmatch(normalized) for pattern in patterns)
+    if any(pattern.fullmatch(normalized) for pattern in patterns):
+        return True
+    return bool(_HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized))
 
 
 def is_inert_floor_setup_segment(
@@ -2236,7 +2260,9 @@ def is_inert_floor_setup_segment(
         # other value — an attacker rebind or concatenation past the marker —
         # is rejected so the executed path cannot diverge from the pinned one.
         return value_binds_anchored_floor_path(
-            value, reject_relative_wrapper=reject_relative_wrapper
+            value,
+            reject_relative_wrapper=reject_relative_wrapper,
+            windows=windows,
         )
     literal = value.strip()
     if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
@@ -2393,14 +2419,24 @@ _WRAPPER_PATH_TOKEN = re.compile(
 )
 # The subset of wrapper path tokens that name the same file from every session
 # cwd. Intermediate components are restricted to literal words so a smuggled
-# `$pwd`/`$cwd` expansion cannot ride in behind the home anchor.
-_HOME_ANCHORED_WRAPPER_TOKEN = re.compile(
-    rf"^{_HOME_VAR}/(?:[\w.-]+/)*{_FLOOR_WRAPPER}$"
-)
+# `$pwd`/`$cwd` expansion cannot ride in behind the home anchor, and the anchor
+# itself must be one this command's shell expands (see the value patterns).
+_HOME_ANCHORED_WRAPPER_TOKENS = {
+    windows: re.compile(
+        rf"^(?:~|{_WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR})"
+        rf"{_WRAPPER_TAIL}$"
+    )
+    for windows in (False, True)
+}
 
 
 def token_is_wrapper(
-    token: str, wrapper_variables: set[str], *, reject_relative: bool = False
+    token: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    single_quoted: bool = False,
 ) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
@@ -2409,8 +2445,11 @@ def token_is_wrapper(
     if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
         # Under ``reject_relative`` only the HOME-anchored spelling survives:
         # every other recognized literal form resolves against the session cwd.
-        return not reject_relative or bool(
-            _HOME_ANCHORED_WRAPPER_TOKEN.fullmatch(stripped)
+        # A single-quoted anchor is not an anchor — the shell passes `$HOME`
+        # through literally — so it fails closed with the relative shapes.
+        return not reject_relative or (
+            not single_quoted
+            and bool(_HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped))
         )
     # A variable-bound wrapper is admitted here on name alone; the anchoring of
     # the value is enforced separately, because `platform_project_floor_command`
@@ -2420,19 +2459,33 @@ def token_is_wrapper(
 
 
 def shell_script_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str], *, reject_relative: bool = False
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    single_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
     if index < len(tokens) and tokens[index] == "--":
         index += 1
     return index < len(tokens) and token_is_wrapper(
-        tokens[index], wrapper_variables, reject_relative=reject_relative
+        tokens[index],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        single_quoted=bool(single_quoted and single_quoted(tokens[index])),
     )
 
 
 def powershell_file_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str], *, reject_relative: bool = False
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    single_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -2443,12 +2496,20 @@ def powershell_file_operand_is_wrapper(
     if len(tokens) < 3:
         return False
     return token_is_wrapper(
-        tokens[2], wrapper_variables, reject_relative=reject_relative
+        tokens[2],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        single_quoted=bool(single_quoted and single_quoted(tokens[2])),
     )
 
 
 def segment_invokes_wrapper(
-    segment: str, wrapper_variables: set[str], *, reject_relative: bool = False
+    segment: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
 ) -> bool:
     """Recognize conservative project-wrapper execution shapes.
 
@@ -2459,7 +2520,8 @@ def segment_invokes_wrapper(
     Codex runs hook commands from the session cwd, so when that directory is not
     the hook source root the relative path resolves somewhere else entirely. A
     HOME-anchored wrapper (`~/work/repo/invoke_deny_floor.sh`) names the same
-    file from every cwd and is still certified there.
+    file from every cwd and is still certified there — but only under an anchor
+    ``windows`` says this shell expands, and never single-quoted.
     """
     stripped = segment.strip()
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
@@ -2474,9 +2536,26 @@ def segment_invokes_wrapper(
         return False
     if not tokens:
         return False
+
+    def single_quoted(token: str) -> bool:
+        """Whether this token appeared inside single quotes in the raw segment.
+
+        `shlex` has already removed the quotes, but a single-quoted `$HOME` is
+        never expanded by either shell, so the anchoring claim depends on it.
+        The character immediately before the token text is the opening quote.
+        """
+        index = stripped.find(token)
+        return index > 0 and stripped[index - 1] == "'"
+
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
-    if token_is_wrapper(head, wrapper_variables, reject_relative=reject_relative):
+    if token_is_wrapper(
+        head,
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        single_quoted=single_quoted(head),
+    ):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
     # The shell/PowerShell interpreter that runs the wrapper must be a bare
@@ -2491,11 +2570,19 @@ def segment_invokes_wrapper(
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
         return shell_script_operand_is_wrapper(
-            tokens, wrapper_variables, reject_relative=reject_relative
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            single_quoted=single_quoted,
         )
     if head_base in {"powershell", "pwsh"}:
         return powershell_file_operand_is_wrapper(
-            tokens, wrapper_variables, reject_relative=reject_relative
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            single_quoted=single_quoted,
         )
     return False
 
@@ -2561,6 +2648,7 @@ def platform_project_floor_command(
                 segment,
                 wrapper_variables,
                 reject_relative=reject_relative_wrapper,
+                windows=windows,
             )
         )
     ]
