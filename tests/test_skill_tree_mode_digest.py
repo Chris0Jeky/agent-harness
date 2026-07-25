@@ -6,8 +6,9 @@ digested identically. `same_tree` then made `sync-global --apply` skip the copy
 that would have restored the mode, leaving an installed skill that cannot run its
 own script.
 
-Only the executable-bit tuple is digested: the rest of the mode is umask/filesystem
-noise, and Windows reports no meaningful bits, so this test skips there.
+Only each file and directory's executable-bit tuple is digested: the rest of the
+mode is umask/filesystem noise, and Windows reports no meaningful bits, so this
+test skips there.
 """
 
 import importlib.util
@@ -76,6 +77,26 @@ class SkillTreeModeDigestTests(unittest.TestCase):
                 harness.tree_digest(base / "source"),
                 harness.tree_digest(base / "target"),
             )
+            self.assertFalse(harness.same_tree(base / "source", base / "target"))
+
+    def test_distinct_root_directory_execute_tuples_do_not_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_tree(base / "source", mode=0o755)
+            write_tree(base / "target", mode=0o755)
+            os.chmod(base / "source", 0o750)
+            os.chmod(base / "target", 0o705)
+            self.assertFalse(harness.same_tree(base / "source", base / "target"))
+
+    def test_distinct_nested_directory_execute_tuples_do_not_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_tree(base / "source", mode=0o755)
+            write_tree(base / "target", mode=0o755)
+            for tree, mode in (("source", 0o750), ("target", 0o705)):
+                directory = base / tree / "scripts"
+                directory.mkdir()
+                os.chmod(directory, mode)
             self.assertFalse(harness.same_tree(base / "source", base / "target"))
 
 

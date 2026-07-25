@@ -1186,7 +1186,7 @@ def tree_digest(root: Path) -> str | None:
     except OSError as exc:
         raise HarnessError(f"cannot inspect skill tree {root}: {exc}") from exc
 
-    entries: list[tuple[bytes, bytes, Path | None]] = []
+    entries: list[tuple[bytes, bytes, Path]] = [(b"", b"D", root)]
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -1215,46 +1215,46 @@ def tree_digest(root: Path) -> str | None:
                 raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
             relative = path.relative_to(root).as_posix().encode("utf-8")
             if stat.S_ISDIR(mode):
-                entries.append((relative, b"D", None))
+                entries.append((relative, b"D", path))
                 pending.append(path)
             elif stat.S_ISREG(mode):
                 entries.append((relative, b"F", path))
             else:
                 raise HarnessError(f"unsupported skill tree entry: {path}")
 
-    for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
+    for relative, kind, entry_path in sorted(entries, key=lambda entry: entry[0]):
         payload = b""
-        executable = b"-"
-        if file_path is not None:
-            if path_is_alias(file_path):
-                raise HarnessError(f"unsafe skill tree alias: {file_path}")
-            try:
-                entry_mode = file_path.lstat().st_mode
-                if not stat.S_ISREG(entry_mode):
-                    raise HarnessError(
-                        f"skill tree changed during inspection: {file_path}"
-                    )
-                # A helper script whose bytes match but whose executable bit has
-                # drifted (source 0755, installed 0644) is NOT the same tree: the
-                # installed skill cannot run it, and same_tree would otherwise make
-                # `sync-global --apply` skip the copy that would restore the mode.
-                # Only the executable-bit tuple is digested — the rest of the
-                # mode is umask/filesystem noise and Windows reports no meaningful
-                # bits. The three bits must stay distinct: 0750 and 0705 grant
-                # different users execution even though both have an executable bit.
-                executable = bytes(
-                    int(bool(entry_mode & bit))
-                    for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+        if path_is_alias(entry_path):
+            raise HarnessError(f"unsafe skill tree alias: {entry_path}")
+        try:
+            entry_mode = entry_path.lstat().st_mode
+            expected_kind = (
+                stat.S_ISREG(entry_mode) if kind == b"F" else stat.S_ISDIR(entry_mode)
+            )
+            if not expected_kind:
+                raise HarnessError(
+                    f"skill tree changed during inspection: {entry_path}"
                 )
-                payload = file_path.read_bytes()
-            except FileNotFoundError as exc:
-                raise HarnessError(
-                    f"skill tree changed during inspection: {file_path}"
-                ) from exc
-            except OSError as exc:
-                raise HarnessError(
-                    f"cannot inspect skill tree {file_path}: {exc}"
-                ) from exc
+            # A file or directory whose bytes/children match but whose executable
+            # tuple has drifted is NOT the same tree: a script may no longer run,
+            # or a directory may no longer be searchable. same_tree would otherwise
+            # make `sync-global --apply` skip the copy that restores access.
+            # The remaining mode bits are umask/filesystem noise, and Windows
+            # reports no meaningful POSIX executable bits.
+            executable = bytes(
+                int(bool(entry_mode & bit))
+                for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+            )
+            if kind == b"F":
+                payload = entry_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise HarnessError(
+                f"skill tree changed during inspection: {entry_path}"
+            ) from exc
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect skill tree {entry_path}: {exc}"
+            ) from exc
         digest.update(kind)
         digest.update(executable)
         digest.update(len(relative).to_bytes(8, byteorder="big"))

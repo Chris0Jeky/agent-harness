@@ -24,29 +24,11 @@ import importlib.util
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
-GIT_HELPER_ENVIRONMENT = {
-    "EDITOR",
-    "GIT_ASKPASS",
-    "GIT_COMMON_DIR",
-    "GIT_EDITOR",
-    "GIT_DIR",
-    "GIT_EXEC_PATH",
-    "GIT_EXTERNAL_DIFF",
-    "GIT_PAGER",
-    "GIT_PROXY_COMMAND",
-    "GIT_SEQUENCE_EDITOR",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GIT_TEMPLATE_DIR",
-    "GIT_WEB_BROWSER",
-    "GIT_WORK_TREE",
-    "PAGER",
-    "SSH_ASKPASS",
-    "VISUAL",
-}
+SMOKE_PATH = ROOT / "templates" / "hooks" / "smoke_test.py"
 
 
 def load_module(name: str, path: Path):
@@ -57,6 +39,8 @@ def load_module(name: str, path: Path):
 
 
 dispatch = load_module("dispatch_block_scan", DISPATCH_PATH)
+smoke = load_module("smoke_block_scan", SMOKE_PATH)
+GIT_HELPER_ENVIRONMENT = smoke.GIT_HELPER_ENVIRONMENT
 
 
 def stub_resolver(
@@ -95,17 +79,20 @@ def check(command: str, tier: int = 1, flags=None):
 
 
 class CheckEnvironmentIsolationTests(unittest.TestCase):
-    def test_inherited_pager_helpers_do_not_change_parser_verdicts(self):
-        original = {name: os.environ.get(name) for name in ("GIT_PAGER", "PAGER")}
-        os.environ.update({"GIT_PAGER": "helper", "PAGER": "helper"})
-        try:
-            self.assertEqual(check("git log")[0], "allow")
-        finally:
-            for name, value in original.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+    def test_inherited_git_helpers_do_not_change_parser_verdicts(self):
+        cases = (
+            ({"GIT_PAGER": "helper", "PAGER": "helper"}, "git log"),
+            ({"EDITOR": "helper", "GIT_EDITOR": "helper"}, "git commit"),
+            (
+                {"GIT_SSH_COMMAND": "helper", "GIT_PROXY_COMMAND": "helper"},
+                "git fetch origin",
+            ),
+            ({"GIT_EXEC_PATH": "helper"}, "git status"),
+        )
+        for environment, command in cases:
+            with self.subTest(environment=environment, command=command):
+                with patch.dict(os.environ, environment):
+                    self.assertEqual(check(command)[0], "allow")
 
 
 class PowershellBlockDepthTests(unittest.TestCase):
