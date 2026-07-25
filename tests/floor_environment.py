@@ -28,6 +28,15 @@ Deliberately NOT covered, so the claim stays exactly as strong as the code:
   shells out). `GIT_CONFIG*` clearing here is a deliberate superset of
   dispatch's `is_git_config_environment_name`, which exempts
   `GIT_CONFIG_NOSYSTEM`, because that name does reach those subprocesses.
+  A suite that reaches that subprocess must stub it — see `StubPushConfig`.
+* The HOME / TMPDIR family: `tempfile.gettempdir()` and `os.path.expanduser`
+  in `is_within_temp`, `is_safe_containment_root`, `canonical_path`. These DO
+  flip path-containment verdicts, but clearing HOME would break `~` for the
+  test process and pinning TMPDIR would redefine the floor's temp allowance for
+  every suite at once. A test whose verdict depends on either must pin its own
+  paths (`smoke_test.isolated_dispatch_temp` is the worked example). They are
+  in the drift alarm's scanner and inventory, classified out of scope — not
+  invisible to it.
 
 `tests/test_floor_environment.py` fails if dispatch grows an ambient read
 outside that inventory, if it grows a `_GIT_*_ENVIRONMENT` family constant that

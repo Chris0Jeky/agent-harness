@@ -15,8 +15,11 @@ honest:
    flows through with no edit anywhere), and the vendored smoke suite derives
    the same set from the same constants;
 2. the inventory of ambient reads in dispatch.py is complete — a new
-   `os.environ` read in a new function fails here until it is classified as
-   covered or deliberately out of scope;
+   `os.environ`, `os.path.expanduser` or `tempfile.gettempdir` read in a new
+   function fails here until it is classified as covered or deliberately out of
+   scope. "Complete" is scoped to `AmbientReadInventoryTests.AMBIENT_READS`: an
+   ambient read spelled some other way is still invisible, so widen that set
+   rather than trusting the claim;
 3. every tests/ suite that calls the real `check()` routes through the shared
    helper, and each covered family really does flip the verdict without it.
 """
@@ -242,7 +245,67 @@ class AmbientReadInventoryTests(unittest.TestCase):
             "so the set is chosen by the command under test, not by the host"
         ),
         "main": "NOT covered: CLAUDE_PROJECT_DIR, which check() never reads",
+        # HOME / TMPDIR family. These DO reach check() and DO flip
+        # path-containment verdicts, but the helper deliberately leaves them
+        # alone: clearing HOME would break `~` resolution for the test process
+        # itself, and pinning TMPDIR would silently redefine the floor's temp
+        # allowance for every suite. A test whose verdict depends on either one
+        # must pin its own paths — templates/hooks/smoke_test.py's
+        # `isolated_dispatch_temp` is the worked example.
+        "canonical_path": (
+            "NOT covered: expanduser/expandvars on a path the CALLER supplies; "
+            "pin the path, not the environment"
+        ),
+        "is_within_path_lexical": "NOT covered: same, on caller-supplied paths",
+        "is_safe_containment_root": (
+            "NOT covered: compares the candidate root against ~; a test that "
+            "cares must not point project_dir at the home directory"
+        ),
+        "is_within_temp": (
+            "NOT covered: reads TMPDIR/TEMP/TMP via tempfile.gettempdir() and ~ "
+            "via expanduser, so the temp allowance follows the host; a suite "
+            "asserting containment must pin its own paths"
+        ),
+        "expand_environment_references": (
+            "NOT covered: expanduser on text the command under test supplies"
+        ),
+        "check_delete_targets": (
+            "NOT covered: compares a resolved delete target against ~; the "
+            "target comes from the command, not the host"
+        ),
     }
+
+    # Not only `os.environ`: `tempfile.gettempdir()` reads TMPDIR/TEMP/TMP and
+    # `os.path.expanduser` reads HOME/USERPROFILE, and both feed
+    # `is_within_temp`, which decides the floor's temp allowance and therefore
+    # flips path-containment verdicts. A scanner that watched only os.environ
+    # would have let a host dependency in through either one while this file
+    # claimed the inventory was complete.
+    AMBIENT_READS = frozenset(
+        {
+            "os.environ",
+            "os.getenv",
+            "os.path.expanduser",
+            "os.path.expandvars",
+            "os.getlogin",
+            "tempfile.gettempdir",
+            "tempfile.gettempdirb",
+            "pathlib.Path.home",
+            "Path.home",
+        }
+    )
+
+    @staticmethod
+    def dotted_name(node):
+        """`os.path.expanduser` for the Attribute chain, or None."""
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        parts.append(node.id)
+        return ".".join(reversed(parts))
 
     def ambient_reads(self):
         tree = ast.parse(DISPATCH_PATH.read_text(encoding="utf-8"))
@@ -254,11 +317,8 @@ class AmbientReadInventoryTests(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 stack.append(node.name)
                 pushed = True
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "os"
-                and node.attr in {"environ", "getenv"}
+            if isinstance(node, ast.Attribute) and (
+                self.dotted_name(node) in self.AMBIENT_READS
             ):
                 owner = ".".join(stack) if stack else "<module>"
                 reads.setdefault(owner, []).append(node.lineno)
@@ -275,9 +335,9 @@ class AmbientReadInventoryTests(unittest.TestCase):
         self.assertEqual(
             sorted(reads),
             sorted(self.INVENTORY),
-            "dispatch.py grew or lost an ambient os.environ read; classify it in "
-            "INVENTORY and, if check() can see it, add it to "
-            "tests/floor_environment.py",
+            "dispatch.py grew or lost an ambient read (see AMBIENT_READS); "
+            "classify it in INVENTORY and, if check() can see it and the "
+            "helper can safely clear it, add it to tests/floor_environment.py",
         )
 
 
