@@ -156,7 +156,10 @@ class DerivedIsolationSetTests(unittest.TestCase):
 class AmbientReadInventoryTests(unittest.TestCase):
     """Drift alarm: a NEW ambient read in dispatch must be classified here."""
 
-    # function name -> why the shared helper does or does not neutralize it
+    # Qualified function path -> why the shared helper does or does not
+    # neutralize it. Qualified, not bare: a read added to a nested helper
+    # inside the already-listed `check` would otherwise be attributed to
+    # `check` and slip through.
     INVENTORY = {
         "dangerous_git_index_file_mutation": "covered: GIT_INDEX_FILE",
         "has_dangerous_git_trace_environment": "covered: _GIT_TRACE_ENVIRONMENT",
@@ -186,7 +189,7 @@ class AmbientReadInventoryTests(unittest.TestCase):
                 and node.value.id == "os"
                 and node.attr in {"environ", "getenv"}
             ):
-                owner = stack[0] if stack else "<module>"
+                owner = ".".join(stack) if stack else "<module>"
                 reads.setdefault(owner, []).append(node.lineno)
             for child in ast.iter_child_nodes(node):
                 walk(child)
