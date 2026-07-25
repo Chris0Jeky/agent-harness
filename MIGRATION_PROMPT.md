@@ -1,6 +1,7 @@
 # Migration Prompt — re-work a repo's harness to the blueprint
 
-Last Updated: 2026-07-06 · Paste the block below into a Fable/top-model session opened in the
+Last Updated: 2026-07-25 · Paste the block below into a top-tier session — the model per the
+`model-effort-routing` skill, which is the only place that names one — opened in the
 target repo. Then paste the matching per-repo appendix from the bottom of this file.
 
 ---
