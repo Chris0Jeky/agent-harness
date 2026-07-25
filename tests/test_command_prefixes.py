@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +25,9 @@ dispatch = load_module(
 smoke = load_module(
     "smoke_command_prefixes", ROOT / "templates" / "hooks" / "smoke_test.py"
 )
+floor_environment = load_module(
+    "floor_environment_command_prefixes", ROOT / "tests" / "floor_environment.py"
+)
 
 
 def private_remote(*_args, **_kwargs):
@@ -33,22 +35,21 @@ def private_remote(*_args, **_kwargs):
     return False, "test-private"
 
 
-def clean_environment() -> dict[str, str]:
-    env = smoke.clean_dispatch_environment()
-    return {
-        name: value for name, value in env.items() if not name.startswith("GIT_CONFIG")
-    }
-
-
 def decide(command: str, tier: int = 1, flags: dict | None = None):
-    with patch.dict(os.environ, clean_environment(), clear=True):
-        return dispatch.check(
-            command,
-            {"tier": tier, "flags": flags or {}},
-            str(ROOT),
-            str(ROOT),
-            remote_resolver=private_remote,
-        )
+    """Decide `command` with no inherited Git launch configuration.
+
+    A prefix expectation that depends on the host's own Git helpers is not an
+    expectation about prefixes; `tests/floor_environment.py` owns that isolation
+    for every suite so the set cannot drift per file.
+    """
+    return floor_environment.hermetic_check(
+        dispatch,
+        command,
+        {"tier": tier, "flags": flags or {}},
+        str(ROOT),
+        str(ROOT),
+        remote_resolver=private_remote,
+    )
 
 
 class CommandHeadPrefixTests(unittest.TestCase):

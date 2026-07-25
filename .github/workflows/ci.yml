@@ -48,8 +48,9 @@ jobs:
       - name: Run Ruff
         run: >-
           python -m ruff check
-          harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          harness.py tests/floor_environment.py tests/test_harness.py
+          tests/test_curl_option_arity.py tests/test_double_quote_escapes.py
+          tests/test_floor_environment.py tests/test_git_editor_terminal_flows.py
           tests/test_command_prefixes.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py
           tests/test_push_config_force.py tests/test_push_guard_review_gaps.py
@@ -61,8 +62,9 @@ jobs:
       - name: Check Black formatting
         run: >-
           python -m black --check
-          harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          harness.py tests/floor_environment.py tests/test_harness.py
+          tests/test_curl_option_arity.py tests/test_double_quote_escapes.py
+          tests/test_floor_environment.py tests/test_git_editor_terminal_flows.py
           tests/test_command_prefixes.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py
           tests/test_push_config_force.py tests/test_push_guard_review_gaps.py
@@ -74,8 +76,9 @@ jobs:
       - name: Compile Python sources
         run: >-
           python -m py_compile
-          harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          harness.py tests/floor_environment.py tests/test_harness.py
+          tests/test_curl_option_arity.py tests/test_double_quote_escapes.py
+          tests/test_floor_environment.py tests/test_git_editor_terminal_flows.py
           tests/test_command_prefixes.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py
           tests/test_push_config_force.py tests/test_push_guard_review_gaps.py

@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
 SMOKE_PATH = ROOT / "templates" / "hooks" / "smoke_test.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 
 def load_module(name: str, path: Path):
@@ -33,6 +34,9 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.dispatch = load_module("terminal_flow_dispatch", DISPATCH_PATH)
+        cls.floor_environment = load_module(
+            "floor_environment_terminal_flow", FLOOR_ENVIRONMENT_PATH
+        )
 
     def test_abort_and_quit_flows_do_not_reach_the_editor(self) -> None:
         cases = [
@@ -238,59 +242,41 @@ class GitEditorTerminalFlowTests(unittest.TestCase):
 
     def test_check_allows_recovery_with_inherited_git_editor(self) -> None:
         tier = {"tier": 4, "flags": {"sensitive_data": True}}
-        # check() scans live os.environ for the WHOLE process-launch set
-        # (e.g. GIT_EXEC_PATH is reachable for any subcommand), so sanitize
-        # every name in it — not just the editor trio — or a host/CI
-        # exporting one of them turns these allow assertions falsely red.
-        sanitized = set(self.dispatch._GIT_PROCESS_COMMAND_ENVIRONMENT) | {
-            "GIT_SEQUENCE_EDITOR"
-        }
-        saved = {name: os.environ.get(name) for name in sanitized}
-        for name in sanitized:
-            os.environ.pop(name, None)
-        os.environ["GIT_EDITOR"] = "true"
-        try:
-            with tempfile.TemporaryDirectory() as project:
-                for command in (
-                    "git merge --abort",
-                    "git rebase --abort",
-                    "git cherry-pick --abort",
-                ):
-                    with self.subTest(command=command):
-                        decision, _ = self.dispatch.check(
-                            command, tier, project, project
-                        )
-                        self.assertEqual(decision, "allow")
-                # A flow that genuinely reaches the editor stays denied.
-                decision, _ = self.dispatch.check(
-                    "git merge main", tier, project, project
-                )
-                self.assertEqual(decision, "deny")
-                # --abort is the separate value of -m here. The later --edit
-                # still reaches the inherited editor, so the check must deny.
-                decision, _ = self.dispatch.check(
-                    "git merge -m --abort --edit --no-ff side",
+
+        with tempfile.TemporaryDirectory() as project:
+            # check() scans live os.environ for far more than the editor trio,
+            # so this test must observe exactly ONE inherited variable. The
+            # shared helper clears every name derived from dispatch's own
+            # constants and then applies the single override, so a host/CI
+            # exporting anything else cannot turn these allow assertions
+            # falsely red.
+            def check(command: str) -> str:
+                return self.floor_environment.hermetic_check(
+                    self.dispatch,
+                    command,
                     tier,
                     project,
-                    project,
-                )
-                self.assertEqual(decision, "deny")
-                # --abort is a ref operand after Git's named option
-                # terminator, so the preceding --edit still reaches the
-                # inherited editor and must remain denied.
-                decision, _ = self.dispatch.check(
-                    "git merge --edit --no-ff --end-of-options --abort",
-                    tier,
-                    project,
-                    project,
-                )
-                self.assertEqual(decision, "deny")
-        finally:
-            for name, value in saved.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+                    overrides={"GIT_EDITOR": "true"},
+                )[0]
+
+            for command in (
+                "git merge --abort",
+                "git rebase --abort",
+                "git cherry-pick --abort",
+            ):
+                with self.subTest(command=command):
+                    self.assertEqual(check(command), "allow")
+            # A flow that genuinely reaches the editor stays denied.
+            self.assertEqual(check("git merge main"), "deny")
+            # --abort is the separate value of -m here. The later --edit
+            # still reaches the inherited editor, so the check must deny.
+            self.assertEqual(check("git merge -m --abort --edit --no-ff side"), "deny")
+            # --abort is a ref operand after Git's named option terminator, so
+            # the preceding --edit still reaches the inherited editor and must
+            # remain denied.
+            self.assertEqual(
+                check("git merge --edit --no-ff --end-of-options --abort"), "deny"
+            )
 
 
 class SmokeNeutralFixtureRootTests(unittest.TestCase):

@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 
 def load_module(name: str, path: Path):
@@ -32,6 +33,7 @@ def load_module(name: str, path: Path):
 
 
 dispatch = load_module("dispatch_push_guard", DISPATCH_PATH)
+floor_environment = load_module("floor_environment_push_guard", FLOOR_ENVIRONMENT_PATH)
 
 
 def stub_resolver(
@@ -42,10 +44,18 @@ def stub_resolver(
 
 
 def check(command: str, tier: int = 1, flags=None):
-    tier_cfg = {"tier": tier, "flags": flags or {}}
-    project_dir = str(ROOT)
-    return dispatch.check(
-        command, tier_cfg, project_dir, project_dir, remote_resolver=stub_resolver
+    """Decide `command` without inherited Git launch configuration.
+
+    These suites assert "allow" for plain git commands, which an ambient
+    `GIT_EXEC_PATH` (git exports it into its own hooks and aliases) flips to
+    deny. `tests/floor_environment.py` owns that isolation for every suite.
+    """
+    return floor_environment.hermetic_check(
+        dispatch,
+        command,
+        {"tier": tier, "flags": flags or {}},
+        str(ROOT),
+        remote_resolver=stub_resolver,
     )
 
 

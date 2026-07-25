@@ -14,34 +14,6 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DISPATCH = os.path.join(HERE, "dispatch.py")
-GIT_HELPER_ENVIRONMENT = {
-    "EDITOR",
-    "GIT_ASKPASS",
-    "GIT_COMMON_DIR",
-    "GIT_EDITOR",
-    "GIT_DIR",
-    "GIT_EXEC_PATH",
-    "GIT_EXTERNAL_DIFF",
-    "GIT_PAGER",
-    "GIT_PROXY_COMMAND",
-    "GIT_SEQUENCE_EDITOR",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GIT_TEMPLATE_DIR",
-    "GIT_WEB_BROWSER",
-    "GIT_WORK_TREE",
-    "PAGER",
-    "SSH_ASKPASS",
-    "VISUAL",
-}
-
-
-def clean_dispatch_environment():
-    """Keep inherited developer Git helpers from changing smoke expectations."""
-    env = dict(os.environ)
-    for name in GIT_HELPER_ENVIRONMENT:
-        env.pop(name, None)
-    return env
 
 
 def load_dispatch_module():
@@ -51,6 +23,39 @@ def load_dispatch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# DERIVED, never mirrored: dispatch.check reads these families straight off the
+# live environment, so a hand-copied list silently stops matching the moment a
+# name is added to dispatch. Naming the constants makes the smoke run inherit
+# any such addition for free. GIT_INDEX_FILE has no constant of its own
+# (dangerous_git_index_file_mutation matches the literal name), and GIT_CONFIG*
+# is a prefix family rather than a set, so both are handled explicitly below.
+_ENVIRONMENT_DISPATCH = load_dispatch_module()
+GIT_HELPER_ENVIRONMENT = frozenset(
+    set(_ENVIRONMENT_DISPATCH._GIT_PROCESS_COMMAND_ENVIRONMENT)
+    | set(_ENVIRONMENT_DISPATCH._GIT_REPOSITORY_ENVIRONMENT)
+    | set(_ENVIRONMENT_DISPATCH._GIT_TRACE_ENVIRONMENT)
+    | {"GIT_INDEX_FILE"}
+)
+GIT_HELPER_ENVIRONMENT_PREFIXES = ("GIT_CONFIG",)
+
+
+def is_inherited_git_helper(name):
+    """Whether an inherited variable can change a dispatch verdict."""
+    upper = name.upper()
+    return upper in GIT_HELPER_ENVIRONMENT or any(
+        upper.startswith(prefix) for prefix in GIT_HELPER_ENVIRONMENT_PREFIXES
+    )
+
+
+def clean_dispatch_environment():
+    """Keep inherited developer Git helpers from changing smoke expectations."""
+    env = dict(os.environ)
+    for name in list(env):
+        if is_inherited_git_helper(name):
+            env.pop(name, None)
+    return env
 
 
 _FIXTURE_ROOT: str | None = None
