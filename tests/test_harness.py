@@ -2383,6 +2383,96 @@ allow_local_binding = true
                     [],
                 )
 
+    def test_repo_floor_keeps_home_anchored_wrappers_outside_the_source_root(
+        self,
+    ) -> None:
+        # A HOME-anchored wrapper names the same file from every session cwd,
+        # so a subdirectory or linked-worktree audit must still certify it
+        # instead of reporting zero valid floor handlers.
+        pin = "a" * 64
+        cases = (
+            ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
+            (
+                "$HOME/work/repo/invoke_deny_floor.sh",
+                "$env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+            ),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                for reject in (False, True):
+                    self.assertEqual(
+                        len(
+                            harness.repo_codex_floor_groups(
+                                text, pin, reject_relative_wrapper=reject
+                            )
+                        ),
+                        1,
+                        posix_wrapper,
+                    )
+
+    def test_home_anchored_wrapper_bound_to_a_variable_survives(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=$HOME/work/repo/invoke_deny_floor.sh; "
+                                        "/bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        "$w='$HOME/work/repo/invoke_deny_floor.ps1'; "
+                                        "& $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject in (False, True):
+            self.assertEqual(
+                len(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=reject
+                    )
+                ),
+                1,
+            )
+
+    def test_home_anchored_wrapper_grammar_rejects_cwd_smuggling(self) -> None:
+        # The relaxation must not let a cwd-dependent expansion ride in behind
+        # the home anchor, nor accept a sibling script name.
+        for token in (
+            "$HOME/$PWD/invoke_deny_floor.sh",
+            "$HOME/${cwd}/invoke_deny_floor.sh",
+            "$HOMEDIR/work/invoke_deny_floor.sh",
+            "$HOME/work/invoke_deny_floor.sh.evil",
+        ):
+            with self.subTest(token=token):
+                self.assertFalse(
+                    harness.token_is_wrapper(token, set(), reject_relative=True), token
+                )
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        token, reject_relative_wrapper=True
+                    ),
+                    token,
+                )
+
     def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:
         pin = "a" * 64
         text = json.dumps(
