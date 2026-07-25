@@ -2088,11 +2088,25 @@ CASES = [
     ("git rev-list --output -- --ext-diff HEAD", 1, {}, "deny"),
     ("git diff --output -- --ext-dif", 1, {}, "deny"),
     ("git diff --not-a-known-option -- --ext-diff", 1, {}, "deny"),
+    # `--cc` is a valueless combined-diff flag for log/diff but takes a separate
+    # <email> for format-patch, an external-diff family member: measured on git
+    # 2.45.1, `git format-patch --cc -- -1 --stdout` prints `Cc: --` and parses
+    # the next token as an OPTION. So it is not a terminator-safe flag.
+    ("git format-patch --cc -- --ext-diff", 1, {}, "deny"),
+    ("git format-patch --cc -- --ext-diff -1 --stdout", 1, {}, "deny"),
+    # The secret-file guard walks the same argv, so it needs the same proof:
+    # `git format-patch --cc -- --output=<f> -1` really creates <f> (measured).
+    ("git format-patch --cc -- --output=.env -1", 1, {}, "deny"),
+    ("git diff --anchored -- --output=.env", 1, {}, "deny"),
     # ... and a PROVEN terminator still ends option parsing, so the false
     # positive #55 fixed stays fixed.
     ("git diff --cached -- --ext-diff", 1, {}, "allow"),
     ("git log --graph --oneline -- --ext-diff", 1, {}, "allow"),
     ("git stash show -- --ext-diff", 1, {}, "allow"),
+    ("git format-patch --stat -- --ext-diff -1", 1, {}, "allow"),
+    ("git format-patch -s -- --ext-diff -1", 1, {}, "allow"),
+    ("git diff -- --output=.env", 1, {}, "allow"),
+    ("git diff --cached -- --output=.env", 1, {}, "allow"),
     # The read-only admission itself must survive the guard.
     ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
     ("git rev-list HEAD --count", 1, {}, "allow"),

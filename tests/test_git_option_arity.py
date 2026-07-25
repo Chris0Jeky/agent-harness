@@ -154,6 +154,9 @@ PLUMBING_OPERANDS_ARE_NOT_OPTIONS = (
     # a proven terminator behind a valueless flag still ends option parsing
     "git diff --cached -- --ext-diff",
     "git diff --stat -- --ext-diff",
+    # a PROVEN terminator still stops the secret-file walk: this names a file
+    "git diff -- --output=.env",
+    "git diff --cached -- --output=.env",
     "git log --graph --oneline -- --ext-diff",
     "git stash show -- --ext-diff",
     "git grep -- -Osh",
@@ -224,6 +227,31 @@ SWALLOWED_TERMINATOR_ATTACKS = (
     "git grep -f -- -O needle",
     "git grep -e -- -Osh",
     "git grep -m -- -Osh needle",
+    # `--cc` is the dense-combined-diff FLAG for log/diff but takes a separate
+    # <email> for format-patch, which is an external-diff family member.
+    # Measured on git 2.45.1: `git format-patch --cc -- -1 --stdout` prints
+    # `Cc: --`, and the token after the swallowed `--` is then parsed as an
+    # option, so the helper really is reachable behind it.
+    "git format-patch --cc -- --ext-diff",
+    "git format-patch --cc -- --ext-diff -1 --stdout",
+    "git format-patch --cc -- --ext-dif -1",
+    # The SECRET-FILE guard reads the same argv through git_option_values, so it
+    # needs the same proof. Measured: `git format-patch --cc -- --output=<f> -1`
+    # really creates <f>, so an unprovable `--` must not end that walk either.
+    "git format-patch --cc -- --output=.env -1",
+    "git format-patch --cc -- --output .env -1",
+    "git diff --anchored -- --output=.env",
+)
+
+# The other direction for the same fix: dropping `--cc` from the allowlist must
+# not stop a PROVEN terminator from truncating in the format-patch family. Each
+# leading flag here was measured as valueless for format-patch on git 2.45.1, so
+# `--ext-diff` after the `--` really is a pathspec.
+FORMAT_PATCH_TERMINATOR_STILL_TRUNCATES = (
+    "git format-patch --stat -- --ext-diff -1",
+    "git format-patch --numstat -- --ext-diff -1",
+    "git format-patch -s -- --ext-diff -1",
+    "git format-patch --stdout -- --ext-diff -1",
 )
 
 # ---------------------------------------------------------------- issue #44
@@ -414,6 +442,33 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
         for flag in ("-n", "-l", "-m", "-v", "-G", "-A", "-B", "-C", "-S", "-U"):
             with self.subTest(flag=flag):
                 self.assertNotIn(flag, dispatch._GIT_TERMINATOR_SAFE_FLAGS)
+
+    def test_cc_is_not_allowlisted_because_format_patch_gives_it_a_value(self):
+        """`--cc <email>` for format-patch swallows `--` (measured, git 2.45.1)."""
+        self.assertNotIn("--cc", dispatch._GIT_TERMINATOR_SAFE_FLAGS)
+        index = dispatch.git_end_of_options_index
+        self.assertIsNone(index(["--cc", "--", "--ext-diff"]))
+        launcher = dispatch.dangerous_git_process_launcher
+        self.assertIsNotNone(launcher("format-patch", ["--cc", "--", "--ext-diff"]))
+
+    def test_option_values_needs_the_same_proof_as_the_scan(self):
+        """The value walk steps over an unprovable `--` instead of stopping."""
+        values = dispatch.git_option_values
+        # unprovable: `--cc` may have eaten the `--`, so keep looking
+        self.assertEqual(values(["--cc", "--", "--output=.env"], "--output"), [".env"])
+        # provable: the `--` really ends options, so `--output=.env` is a file
+        self.assertEqual(values(["--", "--output=.env"], "--output"), [])
+        self.assertEqual(values(["--cached", "--", "--output=.env"], "--output"), [])
+        # a value the walk itself consumed never reaches the terminator test
+        self.assertEqual(values(["--output", "--", "x"], "--output"), ["--"])
+
+    def test_format_patch_still_truncates_at_a_proven_terminator(self):
+        """The other direction: valueless format-patch flags still truncate."""
+        for command in FORMAT_PATCH_TERMINATOR_STILL_TRUNCATES:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, _reason = decide(command, tier)
+                    self.assertEqual(decision, "allow", command)
 
 
 class PushRedirectionTests(unittest.TestCase):
