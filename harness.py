@@ -1586,6 +1586,28 @@ def human_todo_findings(
     ]
 
 
+def floor_file_presence(path: Path) -> tuple[bool, str]:
+    """(is a regular file, access error) for one candidate vendored floor copy.
+
+    `Path.is_file()` answers False for BOTH "absent" and "the OS refused to
+    tell me" — a permissions failure or a transient filesystem error therefore
+    read as "no vendored floor copy" and printed `[ok]`, while a stricter
+    Python/platform combination could instead abort the audit. Neither is one
+    of the three states, so the access failure is preserved and reported as
+    UNPROVEN by the caller.
+    """
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False, ""
+    except NotADirectoryError:
+        # A parent component is a file: the vendored path cannot exist.
+        return False, ""
+    except (OSError, ValueError) as exc:
+        return False, f"{path} could not be inspected ({exc}); existence is unproven"
+    return stat.S_ISREG(mode), ""
+
+
 def floor_version(path: Path) -> str:
     """The FLOOR_VERSION string a dispatcher copy declares, or ""."""
     try:
@@ -1721,13 +1743,28 @@ def vendored_floor_findings(
     deadline: float | None,
 ) -> list[dict[str, str]]:
     """Compare a repo's vendored floor bytes with template and deployed copies."""
-    vendored = [
-        (f"{directory}/{name}", repo / directory / name)
-        for directory in VENDORED_FLOOR_DIRS
-        for name in VENDORED_FLOOR_FILES
-        if (repo / directory / name).is_file()
+    vendored: list[tuple[str, Path]] = []
+    inaccessible: list[tuple[str, str]] = []
+    for directory in VENDORED_FLOOR_DIRS:
+        for name in VENDORED_FLOOR_FILES:
+            label = f"{directory}/{name}"
+            path = repo / directory / name
+            present, access_error = floor_file_presence(path)
+            if access_error:
+                inaccessible.append((label, access_error))
+            elif present:
+                vendored.append((label, path))
+    findings: list[dict[str, str]] = [
+        # A path that cannot be traversed or stat'ed is neither "no vendored
+        # copy" nor a compared one; the three-state contract calls it UNPROVEN.
+        reality_finding(
+            f"vendored {label} vs canonical bytes", REALITY_UNPROVEN, access_error
+        )
+        for label, access_error in inaccessible
     ]
     if not vendored:
+        if findings:
+            return findings
         # Say it. A leg that emits nothing at all cannot be told apart from a
         # leg that ran and found no drift.
         return [
@@ -1742,7 +1779,6 @@ def vendored_floor_findings(
     reference_ok, reference_detail = harness_reference_status(
         harness_root, command_runner, deadline
     )
-    findings: list[dict[str, str]] = []
     for label, path in vendored:
         name = path.name
         check = f"vendored {label} vs canonical bytes"

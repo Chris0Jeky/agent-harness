@@ -5643,6 +5643,44 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("deployed global copy", self.details(result))
         self.assertTrue(result["ok"])
 
+    def test_an_inaccessible_vendored_path_is_unproven_not_ok(self) -> None:
+        # `Path.is_file()` answers False for both "absent" and "the OS refused
+        # to tell me", so a permissions or transient filesystem failure printed
+        # `[ok] no vendored floor copy` for a repo that may well vendor one.
+        repo = self.make_repo()
+        denied = repo / "hooks" / "dispatch.py"
+        real_stat = Path.stat
+
+        def refuse(self: Path, *args: object, **kwargs: object) -> object:
+            if self == denied:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(harness.Path, "stat", refuse):
+            self.assertEqual(
+                harness.floor_file_presence(denied)[0],
+                False,
+            )
+            self.assertIn(
+                "could not be inspected", harness.floor_file_presence(denied)[1]
+            )
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertNotIn("no vendored floor copy", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_absent_vendored_path_is_still_a_clean_ok(self) -> None:
+        # The guarded stat must not turn ordinary absence into an unproven.
+        repo = self.make_repo()
+        self.assertEqual(
+            harness.floor_file_presence(repo / "hooks" / "dispatch.py"), (False, "")
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "vendored floor bytes"), ["ok"])
+
     def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
         repo = self.make_repo()
         runner = FakeCommandRunner()
