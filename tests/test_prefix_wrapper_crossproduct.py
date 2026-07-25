@@ -38,10 +38,26 @@ shape roster is a roster of spellings the author thought of; it does not prove t
 of a shape nobody wrote down. And the floor remains a tripwire that parses argv, so a
 payload fed to an interpreter over stdin is out of scope by construction.
 
-Hermetic by construction: no subprocess, no network, no dependence on the host's
-GIT_*/PAGER/EDITOR environment (that family changes parser verdicts — see
-tests/test_powershell_block_scan.py), remote resolution stubbed, and the project directory
-is a run-owned temp directory so path containment matches `smoke_test.run_case` exactly.
+Hermetic by construction, and asserted rather than asserted-in-prose. `check()` reaches
+the host in three ways and all three are closed here: remote resolution is stubbed;
+`configured_bare_push_is_dangerous` is stubbed, because it shells out to `git config
+--get-regexp` with its DEFAULT runner (bound at def time, so replacing `command_output`
+would not have caught it) and, in a temp project dir that is not a repo, that read falls
+through to the host's GLOBAL gitconfig — a developer whose `~/.gitconfig` sets
+`remote.<n>.push`/`mirror`/`receivepack` would otherwise see ~77 bogus false-positive
+failures pointing at the floor instead of at their config; and the environment the floor
+reads from `os.environ` is scrubbed. `test_the_sweep_spawns_no_subprocess` proves the
+first two by making a subprocess attempt an error, so this paragraph cannot rot.
+
+The scrub covers every `GIT_*` name (the trace/index/process families at
+dispatch.py:4528-4550 and 5099-5106 all change verdicts, not just `GIT_CONFIG*`), the
+smoke suite's helper set, and every variable name any corpus payload interpolates —
+`expand_environment_references` resolves `$VAR`/`%VAR%` against the real environment, so
+a host with `TARGET` set would silently change the verdict of `echo secret > "%TARGET%"`.
+Residual, stated because it is not closed: `~` still expands against the host's home
+directory, and the project directory is a run-owned temp directory (chosen so path
+containment matches `smoke_test.run_case` exactly) whose absolute path therefore differs
+between machines.
 
 Cost control: sharding was measured, then rejected. The whole product runs on every CI
 run — 50s on the author's machine, against 28s for the rest of `tests/` and 913s for
@@ -112,16 +128,61 @@ def _stub_remote_resolver(
     return False, "crossproduct-stub-private"
 
 
+def _stub_configured_bare_push(
+    project_dir, git_globals=None, command_runner=None, deadline=None
+):
+    """No `git config` subprocess, and no read of the host's global gitconfig.
+
+    The real function runs `git config --get-regexp remote\\..*\\.(push|mirror|
+    receivepack)` through a runner bound as a DEFAULT ARGUMENT, so `check()` gives no
+    seam to inject one and patching `command_output` after import would miss it. Both
+    corpora carry refspec-less pushes (`git push origin`, `git push`), so leaving it
+    live spawned a real `git` per check — hundreds per run — and made the verdict depend
+    on whoever's `~/.gitconfig` was on the machine. False is the verdict an unconfigured
+    remote already produces, so stubbing pins today's behaviour instead of changing it.
+    The rule itself is covered properly, against real repositories, by
+    tests/test_push_config_force.py.
+    """
+    return False
+
+
+dispatch.configured_bare_push_is_dangerous = _stub_configured_bare_push
+
+
 _PROJECT_DIR: str | None = None
 _SAVED_ENVIRONMENT: dict[str, str] = {}
 
+#: Names a corpus payload interpolates. `expand_environment_references` resolves these
+#: against the REAL environment, so an exported `TARGET` changes what
+#: `echo secret > "%TARGET%"` means and therefore what the floor says about it.
+_INTERPOLATED_NAME = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?|%([A-Za-z_][A-Za-z0-9_]*)%")
+
+
+def _interpolated_names() -> set[str]:
+    names: set[str] = set()
+    for command, _tier, _flags, _expected in smoke.CASES:
+        for first, second in _INTERPOLATED_NAME.findall(command):
+            names.add(first or second)
+    for command in AGENT_BENIGN_COMMANDS:
+        for first, second in _INTERPOLATED_NAME.findall(command):
+            names.add(first or second)
+    return names
+
 
 def _scrubbed_environment_names() -> list[str]:
-    """Host variables that change floor verdicts and must not leak into the sweep."""
+    """Host variables that change floor verdicts and must not leak into the sweep.
+
+    Every `GIT_*` name, not just `GIT_CONFIG*`: `check()` reads `GIT_INDEX_FILE`, the
+    `GIT_TRACE*` family (including `GIT_TRACE_REDACT`, where an exported `0` flips git
+    payloads to deny) and the git-process command family straight from `os.environ`.
+    """
+    interpolated = _interpolated_names()
     return sorted(
         name
         for name in os.environ
-        if name.startswith("GIT_CONFIG") or name in smoke.GIT_HELPER_ENVIRONMENT
+        if name.startswith("GIT_")
+        or name in smoke.GIT_HELPER_ENVIRONMENT
+        or name in interpolated
     )
 
 
@@ -1171,6 +1232,60 @@ class QuotedSecretRedirectTests(CrossProductBase):
         self.assertTrue(
             matches,
             "smoke_test.CASES holds no deny case redirecting into a QUOTED secret path",
+        )
+
+
+class HermeticityTests(CrossProductBase):
+    """The module docstring's hermeticity claim, made checkable."""
+
+    def test_the_sweep_spawns_no_subprocess(self):
+        """No corpus payload may reach the host through `subprocess`.
+
+        `dispatch.subprocess` is rebound on THIS module's private copy of the floor, so
+        nothing outside the test is affected. Refspec-less pushes are included on
+        purpose: they are the payloads that used to shell out to `git config`.
+        """
+
+        class _NoSubprocess:
+            def __getattr__(self, name):
+                raise AssertionError(
+                    "the cross-product sweep spawned a subprocess "
+                    f"(subprocess.{name}); stub the seam instead"
+                )
+
+        probes = [
+            "git push origin",
+            "git push",
+            "git push origin main",
+            "git push --force origin main",
+            "echo secret123 > '.env'",
+            "git status",
+        ]
+        real = dispatch.subprocess
+        dispatch.subprocess = _NoSubprocess()
+        try:
+            for command in probes:
+                for tier in (1, 2, 3, 4):
+                    decide(command, tier)
+        finally:
+            dispatch.subprocess = real
+
+    def test_verdict_changing_host_variables_are_scrubbed(self):
+        """Nothing the floor reads from `os.environ` survives into the sweep."""
+        leaked = [
+            name
+            for name in os.environ
+            if name.startswith("GIT_") or name in smoke.GIT_HELPER_ENVIRONMENT
+        ]
+        self.assertEqual(leaked, [], "host GIT_* environment leaked into the sweep")
+
+    def test_interpolated_corpus_variables_are_scrubbed(self):
+        """A payload that expands `$VAR`/`%VAR%` must not read the host's value."""
+        leaked = sorted(name for name in _interpolated_names() if name in os.environ)
+        self.assertEqual(
+            leaked,
+            [],
+            "a corpus payload interpolates a variable that is set on this host",
         )
 
 
