@@ -4066,23 +4066,26 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             "show",
             "whatchanged",
         }
-        # Every admitted read-only plumbing subcommand gets the same guard. The
-        # diff plumbing (diff-files/diff-index/diff-tree) takes --ext-diff just
-        # like porcelain diff, and naming the family rather than listing members
-        # means admitting a new subcommand to _GIT_READ_ONLY_PLUMBING cannot
-        # silently leave it unguarded -- which is exactly how `rev-list
-        # --output=` slipped through.
-        or subcommand in _GIT_READ_ONLY_PLUMBING
+        # The admitted plumbing that Git routes through the same revision/diff
+        # option parser takes --ext-diff exactly like porcelain diff. The
+        # plumbing that does NOT parse diff options is excluded: there
+        # `--ext-diff` is an operand git can never act on (issue #55).
+        or subcommand in _GIT_PLUMBING_WITH_DIFF_OPTIONS
     ):
         diff_args = args
     elif subcommand == "stash" and args and args[0].lower() == "show":
         diff_args = args[1:]
-    if diff_args is not None and any(
-        token.lower() == "--ext-diff"
-        or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
-        for token in diff_args
-    ):
-        return "Git external-diff execution is floor-blocked."
+    if diff_args is not None:
+        # `--` ends option parsing, so `git diff -- --ext-diff` names a FILE and
+        # cannot select a helper. Same treatment `git grep -O` already gets.
+        if "--" in diff_args:
+            diff_args = diff_args[: diff_args.index("--")]
+        if any(
+            token.lower() == "--ext-diff"
+            or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
+            for token in diff_args
+        ):
+            return "Git external-diff execution is floor-blocked."
     return None
 
 
@@ -4691,6 +4694,38 @@ _GIT_READ_ONLY_PLUMBING = {
     "merge-base",
     "merge-tree",
     "rev-list",
+    "var",
+    "verify-pack",
+}
+
+# Option profiles for the admitted plumbing (issue #55). `--ext-diff` and
+# `--output=<file>` are options of Git's revision/diff option parser, so they
+# only mean anything for the subcommands that route argv through it. For every
+# other verb the same token is an OPERAND -- `git hash-object --path --output
+# .env` hashes the file `.env` while `--output` is `--path`'s value, and
+# `git hash-object -- --ext-diff` hashes a file called `--ext-diff` -- and
+# guarding those spellings denies a plainly read-only command for a helper git
+# would never launch and a file git would never truncate.
+#
+# The two sets partition _GIT_READ_ONLY_PLUMBING and tests pin that, so
+# admitting a new plumbing verb cannot silently leave it unguarded (which is
+# exactly how `git rev-list --output=` slipped through before #34) and cannot
+# silently inherit a guard that does not apply to it either.
+_GIT_PLUMBING_WITH_DIFF_OPTIONS = {
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    # rev-list runs setup_revisions(), so `--output=<file>` really is parsed and
+    # really does truncate the named file before any revision is written.
+    "rev-list",
+}
+_GIT_PLUMBING_WITHOUT_DIFF_OPTIONS = {
+    "check-attr",
+    "check-ignore",
+    "count-objects",
+    "hash-object",
+    "merge-base",
+    "merge-tree",
     "var",
     "verify-pack",
 }
@@ -8446,15 +8481,20 @@ def check(
                         "deny",
                         "Git patch application under an opaque or secret-looking directory root is floor-blocked.",
                     )
-            # The admitted read-only plumbing is guarded here too. `--output` is a
-            # revision-walking option, not a diff-only one: `git rev-list
-            # --output=<file>` opens the file with "w" during option parsing and
-            # TRUNCATES it before writing any revisions, so it destroys a secret
-            # just as `git diff --output=` would. Verified against real git: a
-            # 35-byte file became 0 bytes with rc=0. Guarding a subcommand that
-            # does not accept --output costs nothing, so the set is deliberately
-            # wider than the options each subcommand documents.
-            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in _GIT_READ_ONLY_PLUMBING:
+            # `--output` is a revision-walking option, not a diff-only one: `git
+            # rev-list --output=<file>` opens the file with "w" during option
+            # parsing and TRUNCATES it before writing any revisions, so it
+            # destroys a secret just as `git diff --output=` would. Verified
+            # against real git: a 35-byte file became 0 bytes with rc=0.
+            #
+            # The scan is scoped to the subcommands whose argv Git actually
+            # routes through that parser. Guarding a subcommand that does not
+            # accept --output is NOT free: for `git hash-object --path --output
+            # .env` the token is `--path`'s value and `.env` is the file being
+            # read, so the blanket scan denied a read-only hash (issue #55).
+            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in (
+                _GIT_PLUMBING_WITH_DIFF_OPTIONS
+            ):
                 diff_outputs = git_option_values(args, "--output")
                 if sub == "format-patch":
                     diff_outputs = diff_outputs + git_option_values(
