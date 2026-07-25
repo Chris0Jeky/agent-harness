@@ -336,6 +336,13 @@ def _language_string_literal(payload: str) -> str | None:
 #: A payload that only makes sense under a Windows shell. Feeding one to a POSIX-scoped
 #: shape (`nohup Copy-Item Env:C Env:GIT_CONFIG_COUNT`) composes a command line no shell
 #: would ever run, and the verdict it produces says nothing about the floor.
+#:
+#: The bare cmd/PowerShell utility names are anchored to a COMMAND HEAD — start of line or
+#: the head of a pipeline/`&&` segment — because they are ordinary English words that
+#: appear as subcommands and arguments. Matched anywhere in the argv, `move` classified
+#: `git worktree move wt .env` and `git worktree move old-wt ../renamed-wt` as Windows-only
+#: (`git worktree move <worktree> <new-path>` is a documented Git subcommand), so every
+#: POSIX-scoped launcher skipped them in BOTH directions and the exclusion was invisible.
 _WINDOWS_SHELL_PAYLOAD = re.compile(r"""(?x)
     \b(?:Get|Set|New|Add|Clear|Copy|Move|Remove|Rename|Out|Write|Read|Where|ForEach
         |Select|Sort|Measure|Invoke|Start|Stop|Test|Join|Split|Convert|Export|Import
@@ -346,7 +353,7 @@ _WINDOWS_SHELL_PAYLOAD = re.compile(r"""(?x)
     | \bEnvironment::
     | \[(?:IO|Environment|System|string|Console)[.\]]
     | \bMicrosoft\.PowerShell
-    | (?:^|\s)(?:rd|rmdir|del|erase|move|copy|xcopy|robocopy|setx|reg|attrib)\b
+    | (?:^|[|&;\n]\s*)(?:rd|rmdir|del|erase|move|copy|xcopy|robocopy|setx|reg|attrib)\b
     | (?:^|\s)(?:rd|rmdir|del|erase)/
     | \.ps1\b
     | \bcmd(?:\.exe)?\s*/[a-zA-Z]
@@ -525,7 +532,12 @@ WRAPPER_SHAPES = [
     Shape("at", WRAPPER, "echo <QCMD> | at now", _POSIX, POSIX_SCOPE),
     Shape("parallel", WRAPPER, "parallel <CMD> ::: 1", scope=POSIX_SCOPE),
     Shape("xargs", WRAPPER, "echo x | xargs -I{} <CMD>", scope=POSIX_SCOPE),
-    Shape("find-exec", WRAPPER, "find . -name x -exec <CMD> ;", scope=POSIX_SCOPE),
+    # `-exec COMMAND ;` needs the semicolon to REACH find. Bare, the shell eats it as a
+    # command separator, find sees an unterminated `-exec` and errors out without ever
+    # running the payload — and the composed line stops being one command at all, which
+    # is the same defect `_composable_deny_case` excludes payloads for. `\;` is the
+    # spelling the smoke matrix already uses (`find . -exec rm -rf / \;`).
+    Shape("find-exec", WRAPPER, "find . -name x -exec <CMD> \\;", scope=POSIX_SCOPE),
     Shape(
         "script-utility", WRAPPER, "script -qc <QCMD> /dev/null", _POSIX, POSIX_SCOPE
     ),
