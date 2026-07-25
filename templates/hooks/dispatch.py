@@ -4737,6 +4737,54 @@ def git_symbolic_ref_is_read_only(args: list[str]) -> bool:
     return len(operands) <= 1
 
 
+# `git update-index` is a read/write-mixed verb, so it cannot be admitted by
+# NAME the way `merge-base` can: --add / --force-remove / --cacheinfo / --chmod /
+# --skip-worktree / --assume-unchanged / --index-info / --again all rewrite the
+# index, and a bare pathspec operand updates that path's index entry too.
+#
+# The refresh forms are the exception worth admitting (issue #45): they only
+# re-stat files whose content already matches the index, which is the standard
+# way to make a following `git status` / `git diff` accurate after a checkout or
+# an mtime-churning build. `--really-refresh` gets its own sentence because it
+# is the stronger form: it ignores the stat cache and re-reads the files, so it
+# can rewrite MORE stat entries -- but a file whose content differs is reported
+# as needing an update rather than staged, so it still cannot change any staged
+# content, ref, or working-tree file.
+_GIT_UPDATE_INDEX_READ_ONLY_OPTIONS = {
+    "--ignore-missing",
+    "--ignore-submodules",
+    "--really-refresh",
+    "--refresh",
+    "--unmerged",
+    "-q",
+}
+_GIT_UPDATE_INDEX_REFRESH_OPTIONS = {"--refresh", "--really-refresh"}
+
+
+def git_update_index_is_read_only(args: list[str]) -> bool:
+    """Return whether `git update-index` only refreshes cached stat data.
+
+    Every token must be a recognised refresh-family option and at least one must
+    actually request the refresh. Anything else -- an unknown option, an
+    abbreviation, an operand, `--` -- counts as a write, so an unrecognised
+    shape fails closed the way `git_symbolic_ref_is_read_only` does.
+    """
+    lowered = [token.lower() for token in args]
+    if not all(token in _GIT_UPDATE_INDEX_READ_ONLY_OPTIONS for token in lowered):
+        return False
+    return any(token in _GIT_UPDATE_INDEX_REFRESH_OPTIONS for token in lowered)
+
+
+def git_sparse_checkout_is_read_only(args: list[str]) -> bool:
+    """Return whether `git sparse-checkout` only prints the current patterns.
+
+    `list` reads the sparse patterns to stdout. Every other action
+    (`init`/`set`/`add`/`reapply`/`disable`) rewrites the working tree, so only
+    the bare `list` arity is admitted (issue #45).
+    """
+    return [token.lower() for token in args] == ["list"]
+
+
 _GIT_PAGER_SUBCOMMANDS = {
     "blame",
     "branch",
@@ -8808,10 +8856,25 @@ def check(
                     "Git symbolic-ref rewrites a ref in this form; "
                     "only the read form is admitted through the floor.",
                 )
+            if sub == "update-index" and not git_update_index_is_read_only(args):
+                return (
+                    "deny",
+                    "Git update-index writes the index in this form; "
+                    "only the refresh form is admitted through the floor.",
+                )
+            if sub == "sparse-checkout" and not git_sparse_checkout_is_read_only(args):
+                return (
+                    "deny",
+                    "Git sparse-checkout rewrites the working tree in this form; "
+                    "only the list form is admitted through the floor.",
+                )
+            # These three are read/write-MIXED verbs, admitted by arity rather
+            # than by name: the guards above have already refused every writing
+            # spelling by the time the opacity check runs.
             admitted_git_subcommands = (
                 known_git_subcommands
                 | _GIT_READ_ONLY_PLUMBING
-                | {"push", "symbolic-ref"}
+                | {"push", "sparse-checkout", "symbolic-ref", "update-index"}
             )
             if sub not in admitted_git_subcommands:
                 return (
