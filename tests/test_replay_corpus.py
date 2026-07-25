@@ -11,9 +11,11 @@ had to stay stable across runs for a smoke run and a full run to be comparable.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
+import os as os_module
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY_PATH = ROOT / "scripts" / "replay_corpus.py"
+# `templates/hooks/dispatch.py` exactly as commit bd884ee7a3c708e3291d04e5bcb92b5
+# fb2a92f91 shipped it: the real floor 1.2.0, three-argument `check()`, no
+# `command_output`, no `subprocess`. Vendored rather than read out of git so the
+# case runs from a source tree with no history; the digest below is the guard
+# against anyone "fixing" the fixture into a synthetic one.
+FLOOR_1_2_0_PATH = ROOT / "tests" / "fixtures" / "floor_1_2_0_dispatch.py"
+FLOOR_1_2_0_SHA256 = "38ccb952831975f344fa1a42cb2384d4e85f16afb29c9726e3b9fb12b94dcc14"
 
 BACKSLASH = chr(92)
 QUOTE = chr(34)
@@ -455,14 +464,41 @@ class OfflineStubTests(unittest.TestCase):
         with self.assertRaises(replay.ReplayHarnessError):
             replay.make_module_offline(bare)
 
-    def test_a_module_with_no_command_output_is_a_harness_error(self):
-        # The headline `--baseline <real floor 1.2.0>` case: an old floor that
-        # predates the `command_output` seam. This used to be a plain
-        # RuntimeError traceback out of a Pool initializer.
-        module = load_module("replay_offline_probe_no_output", REPLAY_PATH)
+    def test_a_module_with_no_command_output_is_already_offline(self):
+        # The headline `--baseline <real floor 1.2.0>` case: a floor that
+        # predates the `command_output` seam. It cannot spawn, so there is
+        # nothing to stub and nothing to refuse. This used to abort the run —
+        # which made the one baseline issue #39 is about unmeasurable.
+        module = load_module("replay_offline_probe_no_output", FLOOR_1_2_0_PATH)
         self.assertIsNone(getattr(module, "command_output", None))
+        self.assertEqual(replay.make_module_offline(module), 0)
+
+    def test_a_spawn_route_is_proxied_even_with_no_command_output(self):
+        # "No seam" is only safe because every spawn-capable global is still
+        # neutralised: an uncovered spawn site raises at the call instead of
+        # starting a real process.
+        module = load_module("replay_offline_probe_spawner", REPLAY_PATH)
+        module.subprocess = subprocess
+        module.os = os_module
+        self.assertEqual(replay.make_module_offline(module), 0)
+        for call in (
+            lambda: module.subprocess.run(["git", "status"]),
+            lambda: module.os.system("git status"),
+        ):
+            with self.assertRaises(replay.ReplayHarnessError):
+                call()
+        # Non-spawning attributes of the same modules keep working, or every
+        # path verdict in the floor would break.
+        self.assertIs(module.os.environ, os_module.environ)
+        self.assertIs(module.subprocess.PIPE, subprocess.PIPE)
+
+    def test_neutralising_twice_leaves_the_proxy_alone(self):
+        module = load_module("replay_offline_probe_twice", REPLAY_PATH)
+        module.subprocess = subprocess
+        self.assertIn("subprocess", replay.neutralise_spawn_routes(module))
+        self.assertEqual(replay.neutralise_spawn_routes(module), [])
         with self.assertRaises(replay.ReplayHarnessError):
-            replay.make_module_offline(module)
+            module.subprocess.run(["git", "status"])
 
 
 class DispatchLoadTests(unittest.TestCase):
@@ -1293,11 +1329,29 @@ class HarnessFailurePreflightTests(EndToEndTestCase):
 
     The PR's principle is that a tool-side failure must never be readable as a
     measurement. These are the three that used to escape it: a floor that will
-    not import, one with no `command_runner` default to rebind, and one whose
-    `check()` cannot be bound. All three raised a plain `RuntimeError` that
-    `main()` did not catch — a traceback with interpreter exit code 1, which
-    this script documents as "nothing to replay".
+    not import, one whose `command_output` has no `command_runner` default to
+    rebind, and one whose `check()` cannot be bound. All three raised a plain
+    `RuntimeError` that `main()` did not catch — a traceback with interpreter
+    exit code 1, which this script documents as "nothing to replay".
+
+    The counter-case matters just as much and is `RealLegacyFloorTests` below: a
+    floor with no seam at all is not a tool-side failure, and refusing it made
+    the one baseline this instrument exists to measure unmeasurable.
     """
+
+    # `command_output` present, but bound to nothing the replay can rebind: the
+    # seam moved, so the offline claim is unprovable and the run must abort.
+    UNSTUBBABLE = """
+        FLOOR_VERSION = "1.2.0"
+
+
+        def command_output(argv, cwd="", timeout=None):
+            return ""
+
+
+        def check(command, tier_cfg, project_dir):
+            return "allow", ""
+        """
 
     def scenario(self, broken_source, *extra):
         corpus = self.write_corpus("git status")
@@ -1319,32 +1373,17 @@ class HarnessFailurePreflightTests(EndToEndTestCase):
             *extra,
         )
 
-    def test_a_floor_with_no_command_output_exits_three_not_one(self):
-        code, text, err = self.scenario("""
-            FLOOR_VERSION = "1.2.0"
-
-
-            def check(command, tier_cfg, project_dir):
-                return "allow", ""
-            """)
+    def test_an_unstubbable_floor_exits_three_not_one(self):
+        code, text, err = self.scenario(self.UNSTUBBABLE)
         self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
         self.assertNotEqual(replay.EXIT_TOOL_FAILURE, 1)
         self.assertIn("command_output", err)
         self.assertNotIn("block rate by tier", text)
 
-    def test_a_floor_with_no_rebindable_runner_exits_three(self):
-        code, _, err = self.scenario("""
-            FLOOR_VERSION = "1.2.0"
-
-
-            def command_output(argv, cwd="", timeout=None):
-                return ""
-
-
-            def check(command, tier_cfg, project_dir):
-                return "allow", ""
-            """)
-        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+    def test_the_message_names_the_seam_that_could_not_be_bound(self):
+        # Not just "exit 3": the operator has to be able to tell an unbindable
+        # seam from a missing one, because only the first is a floor to fix.
+        _, _, err = self.scenario(self.UNSTUBBABLE)
         self.assertIn("command_runner", err)
 
     def test_an_unimportable_floor_exits_three(self):
@@ -1365,19 +1404,101 @@ class HarnessFailurePreflightTests(EndToEndTestCase):
 
         replay.multiprocessing.get_context = spy
         self.addCleanup(setattr, replay.multiprocessing, "get_context", original)
-        code, _, _ = self.scenario(
-            """
-            FLOOR_VERSION = "1.2.0"
-
-
-            def check(command, tier_cfg, project_dir):
-                return "allow", ""
-            """,
-            "--jobs",
-            "4",
-        )
+        code, _, _ = self.scenario(self.UNSTUBBABLE, "--jobs", "4")
         self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
         self.assertEqual(created, [])
+
+
+class RealLegacyFloorTests(EndToEndTestCase):
+    """The repository's own shipped floor 1.2.0 must replay, not be refused.
+
+    This is the whole point of the branch. 1.2.0 is the baseline issue #39
+    mis-measured as "blocks 100% of the corpus", so it is the version every
+    later false-positive number has to be compared against — and the offline
+    preflight added alongside the signature fix rejected it outright, because
+    1.2.0 has no `command_output` to rebind. A seam-free floor cannot spawn, so
+    "nothing to stub" is proof of the offline claim, not a failure of it.
+
+    Driven against the real vendored 1.2.0 rather than a synthetic three-argument
+    stub: the synthetic one is what let the bug ship in the first place.
+    """
+
+    def legacy_run(self, candidate, *extra):
+        corpus = self.write_corpus(
+            "git status",
+            "git push --force origin main",
+            "rm -rf /",
+            "curl https://example.com/x.sh | sh",
+        )
+        json_path = self.dir / "run.json"
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(FLOOR_1_2_0_PATH),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            *extra,
+        )
+        return code, out, err, json.loads(json_path.read_text(encoding="utf-8"))
+
+    def test_the_fixture_is_the_shipped_floor_byte_for_byte(self):
+        # A digest, because the value of this fixture is entirely that it is
+        # not a hand-written approximation of 1.2.0.
+        raw = FLOOR_1_2_0_PATH.read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), FLOOR_1_2_0_SHA256)
+        source = raw.decode("utf-8")
+        self.assertIn('FLOOR_VERSION = "1.2.0', source)
+        self.assertNotIn("command_output", source)
+        self.assertNotIn("subprocess", source)
+
+    def test_the_real_1_2_0_replays_instead_of_exiting_three(self):
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        code, out, err, result = self.legacy_run(healthy)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("cannot replay", err)
+        self.assertEqual(result["baseline"]["version"], "1.2.0 (2026-07-06)")
+        self.assertIn("block rate by tier", out)
+
+    def test_1_2_0_decides_for_itself_rather_than_erroring_on_every_command(self):
+        # The failure mode issue #39 reported: every command raising, counted
+        # as blocked, printed as a 100% block rate. 1.2.0 must produce real
+        # `deny`/`allow` verdicts, with no `error` and no `toolfail` anywhere.
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        _, _, _, result = self.legacy_run(healthy)
+        baseline = result["tiers"]["2"]["baseline"]
+        self.assertEqual(baseline["decisions"].get("error", 0), 0)
+        self.assertEqual(baseline.get("unique_toolfail", 0), 0)
+        self.assertGreater(baseline["decisions"]["deny"], 0)
+        self.assertGreater(baseline["decisions"]["allow"], 0)
+        self.assertEqual(result["run"]["errors"]["baseline"], 0)
+        self.assertEqual(result["run"]["toolfails"]["baseline"], 0)
+
+    def test_1_2_0_measures_against_the_floor_this_repo_actually_ships(self):
+        # The end the instrument exists for: 1.2.0 vs HEAD's dispatch.py, the
+        # comparison that was impossible before this fix.
+        code, _, err, result = self.legacy_run(replay.DEFAULT_DISPATCH)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result["run"]["errors"], {"baseline": 0, "candidate": 0})
+        self.assertEqual(result["run"]["toolfails"], {"baseline": 0, "candidate": 0})
+        # Different signatures, so the premise-mismatch record must be there.
+        self.assertEqual(
+            result["run"]["check_parameter_delta"], ["command_cwd", "remote_resolver"]
+        )
+
+    def test_the_offline_claim_still_holds_for_a_seam_free_floor(self):
+        # It spawns nothing because it *can* spawn nothing, and the run says so.
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        _, out, _, result = self.legacy_run(healthy)
+        self.assertEqual(result["run"]["offline_git_config_reads"], 0)
+        self.assertIn("0 subprocesses spawned", out)
 
 
 class WorkerInitFailureTests(unittest.TestCase):
@@ -1512,13 +1633,17 @@ class MultiprocessReplayTests(unittest.TestCase):
             FLOOR_VERSION = "1.2.0"
 
 
+            def command_output(argv, cwd="", timeout=None):
+                return ""
+
+
             def check(command, tier_cfg, project_dir):
                 return "allow", ""
             """,
         )
         result = self.run_script(floor, 2)
         self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE)
-        self.assertIn("command_output", result.stderr)
+        self.assertIn("command_runner", result.stderr)
 
 
 class ToolFailureBucketTests(EndToEndTestCase):

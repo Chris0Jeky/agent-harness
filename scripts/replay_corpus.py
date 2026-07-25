@@ -69,8 +69,12 @@ The rest of that audit, and what each failure is now counted as:
 * the offline guard fired (`OfflineSubprocess`, a floor version spawning a
   subprocess the stub does not cover) -> `toolfail`, exit 3. It used to be an
   `error`, i.e. a block.
-* a floor that will not import, has no `command_runner` default to stub
-  (`make_module_offline`), or has an unbindable `check()` -> exit 3. `main()`
+* a floor that will not import, offers a `command_output` with no
+  `command_runner` default bound to it (`make_module_offline`), or has an
+  unbindable `check()` -> exit 3. A floor with no `command_output` at all is
+  not a failure: it has no spawn seam, so it is already offline and replays.
+  That is the shipped floor 1.2.0, i.e. the exact baseline issue #39 is about.
+  `main()`
   proves all three in the parent before any worker starts, and `_worker_init`
   never raises: a raising `multiprocessing.Pool` initializer is respawned
   forever, so a failure there would hang the run instead of ending it. It
@@ -143,8 +147,14 @@ COVERAGE LIMITS (read before quoting a number)
   `git.exe` processes per version, the verdict depends on `--project-dir`'s
   actual git config, and a transient slow spawn on one side of the comparison
   alone can manufacture a phantom delta row. The run reports how many reads the
-  stub answered. Unlike the resolver this one is unconditional: a version that
-  offers no such default to rebind aborts the run (`OfflineBindingError`).
+  stub answered. A version that offers `command_output` but no such default to
+  rebind aborts the run (`OfflineBindingError`); a version with no
+  `command_output` at all has no spawn seam to stub and replays as-is. Every
+  spawn-capable module in a loaded floor's *globals* (`subprocess`, `os`,
+  `pty`, `asyncio`) is proxied either way, so an uncovered spawn site raises
+  instead of running — but a floor that imported one of them *inside a function
+  body* would still reach the real module. No floor version has ever done that;
+  it is a residual of this design, not a covered case.
 * The whole ambient `GIT_*` family plus `EDITOR` / `VISUAL` / `PAGER` /
   `SSH_ASKPASS` is cleared for the duration of the run, because `check()` reads
   all of them from `os.environ` and any one of them turns a verdict into a
@@ -1016,16 +1026,14 @@ def stub_command_runner(
     return ""
 
 
-class OfflineSubprocess:
-    """Proxy that lets a replayed dispatch module see `subprocess`, not use it.
-
-    Belt and braces behind `make_module_offline`: if a future floor version
-    grows a spawn site the default rebinding does not cover, this turns it into
-    a loud `error` verdict in the report instead of a silent, host-dependent,
-    non-deterministic result.
-    """
-
-    _BLOCKED = frozenset(
+# Module objects a loaded floor could start a process through, and the exact
+# attributes on each that do it. Anything found in a floor's own globals is
+# replaced by an `OfflineModule` proxy, so a spawn site the `command_runner`
+# rebinding does not cover becomes a loud `toolfail` instead of a silent,
+# host-dependent, non-deterministic verdict. Names are matched exactly, never by
+# prefix: `os.path`, `os.environ` and `os.sep` must keep working.
+SPAWN_ROUTES: dict[str, frozenset[str]] = {
+    "subprocess": frozenset(
         {
             "run",
             "Popen",
@@ -1035,17 +1043,77 @@ class OfflineSubprocess:
             "getoutput",
             "getstatusoutput",
         }
-    )
+    ),
+    "os": frozenset(
+        {
+            "system",
+            "popen",
+            "startfile",
+            "fork",
+            "forkpty",
+            "posix_spawn",
+            "posix_spawnp",
+            "spawnl",
+            "spawnle",
+            "spawnlp",
+            "spawnlpe",
+            "spawnv",
+            "spawnve",
+            "spawnvp",
+            "spawnvpe",
+            "execl",
+            "execle",
+            "execlp",
+            "execlpe",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+        }
+    ),
+    "pty": frozenset({"spawn", "fork", "forkpty", "openpty"}),
+    "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
+}
 
-    def __init__(self, real: ModuleType) -> None:
+
+class OfflineModule:
+    """Proxy that lets a replayed dispatch module see a module, not spawn with it.
+
+    Belt and braces behind `make_module_offline`: if a floor version has a spawn
+    site the `command_runner` rebinding does not cover, this turns it into a
+    loud `toolfail` in the report rather than a real process.
+
+    It covers the module's *globals* only. A floor that did `import subprocess`
+    inside a function body would get the real module, and nothing here would
+    see it — stated in COVERAGE LIMITS rather than papered over.
+    """
+
+    def __init__(self, real: ModuleType, blocked: frozenset[str], label: str) -> None:
         self._real = real
+        self._blocked = blocked
+        self._label = label
 
     def __getattr__(self, name: str) -> Any:
-        if name in OfflineSubprocess._BLOCKED:
+        if name in self._blocked:
             raise ReplayHarnessError(
-                f"corpus replay is offline but dispatch called subprocess.{name}"
+                "corpus replay is offline but dispatch called " f"{self._label}.{name}"
             )
         return getattr(self._real, name)
+
+
+def neutralise_spawn_routes(module: ModuleType) -> list[str]:
+    """Proxy every spawn-capable module in `module`'s globals; name what was hit.
+
+    Idempotent: a second call sees the proxies, which are not `ModuleType`, and
+    leaves them alone.
+    """
+    wrapped = []
+    for name, blocked in SPAWN_ROUTES.items():
+        value = getattr(module, name, None)
+        if isinstance(value, ModuleType):
+            setattr(module, name, OfflineModule(value, blocked, name))
+            wrapped.append(name)
+    return wrapped
 
 
 def make_module_offline(module: ModuleType) -> int:
@@ -1061,16 +1129,30 @@ def make_module_offline(module: ModuleType) -> int:
     smallest change that makes the offline claim true without touching
     `dispatch.py` (T4-class shared infrastructure) to add an injection point.
 
-    Raises `OfflineBindingError` when nothing was rebound: a floor version that
-    no longer matches this shape must fail loudly rather than quietly resume
-    spawning `git config`. `main()` calls this on both probe modules before any
-    worker starts, so a baseline that predates the `command_runner` seam aborts
-    with `EXIT_TOOL_FAILURE` instead of dying in a worker.
+    **A floor with no `command_output` at all is already offline**, and returns
+    0 rather than raising. This used to be an unconditional abort, and the thing
+    it aborted on was the one baseline the instrument exists to measure: the
+    repository's own shipped floor 1.2.0 has the three-argument `check()` issue
+    #39 is about, imports only `json`/`os`/`re`/`sys`, and spawns nothing — so
+    the preflight rejected it with `EXIT_TOOL_FAILURE` and 1.2.0 stayed
+    unmeasurable. "No seam" is not "unproven", it is proof of a stronger claim
+    than the rebinding gives.
+
+    What still raises is a floor that *has* the seam but does not expose it the
+    way this replay binds it: `command_output` present with no `command_runner`
+    default bound to it means the shape moved, the rebinding is a no-op, and the
+    module would quietly resume spawning `git config`.
+
+    Either way `neutralise_spawn_routes` proxies every spawn-capable module in
+    the floor's globals, so a spawn route the rebinding never covered raises
+    `ReplayHarnessError` at the call rather than running. That is what makes the
+    seam-free case safe instead of merely unmeasured.
     """
     real = getattr(module, "command_output", None)
-    if real is None:
-        raise OfflineBindingError(f"{module.__name__} has no command_output to stub")
     patched = 0
+    if real is None:
+        neutralise_spawn_routes(module)
+        return patched
     for name in dir(module):
         function = getattr(module, name, None)
         if not isinstance(function, FunctionType):
@@ -1095,13 +1177,12 @@ def make_module_offline(module: ModuleType) -> int:
             patched += 1
     if not patched:
         raise OfflineBindingError(
-            f"{module.__name__}: no command_runner default bound to command_output; "
-            "the replay cannot prove it is offline"
+            f"{module.__name__}: command_output exists but no command_runner "
+            "default is bound to it; the replay cannot prove it is offline"
         )
     # Any direct call site, plus a hard stop on every other spawn route.
     module.command_output = stub_command_runner
-    if isinstance(getattr(module, "subprocess", None), ModuleType):
-        module.subprocess = OfflineSubprocess(module.subprocess)
+    neutralise_spawn_routes(module)
     return patched
 
 
