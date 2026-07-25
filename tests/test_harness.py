@@ -396,7 +396,44 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.remove_managed_codex_floor(current, dispatcher)
 
-    def test_remove_managed_floor_normalizes_deep_ignored_rewrite(self) -> None:
+    def test_remove_managed_floor_normalizes_serializer_recursion(self) -> None:
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        kept_handler = {"type": "command", "command": "echo keep"}
+        current = json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [managed_handler, kept_handler]}]}}
+        )
+        # Baseline that keeps the assertion below non-vacuous: this exact input
+        # rewrites cleanly, so the failure can only come from the serializer.
+        rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        self.assertEqual(
+            json.loads(rewritten)["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"refusing to rewrite hooks\.json with an ignored value",
+            ):
+                harness.remove_managed_codex_floor(current, dispatcher)
+        # The rewrite reached serialization once, carrying the retained handler:
+        # the HarnessError is the serializer boundary, not an earlier reject.
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(
+            serialized[0]["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+    def test_deep_documents_never_leak_a_raw_recursion_error(self) -> None:
+        # Whether the stdlib decoder or encoder survives a given depth is a
+        # Python-version detail (3.11 fails in the decoder, 3.14.3 in the
+        # encoder, 3.14.4 in neither). The contract is only that a RecursionError
+        # is normalized instead of escaping as itself.
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
         ignored_depth = ('{"nested":' * 10000) + "0" + ("}" * 10000)
@@ -407,8 +444,10 @@ class HarnessTests(unittest.TestCase):
             + json.dumps(managed_handler)
             + "]}]}}"
         )
-        with self.assertRaises(harness.HarnessError):
+        try:
             harness.remove_managed_codex_floor(current, dispatcher)
+        except harness.HarnessError:
+            pass
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -976,12 +1015,45 @@ class HarnessTests(unittest.TestCase):
 
     def test_inline_hook_conversions_normalize_serializer_recursion(self) -> None:
         config = Path(self.temp.name) / "config.toml"
+        config.write_text("hooks.nested.leaf = 0\n", encoding="utf-8")
+        # Baseline that keeps the assertions below non-vacuous.
+        self.assertEqual(
+            json.loads(harness.inline_hooks_document(config)),
+            {"hooks": {"nested": {"leaf": 0}}},
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            for convert in (
+                harness.inline_hooks_document,
+                harness.inline_hook_documents_from_config,
+            ):
+                with self.subTest(convert=convert.__name__):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        r"unsupported inline hooks value in .*fixture depth",
+                    ):
+                        convert(config)
+        self.assertEqual(serialized, [{"hooks": {"nested": {"leaf": 0}}}] * 2)
+
+    def test_deep_inline_hooks_never_leak_a_raw_recursion_error(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
         config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
 
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hooks_document(config)
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hook_documents_from_config(config)
+        for convert in (
+            harness.inline_hooks_document,
+            harness.inline_hook_documents_from_config,
+        ):
+            with self.subTest(convert=convert.__name__):
+                try:
+                    convert(config)
+                except harness.HarnessError:
+                    pass
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
