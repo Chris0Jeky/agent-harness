@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.5 (2026-07-25)"
+FLOOR_VERSION = "1.6.6 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -2524,6 +2524,15 @@ def windows_operator_segments(
         if char == '"' or (char == "'" and single_quotes_are_inert):
             quote = char
             current.append(char)
+        elif char == "&" and (
+            (current and current[-1] in "<>")
+            or (index + 1 < len(command) and command[index + 1] == ">")
+        ):
+            # ``2>&1``, ``<&0`` and aggregate ``&>``/``&>>`` are
+            # redirections, not command separators.  Splitting here discards
+            # the executable before the Windows-quoting fallback can inspect
+            # it.  ``|&`` is consumed from the preceding ``|`` branch below.
+            current.append(char)
         elif char in ";&|\n":
             operator = char
             if index + 1 < len(command) and (
@@ -2586,13 +2595,21 @@ def windows_fallback_tokens(candidate: str) -> list[str]:
 
 def strip_windows_execution_prefix(candidate: str) -> str:
     """Expose a Windows command after inert control and redirect prefixes."""
-    candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
-    redirect = re.compile(
-        r"(?is)^(?:\d+)?(?:>>?|<)\s*" r"(?:&\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+    # Preserve a leading ``&`` until aggregate redirections have been tested:
+    # eagerly stripping it turns ``&>file command`` into ``>file command`` and
+    # turns ``>&1 command`` into an unrecognizable ``>`` form.
+    candidate = re.sub(r"^[\s\"'({}@]+", "", candidate)
+    prefix = re.compile(
+        r"(?is)^(?:"
+        r"--%\s+"
+        r"|[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s]*)\s+"
+        r"|(?:\d+|\*)?(?:&>>|&>|>>|>\||>&|<<|<&|<>|>|<)\s*"
+        r"(?:&?\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+        r")"
     )
-    while match := redirect.match(candidate):
+    while match := prefix.match(candidate):
         candidate = candidate[match.end() :].lstrip()
-    return candidate
+    return re.sub(r"^[\s\"'({}&@]+", "", candidate)
 
 
 def normalize_windows_shell_head(candidate: str) -> str:
@@ -3860,6 +3877,157 @@ def gnu_target_directory_values(toks: list[str]) -> list[str]:
     return values
 
 
+_COMMAND_PREFIX_REDIRECTION_OPERATORS = (
+    "&>>",
+    "<<<",
+    "&>",
+    ">>",
+    ">|",
+    ">&",
+    "<<",
+    "<&",
+    "<>",
+    ">",
+    "<",
+)
+
+
+def command_prefix_redirection_token(
+    token: str,
+) -> tuple[str, str, bool] | None:
+    """Return ``(operator, glued_target, has_descriptor)`` for a redirect token.
+
+    The quote-aware shlex pass emits ``2>&1`` as three tokens, while the
+    sanitized whitespace pass keeps it as one.  Both passes enforce different
+    rules, so command-head normalization must understand both representations.
+    """
+    match = re.match(r"^(?P<descriptor>\d+|\*)", token)
+    has_descriptor = match is not None
+    rest = token[match.end() :] if match else token
+    for operator in _COMMAND_PREFIX_REDIRECTION_OPERATORS:
+        if rest.startswith(operator):
+            return operator, rest[len(operator) :], has_descriptor
+    return None
+
+
+def leading_redirection_end(toks: list[str], index: int) -> int | None:
+    """Return the argv index after one command-leading redirection.
+
+    Shell redirections may precede the executable, and shlex emits the file
+    descriptor, operator, and target as separate tokens: ``2>&1 rm`` becomes
+    ``["2", ">&", "1", "rm"]``.  Treating ``2`` or ``>&`` as the command
+    head lets the real executable bypass every rule.  Consume exactly one
+    target, then let :func:`command_head` continue through any further prefix.
+
+    A leading ``<(command)``/``>(command)`` is process substitution, not a
+    redirection attached to a later executable.  The tokenizer splits it into
+    an operator plus a ``("`-headed token, so retain that spelling as a head
+    rather than skipping past it.
+    """
+    if index >= len(toks):
+        return None
+    combined = command_prefix_redirection_token(toks[index])
+    if combined is not None:
+        operator, glued_target, has_descriptor = combined
+        if (
+            not has_descriptor
+            and operator in {"<", ">"}
+            and glued_target.lstrip().startswith("(")
+        ):
+            return None
+        if glued_target:
+            return index + 1
+        target_index = index + 1
+        if target_index >= len(toks):
+            return len(toks)
+        if (
+            not has_descriptor
+            and operator in {"<", ">"}
+            and toks[target_index].lstrip().startswith("(")
+        ):
+            return None
+        if (
+            toks[target_index] in {"<", ">"}
+            and target_index + 1 < len(toks)
+            and toks[target_index + 1].lstrip().startswith("(")
+        ):
+            return target_index + 2
+        return target_index + 1
+    operator_index = index
+    has_descriptor = False
+    if (
+        re.fullmatch(r"(?:\d+|\*)", toks[index])
+        and index + 1 < len(toks)
+        and _ARGV_REDIRECTION_TOKEN.fullmatch(toks[index + 1])
+    ):
+        operator_index += 1
+        has_descriptor = True
+    if not _ARGV_REDIRECTION_TOKEN.fullmatch(toks[operator_index]):
+        return None
+    target_index = operator_index + 1
+    if target_index >= len(toks):
+        return len(toks)
+    if (
+        not has_descriptor
+        and toks[operator_index] in {"<", ">"}
+        and toks[target_index].lstrip().startswith("(")
+    ):
+        return None
+    # ``< <(producer) command`` redirects from a process substitution.  Its
+    # operand is two shlex tokens and both belong to the redirection prefix.
+    if (
+        toks[target_index] in {"<", ">"}
+        and target_index + 1 < len(toks)
+        and toks[target_index + 1].lstrip().startswith("(")
+    ):
+        return target_index + 2
+    return target_index + 1
+
+
+def strip_leading_command_redirections(toks: list[str]) -> list[str]:
+    """Remove command-leading redirects/``--%`` while retaining assignments.
+
+    This normalization is used by every rule scanner, not only
+    :func:`command_head`.  Several guards inspect argv positionally before they
+    ask for the head, so fixing head resolution alone still let the same prefix
+    hide environment mutation, wrapper, and Windows-fallback cases.
+
+    Redirect targets are validated before this runs, and repository-config
+    redirect state is recorded from the original argv.  Removing the prefix
+    here therefore exposes the executable without discarding either policy.
+    """
+    assignments: list[str] = []
+    index = 0
+    while index < len(toks):
+        token = toks[index]
+        if _ASSIGN.match(token):
+            assignments.append(token)
+            index += 1
+            continue
+        if token == "--%":
+            index += 1
+            continue
+        redirect_end = leading_redirection_end(toks, index)
+        if redirect_end is None:
+            break
+        index = redirect_end
+    return [*assignments, *toks[index:]]
+
+
+def strip_leading_environment_assignments(toks: list[str]) -> list[str]:
+    """Expose a command hidden behind one or more POSIX ``NAME=value`` words.
+
+    Callers must inspect the original argv first because an assignment can
+    itself establish dangerous Git state.  This view exists for positional
+    scanners whose executable otherwise remains displaced by an unrelated
+    command-scoped environment setting.
+    """
+    index = 0
+    while index < len(toks) and _ASSIGN.match(toks[index]):
+        index += 1
+    return toks[index:] if index < len(toks) else toks
+
+
 def command_head(toks):
     """Normalize toks to (head, command_toks): strip leading VAR=val assignments
     and known wrappers, drop the head's directory + .exe/.cmd suffix. So
@@ -3868,6 +4036,16 @@ def command_head(toks):
     i = 0
     while i < len(toks):
         t = toks[i]
+        if t == "--%":
+            # PowerShell's stop-parsing marker changes how the following argv
+            # is decoded, not which executable runs.  At command start the next
+            # token is still the head the floor must inspect. (#46)
+            i += 1
+            continue
+        redirect_end = leading_redirection_end(toks, i)
+        if redirect_end is not None:
+            i = redirect_end
+            continue
         if _ASSIGN.match(t):
             i += 1
             continue
@@ -5125,11 +5303,12 @@ def git_process_environment_mutations(
         return set()
     mutations: set[str] = set()
     first = raw[0].lower()
-    if (
-        _ASSIGN.match(raw[0])
-        and git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
-    ):
-        mutations.add(git_environment_name(raw[0]))
+    for token in raw:
+        if not _ASSIGN.match(token):
+            break
+        name = git_environment_name(token)
+        if name in _GIT_PROCESS_COMMAND_ENVIRONMENT:
+            mutations.add(name)
     if (
         git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         and ("=" in raw[0] or (len(raw) > 1 and raw[1] == "="))
@@ -5336,8 +5515,11 @@ def is_git_config_environment_mutation(
     if not raw:
         return False
     first = raw[0].lower()
-    if _ASSIGN.match(raw[0]) and is_git_config_environment_name(raw[0]):
-        return True
+    for token in raw:
+        if not _ASSIGN.match(token):
+            break
+        if is_git_config_environment_name(token):
+            return True
     if first.startswith(("$env:", "${env:")) and is_git_config_environment_name(raw[0]):
         return True
     if first in {"export", "set", "setx"}:
@@ -6754,7 +6936,7 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
     # MUST stay above the readonly fallback: `echo`/`printf`/`write-host` are
     # vouched readers, so `echo x > .git/config` reopens if these are reordered.
     if any(
-        index > 0 and normalized[index - 1] in {">", ">>", ">|"}
+        index > 0 and normalized[index - 1] in {">", ">>", ">|", "&>", "&>>", ">&"}
         for index in config_indexes
     ):
         return True
@@ -7610,23 +7792,38 @@ def check(
             repository_config_may_have_changed
             or segment_may_mutate_repository_config(raw)
         )
-        if dangerous_git_trace_environment_mutation(raw):
+        raw = strip_leading_command_redirections(raw)
+        if not raw:
+            continue
+        exposed_raw = strip_leading_environment_assignments(raw)
+        mutation_views = [raw]
+        if exposed_raw != raw:
+            mutation_views.append(exposed_raw)
+        if any(
+            dangerous_git_trace_environment_mutation(view) for view in mutation_views
+        ):
             return (
                 "deny",
                 "Git trace settings cannot write to or disclose secret material.",
             )
-        if dangerous_git_index_file_mutation(raw):
+        if any(dangerous_git_index_file_mutation(view) for view in mutation_views):
             return (
                 "deny",
                 "GIT_INDEX_FILE to a secret-looking or dynamic path is floor-blocked.",
             )
-        if is_git_config_environment_mutation(raw, environment_provider_context):
+        if any(
+            is_git_config_environment_mutation(view, environment_provider_context)
+            for view in mutation_views
+        ):
             return (
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
-        process_environment_mutations = git_process_environment_mutations(
-            raw, environment_provider_context
+        process_environment_mutations = set().union(
+            *(
+                git_process_environment_mutations(view, environment_provider_context)
+                for view in mutation_views
+            )
         )
         if process_environment_mutations & (
             _GIT_PROCESS_ENVIRONMENT | {_UNKNOWN_GIT_PROCESS_ENVIRONMENT}
@@ -7637,17 +7834,27 @@ def check(
             )
         active_git_process_environment.update(process_environment_mutations)
         active_git_repository_environment.update(
-            git_repository_environment_mutations(raw)
+            set().union(
+                *(git_repository_environment_mutations(view) for view in mutation_views)
+            )
         )
         effective_git_repository_environment = (
             active_git_repository_environment
-            | command_scoped_repository_environment(raw)
+            | set().union(
+                *(
+                    command_scoped_repository_environment(view)
+                    for view in mutation_views
+                )
+            )
         )
+        raw = exposed_raw
         assignment_rhs = powershell_assignment_rhs(raw)
         if assignment_rhs is not None:
             if current_pass == 0 and segment_index < len(assignment_segments):
-                assignment_raw = strip_control_prefixes(
-                    assignment_segments[segment_index][0]
+                assignment_raw = strip_leading_environment_assignments(
+                    strip_leading_command_redirections(
+                        strip_control_prefixes(assignment_segments[segment_index][0])
+                    )
                 )
                 masked_rhs = powershell_assignment_rhs(assignment_raw)
                 if (
@@ -7724,7 +7931,9 @@ def check(
         # (`bash -c ...`) before the command body runs, so a leading (or env-set)
         # BASH_ENV assignment injects opaque program text the floor cannot see.
         if head in _POSIX_SHELL_HEADS and any(
-            re.match(r"^BASH_ENV=\S", token) for token in raw
+            re.match(r"^BASH_ENV=\S", token)
+            for view in mutation_views
+            for token in view
         ):
             return (
                 "deny",
