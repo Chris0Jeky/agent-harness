@@ -14,6 +14,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -446,8 +448,49 @@ class OfflineStubTests(unittest.TestCase):
 
         bare = load_module("replay_offline_probe_bare", REPLAY_PATH)
         bare.command_output = command_output
-        with self.assertRaises(RuntimeError):
+        # A `ReplayHarnessError`, not a bare `RuntimeError`: only the former
+        # reaches `main()`'s handler and exits 3. A plain RuntimeError escaped
+        # as a traceback with interpreter exit code 1, which this script
+        # documents as "nothing to replay".
+        with self.assertRaises(replay.ReplayHarnessError):
             replay.make_module_offline(bare)
+
+    def test_a_module_with_no_command_output_is_a_harness_error(self):
+        # The headline `--baseline <real floor 1.2.0>` case: an old floor that
+        # predates the `command_output` seam. This used to be a plain
+        # RuntimeError traceback out of a Pool initializer.
+        module = load_module("replay_offline_probe_no_output", REPLAY_PATH)
+        self.assertIsNone(getattr(module, "command_output", None))
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.make_module_offline(module)
+
+
+class DispatchLoadTests(unittest.TestCase):
+    """An unimportable floor is a broken instrument, not an empty corpus."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_a_missing_file_raises_a_harness_error(self):
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.load_dispatch("replay_missing", self.dir / "nope.py")
+
+    def test_an_import_time_failure_raises_a_harness_error(self):
+        # A vendored old floor can fail on a SyntaxError under a newer
+        # interpreter, or on a module-level import this environment lacks.
+        path = self.dir / "unimportable.py"
+        path.write_text("def check(  # unterminated\n", encoding="utf-8")
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay.load_dispatch("replay_unimportable", path)
+        self.assertIn("SyntaxError", str(caught.exception))
+
+    def test_a_module_level_raise_is_wrapped_too(self):
+        path = self.dir / "raises.py"
+        path.write_text("raise ImportError('no such module')\n", encoding="utf-8")
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.load_dispatch("replay_raises", path)
 
 
 class EndToEndTestCase(unittest.TestCase):
@@ -1066,6 +1109,239 @@ class SignatureDispatchTests(EndToEndTestCase):
         self.assertIn("audit_sink", err)
         # No block rate at all: an unmeasurable version gets no table.
         self.assertNotIn("block rate by tier", text)
+
+
+class HarnessFailurePreflightTests(EndToEndTestCase):
+    """Every tool-side failure exits 3, in the parent, before the pool exists.
+
+    The PR's principle is that a tool-side failure must never be readable as a
+    measurement. These are the three that used to escape it: a floor that will
+    not import, one with no `command_runner` default to rebind, and one whose
+    `check()` cannot be bound. All three raised a plain `RuntimeError` that
+    `main()` did not catch — a traceback with interpreter exit code 1, which
+    this script documents as "nothing to replay".
+    """
+
+    def scenario(self, broken_source, *extra):
+        corpus = self.write_corpus("git status")
+        broken = self.dir / "broken_floor.py"
+        broken.write_text(textwrap.dedent(broken_source).lstrip(), encoding="utf-8")
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(broken),
+            "--candidate",
+            str(healthy),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_a_floor_with_no_command_output_exits_three_not_one(self):
+        code, text, err = self.scenario("""
+            FLOOR_VERSION = "1.2.0"
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """)
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertNotEqual(replay.EXIT_TOOL_FAILURE, 1)
+        self.assertIn("command_output", err)
+        self.assertNotIn("block rate by tier", text)
+
+    def test_a_floor_with_no_rebindable_runner_exits_three(self):
+        code, _, err = self.scenario("""
+            FLOOR_VERSION = "1.2.0"
+
+
+            def command_output(argv, cwd="", timeout=None):
+                return ""
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """)
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("command_runner", err)
+
+    def test_an_unimportable_floor_exits_three(self):
+        code, _, err = self.scenario("def check(  # unterminated\n")
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("SyntaxError", err)
+
+    def test_the_preflight_runs_before_any_pool_is_created(self):
+        # `--jobs 4` is the shape that used to hang forever: a raising
+        # `Pool` initializer is killed and respawned indefinitely. The parent
+        # preflight must reject the run before `replay()` is reached at all.
+        created = []
+        original = replay.multiprocessing.get_context
+
+        def spy(*args, **kwargs):  # pragma: no cover - must never be called
+            created.append(args)
+            return original(*args, **kwargs)
+
+        replay.multiprocessing.get_context = spy
+        self.addCleanup(setattr, replay.multiprocessing, "get_context", original)
+        code, _, _ = self.scenario(
+            """
+            FLOOR_VERSION = "1.2.0"
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """,
+            "--jobs",
+            "4",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertEqual(created, [])
+
+
+class WorkerInitFailureTests(unittest.TestCase):
+    """`_worker_init` must never raise; the failure comes back as a task error.
+
+    A `multiprocessing.Pool` initializer that raises makes CPython kill the
+    worker and start another one, forever. The parent preflight above is the
+    first line of defence; this is the backstop for anything that only fails
+    inside a worker (a path that resolves differently there, a spawn-only
+    import error).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(replay._WORKER.clear)
+
+    def test_a_failing_init_stashes_instead_of_raising(self):
+        missing = self.dir / "not-a-floor.py"
+        replay._worker_init(str(missing), str(missing), (2,), str(self.dir), {})
+        self.assertIn("init_error", replay._WORKER)
+
+    def test_the_stashed_failure_is_raised_by_the_worker_task(self):
+        missing = self.dir / "not-a-floor.py"
+        replay._worker_init(str(missing), str(missing), (2,), str(self.dir), {})
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay._worker_run([(0, "git status")])
+        self.assertIn("replay worker could not start", str(caught.exception))
+
+    def test_the_single_process_path_fails_before_the_first_chunk(self):
+        missing = self.dir / "not-a-floor.py"
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.replay(
+                ["git status"], missing, missing, (2,), str(self.dir), 1, False, {}
+            )
+
+    def test_a_successful_init_leaves_no_stashed_failure(self):
+        path = self.dir / "floor.py"
+        path.write_text(
+            STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+            encoding="utf-8",
+        )
+        replay._worker_init(str(path), str(path), (2,), str(self.dir), {})
+        self.assertNotIn("init_error", replay._WORKER)
+        replay.raise_if_worker_init_failed()
+
+
+class MultiprocessReplayTests(unittest.TestCase):
+    """Actually run `--jobs > 1`, because it was previously never exercised.
+
+    It cannot be driven through the in-process `replay` module: under `spawn`,
+    `_worker_run` is pickled by qualified name and the child would have to
+    import `replay_corpus_under_test`, which exists only in this process. Run as
+    a real script it is `__main__`, which multiprocessing re-imports from the
+    path. So these shell out — the only way to prove the pool neither hangs nor
+    lies. Every one carries a timeout: a hang is the failure under test.
+    """
+
+    TIMEOUT = 180
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.corpus = self.dir / "corpus.jsonl"
+        self.corpus.write_text(
+            "".join(
+                json.dumps({"command": f"git status {n}", "codex": 1, "claude": 0})
+                + "\n"
+                for n in range(40)
+            ),
+            encoding="utf-8",
+        )
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def run_script(self, floor, jobs):
+        try:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(REPLAY_PATH),
+                    "--from-corpus",
+                    str(self.corpus),
+                    "--baseline",
+                    str(floor),
+                    "--candidate",
+                    str(floor),
+                    "--tier",
+                    "2",
+                    "--project-dir",
+                    str(self.dir),
+                    "--jobs",
+                    str(jobs),
+                    "--quiet",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:  # pragma: no cover - the bug being fixed
+            self.fail(f"--jobs {jobs} hung for {self.TIMEOUT}s instead of finishing")
+
+    def test_a_healthy_run_agrees_with_the_single_process_run(self):
+        floor = self.write_floor(
+            "healthy",
+            STUB_DISPATCH.format(
+                version="1.0.0",
+                decide='    return ("deny", "no") if "7" in command else ("allow", "")',
+            ),
+        )
+        serial = self.run_script(floor, 1)
+        parallel = self.run_script(floor, 2)
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stderr)
+        table = "block rate by tier"
+        self.assertIn(table, parallel.stdout)
+        # Identical numbers, not merely a clean exit: a pool that dropped a
+        # chunk would still exit 0 with a smaller, plausible-looking rate.
+        self.assertEqual(serial.stdout.split(table)[1], parallel.stdout.split(table)[1])
+
+    def test_a_floor_the_harness_cannot_stub_exits_three_without_hanging(self):
+        # The regression: `make_module_offline` raised a plain RuntimeError from
+        # inside a Pool initializer, which CPython respawns forever.
+        floor = self.write_floor(
+            "legacy",
+            """
+            FLOOR_VERSION = "1.2.0"
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """,
+        )
+        result = self.run_script(floor, 2)
+        self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("command_output", result.stderr)
 
 
 class ToolFailureBucketTests(EndToEndTestCase):

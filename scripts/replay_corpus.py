@@ -46,6 +46,13 @@ several minor versions old replays with the arguments it declares. If no binding
 exists the run aborts with exit 3 before replaying anything, rather than
 counting a per-command `TypeError`.
 
+That principle is only worth anything if it holds for *every* harness failure,
+not just the verdict-shaped ones, so every one of them raises a
+`ReplayHarnessError` subclass and nothing else. A plain `RuntimeError` escaping
+`main()` would end the run in a traceback with interpreter exit code 1 — the
+code documented right above as "nothing to replay" — and a gate keying on exit
+codes would read a broken instrument as an empty corpus.
+
 The rest of that audit, and what each failure is now counted as:
 
 * `check()` raised -> `error` decision (still blocked), `EXIT_ERRORS_PRESENT`.
@@ -53,6 +60,12 @@ The rest of that audit, and what each failure is now counted as:
 * the offline guard fired (`OfflineSubprocess`, a floor version spawning a
   subprocess the stub does not cover) -> `toolfail`, exit 3. It used to be an
   `error`, i.e. a block.
+* a floor that will not import, has no `command_runner` default to stub
+  (`make_module_offline`), or has an unbindable `check()` -> exit 3. `main()`
+  proves all three in the parent before any worker starts, and `_worker_init`
+  never raises: a raising `multiprocessing.Pool` initializer is respawned
+  forever, so a failure there would hang the run instead of ending it. It
+  stashes the failure and `_worker_run` re-raises it as a task exception.
 * a chunk came back with no verdict under `--jobs > 1` -> the run aborts with
   exit 3 instead of failing inside `summarize_tier` on a `None`.
 * an unreadable transcript file, a mid-file read error, or a transcript tree
@@ -664,12 +677,55 @@ def select_commands(
 # --------------------------------------------------------------------------- #
 
 
+class ReplayHarnessError(RuntimeError):
+    """The instrument failed, so this command has no verdict.
+
+    Never a policy result. Anything raised as one of these is bucketed as
+    `toolfail`, excluded from every rate, and aborts the run — as opposed to a
+    plain exception out of `check()`, which is the *floor* crashing and is
+    reported as an `error` decision (see `EXIT_ERRORS_PRESENT`).
+
+    Every harness-side failure raises one of these subclasses and nothing else.
+    A plain `RuntimeError` here would escape `main()`'s handler and end the run
+    in a traceback with interpreter exit code 1 — the code this script
+    documents as "nothing to replay", so a gate keying on exit codes would read
+    a broken instrument as an empty corpus.
+    """
+
+
+class DispatchLoadError(ReplayHarnessError):
+    """A dispatch.py could not be imported, so it has no verdicts to give."""
+
+
+class OfflineBindingError(ReplayHarnessError):
+    """A loaded floor cannot be proven offline, so its verdicts are not usable."""
+
+
+class CheckSignatureError(ReplayHarnessError):
+    """A loaded floor's `check()` cannot be invoked by this replay at all."""
+
+
 def load_dispatch(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load dispatch module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Import one dispatch.py; any failure is a harness failure, not a verdict.
+
+    Import-time failures are wrapped too, not just the missing-loader case: a
+    vendored old floor can fail on a `SyntaxError` under a newer interpreter, or
+    on a module-level import this environment does not have. Either way the
+    instrument has produced no measurement, and that must reach `main()` as
+    `EXIT_TOOL_FAILURE` rather than as a traceback.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise DispatchLoadError(f"cannot load dispatch module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except ReplayHarnessError:
+        raise
+    except Exception as error:  # noqa: BLE001 - any import failure is tool-side
+        raise DispatchLoadError(
+            f"cannot import {path}: {type(error).__name__}: {error}"
+        ) from error
     return module
 
 
@@ -682,20 +738,6 @@ def stub_resolver(
 ) -> tuple[bool, str]:
     """Keep the network out of the replay; treat every remote as private."""
     return False, "corpus-replay-stub-private"
-
-
-class ReplayHarnessError(RuntimeError):
-    """The instrument failed, so this command has no verdict.
-
-    Never a policy result. Anything raised as one of these is bucketed as
-    `toolfail`, excluded from every rate, and aborts the run — as opposed to a
-    plain exception out of `check()`, which is the *floor* crashing and is
-    reported as an `error` decision (see `EXIT_ERRORS_PRESENT`).
-    """
-
-
-class CheckSignatureError(ReplayHarnessError):
-    """A loaded floor's `check()` cannot be invoked by this replay at all."""
 
 
 # Every argument the replay knows how to supply, and the parameter names a
@@ -909,12 +951,15 @@ def make_module_offline(module: ModuleType) -> int:
     smallest change that makes the offline claim true without touching
     `dispatch.py` (T4-class shared infrastructure) to add an injection point.
 
-    Raises when nothing was rebound: a floor version that no longer matches this
-    shape must fail loudly rather than quietly resume spawning `git config`.
+    Raises `OfflineBindingError` when nothing was rebound: a floor version that
+    no longer matches this shape must fail loudly rather than quietly resume
+    spawning `git config`. `main()` calls this on both probe modules before any
+    worker starts, so a baseline that predates the `command_runner` seam aborts
+    with `EXIT_TOOL_FAILURE` instead of dying in a worker.
     """
     real = getattr(module, "command_output", None)
     if real is None:
-        raise RuntimeError(f"{module.__name__} has no command_output to stub")
+        raise OfflineBindingError(f"{module.__name__} has no command_output to stub")
     patched = 0
     for name in dir(module):
         function = getattr(module, name, None)
@@ -939,7 +984,7 @@ def make_module_offline(module: ModuleType) -> int:
             keyword_defaults["command_runner"] = stub_command_runner
             patched += 1
     if not patched:
-        raise RuntimeError(
+        raise OfflineBindingError(
             f"{module.__name__}: no command_runner default bound to command_output; "
             "the replay cannot prove it is offline"
         )
@@ -1047,20 +1092,36 @@ def _worker_init(
     project_dir: str,
     flags: dict[str, bool] | None = None,
 ) -> None:
-    # Cleared before the modules load, then again with what they declare they
-    # read. Workers are forked/spawned copies, so the parent's clearing does not
-    # reach them under `spawn`; they never restore, they exit.
-    clear_host_git_env()
-    baseline = load_dispatch("replay_baseline", Path(baseline_path))
-    candidate = load_dispatch("replay_candidate", Path(candidate_path))
-    clear_host_git_env((baseline, candidate))
-    make_module_offline(baseline)
-    make_module_offline(candidate)
-    # Fail here, once, rather than once per command: an unbindable `check()`
-    # raised per command would be caught by `decide()` and counted, and the run
-    # would print a plausible-looking 100% block rate for the unusable version.
-    check_caller(baseline)
-    check_caller(candidate)
+    """Load and neutralise both floors in this process. NEVER raises.
+
+    Under `--jobs > 1` this is a `multiprocessing.Pool` initializer, and CPython
+    answers a raising initializer by killing the worker and starting another
+    one, forever: the run hangs instead of failing, which is strictly worse than
+    the traceback it replaced. Every failure is therefore stashed and re-raised
+    from `_worker_run`, where a task exception propagates to the parent, out of
+    `replay()`, and into `main()`'s `ReplayHarnessError` handler as
+    `EXIT_TOOL_FAILURE`. `main()` also proves all three steps in the parent
+    before the pool is created, so this is the backstop, not the only guard.
+    """
+    _WORKER.clear()
+    try:
+        # Cleared before the modules load, then again with what they declare
+        # they read. Workers are forked/spawned copies, so the parent's clearing
+        # does not reach them under `spawn`; they never restore, they exit.
+        clear_host_git_env()
+        baseline = load_dispatch("replay_baseline", Path(baseline_path))
+        candidate = load_dispatch("replay_candidate", Path(candidate_path))
+        clear_host_git_env((baseline, candidate))
+        make_module_offline(baseline)
+        make_module_offline(candidate)
+        # Fail here, once, rather than once per command: an unbindable `check()`
+        # raised per command would be caught by `decide()` and counted, and the
+        # run would print a plausible 100% block rate for the unusable version.
+        check_caller(baseline)
+        check_caller(candidate)
+    except Exception as error:  # noqa: BLE001 - re-raised from `_worker_run`
+        _WORKER["init_error"] = f"{type(error).__name__}: {error}".strip()
+        return
     _WORKER["baseline"] = baseline
     _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
@@ -1068,9 +1129,23 @@ def _worker_init(
     _WORKER["flags"] = dict(flags or {})
 
 
+def raise_if_worker_init_failed() -> None:
+    """Turn a stashed `_worker_init` failure back into a raised harness error.
+
+    Called from `_worker_run` (so a pool worker reports through a task result
+    instead of respawning forever) and directly by `replay()` in the
+    single-process path (so that path keeps failing before the first command
+    rather than on the first chunk, and fails even when there are no chunks).
+    """
+    stashed = _WORKER.get("init_error")
+    if stashed is not None:
+        raise ReplayHarnessError(f"replay worker could not start: {stashed}")
+
+
 def _worker_run(
     chunk: list[tuple[int, str]],
 ) -> tuple[list[tuple[int, list, list]], int]:
+    raise_if_worker_init_failed()
     tiers = _WORKER["tiers"]
     project_dir = _WORKER["project_dir"]
     flags = _WORKER["flags"]
@@ -1133,6 +1208,7 @@ def replay(
         _worker_init(
             str(baseline_path), str(candidate_path), tiers, project_dir, overlay
         )
+        raise_if_worker_init_failed()
         for chunk in chunks:
             batch, reads = _worker_run(chunk)
             for index, base, cand in batch:
@@ -2000,18 +2076,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write("every command was filtered out; nothing to replay\n")
         return 1
 
-    baseline_module = load_dispatch("replay_baseline_probe", args.baseline)
-    candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
-    baseline_version = module_version(baseline_module)
-    candidate_version = module_version(candidate_module)
-    # Prove both versions are callable before replaying anything. Each side is
-    # bound to its own declared signature, so a baseline predating
-    # `command_cwd` / `remote_resolver` measures correctly instead of raising
-    # `TypeError` per command and reading as a 100% block rate (issue #39).
+    # Prove the whole instrument works on both versions before replaying
+    # anything: the module imports, `check()` binds to its own declared
+    # signature (so a baseline predating `command_cwd` / `remote_resolver`
+    # measures correctly instead of raising `TypeError` per command and reading
+    # as a 100% block rate, issue #39), and the `command_runner` seam the
+    # offline claim depends on exists. Every one of those is a harness failure,
+    # so every one of them exits `EXIT_TOOL_FAILURE` here — in the parent,
+    # before a `Pool` whose initializer cannot safely raise is ever created.
     try:
+        baseline_module = load_dispatch("replay_baseline_probe", args.baseline)
+        candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
+        baseline_version = module_version(baseline_module)
+        candidate_version = module_version(candidate_module)
         baseline_parameters = describe_check_signature(baseline_module)
         candidate_parameters = describe_check_signature(candidate_module)
-    except CheckSignatureError as error:
+        make_module_offline(baseline_module)
+        make_module_offline(candidate_module)
+    except ReplayHarnessError as error:
         sys.stderr.write(f"cannot replay: {error}\n")
         return EXIT_TOOL_FAILURE
 
