@@ -25,8 +25,12 @@ honest:
 """
 
 import ast
+import atexit
 import importlib.util
 import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -58,35 +62,20 @@ def stub_resolver(
     return False, "unit-test-stub-private"
 
 
-class StubPushConfig:
-    """No host `git config` during unit tests, for the same reason as above.
-
-    Once the helper clears GIT_DIR, a refspec-less `git push` falls through to
-    `configured_bare_push_is_dangerous`, which runs
-    `git config --get-regexp ^remote\\..*\\.(push|mirror|receivepack)$` with the
-    DEFAULT command_runner — `remote_resolver` does not intercept it. That
-    subprocess reads the caller's own checkout and, because the helper also
-    clears GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM, ~/.gitconfig and the system
-    config too. A contributor with a global `remote.*.receivepack` or
-    `remote.*.mirror` would then watch this suite deny for reasons that have
-    nothing to do with environment isolation — the very host dependency issue
-    #54 exists to remove.
-
-    Stubbing it hides nothing these tests assert: when GIT_DIR IS inherited,
-    check() returns [push-config-unverifiable] well before this call, so the
-    deny direction is unaffected. `calls` proves the stub is load-bearing
-    rather than decorative. What the stub does drop from THIS file — the
-    resolver's own force/delete/mirror/receivepack behaviour, and check()'s
-    [push-config-force] deny — is covered against real fixture repositories by
-    tests/test_push_config_force.py, which is where it belongs.
-    """
-
-    def __init__(self):
-        self.calls = 0
-
-    def __call__(self, *args, **kwargs):
-        self.calls += 1
-        return False
+# A directory with no repository-local Git config, used as project_dir instead
+# of ROOT. Once the helper clears GIT_DIR, a refspec-less `git push` falls
+# through to `configured_bare_push_is_dangerous`, which really does run
+# `git config --get-regexp ^remote\..*\.(push|mirror|receivepack)$`. The helper
+# neutralizes that subprocess's user and system config; the repository-local
+# layer is the caller's cwd, so a contributor with `remote.origin.push = +...`
+# in their own agent-harness checkout would otherwise watch this suite deny for
+# reasons that have nothing to do with environment isolation. Earlier revisions
+# of this file stubbed the resolver out instead, which only RELOCATED the host
+# dependency into a mock. The resolver's own force/delete/mirror/receivepack
+# behaviour is exercised against real fixture repositories in
+# tests/test_push_config_force.py, which is where it belongs.
+CONFIG_FREE_DIR = tempfile.mkdtemp(prefix="floor-env-project-")
+atexit.register(shutil.rmtree, CONFIG_FREE_DIR, ignore_errors=True)
 
 
 # Each entry is an inherited environment that dispatch.check reads directly,
@@ -113,23 +102,23 @@ HOSTILE_ENVIRONMENTS = (
 )
 
 
-def hermetic(command: str, tier: int = 1):
+def hermetic(command: str, tier: int = 1, project_dir: str = CONFIG_FREE_DIR):
     return floor_environment.hermetic_check(
         dispatch,
         command,
         {"tier": tier, "flags": {}},
-        str(ROOT),
+        project_dir,
         remote_resolver=stub_resolver,
     )
 
 
-def bare(command: str, tier: int = 1):
+def bare(command: str, tier: int = 1, project_dir: str = CONFIG_FREE_DIR):
     """`dispatch.check` with NO isolation — the shape this issue removes."""
     return dispatch.check(
         command,
         {"tier": tier, "flags": {}},
-        str(ROOT),
-        str(ROOT),
+        project_dir,
+        project_dir,
         remote_resolver=stub_resolver,
     )
 
@@ -362,26 +351,81 @@ class AmbientReadInventoryTests(unittest.TestCase):
         )
 
 
+class BarePushSubprocessIsolationTests(unittest.TestCase):
+    """The one code path that shells out must read no host configuration.
+
+    Clearing `GIT_CONFIG*` is worse than doing nothing for this subprocess: a
+    host that isolates Git the supported way (`GIT_CONFIG_GLOBAL=<empty>`)
+    has its protection REMOVED by the clearing, re-enabling `$HOME/.gitconfig`.
+    The helper therefore neutralizes the subprocess's config sources instead of
+    unsetting the selectors that name them.
+    """
+
+    def hostile_home(self) -> dict:
+        """A home directory whose `.gitconfig` would deny a bare push."""
+        home = tempfile.mkdtemp(prefix="floor-env-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        Path(home, ".gitconfig").write_text(
+            '[remote "origin"]\n\treceivepack = evil-helper\n', encoding="utf-8"
+        )
+        return {
+            "HOME": home,
+            "USERPROFILE": home,
+            "HOMEDRIVE": "",
+            "HOMEPATH": "",
+            "XDG_CONFIG_HOME": os.path.join(home, "xdg"),
+        }
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_the_resolver_really_reads_a_hostile_home(self):
+        """The fixture is load-bearing: unneutralized, this config denies."""
+        with patch.dict(os.environ, self.hostile_home()):
+            for name in list(os.environ):
+                if name.upper().startswith("GIT_CONFIG"):
+                    del os.environ[name]
+            self.assertTrue(
+                dispatch.configured_bare_push_is_dangerous(CONFIG_FREE_DIR),
+                "the fixture ~/.gitconfig is not reaching git, so the "
+                "isolation assertion below would pass vacuously",
+            )
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_a_hostile_home_does_not_reach_the_helper_verdict(self):
+        with patch.dict(os.environ, self.hostile_home()):
+            self.assertEqual(hermetic("git push")[0], "allow")
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_a_host_that_isolates_git_is_not_de_isolated(self):
+        """Codex P2: unsetting GIT_CONFIG_GLOBAL re-enables ~/.gitconfig."""
+        environment = self.hostile_home()
+        environment["GIT_CONFIG_GLOBAL"] = floor_environment.empty_git_config_path()
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        with patch.dict(os.environ, environment):
+            # What the host itself sees, with its own isolation intact.
+            self.assertFalse(
+                dispatch.configured_bare_push_is_dangerous(CONFIG_FREE_DIR)
+            )
+            # ...and what the suite sees, after the helper removes those names.
+            self.assertEqual(hermetic("git push")[0], "allow")
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_repository_local_config_still_decides(self):
+        """Neutralizing the host must not blind the resolver to a real repo."""
+        repo = tempfile.mkdtemp(prefix="floor-env-repo-")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        for args in (
+            ("init", "-q"),
+            ("config", "remote.origin.receivepack", "helper --unsafe"),
+        ):
+            subprocess.run(
+                ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+            )
+        decision, reason = hermetic("git push", project_dir=repo)
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("push-config-force", reason)
+
+
 class HermeticCheckTests(unittest.TestCase):
-    def setUp(self):
-        self.push_config = StubPushConfig()
-        patcher = patch.object(
-            dispatch, "configured_bare_push_is_dangerous", self.push_config
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_the_bare_push_case_really_reaches_the_host_git_config(self):
-        """Without the stub this suite would shell out to the caller's config."""
-        self.assertEqual(hermetic("git push")[0], "allow")
-        self.assertGreaterEqual(
-            self.push_config.calls,
-            1,
-            "the refspec-less push no longer reaches "
-            "configured_bare_push_is_dangerous; if check() stopped calling it, "
-            "drop StubPushConfig rather than keep a stub for a dead path",
-        )
-
     def test_hostile_environments_do_not_change_the_verdict(self):
         for family, environment, command in HOSTILE_ENVIRONMENTS:
             with self.subTest(family=family, command=command):

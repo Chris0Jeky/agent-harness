@@ -24,11 +24,19 @@ Deliberately NOT covered, so the claim stays exactly as strong as the code:
   That set is unbounded and chosen by the command under test, not by the host,
   so it is the test author's business, not this helper's.
 * `main`'s `CLAUDE_PROJECT_DIR`. `check` never reads it.
-* Everything a real `git` subprocess reads (`configured_bare_push_is_dangerous`
-  shells out). `GIT_CONFIG*` clearing here is a deliberate superset of
-  dispatch's `is_git_config_environment_name`, which exempts
-  `GIT_CONFIG_NOSYSTEM`, because that name does reach those subprocesses.
-  A suite that reaches that subprocess must stub it — see `StubPushConfig`.
+* Everything a real `git` subprocess reads. Removing every `GIT_CONFIG*`
+  selector is NOT hermetic for those: on a host that isolates Git the supported
+  way (`GIT_CONFIG_GLOBAL=<empty>`, `GIT_CONFIG_NOSYSTEM=1`), deleting the
+  selectors RE-ENABLES `$HOME/.gitconfig` and the system config, so the
+  "isolation" makes the subprocess read MORE host state than the host chose to
+  expose. The parent process cannot hold the neutralizing values itself —
+  `dispatch.has_git_config_environment` reads an inherited `GIT_CONFIG_GLOBAL`
+  as config injection and would deny every git command — so the neutralization
+  is applied at the subprocess boundary instead: `hermetic_environment` routes
+  `configured_bare_push_is_dangerous` through `neutral_git_command_runner`,
+  which points that one `git config` call at an empty global AND system config.
+  Repository-local config still applies, by design: those suites assert against
+  fixture repositories they build themselves.
 * The HOME / TMPDIR family: `tempfile.gettempdir()` and `os.path.expanduser`
   in `is_within_temp`, `is_safe_containment_root`, `canonical_path`. These DO
   flip path-containment verdicts, but clearing HOME would break `~` for the
@@ -44,9 +52,12 @@ is not classified below, or if a tests/ suite calls `check()` without this
 helper.
 """
 
+import atexit
 import contextlib
 import os
 import re
+import subprocess
+import tempfile
 
 # Ambient names dispatch reads that are not members of a named constant.
 _EXTRA_ISOLATED_NAMES = frozenset({"GIT_INDEX_FILE"})
@@ -118,6 +129,85 @@ def should_isolate(dispatch, name: str) -> bool:
     )
 
 
+_EMPTY_GIT_CONFIG = None
+
+
+def empty_git_config_path() -> str:
+    """Path to an empty file usable as a Git config source.
+
+    An empty FILE, not `os.devnull`: `NUL` is not a readable config path on
+    Windows, and a nonexistent path relies on git's tolerance rather than
+    stating the intent.
+    """
+    global _EMPTY_GIT_CONFIG
+    if _EMPTY_GIT_CONFIG is None:
+        handle, path = tempfile.mkstemp(prefix="floor-empty-gitconfig-")
+        os.close(handle)
+        atexit.register(lambda: os.path.exists(path) and os.remove(path))
+        _EMPTY_GIT_CONFIG = path
+    return _EMPTY_GIT_CONFIG
+
+
+def neutral_git_command_runner(argv: list[str], cwd: str, timeout: float = 3) -> str:
+    """`dispatch.command_output` with the user and system config sources emptied.
+
+    Same contract as `dispatch.command_output` (non-zero exit -> ""), so the
+    resolver under test keeps its real behaviour; only where that subprocess
+    looks for configuration changes. Pointing the selectors at an empty file is
+    what the host's own isolation does — unsetting them is what re-enables
+    `$HOME/.gitconfig`.
+    """
+    empty = empty_git_config_path()
+    environment = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": empty,
+        "GIT_CONFIG_SYSTEM": empty,
+        # Belt and braces for git < 2.32, which has no GIT_CONFIG_SYSTEM.
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+@contextlib.contextmanager
+def neutral_bare_push_config(dispatch):
+    """Run `configured_bare_push_is_dangerous` against no user/system config.
+
+    `check()` calls it with the DEFAULT command_runner, which is bound at
+    definition time — so replacing `dispatch.command_output` would not reach
+    it. Wrapping the resolver itself is the one seam that does, and it keeps
+    the real git subprocess and the real parsing: only the config SOURCES move.
+    An explicit `command_runner` from a caller still wins.
+    """
+    original = dispatch.configured_bare_push_is_dangerous
+
+    def neutral(project_dir, git_globals=None, command_runner=None, deadline=None):
+        return original(
+            project_dir,
+            git_globals,
+            neutral_git_command_runner if command_runner is None else command_runner,
+            deadline,
+        )
+
+    dispatch.configured_bare_push_is_dangerous = neutral
+    try:
+        yield neutral
+    finally:
+        dispatch.configured_bare_push_is_dangerous = original
+
+
 @contextlib.contextmanager
 def hermetic_environment(dispatch, overrides=None):
     """Run the body with every host-inherited Git launch variable removed.
@@ -125,6 +215,10 @@ def hermetic_environment(dispatch, overrides=None):
     `overrides` are applied AFTER the clearing, so a test that needs one
     specific inherited variable observed (rather than every variable the host
     happens to export) gets exactly that variable and nothing else.
+
+    Clearing the environment is only half of it: the `git config` subprocess
+    the bare-push guard spawns is neutralized explicitly, because removing the
+    `GIT_CONFIG*` selectors would hand it MORE host state (see module docstring).
     """
     names = {name for name in os.environ if should_isolate(dispatch, name)}
     names |= set(overrides or {})
@@ -133,7 +227,8 @@ def hermetic_environment(dispatch, overrides=None):
         os.environ.pop(name, None)
     os.environ.update(overrides or {})
     try:
-        yield
+        with neutral_bare_push_config(dispatch):
+            yield
     finally:
         for name in names:
             os.environ.pop(name, None)
