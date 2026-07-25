@@ -49,8 +49,6 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   "authority": { "push": "free", "merge": "gated" },
   "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
              "relaxed_work_loss_guards": false },
-  "model_routing": { "harness_and_review": "top", "slices": "default",
-                     "maintenance_judgment": "default", "maintenance_mechanical": "cheap" },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
   "last_reviewed": "2026-07-06"
@@ -63,20 +61,13 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
-- `model_routing.*`: routing-tier names ONLY — `top` | `default` | `cheap`, the §8 vocabulary.
-  Never write a named model here; that is the `model-effort-routing` skill's job, and a model
-  name in a per-repo config file is a copy that will go stale silently.
-- Maintenance takes TWO keys, because §8 splits the class: `maintenance_judgment` (Gardener
-  triage, tombstone classification, promotion routing → `default`) and `maintenance_mechanical`
-  (bulk sweeps, doc rotation, formatting, test running → `cheap`). The single `maintenance` key
-  is RETIRED: with one key a consumer had to send mechanical sweeps to `default` against §8 or
-  ignore the file entirely. Readers should treat a legacy `maintenance` value as
-  `maintenance_judgment` and leave `maintenance_mechanical` unset (fall back to §8's `cheap`).
-  NOTE: `harness.py seed` currently emits the old three keys with values `sol` / `terra` /
-  `luna`, matching neither this schema nor §8, and is read by nothing — tracked in issue #47,
-  which now also covers emitting the split keys.
-- Read by: dispatcher hook, Gardener, bootstrapper, CI templates. The dispatcher also reads
-  legacy `.claude/tier.json` files so existing estates can migrate without a flag day.
+- `model_routing` is NOT part of the schema: `seed` no longer emits it. The model ladder lives
+  in ONE place (BLUEPRINT §5 / SPECS §8); a per-repo copy is a third place for it to go stale.
+  Repos seeded before 2026-07-25 still carry a `model_routing` block — it is inert, read by
+  nothing, and `audit`/`doctor` ignore it rather than failing on it.
+- Read by: dispatcher hook (`tier`, `flags`), Gardener, bootstrapper, CI templates. The
+  dispatcher also reads legacy `.claude/tier.json` files so existing estates can migrate
+  without a flag day.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
   the budget script fails if they disagree.

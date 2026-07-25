@@ -32,8 +32,8 @@ py -3 -m black --check <same file list as ruff>
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v
 
 # Harness CLI (inspect first; installation is never implicit)
-py -3 harness.py doctor [--repo <path>]
-py -3 harness.py audit <repo> [--json]
+py -3 harness.py doctor [--repo <path>] [--offline]
+py -3 harness.py audit <repo> [--json] [--offline]
 py -3 harness.py seed <repo> --tier N [--sensitive-data]
 py -3 harness.py sync-global --config-root <claude-config checkout> [--apply]
 ```
@@ -47,7 +47,14 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
 
 **`harness.py`** — single-file CLI with four subcommands:
 - `audit` — validates a repo's tier declaration, doc line budgets (CLAUDE.md is capped per
-  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths
+  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths.
+  It also runs the **reality checks** (`reality_findings`): declared `sensitive_data` vs each
+  remote's real host visibility, vendored floor bytes (`hooks/` or `.claude/hooks/`) vs the
+  canonical template, and declared `human_todo` vs a file that exists. `MISMATCH` fails;
+  `UNPROVEN` is printed loudly, counted in the summary and `--json`, and never renders as a
+  pass; the deployed `~/.claude` copy is advisory because it is the auditing machine's state,
+  not the repo's; probes are read-only, deadline-bounded, and injectable
+  (`command_runner`) so tests never spawn a process or hit the network
 - `seed` — writes a write-once `.agent-harness/tier.json`; refuses to overwrite
 - `sync-global` — diffs (default) or installs (`--apply`) shared global guidance, managed
   skills, and the dispatcher bytes into `~/.claude/hooks`, backing up anything it replaces

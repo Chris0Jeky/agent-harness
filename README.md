@@ -32,6 +32,34 @@ Install the pinned development tools with `py -3 -m pip install -r requirements-
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every
 pull request and push to `main`; workflow actions are pinned to immutable commit SHAs.
 
+`audit` also measures declarations against reality instead of against other documents:
+a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
+`dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
+template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
+`human_todo` against a file that exists. A repo that vendors nothing says so rather than
+emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
+failure: it is the auditing machine's state, so making it a repo verdict would let the same
+repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
+`UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
+Only a PUBLIC endpoint work is actually PUSHED to is a `MISMATCH`: the push URL of `origin`,
+or of any remote when no `origin` is configured. A public `upstream` or mirror on a private
+fork, and a public fetch URL behind a private `pushurl`, are reported as an `advisory` naming
+the remote and the reason. Any credential embedded in a remote URL is redacted before it
+reaches a finding.
+Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
+skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
+degrades to `UNPROVEN` and exits 0. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
+tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
+diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
+is a local tracking ref, so currency is proven against the published tip with a bounded
+`git ls-remote`; a stale tracking ref, or a published tip that cannot be read (offline,
+unreachable), refuses the reference rather than assuming it. A detached-HEAD
+CI checkout (what `actions/checkout` produces) is never a reference, so the canonical-template
+leg is permanently `UNPROVEN` there and live only on a checkout sitting on a clean `main`. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
+that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
+`--repo`, plus a global `floor version` check; when the reference is refused that check prints
+`[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
+
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated

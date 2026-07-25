@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -1123,7 +1125,1063 @@ def stale_path_issues(repo: Path) -> list[str]:
     return issues
 
 
-def audit_repo(path: Path) -> dict[str, Any]:
+# --- reality checks: declarations measured against the world, not each other ---
+#
+# Every check below answers "is the declared thing actually true?" and reports
+# one of three states. `MISMATCH` means two things that must agree do not, and
+# is a hard failure. `UNPROVEN` means the check could not run (offline, no
+# `gh`, an unresolvable host, an exhausted budget) and must never render as a
+# pass. `advisory` is a real observation that is not by itself a defect.
+# Subprocess use follows the deny floor's discipline (`dispatch.py`
+# `command_output_before_deadline`): every resolver is read-only, bounded by a
+# per-command timeout AND a shared aggregate deadline, and injectable so tests
+# never spawn a process or touch the network. An offline run degrades to
+# `UNPROVEN` and exits 0 rather than failing CI.
+REALITY_BUDGET_SECONDS = 8.0
+REALITY_COMMAND_TIMEOUT_SECONDS = 3.0
+REALITY_OK = "ok"
+REALITY_MISMATCH = "MISMATCH"
+REALITY_UNPROVEN = "UNPROVEN"
+REALITY_ADVISORY = "advisory"
+PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
+
+# The phrasings a doc actually uses to claim privacy. The first version only
+# matched "private" immediately followed by one of three singular nouns, which
+# misses "this repository is private", "private repos" and "kept private" - the
+# most natural spellings - so the advertised converse check almost never fired.
+#
+# EVERY alternative requires one of these nouns inside the match. A bare
+# `(?:kept|keep|stays?|remains?)\s+private` fires on ordinary secrets-hygiene
+# boilerplate - "Keep private keys out of version control", "Secrets remain
+# private to the operator" - and then reports a two-word fragment as if the doc
+# had made a claim about the REPOSITORY. Requiring the noun both removes that
+# false positive and makes the quoted fragment show what is being kept private.
+_PRIVACY_NOUNS = r"(?:repo|repository|remote)s?"
+_PRIVACY_STATES = r"(?:is|are|was|were|stays?|stayed|remains?|remained|kept|keeps?)"
+PRIVACY_CLAIM_PATTERN = re.compile(
+    # "a private repo", "private GitHub repository"
+    rf"private\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    # "this repository is private", "the repo stays private", "repos are kept private"
+    rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+{_PRIVACY_STATES}\s+private\b"
+    # "keep the repo private"
+    rf"|(?:keeps?|kept|stays?|remains?)\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    rf"(?:\s+\w+){{0,2}}\s+private\b",
+    re.IGNORECASE,
+)
+# A remote nothing is published THROUGH a host: a `file://` URL, a drive path,
+# or a relative/home/absolute local path. The leading `//` (or `\\`) authority
+# is excluded: `//server/share/repo.git` is a UNC network share whose reach is
+# exactly what a sensitive-data audit must not assert, and calling it
+# "local-only" printed `ok` without measuring who can read it.
+LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[.~]|/(?!/)|\\(?!\\))")
+UNC_REMOTE_PATTERN = re.compile(r"^(?://|\\\\)[^/\\]")
+# A `file://` URL hides a host in two different places, and the share test has
+# to see both before `LOCAL_REMOTE_PATTERN`'s `file://` alternative claims the
+# URL: `file://server/share/x` puts the host in the AUTHORITY, while
+# `file:////server/share/x` has an empty authority and the UNC path in the path
+# component. Stripping a fixed prefix caught only the second.
+_FILE_URL = re.compile(r"(?i)^file://([^/]*)(/.*)?$")
+
+
+def remote_names_a_network_share(url: str) -> bool:
+    """Whether this remote names a HOST rather than a path on this machine."""
+    candidate = url.strip()
+    match = _FILE_URL.match(candidate)
+    if match:
+        authority = match.group(1)
+        if authority and authority.lower() != "localhost":
+            return True
+        candidate = match.group(2) or ""
+    return bool(UNC_REMOTE_PATTERN.match(candidate))
+
+
+# The remote work is actually published to. A public remote under any other
+# name (a fork's upstream, a mirror) is a topology note, not an exposure.
+PUBLISHING_REMOTE = "origin"
+# git's "dot repository": pushing to `.` targets THIS repository, never a
+# remote (see git-config, branch.<name>.remote).
+LOCAL_PUSH_REMOTE = "."
+VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
+# Both shapes a repo can carry its own floor bytes in. `.claude/hooks/` is the
+# one `doctor` already recognizes as "a repo-local dispatcher copy rather than
+# the shared home-anchored one"; probing only `hooks/` made the drift check a
+# silent no-op for every repo that vendors the way this estate actually does.
+VENDORED_FLOOR_DIRS = (PurePosixPath("hooks"), PurePosixPath(".claude/hooks"))
+
+
+def bounded_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Run one read-only resolver under a hard timeout; never raise.
+
+    Decoding is explicit and tolerant. Under `text=True` alone, a resolver that
+    emits bytes the platform locale cannot decode — a non-UTF-8 configured
+    remote, a branch name in another encoding — raises `UnicodeDecodeError`
+    while `subprocess.run` builds its result. Neither this handler nor `main()`
+    catches that, so an audit died with a traceback where the contract says the
+    check is simply UNPROVEN. `errors="replace"` keeps whatever is decodable
+    and leaves the rest as replacement characters; `UnicodeError` is still
+    caught, because a caller may pass its own runner.
+
+    The timeout is a HARD bound on this function, not just on the direct child.
+    `subprocess.run` kills only the process it started, so `git ls-remote`'s ssh
+    helper — which inherits the captured pipes and carries its own much longer
+    network timeout — could keep the drain waiting long past the deadline the
+    aggregate budget is built on. The child is started in its own process group
+    (POSIX) and the whole tree is killed on timeout (`taskkill /T` on Windows);
+    the pipes are then closed without a second blocking read, so the bound
+    holds even if a descendant survives.
+    """
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            **popen_kwargs,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, ""
+    try:
+        stdout, _stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc)
+        return False, ""
+    except (OSError, ValueError, UnicodeError):
+        terminate_process_tree(proc)
+        return False, ""
+    return proc.returncode == 0, (stdout or "").strip()
+
+
+def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill a timed-out resolver and every descendant, then stop reading it.
+
+    Nothing here may block: this runs because a deadline was already missed.
+    The pipes are closed rather than drained, so a descendant that survives
+    cannot hold this process open — the file objects are released to the GC.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except (OSError, ValueError):
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except OSError:
+            pass
+
+
+# `git` is not by itself a local resolver: these subcommands contact the
+# remote, so `--offline` has to refuse them by name rather than trust the
+# binary. `remote --verbose` reads config and stays; `remote show/update`
+# does not.
+NETWORK_GIT_SUBCOMMANDS = frozenset(
+    {"clone", "fetch", "pull", "push", "ls-remote", "submodule", "archive"}
+)
+NETWORK_GIT_REMOTE_ACTIONS = frozenset({"show", "update", "prune"})
+
+
+def command_reaches_the_network(argv: list[str]) -> bool:
+    """Whether this resolver would contact a host; `--offline` refuses these."""
+    if argv[:1] != ["git"]:
+        return True
+    operands = [token for token in argv[1:] if not token.startswith("-")]
+    if not operands:
+        return False
+    if operands[0] in NETWORK_GIT_SUBCOMMANDS:
+        return True
+    return (
+        operands[0] == "remote"
+        and len(operands) > 1
+        and operands[1] in NETWORK_GIT_REMOTE_ACTIONS
+    )
+
+
+def offline_aware_command_runner(args: argparse.Namespace) -> Any:
+    """The resolver an `--offline`-capable subcommand must use.
+
+    One selector for every probe a subcommand makes: `doctor --repo --offline`
+    shipped with the reality checks routed through it and the floor-reference
+    probe still hard-wired to the network runner, so the "offline" run reached
+    the remote anyway.
+    """
+    if getattr(args, "offline", False):
+        return local_only_command_output
+    return bounded_command_output
+
+
+def local_only_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """`audit --offline`: answer local resolvers, refuse every network one.
+
+    A refused resolver returns "did not answer", which every caller already
+    reports as UNPROVEN — the audit stays honest about what it did not
+    measure instead of pretending an unmeasured remote is fine.
+    """
+    if command_reaches_the_network(argv):
+        return False, ""
+    return bounded_command_output(argv, cwd, timeout)
+
+
+# The runners that accept a `timeout`, and so can be clamped to what is left of
+# the aggregate budget. A test's fake runner is deliberately not one of them.
+CLAMPABLE_COMMAND_RUNNERS = (bounded_command_output, local_only_command_output)
+
+
+def output_before_deadline(
+    command_runner: Any,
+    argv: list[str],
+    cwd: Path | None,
+    deadline: float | None,
+) -> tuple[bool, str]:
+    """Run a resolver without overrunning the audit's aggregate budget.
+
+    The clock is read ONCE, before the call: an exhausted budget starts no new
+    process, and the per-command timeout is clamped to what is left, so the
+    whole sweep is bounded by the budget plus at most one in-flight command.
+    Unlike `dispatch.py`, a late answer is KEPT rather than discarded — a hook
+    must not delay a tool call, but an audit has no latency contract, and
+    throwing away a measurement that already proved a remote PUBLIC would turn
+    the exact finding this exists to make into an UNPROVEN.
+    """
+    if deadline is None:
+        return command_runner(argv, cwd)
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return False, ""
+    # Every production runner takes the clamp, not just the network one:
+    # `--offline` still shells out to local git, and a `status`/`ls-files`/
+    # `rev-list` on a network-mounted checkout can be slow enough to overrun
+    # the advertised aggregate budget with its own 3s default. A test's fake
+    # runner takes no timeout, so it is called with the plain signature.
+    if command_runner in CLAMPABLE_COMMAND_RUNNERS:
+        return command_runner(
+            argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
+        )
+    return command_runner(argv, cwd)
+
+
+def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
+    return {"check": check, "status": status, "detail": detail}
+
+
+# `git remote --verbose` preserves URL userinfo, so a remote configured as
+# `https://ci-user:PAT@host/acme/repo.git` carries a live credential. Every
+# finding this module renders reaches stdout, `--json` and the `doctor --repo`
+# detail, so the token is stripped before it is stored, never at the printer.
+_REMOTE_USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", re.IGNORECASE)
+
+
+def redact_remote_url(url: str) -> str:
+    """Return the remote URL with any embedded credential replaced.
+
+    Two places a credential rides in a remote URL, and both reach stdout,
+    `--json` and the `doctor --repo` detail:
+
+    * userinfo — `https://ci-user:PAT@host/acme/repo.git`. Only
+      scheme-qualified userinfo is redacted: `git@github.com:owner/repo` is scp
+      syntax whose `git` is a fixed account name, not a secret, and blanking it
+      would make the finding harder to act on for no gain.
+    * query/fragment — `https://gitlab.example/acme/repo.git?private_token=PAT`.
+      Nothing downstream needs it (`github_repo_slug` already stops at `?`), so
+      the whole tail is dropped rather than parsed for known parameter names,
+      which would keep failing open on the next host's spelling.
+    """
+    redacted = _REMOTE_USERINFO.sub(r"\1***@", url.strip())
+    parts = re.split(r"([?#])", redacted, maxsplit=1)
+    if len(parts) == 1:
+        return redacted
+    return f"{parts[0]}{parts[1]}<redacted>"
+
+
+def github_repo_slug(remote: str) -> str:
+    """Return owner/repo for a github.com remote, without any credentials.
+
+    An `ssh://` URL may carry a port (`ssh://git@github.com:22/owner/repo.git`,
+    which git resolves as `ssh -p 22 git@github.com` with path `/owner/repo`).
+    Without `(?::\\d+)?` the port was captured as the owner, so `gh` was asked
+    about `22/owner` and a genuinely public origin degraded to UNPROVEN instead
+    of raising the mismatch. `(?::\\d+)?` is optional and backtracks, so the
+    portless `ssh://git@github.com:owner/repo` spelling still parses.
+    """
+    patterns = (
+        r"^(?:https?|git)://(?:[^/@]+@)?github\.com(?::\d+)?/([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
+        r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, remote.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).removesuffix(".git")
+    return ""
+
+
+def configured_push_remote(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> tuple[str, bool]:
+    """(remote `git push` targets, whether that selection was measured).
+
+    `origin` is only git's LAST fallback. `branch.<name>.pushRemote`,
+    `remote.pushDefault` and `branch.<name>.remote` each override it, in that
+    order, so a repo with a private `origin` and
+    `remote.pushDefault = public-mirror` publishes to the public one — while an
+    origin-only rule downgraded that PUBLIC result to an exit-0 advisory.
+
+    Every query is `git config`, which reads local files and stays available
+    under `--offline`. `git config --get` also exits non-zero for an UNSET key,
+    so a failed probe cannot be told from an absent one — which is fine while
+    the budget holds and a lie once it does not. An exhausted budget therefore
+    returns `False` for the second element rather than guessing `origin`: the
+    caller reports the whole check UNPROVEN instead of downgrading a public
+    push endpoint to an advisory it never measured.
+    """
+
+    def exhausted() -> bool:
+        return deadline is not None and deadline - monotonic() <= 0
+
+    def configured(key: str) -> str:
+        resolved, value = output_before_deadline(
+            command_runner, ["git", "config", "--get", key], repo, deadline
+        )
+        return value.strip() if resolved else ""
+
+    if exhausted():
+        return PUBLISHING_REMOTE, False
+    resolved, branch = output_before_deadline(
+        command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
+    )
+    branch = branch.strip() if resolved else ""
+    candidates = []
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.pushRemote")
+    candidates.append("remote.pushDefault")
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.remote")
+    for key in candidates:
+        if exhausted():
+            return PUBLISHING_REMOTE, False
+        configured_name = configured(key)
+        if configured_name:
+            return configured_name, True
+    return PUBLISHING_REMOTE, not exhausted()
+
+
+def configured_remote_urls(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Enumerate (name, url, direction) rows; False when git was silent.
+
+    The NAME matters: publishing happens to `origin`, so a public `upstream`
+    on a private fork is a normal topology rather than an exposure. So does the
+    DIRECTION: `git remote --verbose` prints the fetch and push endpoints on
+    separate rows, and `remote.<name>.pushurl` may differ from
+    `remote.<name>.url`, so discarding the third field made a public fetch
+    endpoint look like the place work is published.
+    """
+    resolved, output = output_before_deadline(
+        command_runner, ["git", "remote", "--verbose"], repo, deadline
+    )
+    if not resolved:
+        return False, []
+    rows = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        direction = parts[2].strip("()").lower() if len(parts) > 2 else ""
+        # A row with no direction is git's own default: the same endpoint is
+        # both fetched from and pushed to.
+        rows.append((parts[0], parts[1], direction if direction else "push"))
+    return True, list(dict.fromkeys(rows))
+
+
+def publishing_remote_endpoints(
+    rows: list[tuple[str, str, str]],
+    publishing_remote: str = PUBLISHING_REMOTE,
+) -> list[tuple[str, str, bool, str]]:
+    """Fold `git remote -v` rows into (name, url, publishes, note) entries.
+
+    `publishes` is what decides MISMATCH vs advisory. It is true only for a URL
+    work can actually be pushed to under the remote this repo publishes
+    through:
+
+    * a URL that is a PUSH endpoint — a public `url` behind a private
+      `pushurl` is a fetch mirror, not a place anything is published;
+    * of ``publishing_remote`` — which is `origin` only as git's LAST fallback;
+      `configured_push_remote` resolves `branch.<name>.pushRemote` and
+      `remote.pushDefault` first, because a repo with a private `origin` and
+      `remote.pushDefault = public-mirror` publishes to the public one;
+    * or of ANY remote when the resolved publishing remote is not configured at
+      all. The origin-only rule presumed a private `origin` exists; with none,
+      calling the one remote that carries the work "not the publishing remote"
+      turned a real exposure into an exit-0 advisory.
+
+    `note` is the clause that explains a non-publishing verdict, so the finding
+    says which of the reasons applied.
+    """
+    by_name: dict[str, dict[str, list[str]]] = {}
+    for name, url, direction in rows:
+        endpoints = by_name.setdefault(name, {"fetch": [], "push": []})
+        bucket = endpoints["push" if direction == "push" else "fetch"]
+        if url not in bucket:
+            bucket.append(url)
+    # git's "dot repository": `remote.pushDefault = .` pushes into THIS
+    # repository, so no configured remote is a publishing endpoint. Passing the
+    # literal `.` through would match no remote and then trip the "no
+    # publishing remote is configured, so treat them all as publishing" rule —
+    # a hard MISMATCH for a public origin an ordinary push never reaches.
+    pushes_locally = publishing_remote == LOCAL_PUSH_REMOTE
+    has_publishing_remote = publishing_remote in by_name
+    entries: list[tuple[str, str, bool, str]] = []
+    for name, endpoints in by_name.items():
+        # git prints both rows; a fetch-only listing means the same endpoint.
+        push_urls = endpoints["push"] or endpoints["fetch"]
+        publishes_here = not pushes_locally and (
+            name == publishing_remote or not has_publishing_remote
+        )
+        for url in dict.fromkeys(endpoints["fetch"] + endpoints["push"]):
+            if pushes_locally:
+                note = (
+                    f"git pushes to the local repository ({LOCAL_PUSH_REMOTE}), so "
+                    f"nothing is published to {name}"
+                )
+            elif not publishes_here:
+                note = (
+                    f"{name} is not the publishing remote ({publishing_remote}), "
+                    "so never push this repo there"
+                )
+            elif url not in push_urls:
+                note = f"{name} only FETCHES from this URL; it pushes to " + ", ".join(
+                    redact_remote_url(each) for each in push_urls
+                )
+            elif has_publishing_remote:
+                note = (
+                    ""
+                    if publishing_remote == PUBLISHING_REMOTE
+                    else f"git is configured to push to {publishing_remote}, "
+                    f"not {PUBLISHING_REMOTE}"
+                )
+            else:
+                note = (
+                    f"no remote named {publishing_remote!r} is configured, so "
+                    f"{name} is treated as a publishing remote"
+                )
+            entries.append((name, url, publishes_here and url in push_urls, note))
+    # Spend the shared probe budget on the endpoints that can produce a
+    # MISMATCH first. The caller walks this list under one aggregate deadline,
+    # so with git's alphabetical remote order a handful of slow advisory
+    # remotes ahead of `origin` could exhaust it and leave the one exposure
+    # this check exists to catch reported as UNPROVEN — an exit-0 pass.
+    return sorted(entries, key=lambda entry: not entry[2])
+
+
+def github_visibility(
+    slug: str, repo: Path, command_runner: Any, deadline: float | None
+) -> str:
+    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked.
+
+    The slug is pinned to `github.com/`. `gh repo view` accepts
+    `[HOST/]OWNER/REPO` and resolves a bare `OWNER/REPO` against `GH_HOST` or
+    the default authenticated host, so on a machine pointed at a GitHub
+    Enterprise instance the probe could answer PRIVATE about an entirely
+    different repository that happens to share the slug — while the
+    github.com remote this finding is about is public.
+    """
+    resolved, output = output_before_deadline(
+        command_runner,
+        [
+            "gh",
+            "repo",
+            "view",
+            f"github.com/{slug}",
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility",
+        ],
+        repo,
+        deadline,
+    )
+    return output.strip().upper() if resolved else ""
+
+
+def privacy_claim_findings(repo: Path) -> list[dict[str, str]]:
+    """Sibling docs asserting privacy while the overlay is absent: a split."""
+    check = "documented privacy vs the sensitive_data overlay"
+    claims: list[str] = []
+    for name in PRIVACY_CLAIM_DOCS:
+        path = repo / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        match = PRIVACY_CLAIM_PATTERN.search(text)
+        if match:
+            claims.append(f"{name} says {match.group(0)!r}")
+    if not claims:
+        return []
+    return [
+        reality_finding(
+            check,
+            REALITY_ADVISORY,
+            f"{'; '.join(claims)}, but flags.sensitive_data is not declared true — "
+            "the docs and the tier declaration disagree",
+        )
+    ]
+
+
+def sensitive_data_findings(
+    repo: Path,
+    tier_data: dict[str, Any],
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Measure a declared `sensitive_data` overlay against remote visibility."""
+    flags = tier_data.get("flags")
+    declared = bool(flags.get("sensitive_data")) if isinstance(flags, dict) else False
+    if not declared:
+        return privacy_claim_findings(repo)
+    check = "sensitive_data vs actual remote visibility"
+    resolved, remotes = configured_remote_urls(repo, command_runner, deadline)
+    if not resolved:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "`git remote --verbose` did not answer, so no remote visibility "
+                "was measured",
+            )
+        ]
+    if not remotes:
+        return [
+            reality_finding(
+                check, REALITY_OK, "no remote is configured; nothing is published"
+            )
+        ]
+    findings: list[dict[str, str]] = []
+    publishing_remote, selection_proven = configured_push_remote(
+        repo, command_runner, deadline
+    )
+    if not selection_proven:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "the probe budget expired before git's push-remote configuration "
+                "could be read, so which remote publishes this repo is unmeasured; "
+                "assuming `origin` here could downgrade a public push endpoint to "
+                "an advisory",
+            )
+        ]
+    for name, url, publishes, note in publishing_remote_endpoints(
+        remotes, publishing_remote
+    ):
+        shown = redact_remote_url(url)
+        if remote_names_a_network_share(url):
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {shown} is a network share; who can reach it is not "
+                    "machine-checkable here",
+                )
+            )
+            continue
+        if LOCAL_REMOTE_PATTERN.match(url):
+            findings.append(
+                reality_finding(
+                    check, REALITY_OK, f"{name} {shown} is a local-only remote"
+                )
+            )
+            continue
+        slug = github_repo_slug(url)
+        if not slug:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {shown} is not a github.com remote; its visibility is "
+                    "not machine-checkable here",
+                )
+            )
+            continue
+        visibility = github_visibility(slug, repo, command_runner, deadline)
+        if visibility == "PUBLIC":
+            # A public endpoint work is actually PUSHED to is the exposure this
+            # check exists to catch. Anything else — the upstream of a private
+            # fork, a read-only mirror, a public fetch URL behind a private
+            # pushurl — is a normal topology, and hard-failing it with no
+            # allowlist and no escape hatch made the only remedy deleting the
+            # remote.
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_MISMATCH if publishes else REALITY_ADVISORY,
+                    f"flags.sensitive_data is declared true but remote {name} "
+                    f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
+                    f"`gh repo view {slug} --json visibility` -> PUBLIC"
+                    + (f"; {note}" if note else ""),
+                )
+            )
+        elif visibility in {"PRIVATE", "INTERNAL"}:
+            findings.append(
+                reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")
+            )
+        else:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {slug}: `gh repo view` returned "
+                    f"{visibility or '<no output>'}; visibility is unmeasured "
+                    "(offline, unauthenticated, or gh is absent)",
+                )
+            )
+    return findings
+
+
+def human_todo_findings(
+    repo: Path, tier: int, tier_data: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Measure a declared human-action file against the filesystem."""
+    check = "human_todo vs the file on disk"
+    declared = tier_data.get("human_todo")
+    if declared is None:
+        if tier >= 2:
+            return [
+                reality_finding(
+                    check,
+                    REALITY_ADVISORY,
+                    f"T{tier} declares no human_todo "
+                    f"({'null' if 'human_todo' in tier_data else 'absent'}), so law "
+                    "5 has no file to surface in summaries",
+                )
+            ]
+        return []
+    if not isinstance(declared, str) or not declared.strip():
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo must be a repo-relative path or null, not {declared!r}",
+            )
+        ]
+    relative = PurePosixPath(declared.replace("\\", "/"))
+    # `PurePosixPath("C:/Users/...").is_absolute()` is False - no leading slash -
+    # so a drive-absolute declaration slipped past the POSIX test and was then
+    # JOINED to the repo path, where the drive silently won. Reject any value
+    # that carries a Windows drive or root as well.
+    windows_view = PureWindowsPath(declared)
+    if (
+        relative.is_absolute()
+        or windows_view.is_absolute()
+        or windows_view.drive
+        or windows_view.root
+        or ".." in relative.parts
+        # A NUL cannot appear in any path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as `ValueError` -> UNPROVEN -> exit 0.
+        or "\x00" in declared
+    ):
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo {declared!r} is not a repo-relative path",
+            )
+        ]
+    # `Path.is_file()` swallows the OS's refusal to answer, so a permissions
+    # failure or an unavailable mount read as "absent" and produced a hard
+    # MISMATCH claiming a file that may well exist does not. Same guarded stat
+    # as the vendored floor probe: an access failure is UNPROVEN, not a defect.
+    present, access_error = file_presence(repo / relative)
+    if access_error:
+        return [reality_finding(check, REALITY_UNPROVEN, access_error)]
+    if present:
+        return [reality_finding(check, REALITY_OK, f"{declared} exists")]
+    return [
+        reality_finding(
+            check,
+            REALITY_MISMATCH,
+            f"human_todo declares {declared!r} but no such file exists in {repo}",
+        )
+    ]
+
+
+def symlink_target(path: Path) -> str:
+    """The link this path IS, or "" for an ordinary file or an unreadable link.
+
+    Deliberately `lstat`-based: every other probe here follows links, which is
+    right for reading content and wrong for deciding whether a repo vendors
+    bytes of its own.
+    """
+    try:
+        if not path.is_symlink():
+            return ""
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return ""
+
+
+def file_presence(path: Path) -> tuple[bool, str]:
+    """(is a regular file, access error) for one path an audit asks about.
+
+    `Path.is_file()` answers False for BOTH "absent" and "the OS refused to
+    tell me" — a permissions failure or a transient filesystem error therefore
+    read as absence (`[ok] no vendored floor copy`, or a hard `MISMATCH` for a
+    declared `human_todo`), while a stricter Python/platform combination could
+    instead abort the audit. Neither is one of the three states, so the access
+    failure is preserved and reported as UNPROVEN by the caller.
+    """
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False, ""
+    except NotADirectoryError:
+        # A parent component is a file: the path cannot exist.
+        return False, ""
+    except (OSError, ValueError) as exc:
+        return False, f"{path} could not be inspected ({exc}); existence is unproven"
+    return stat.S_ISREG(mode), ""
+
+
+def floor_version(path: Path) -> str:
+    """The FLOOR_VERSION string a dispatcher copy declares, or ""."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = re.search(r'^FLOOR_VERSION\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def floor_identity(path: Path) -> tuple[str, str]:
+    """(normalized sha256, FLOOR_VERSION) for a floor copy; ("", "") if absent."""
+    if not path.is_file():
+        return "", ""
+    try:
+        return normalized_text_sha256(path), floor_version(path)
+    except (OSError, UnicodeDecodeError, UnicodeError):
+        return "", ""
+
+
+def describe_floor(label: str, digest: str, version: str) -> str:
+    if not digest:
+        return f"{label} absent/unreadable"
+    return f"{label} {version or '<no FLOOR_VERSION>'} sha {digest[:12]}"
+
+
+def harness_reference_status(
+    harness_root: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, str]:
+    """Whether this harness checkout may serve as the canonical byte reference.
+
+    The pin/compare primitives read the WORKING TREE, so a floor branch or a
+    dirty tree would make unmerged bytes the reference. Refuse, and say so.
+    """
+    resolved, branch = output_before_deadline(
+        command_runner,
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return False, f"the branch of harness checkout {harness_root} is unresolvable"
+    if branch.strip() != "main":
+        return (
+            False,
+            f"harness checkout {harness_root} is on {branch.strip() or '<unknown>'!r}, "
+            "not main, so its working tree is not the canonical reference",
+        )
+    resolved, dirty = output_before_deadline(
+        command_runner,
+        ["git", "status", "--porcelain", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the working-tree state of harness checkout {harness_root} is "
+            "unresolvable",
+        )
+    if dirty.strip():
+        return (
+            False,
+            f"harness checkout {harness_root} has uncommitted templates/hooks "
+            "changes, so its working tree is not the canonical reference",
+        )
+    # "Clean" is only as trustworthy as the index. `skip-worktree` (S) and
+    # `assume-unchanged` (lowercase tag) both make `git status` omit a file's
+    # local edits, so a modified template would report clean and then be hashed
+    # from the working tree — the vendored copy matching that hidden edit would
+    # read `ok` while published HEAD holds different canonical bytes.
+    resolved, index_flags = output_before_deadline(
+        command_runner,
+        ["git", "ls-files", "-v", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the index flags of harness checkout {harness_root} are unresolvable",
+        )
+    hidden = sorted(
+        line.split(" ", 1)[1]
+        for line in index_flags.splitlines()
+        if line[:1] and (line[0].islower() or line[0] == "S") and " " in line
+    )
+    if hidden:
+        return (
+            False,
+            f"harness checkout {harness_root} marks {', '.join(hidden)} "
+            "skip-worktree/assume-unchanged, so `git status` cannot see local "
+            "edits there and this working tree is not the canonical reference",
+        )
+    # Clean on a local `main` is not the same as agreeing with the published
+    # one: unpushed commits to templates/hooks, or a main that is behind, would
+    # otherwise be called canonical. This first query reads refs only, so it
+    # answers the common case cheaply and with a diagnosis.
+    resolved, divergence = output_before_deadline(
+        command_runner,
+        ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
+        harness_root,
+        deadline,
+    )
+    counts = divergence.split() if resolved else []
+    if len(counts) == 2 and all(count.isdigit() for count in counts):
+        behind, ahead = counts
+        if behind != "0" or ahead != "0":
+            return (
+                False,
+                f"harness checkout {harness_root} is {ahead} ahead of and "
+                f"{behind} behind origin/main, so its working tree is not the "
+                "canonical reference",
+            )
+    # `origin/main` is a LOCAL tracking ref. Unfetched, it can be arbitrarily
+    # far behind the published branch, and `rev-list` then reports `0 0` for a
+    # working tree that is stale — a vendored copy matching that obsolete
+    # template would report `ok` while it has drifted from the published floor.
+    # Prove currency against the remote, and when the remote cannot be asked
+    # (offline, unreachable) say the reference is unproven rather than assume
+    # it: `vendored_floor_findings` renders that as UNPROVEN, never as a pass.
+    resolved_head, head = output_before_deadline(
+        command_runner, ["git", "rev-parse", "HEAD"], harness_root, deadline
+    )
+    resolved_published, published = output_before_deadline(
+        command_runner,
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        harness_root,
+        deadline,
+    )
+    fields = published.split() if resolved_published else []
+    published_tip = fields[0] if fields else ""
+    if not resolved_head or not published_tip:
+        return (
+            False,
+            f"harness checkout {harness_root} is clean on main, but the published "
+            "main tip could not be read (offline, or origin is unreachable), so "
+            "this working tree cannot be proven current",
+        )
+    if head.strip() != published_tip:
+        return (
+            False,
+            f"harness checkout {harness_root} is clean on main at "
+            f"{head.strip()[:12]}, but published main is at {published_tip[:12]} — "
+            "the local origin/main is stale, so this working tree is not the "
+            "canonical reference",
+        )
+    return (
+        True,
+        f"harness checkout {harness_root} is clean on main and level with "
+        f"origin/main at the published tip {published_tip[:12]}",
+    )
+
+
+def vendored_floor_findings(
+    repo: Path,
+    harness_root: Path,
+    claude_home: Path,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Compare a repo's vendored floor bytes with template and deployed copies."""
+    vendored: list[tuple[str, Path]] = []
+    inaccessible: list[tuple[str, str]] = []
+    for directory in VENDORED_FLOOR_DIRS:
+        for name in VENDORED_FLOOR_FILES:
+            label = f"{directory}/{name}"
+            path = repo / directory / name
+            # The link is inspected BEFORE anything follows it. `stat()` follows
+            # links, so a `hooks/dispatch.py` symlinked to the harness template
+            # hashed the TARGET and reported the repo as matching canonical
+            # bytes — while the repo vendors none, and the link may resolve
+            # elsewhere, or nowhere, on the next machine. A DANGLING link is
+            # the same claim with the follow already failed: guarding this on
+            # `present` let `[ok] no vendored floor copy` through for it.
+            target = symlink_target(path)
+            if target:
+                present, access_error = False, (
+                    f"{path} is a symlink to {target}; the bytes it resolves "
+                    "to are this machine's, not this repo's vendored floor"
+                )
+            else:
+                present, access_error = file_presence(path)
+            if access_error:
+                inaccessible.append((label, access_error))
+            elif present:
+                vendored.append((label, path))
+    findings: list[dict[str, str]] = [
+        # A path that cannot be traversed or stat'ed is neither "no vendored
+        # copy" nor a compared one; the three-state contract calls it UNPROVEN.
+        reality_finding(
+            f"vendored {label} vs canonical bytes", REALITY_UNPROVEN, access_error
+        )
+        for label, access_error in inaccessible
+    ]
+    if not vendored:
+        if findings:
+            return findings
+        # Say it. A leg that emits nothing at all cannot be told apart from a
+        # leg that ran and found no drift.
+        return [
+            reality_finding(
+                "vendored floor bytes vs canonical bytes",
+                REALITY_OK,
+                "no vendored floor copy under "
+                + " or ".join(f"{directory}/" for directory in VENDORED_FLOOR_DIRS)
+                + f" in {repo}; nothing to drift from the shared dispatcher",
+            )
+        ]
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, command_runner, deadline
+    )
+    for label, path in vendored:
+        name = path.name
+        check = f"vendored {label} vs canonical bytes"
+        repo_digest, repo_version = floor_identity(path)
+        template = harness_root / "templates" / "hooks" / name
+        deployed = claude_home / "hooks" / name
+        template_digest, template_version = floor_identity(template)
+        deployed_digest, deployed_version = floor_identity(deployed)
+        parts = [
+            describe_floor("vendored", repo_digest, repo_version),
+            describe_floor("canonical template", template_digest, template_version),
+            describe_floor("deployed global", deployed_digest, deployed_version),
+        ]
+        notes: list[str] = []
+        status = REALITY_OK
+        if not repo_digest:
+            status = REALITY_UNPROVEN
+            notes.append(f"{path} could not be hashed")
+        else:
+            if reference_ok and template_digest:
+                if template_digest != repo_digest:
+                    status = REALITY_MISMATCH
+                    notes.append("vendored bytes differ from the canonical template")
+            else:
+                status = REALITY_UNPROVEN
+                notes.append(
+                    "not compared with the canonical template: "
+                    + (reference_detail if not reference_ok else f"{template} absent")
+                )
+            # The deployed global copy is a fact about the AUDITING MACHINE,
+            # not about this repo. Promoting that difference to MISMATCH made
+            # `audit` non-hermetic: an operator who had not run
+            # `sync-global --apply` since the last FLOOR_VERSION bump failed a
+            # repo gate from their home directory, while the same repo passed
+            # on a CI runner with no `~/.claude` at all. `doctor` owns machine
+            # state (`shared dispatcher`, `floor version`); `audit` records it.
+            if not deployed_digest:
+                notes.append(
+                    f"no deployed global copy at {deployed} on this machine, so "
+                    "the deployed comparison was skipped"
+                )
+            elif deployed_digest != repo_digest:
+                if status == REALITY_OK:
+                    status = REALITY_ADVISORY
+                notes.append(
+                    "vendored bytes differ from the deployed global copy on this "
+                    "machine — a machine-state observation, not a repo defect; "
+                    "reconcile with `harness.py doctor` and `sync-global --apply`"
+                )
+        detail = "; ".join(parts)
+        if notes:
+            detail = f"{detail} — {'; '.join(notes)}"
+        findings.append(reality_finding(check, status, detail))
+    return findings
+
+
+def reality_findings(
+    repo: Path,
+    tier: int,
+    tier_data: dict[str, Any],
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> list[dict[str, str]]:
+    """Every declaration this repo makes that is cheaply checkable for real."""
+    if harness_root is None:
+        harness_root = Path(__file__).resolve().parent
+    if claude_home is None:
+        claude_home = Path.home() / ".claude"
+    if deadline is None:
+        deadline = monotonic() + REALITY_BUDGET_SECONDS
+    findings = sensitive_data_findings(
+        repo, tier_data, command_runner=command_runner, deadline=deadline
+    )
+    findings.extend(
+        vendored_floor_findings(
+            repo,
+            harness_root,
+            claude_home,
+            command_runner=command_runner,
+            deadline=deadline,
+        )
+    )
+    findings.extend(human_todo_findings(repo, tier, tier_data))
+    return findings
+
+
+def audit_repo(
+    path: Path,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> dict[str, Any]:
     repo = git_root(path)
     config_path, tier_data = load_tier(repo)
     issues: list[str] = []
@@ -1139,6 +2197,17 @@ def audit_repo(path: Path) -> dict[str, Any]:
         issues.append("missing root AGENTS.md")
     issues.extend(budget_issues(repo, tier))
     issues.extend(stale_path_issues(repo))
+    findings = reality_findings(
+        repo,
+        tier,
+        tier_data,
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
+        deadline=deadline,
+    )
+    mismatches = [f for f in findings if f["status"] == REALITY_MISMATCH]
+    unproven = [f for f in findings if f["status"] == REALITY_UNPROVEN]
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
@@ -1146,7 +2215,12 @@ def audit_repo(path: Path) -> dict[str, Any]:
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
-        "ok": not issues,
+        "reality": findings,
+        # `ok` is the exit code, not a claim that everything was measured:
+        # `unproven` is what a consumer needs to tell a clean run from an
+        # unmeasured one.
+        "unproven": len(unproven),
+        "ok": not issues and not mismatches,
     }
 
 
@@ -1167,11 +2241,6 @@ def seed_repo(args: argparse.Namespace) -> int:
         "name": TIER_NAMES[args.tier],
         "authority": {"push": args.push, "merge": args.merge},
         "flags": flags,
-        "model_routing": {
-            "harness_and_review": "sol",
-            "slices": "terra",
-            "maintenance": "luna",
-        },
         "budgets": {
             "standing_context_tokens": {1: 1000, 2: 3000, 3: 6000, 4: 8000}.get(
                 args.tier, 200
@@ -3186,6 +4255,43 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
+    # `harness_reference_status` reaches the remote for the published main tip,
+    # so this probe answers to `--offline` exactly like the repo reality checks
+    # below; otherwise a supposedly offline run still waits out `git ls-remote`.
+    # ONE budget for every probe this command makes. The floor-version check
+    # and the `--repo` reality checks both call `harness_reference_status`, so
+    # a separate deadline each let an unreachable harness origin be waited out
+    # twice — and let the two legs report different reference states.
+    probe_deadline = monotonic() + REALITY_BUDGET_SECONDS
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, offline_aware_command_runner(args), probe_deadline
+    )
+    template_version = floor_version(
+        harness_root / "templates" / "hooks" / "dispatch.py"
+    )
+    deployed_version = floor_version(claude_home / "hooks" / "dispatch.py")
+    # When the working-tree template is not the canonical reference, this
+    # comparison cannot certify anything: reporting it as a pass would call
+    # unmerged branch bytes the canonical floor. It is UNPROVEN, and UNPROVEN
+    # never renders as `[ok]`.
+    checks.append(
+        (
+            "floor version",
+            (
+                (bool(template_version) and template_version == deployed_version)
+                if reference_ok
+                else REALITY_UNPROVEN
+            ),
+            f"canonical template {template_version or '<unreadable>'}; deployed "
+            f"global {deployed_version or '<unreadable>'}; reference integrity: "
+            f"{reference_detail}"
+            + (
+                ""
+                if reference_ok
+                else " — nothing here was compared against canonical bytes"
+            ),
+        )
+    )
     if args.repo:
         try:
             marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
@@ -3425,24 +4531,102 @@ def doctor(args: argparse.Namespace) -> int:
                 project_detail,
             )
         )
+        try:
+            reality_repo = git_root(Path(args.repo))
+            _reality_config, reality_tier_data = load_tier(reality_repo)
+            reality_tier = (
+                reality_tier_data.get("tier")
+                if reality_tier_data.get("tier") in TIER_NAMES
+                else 1
+            )
+            findings = reality_findings(
+                reality_repo,
+                reality_tier,
+                reality_tier_data,
+                harness_root=harness_root,
+                claude_home=claude_home,
+                # `doctor --repo` runs the same reality checks as `audit`, so
+                # it needs the same escape hatch: without it an operator off
+                # network waits out the whole probe budget on `gh` and remote
+                # ref lookups before every one of them degrades to UNPROVEN.
+                command_runner=offline_aware_command_runner(args),
+                deadline=probe_deadline,
+            )
+            statuses = {finding["status"] for finding in findings}
+            reality_ok: bool | str = True
+            if REALITY_MISMATCH in statuses:
+                reality_ok = False
+            elif REALITY_UNPROVEN in statuses:
+                reality_ok = REALITY_UNPROVEN
+            reality_detail = (
+                "; ".join(
+                    f"[{finding['status']}] {finding['check']}: {finding['detail']}"
+                    for finding in findings
+                )
+                or "this repo declares nothing that is checkable against reality"
+            )
+        except (HarnessError, OSError, UnicodeError) as exc:
+            reality_ok = False
+            reality_detail = str(exc)
+        checks.append(("declared vs real", reality_ok, reality_detail))
+    # Three states, one renderer: a check that could not run prints as
+    # UNPROVEN, never as `[ok]`. It is not a failure either — an unprovable
+    # canonical reference is a property of where the operator is standing, not
+    # a defect in the floor being audited.
     for label, ok, detail in checks:
-        print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
-    return 0 if all(ok for _, ok, _ in checks) else 1
+        if ok == REALITY_UNPROVEN:
+            state = REALITY_UNPROVEN
+        else:
+            state = "ok" if ok else "FAIL"
+        print(f"[{state}] {label}: {detail}")
+    return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
-def audit_command(args: argparse.Namespace) -> int:
-    result = audit_repo(Path(args.path))
+def audit_command(
+    args: argparse.Namespace,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any | None = None,
+) -> int:
+    """Render one audit. The seams exist so a test never runs the real world.
+
+    `audit_repo` already takes the harness checkout, the deployed `~/.claude`
+    copy and the resolver as arguments; without the same seams here, any test
+    that exercises the RENDERING falls back to the real harness checkout, the
+    real home directory and a real `git`/`gh` — which is exactly the
+    auditing-machine dependence these checks exist to remove.
+    """
+    if command_runner is None:
+        command_runner = offline_aware_command_runner(args)
+    result = audit_repo(
+        Path(args.path),
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
+    )
     if args.json:
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
         print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
         print(result["git"])
-        if result["issues"]:
-            for issue in result["issues"]:
-                print(f"[FAIL] {issue}")
-        else:
-            print("[ok] harness audit")
+        for issue in result["issues"]:
+            print(f"[FAIL] {issue}")
+        for finding in result["reality"]:
+            print(f"[{finding['status']}] {finding['check']}: {finding['detail']}")
+        if result["ok"]:
+            # An unproven check is neither a pass nor a failure, so the summary
+            # line has to say how much of this run was actually measured.
+            unproven = result["unproven"]
+            print(
+                "[ok] harness audit"
+                + (
+                    f" — {unproven} check(s) UNPROVEN and therefore not passed"
+                    if unproven
+                    else ""
+                )
+            )
     return 0 if result["ok"] else 1
 
 
@@ -3452,6 +4636,11 @@ def parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="validate a repository harness")
     audit.add_argument("path", nargs="?", default=".")
     audit.add_argument("--json", action="store_true")
+    audit.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver; unmeasured checks report UNPROVEN",
+    )
     audit.set_defaults(func=audit_command)
 
     seed = sub.add_parser(
@@ -3487,6 +4676,12 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--skills-home")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
+    )
+    check.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver in the --repo reality checks; "
+        "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
     return root
