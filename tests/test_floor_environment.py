@@ -445,38 +445,86 @@ class SiblingSuiteHermeticityTests(unittest.TestCase):
                     verdict[0] if isinstance(verdict, tuple) else verdict, "allow"
                 )
 
-    # This module deliberately calls the raw check() to prove the helper is
-    # load-bearing (see bare()), so it is the one permitted exception.
-    RAW_CHECK_ALLOWED = {"test_floor_environment.py"}
+    # tests/floor_environment.py IS the wrapper, and this module deliberately
+    # calls the raw check() to prove the wrapper is load-bearing (see bare()).
+    # Those two are the only permitted exceptions.
+    RAW_CHECK_ALLOWED = {"floor_environment.py", "test_floor_environment.py"}
+
+    @staticmethod
+    def raw_check_calls(tree):
+        """Line numbers of every `check(...)` / `<x>.check(...)` call.
+
+        Structural, and deliberately not gated on how the file happens to spell
+        its dispatch import. An earlier revision only scanned files containing
+        the literal token `"dispatch.py"`, so a suite written with
+        `ROOT / 'templates' / 'hooks' / 'dispatch.py'`, with
+        `importlib.import_module`, or against an already-loaded dispatch module
+        would have re-introduced the host dependency while this test stayed
+        green. Scanning every module under tests/ removes the spelling from the
+        guard entirely; the direction of the error is a false positive on some
+        unrelated `.check()` method, which is loud and easy to allowlist.
+        """
+        # A module that defines its own `check` (several wrap hermetic_check
+        # under that name, at module level or nested inside a test) owns the
+        # bare name, so only the attribute form is an offender there.
+        defines_check = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "check"
+            for node in ast.walk(tree)
+        )
+        lines = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "check":
+                lines.append(node.lineno)
+            elif (
+                isinstance(func, ast.Name) and func.id == "check" and not defines_check
+            ):
+                lines.append(node.lineno)
+        return lines
 
     def test_no_suite_calls_the_raw_check(self):
-        """A new suite cannot quietly re-introduce a hand-rolled helper.
-
-        A substring scan is not enough: `hermetic_check(...)` and
-        `dispatch.check(...)` differ by one character. Match the call shape
-        `<anything>.check(...)` in the AST instead, in any file that loads the
-        real dispatch.py.
-        """
+        """A new suite cannot quietly re-introduce a hand-rolled helper."""
         offenders = []
-        for path in sorted(TESTS_DIR.glob("test_*.py")):
+        for path in sorted(TESTS_DIR.glob("*.py")):
             if path.name in self.RAW_CHECK_ALLOWED:
                 continue
-            source = path.read_text(encoding="utf-8")
-            if '"dispatch.py"' not in source:
-                continue
-            for node in ast.walk(ast.parse(source)):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "check"
-                ):
-                    offenders.append(f"{path.name}:{node.lineno}")
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            offenders.extend(
+                f"{path.name}:{line}" for line in self.raw_check_calls(tree)
+            )
         self.assertEqual(
             offenders,
             [],
             "these call the real dispatch.check directly instead of "
             "tests/floor_environment.hermetic_check, so their verdicts depend "
             "on the host's Git configuration",
+        )
+
+    def test_the_guard_sees_every_spelling_of_the_raw_call(self):
+        """The guard itself needs a test: it is what stops the regression.
+
+        Each of these is a way a future suite could reach the real check()
+        while the retired substring gate ('"dispatch.py"' in source) stayed
+        silent.
+        """
+        for source in (
+            "d = load(ROOT / 'templates' / 'hooks' / 'dispatch.py')\nd.check('git log')",
+            "import dispatch\ndispatch.check('git log')",
+            "from dispatch import check\ncheck('git log')",
+            "floor = sys.modules['dispatch']\nfloor.check('git log')",
+            "self.dispatch.check('git log')",
+        ):
+            with self.subTest(source=source.splitlines()[-1]):
+                self.assertTrue(self.raw_check_calls(ast.parse(source)), source)
+        # ...and the wrapper call must NOT be flagged, or every suite fails.
+        self.assertEqual(
+            self.raw_check_calls(
+                ast.parse("floor_environment.hermetic_check(dispatch, 'git log')")
+            ),
+            [],
         )
 
 
