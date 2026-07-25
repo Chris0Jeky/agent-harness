@@ -1018,18 +1018,29 @@ class HarnessTests(unittest.TestCase):
                 self.assertTrue(
                     harness.requirements_hook_path_is_locally_probeable(value)
                 )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_a_unc_windows_managed_dir_is_never_stat_probed(self) -> None:
         with mock.patch.object(
             harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
         ):
             harness.validate_requirements_hook_paths(
-                {
-                    "managed_dir": "//fileserver/codex/hooks",
-                    "windows_managed_dir": "\\\\fileserver\\codex\\hooks",
-                }
+                {"windows_managed_dir": "\\\\fileserver\\codex\\hooks"}
             )
-        # The absoluteness rule still applies to a UNC-looking relative value.
-        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
-            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX-only managed field")
+    def test_a_double_slash_posix_managed_dir_is_probed(self) -> None:
+        # The UNC exemption answers about WINDOWS path semantics. On POSIX
+        # `//missing/share` is an ordinary absolute path, so reparsing it as a
+        # share would skip the probe and certify a directory Codex cannot load.
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths({"managed_dir": "//missing/share"})
 
     def test_local_windows_device_paths_are_still_probed(self) -> None:
         # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
@@ -2542,7 +2553,8 @@ allow_local_binding = true
                                         f"$expected='{pin}'; "
                                         "$d=$env:USERPROFILE"
                                         "+'/.claude/hooks/dispatch.py'; "
-                                        "$w='$HOME/work/repo/invoke_deny_floor.ps1'; "
+                                        '$w="$env:USERPROFILE'
+                                        '/work/repo/invoke_deny_floor.ps1"; '
                                         "& $w"
                                     ),
                                     "timeout": 5,
@@ -2582,6 +2594,93 @@ allow_local_binding = true
                     ),
                     token,
                 )
+
+    def test_a_powershell_home_anchor_is_not_cwd_independent_on_posix(self) -> None:
+        # `$env:USERPROFILE` is PowerShell-only: a POSIX shell expands `$env`
+        # to nothing and runs `:USERPROFILE/...`, so the floor never starts.
+        # Certifying it from a foreign cwd would be a false green.
+        value = "$env:USERPROFILE/work/repo/invoke_deny_floor.sh"
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=False
+            )
+        )
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=True
+            )
+        )
+        self.assertFalse(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=False)
+        )
+        self.assertTrue(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=True)
+        )
+        # `$HOME` and `~` expand in both shells, so they are accepted on both.
+        for portable in (
+            "$HOME/work/repo/invoke_deny_floor.sh",
+            "~/work/repo/invoke_deny_floor.sh",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=portable, windows=windows):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            portable, reject_relative_wrapper=True, windows=windows
+                        )
+                    )
+
+    def test_a_single_quoted_home_anchor_never_expands(self) -> None:
+        # Single quotes suppress expansion in BOTH sh and PowerShell, so the
+        # shell invokes a literal `$HOME` directory and the floor never runs.
+        for value in (
+            "'$HOME/work/repo/invoke_deny_floor.sh'",
+            "'~/work/repo/invoke_deny_floor.sh'",
+            "'$env:USERPROFILE/work/repo/invoke_deny_floor.ps1'",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=value, windows=windows):
+                    self.assertFalse(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=True, windows=windows
+                        ),
+                        value,
+                    )
+        # A double-quoted variable still expands; a double-quoted `~` does not.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                '"$HOME/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                '"~/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_single_quoted_wrapper_operand_is_not_certified(self) -> None:
+        # The same rule at the invocation site: `shlex` removes the quotes, so
+        # the raw segment is consulted for the character before the token.
+        self.assertFalse(
+            harness.segment_invokes_wrapper(
+                "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+                set(),
+                reject_relative=True,
+            )
+        )
+        self.assertTrue(
+            harness.segment_invokes_wrapper(
+                "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+                set(),
+                reject_relative=True,
+            )
+        )
+        # Both still parse as a wrapper invocation when relativity is allowed.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(harness.segment_invokes_wrapper(segment, set()))
 
     def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:
         pin = "a" * 64
