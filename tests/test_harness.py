@@ -5600,6 +5600,33 @@ class RealityCheckTests(unittest.TestCase):
                 self.assertIn("not a repo-relative path", self.details(result))
                 self.assertFalse(result["ok"])
 
+    def test_an_inaccessible_human_todo_is_unproven_not_a_mismatch(self) -> None:
+        # `Path.is_file()` swallows the OS's refusal, so a permissions failure
+        # or an unavailable mount produced a hard MISMATCH claiming the file is
+        # absent — a repo defect asserted from a machine-state failure.
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        declared = repo / "HUMAN_TODO.md"
+        refused = {declared, repo.resolve() / "HUMAN_TODO.md"}
+        real_stat = Path.stat
+
+        def refuse(self: Path, *args: object, **kwargs: object) -> object:
+            if self in refused:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(harness.Path, "stat", refuse):
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["UNPROVEN"])
+        self.assertIn("could not be inspected", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_missing_human_todo_is_still_a_mismatch(self) -> None:
+        # The guarded stat must not turn ordinary absence into an unproven.
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
     def test_null_human_todo_above_t1_is_advisory_only(self) -> None:
         repo = self.make_repo(tier=3, human_todo=None)
         result = self.audit(repo, FakeCommandRunner())
@@ -5846,12 +5873,10 @@ class RealityCheckTests(unittest.TestCase):
 
         with mock.patch.object(harness.Path, "stat", refuse):
             self.assertEqual(
-                harness.floor_file_presence(denied)[0],
+                harness.file_presence(denied)[0],
                 False,
             )
-            self.assertIn(
-                "could not be inspected", harness.floor_file_presence(denied)[1]
-            )
+            self.assertIn("could not be inspected", harness.file_presence(denied)[1])
             result = self.audit(repo, FakeCommandRunner())
         self.assertEqual(
             self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
@@ -5864,7 +5889,7 @@ class RealityCheckTests(unittest.TestCase):
         # The guarded stat must not turn ordinary absence into an unproven.
         repo = self.make_repo()
         self.assertEqual(
-            harness.floor_file_presence(repo / "hooks" / "dispatch.py"), (False, "")
+            harness.file_presence(repo / "hooks" / "dispatch.py"), (False, "")
         )
         result = self.audit(repo, FakeCommandRunner())
         self.assertEqual(self.statuses(result, "vendored floor bytes"), ["ok"])

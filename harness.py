@@ -1588,7 +1588,14 @@ def human_todo_findings(
                 f"human_todo {declared!r} is not a repo-relative path",
             )
         ]
-    if (repo / relative).is_file():
+    # `Path.is_file()` swallows the OS's refusal to answer, so a permissions
+    # failure or an unavailable mount read as "absent" and produced a hard
+    # MISMATCH claiming a file that may well exist does not. Same guarded stat
+    # as the vendored floor probe: an access failure is UNPROVEN, not a defect.
+    present, access_error = file_presence(repo / relative)
+    if access_error:
+        return [reality_finding(check, REALITY_UNPROVEN, access_error)]
+    if present:
         return [reality_finding(check, REALITY_OK, f"{declared} exists")]
     return [
         reality_finding(
@@ -1599,22 +1606,22 @@ def human_todo_findings(
     ]
 
 
-def floor_file_presence(path: Path) -> tuple[bool, str]:
-    """(is a regular file, access error) for one candidate vendored floor copy.
+def file_presence(path: Path) -> tuple[bool, str]:
+    """(is a regular file, access error) for one path an audit asks about.
 
     `Path.is_file()` answers False for BOTH "absent" and "the OS refused to
     tell me" — a permissions failure or a transient filesystem error therefore
-    read as "no vendored floor copy" and printed `[ok]`, while a stricter
-    Python/platform combination could instead abort the audit. Neither is one
-    of the three states, so the access failure is preserved and reported as
-    UNPROVEN by the caller.
+    read as absence (`[ok] no vendored floor copy`, or a hard `MISMATCH` for a
+    declared `human_todo`), while a stricter Python/platform combination could
+    instead abort the audit. Neither is one of the three states, so the access
+    failure is preserved and reported as UNPROVEN by the caller.
     """
     try:
         mode = path.stat().st_mode
     except FileNotFoundError:
         return False, ""
     except NotADirectoryError:
-        # A parent component is a file: the vendored path cannot exist.
+        # A parent component is a file: the path cannot exist.
         return False, ""
     except (OSError, ValueError) as exc:
         return False, f"{path} could not be inspected ({exc}); existence is unproven"
@@ -1762,7 +1769,7 @@ def vendored_floor_findings(
         for name in VENDORED_FLOOR_FILES:
             label = f"{directory}/{name}"
             path = repo / directory / name
-            present, access_error = floor_file_presence(path)
+            present, access_error = file_presence(path)
             if access_error:
                 inaccessible.append((label, access_error))
             elif present:
