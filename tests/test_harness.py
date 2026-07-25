@@ -2182,6 +2182,38 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_doctor_ignores_a_commented_dispatcher_mention_in_a_sibling(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = json.loads(
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        # A second, unrelated PreToolUse handler that only MENTIONS the
+        # dispatcher inside a comment. The floor candidate count already
+        # strips comments, so the contract check must agree or a lint gate
+        # next door turns a valid adapter into a failure.
+        valid_adapter["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "^Bash$",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo hi # see ~/.claude/hooks/dispatch.py",
+                        "commandWindows": "echo hi # see ~/.claude/hooks/dispatch.py",
+                    }
+                ],
+            }
+        )
+        self.write_hooks(repo, json.dumps(valid_adapter))
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("contract gap", output)
+
     def test_doctor_inventories_wrapper_flag_delegation(self) -> None:
         repo = self.make_repo()
         pin = harness.normalized_text_sha256(

@@ -2634,10 +2634,17 @@ def codex_adapter_contract_notes(
                     windows_hook_command(handler)
                 ),
             }
+            # Candidacy must agree with `repo_codex_floor_candidates`, which
+            # decides on comment-stripped text. A commented-out mention of the
+            # dispatcher is not an adapter handler; treating it as one reported
+            # contract gaps against a handler every floor check ignores, which
+            # turned an unrelated commented command into a false red.
             if not any(
-                ".claude/hooks/dispatch.py" in text.lower().replace("\\", "/")
-                or "invoke_deny_floor" in text.lower()
-                for text in commands.values()
+                ".claude/hooks/dispatch.py" in stripped.lower().replace("\\", "/")
+                or "invoke_deny_floor" in stripped.lower()
+                for stripped in (
+                    strip_shell_comments(text) for text in commands.values()
+                )
             ):
                 continue
             for field, text in commands.items():
