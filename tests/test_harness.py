@@ -5294,6 +5294,90 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
 
+    def test_a_unc_remote_is_unproven_not_a_local_only_pass(self) -> None:
+        # `//server/share/repo.git` starts with `/`, so the local-path rule
+        # called a network share local and printed `ok` without measuring who
+        # can reach it.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\t//fileserver/git/secrets.git (fetch)\n"
+                    "origin\t//fileserver/git/secrets.git (push)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_ordinary_absolute_path_remote_is_still_local(self) -> None:
+        for url in ("/srv/git/widgets.git", "./widgets.git", "~/git/widgets.git"):
+            with self.subTest(url=url):
+                repo = self.make_repo(sensitive_data=True)
+                runner = FakeCommandRunner(
+                    {"remote --verbose": (True, f"origin\t{url} (fetch)")}
+                )
+                result = self.audit(repo, runner)
+                self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+
+    def test_publishing_endpoints_are_probed_before_advisory_ones(self) -> None:
+        # The probe budget is shared. With git's alphabetical remote order, a
+        # few slow advisory remotes ahead of `origin` could exhaust it and
+        # leave the one exposure this check exists to catch as UNPROVEN.
+        entries = harness.publishing_remote_endpoints(
+            [
+                ("aaa-mirror", "https://github.com/acme/mirror.git", "fetch"),
+                ("aaa-mirror", "https://github.com/acme/mirror.git", "push"),
+                ("origin", "https://github.com/acme/widgets.git", "fetch"),
+                ("origin", "https://github.com/acme/widgets.git", "push"),
+                ("zzz-upstream", "https://github.com/upstream/widgets.git", "fetch"),
+            ]
+        )
+        self.assertTrue(entries[0][2], entries)
+        self.assertEqual(entries[0][0], "origin")
+        self.assertEqual(
+            [name for name, _url, publishes, _note in entries if publishes], ["origin"]
+        )
+
+    def test_a_public_origin_survives_a_budget_spent_on_advisory_remotes(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        clock = {"now": 0.0}
+
+        class SlowRunner(FakeCommandRunner):
+            """Every visibility probe burns 3s of the 8s aggregate budget."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    clock["now"] += 3.0
+                return answer
+
+        runner = SlowRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "aaa\thttps://github.com/acme/a.git (fetch)\n"
+                    "aaa\thttps://github.com/acme/a.git (push)\n"
+                    "bbb\thttps://github.com/acme/b.git (fetch)\n"
+                    "bbb\thttps://github.com/acme/b.git (push)\n"
+                    "ccc\thttps://github.com/acme/c.git (fetch)\n"
+                    "ccc\thttps://github.com/acme/c.git (push)\n"
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "gh repo view acme/widgets": (True, "PUBLIC"),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
+            result = self.audit(repo, runner, deadline=8.0)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
     def test_a_public_fetch_url_behind_a_private_pushurl_is_not_a_mismatch(
         self,
     ) -> None:

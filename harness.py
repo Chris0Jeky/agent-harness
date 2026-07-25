@@ -1167,7 +1167,13 @@ PRIVACY_CLAIM_PATTERN = re.compile(
     rf"(?:\s+\w+){{0,2}}\s+private\b",
     re.IGNORECASE,
 )
-LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
+# A remote nothing is published THROUGH a host: a `file://` URL, a drive path,
+# or a relative/home/absolute local path. The leading `//` (or `\\`) authority
+# is excluded: `//server/share/repo.git` is a UNC network share whose reach is
+# exactly what a sensitive-data audit must not assert, and calling it
+# "local-only" printed `ok` without measuring who can read it.
+LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[.~]|/(?!/)|\\(?!\\))")
+UNC_REMOTE_PATTERN = re.compile(r"^(?://|\\\\)[^/\\]")
 # The remote work is actually published to. A public remote under any other
 # name (a fork's upstream, a mirror) is a topology note, not an exposure.
 PUBLISHING_REMOTE = "origin"
@@ -1414,7 +1420,12 @@ def publishing_remote_endpoints(
                     f"{name} is treated as a publishing remote"
                 )
             entries.append((name, url, publishing_remote and url in push_urls, note))
-    return entries
+    # Spend the shared probe budget on the endpoints that can produce a
+    # MISMATCH first. The caller walks this list under one aggregate deadline,
+    # so with git's alphabetical remote order a handful of slow advisory
+    # remotes ahead of `origin` could exhaust it and leave the one exposure
+    # this check exists to catch reported as UNPROVEN — an exit-0 pass.
+    return sorted(entries, key=lambda entry: not entry[2])
 
 
 def github_visibility(
@@ -1489,6 +1500,16 @@ def sensitive_data_findings(
     findings: list[dict[str, str]] = []
     for name, url, publishes, note in publishing_remote_endpoints(remotes):
         shown = redact_remote_url(url)
+        if UNC_REMOTE_PATTERN.match(url):
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {shown} is a network share; who can reach it is not "
+                    "machine-checkable here",
+                )
+            )
+            continue
         if LOCAL_REMOTE_PATTERN.match(url):
             findings.append(
                 reality_finding(
