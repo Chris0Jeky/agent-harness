@@ -45,7 +45,10 @@ Every probe is read-only, bounded by a per-command timeout and an aggregate dead
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
 degrades to `UNPROVEN` and exits 0. Because the byte comparison reads the harness working
 tree, a non-`main` or dirty harness checkout is refused as the canonical reference and said
-so. `doctor` surfaces the same findings for `--repo`, plus a global `floor version` check.
+so. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
+that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
+`--repo`, plus a global `floor version` check; when the reference is refused that check prints
+`[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before

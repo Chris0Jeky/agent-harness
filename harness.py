@@ -1617,6 +1617,7 @@ def audit_repo(
         deadline=deadline,
     )
     mismatches = [f for f in findings if f["status"] == REALITY_MISMATCH]
+    unproven = [f for f in findings if f["status"] == REALITY_UNPROVEN]
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
@@ -1625,6 +1626,10 @@ def audit_repo(
         "git": status.stdout.strip(),
         "issues": issues,
         "reality": findings,
+        # `ok` is the exit code, not a claim that everything was measured:
+        # `unproven` is what a consumer needs to tell a clean run from an
+        # unmeasured one.
+        "unproven": len(unproven),
         "ok": not issues and not mismatches,
     }
 
@@ -3460,14 +3465,26 @@ def doctor(args: argparse.Namespace) -> int:
         harness_root / "templates" / "hooks" / "dispatch.py"
     )
     deployed_version = floor_version(claude_home / "hooks" / "dispatch.py")
+    # When the working-tree template is not the canonical reference, this
+    # comparison cannot certify anything: reporting it as a pass would call
+    # unmerged branch bytes the canonical floor. It is UNPROVEN, and UNPROVEN
+    # never renders as `[ok]`.
     checks.append(
         (
             "floor version",
-            bool(template_version) and template_version == deployed_version,
+            (
+                (bool(template_version) and template_version == deployed_version)
+                if reference_ok
+                else REALITY_UNPROVEN
+            ),
             f"canonical template {template_version or '<unreadable>'}; deployed "
             f"global {deployed_version or '<unreadable>'}; reference integrity: "
             f"{reference_detail}"
-            + ("" if reference_ok else " (canonical comparisons are UNPROVEN here)"),
+            + (
+                ""
+                if reference_ok
+                else " — nothing here was compared against canonical bytes"
+            ),
         )
     )
     if args.repo:
@@ -3724,9 +3741,12 @@ def doctor(args: argparse.Namespace) -> int:
                 harness_root=harness_root,
                 claude_home=claude_home,
             )
-            reality_ok = not any(
-                finding["status"] == REALITY_MISMATCH for finding in findings
-            )
+            statuses = {finding["status"] for finding in findings}
+            reality_ok: bool | str = True
+            if REALITY_MISMATCH in statuses:
+                reality_ok = False
+            elif REALITY_UNPROVEN in statuses:
+                reality_ok = REALITY_UNPROVEN
             reality_detail = (
                 "; ".join(
                     f"[{finding['status']}] {finding['check']}: {finding['detail']}"
@@ -3738,9 +3758,17 @@ def doctor(args: argparse.Namespace) -> int:
             reality_ok = False
             reality_detail = str(exc)
         checks.append(("declared vs real", reality_ok, reality_detail))
+    # Three states, one renderer: a check that could not run prints as
+    # UNPROVEN, never as `[ok]`. It is not a failure either — an unprovable
+    # canonical reference is a property of where the operator is standing, not
+    # a defect in the floor being audited.
     for label, ok, detail in checks:
-        print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
-    return 0 if all(ok for _, ok, _ in checks) else 1
+        if ok == REALITY_UNPROVEN:
+            state = REALITY_UNPROVEN
+        else:
+            state = "ok" if ok else "FAIL"
+        print(f"[{state}] {label}: {detail}")
+    return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
 def audit_command(args: argparse.Namespace) -> int:
@@ -3756,7 +3784,17 @@ def audit_command(args: argparse.Namespace) -> int:
         for finding in result["reality"]:
             print(f"[{finding['status']}] {finding['check']}: {finding['detail']}")
         if result["ok"]:
-            print("[ok] harness audit")
+            # An unproven check is neither a pass nor a failure, so the summary
+            # line has to say how much of this run was actually measured.
+            unproven = result["unproven"]
+            print(
+                "[ok] harness audit"
+                + (
+                    f" — {unproven} check(s) UNPROVEN and therefore not passed"
+                    if unproven
+                    else ""
+                )
+            )
     return 0 if result["ok"] else 1
 
 

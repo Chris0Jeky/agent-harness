@@ -4771,11 +4771,67 @@ allow_local_binding = true
 
     def test_doctor_reports_floor_version_and_reference_integrity(self) -> None:
         repo = self.make_repo()
-        result, output = self.run_doctor_with_fixture_globals(repo)
-        self.assertIn("floor version: canonical template ", output)
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        with mock.patch.object(
+            harness, "harness_reference_status", return_value=(True, "fixture clean")
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+        self.assertIn("[ok] floor version: canonical template ", output)
         self.assertIn("reference integrity: ", output)
         self.assertIn("declared vs real: ", output)
-        self.assertIsInstance(result, int)
+        self.assertEqual(result, 0, output)
+
+    def test_doctor_never_prints_an_unprovable_comparison_as_a_pass(self) -> None:
+        # A working-tree template that is not the canonical reference proves
+        # nothing about canonical bytes, so it must not render as
+        # `[ok] floor version`.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        with mock.patch.object(
+            harness, "harness_reference_status", return_value=(False, "fixture reason")
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+        self.assertIn("[UNPROVEN] floor version", output)
+        self.assertNotIn("[ok] floor version", output)
+        self.assertIn("nothing here was compared against canonical bytes", output)
+        # Unprovable is not a defect in the audited floor, so it does not fail.
+        self.assertEqual(result, 0, output)
+
+    def test_doctor_fails_on_a_reality_mismatch(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".agent-harness").mkdir()
+        (repo / ".agent-harness" / "tier.json").write_text(
+            json.dumps(
+                {
+                    "tier": 2,
+                    "name": harness.TIER_NAMES[2],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": "HUMAN_TODO.md",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] declared vs real", output)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
 
 
 class FakeCommandRunner:
@@ -5196,6 +5252,24 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("[MISMATCH] human_todo vs the file on disk", text)
         self.assertNotIn("[ok] harness audit", text)
+
+    def test_unproven_findings_are_counted_in_the_summary_and_json(self) -> None:
+        # "[ok] harness audit" after a run that measured nothing reads as a
+        # pass. Say how much of the run was actually proven.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(result["unproven"], 1)
+        self.assertTrue(result["ok"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            harness.audit_command(SimpleNamespace(path=str(repo), json=False))
+        text = output.getvalue()
+        self.assertIn("[UNPROVEN]", text)
+        self.assertNotIn("\n[ok] harness audit\n", text)
 
     def test_audit_json_output_carries_every_finding(self) -> None:
         repo = self.make_repo(tier=3, human_todo=None)
