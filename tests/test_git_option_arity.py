@@ -22,6 +22,11 @@ The risk in all three is the one from #25/#29: a relaxation removes whatever
 coverage the over-broad rule was providing by accident. So every case is pinned
 in BOTH directions -- the legitimate command allows, and the dangerous
 neighbour it must never admit still denies, at every tier.
+
+The PR #70 review rounds added four more, each pinned the same way: a quoted
+redirect lookalike is a refspec, a SPACED numeric token is a refspec, a complete
+redirection operator (`>|`) is consumed whole, the valueless-flag allowlist only
+binds the families it was swept against, and a second `--` bounds the scan.
 """
 
 import importlib.util
@@ -323,6 +328,50 @@ LEASE_QUOTED_FEATURE_STILL_ALLOWED = (
     "bash -c 'git push --force-with-lease origin fix/x 2>&1'",
 )
 
+# A DETACHED numeric token is a refspec, not a file descriptor. Measured on
+# bash 5.2: `f z 2 >out` passes `[z] [2]` to `f`, while `f y 2>&1` passes only
+# `[y]` -- the descriptor has to be glued to the operator. The whitespace pass
+# preserves that spacing, so it must not pop the preceding token; popping it hid
+# a non-feature refspec from the lease guard (PR #70 review).
+LEASE_SPACED_DESCRIPTOR_IS_A_REFSPEC = (
+    "git push --force-with-lease origin fix/x 2 >out.txt",
+    "git push --force-with-lease origin fix/x 2 > out.txt",
+    "git push --force-with-lease origin fix/x 2 >& 1",
+    "git push --force-with-lease origin fix/x 1 >>push.log",
+)
+
+# The other direction of that same fix: a GLUED descriptor really is consumed by
+# the shell, and so is bash's noclobber override `>|` -- which used to leave its
+# target behind in the destination list and deny (PR #70 review).
+COMPLETE_REDIRECTION_OPERATORS_ALLOWED = (
+    "git push --force-with-lease origin fix/x 2>out.txt",
+    "git push --force-with-lease origin fix/x >| out.txt",
+    "git push --force-with-lease origin fix/x >|out.txt",
+    "git push --force-with-lease origin fix/x 2>| err.log",
+)
+
+# ---------------------------------------------------------------- PR #70 r2
+
+# `-b` is valueless for grep/diff but takes a value for clone/init, so the
+# shared allowlist must not end the scan outside the families it was swept for.
+# Measured on git 2.45.1: `git init -b -- --separate-git-dir=zzz repo` created
+# `zzz`, and `git clone -b -- --upload-pack=helper src dst` parsed the
+# upload-pack option (the source-not-found error names `src`, not the option).
+CROSS_FAMILY_FLAG_ATTACKS = (
+    "git clone -b -- --upload-pack=helper source dest",
+    "git clone -b -- --upload-pack helper source dest",
+    "git init -b -- --separate-git-dir=.env repo",
+    "git clone -u -- --config=core.pager=helper source dest",
+)
+
+# A second `--` bounds the scan under both readings, so the shape git really
+# runs stops being denied. `git grep -e -- -- -Osh` searches the file `-Osh`.
+TWO_MARKER_SCANS_ALLOWED = (
+    "git grep -e -- -- -Osh",
+    "git grep -e -- -- -Osh pattern",
+    "git diff --output -- -- --ext-diff",
+)
+
 
 class UpdateIndexAndSparseCheckoutArityTests(unittest.TestCase):
     """Issue #45: read/write-mixed verbs admitted by arity, never by name."""
@@ -442,7 +491,9 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
                     self.assertNotEqual(decision, "allow", command)
 
     def test_terminator_index_is_only_returned_when_argv_proves_it(self):
-        index = dispatch.git_end_of_options_index
+        def index(args, subcommand="diff"):
+            return dispatch.git_end_of_options_index(args, subcommand)
+
         # provable: first token, an operand, a glued value, a valueless flag
         self.assertEqual(index(["--", "--ext-diff"]), 0)
         self.assertEqual(index(["HEAD", "--", "path"]), 1)
@@ -452,19 +503,59 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
         # unprovable: an option that takes a separate value swallows the `--`
         self.assertIsNone(index(["--output", "--", "--ext-diff"]))
         self.assertIsNone(index(["-O", "--", "--ext-diff"]))
-        self.assertIsNone(index(["-f", "--", "-O"]))
+        self.assertIsNone(index(["-f", "--", "-O"], "grep"))
         # unknown options fail closed rather than guessing an arity
         self.assertIsNone(index(["--not-a-known-option", "--", "path"]))
         # no terminator at all
         self.assertIsNone(index(["--ext-diff"]))
         self.assertIsNone(index([]))
 
+    def test_a_second_marker_bounds_the_scan_after_a_swallowed_one(self):
+        """A `--` behind a `--` is proof under BOTH readings (PR #70 review).
+
+        Either the first marker really terminated options -- and then this one
+        is an operand, so stopping here scans a superset of the option region --
+        or the first was eaten as some option's value, and the parser is between
+        options again so this one really does terminate.
+        """
+
+        def index(args, subcommand="grep"):
+            return dispatch.git_end_of_options_index(args, subcommand)
+
+        self.assertEqual(index(["-e", "--", "--", "-Osh"]), 2)
+        self.assertEqual(index(["--output", "--", "--", "--ext-diff"], "diff"), 2)
+        # one marker on its own is still unprovable behind a value-taking option
+        self.assertIsNone(index(["-e", "--", "-Osh"]))
+        # a later marker proved by an ordinary operand also bounds the scan
+        self.assertEqual(index(["--output", "--", "HEAD", "--", "path"], "diff"), 3)
+
     def test_the_flag_allowlist_is_case_sensitive(self):
         """`-I <regex>` for diff must never inherit grep's valueless `-I`."""
-        index = dispatch.git_end_of_options_index
+
+        def index(args, subcommand="diff"):
+            return dispatch.git_end_of_options_index(args, subcommand)
+
         self.assertEqual(index(["-i", "--", "path"]), 1)
         self.assertIsNone(index(["-I", "--", "path"]))
         self.assertIsNone(index(["--CACHED", "--", "path"]))
+
+    def test_the_flag_allowlist_only_applies_to_the_swept_families(self):
+        """`git clone -b <branch>` proves a flag's arity is family-specific.
+
+        Measured on git 2.45.1: `git init -b -- --separate-git-dir=zzz repo`
+        really created `zzz`, and `git clone -b -- --upload-pack=helper src dst`
+        really parsed the upload-pack option -- so `-b` cannot end the scan for
+        those verbs even though it is valueless for grep/diff (PR #70 review).
+        """
+        index = dispatch.git_end_of_options_index
+        self.assertEqual(index(["-b", "--", "path"], "diff"), 1)
+        self.assertIsNone(index(["-b", "--", "path"], "clone"))
+        self.assertIsNone(index(["-b", "--", "path"], "init"))
+        self.assertIsNone(index(["-b", "--", "path"]))
+        # the arity-free proofs still hold everywhere
+        self.assertEqual(index(["--", "path"], "clone"), 0)
+        self.assertEqual(index(["src", "--", "path"], "clone"), 1)
+        self.assertEqual(index(["--branch=x", "--", "path"], "clone"), 1)
 
     def test_the_allowlist_excludes_flags_whose_arity_differs_by_family(self):
         """One shared set, so an entry has to be valueless in every family."""
@@ -482,7 +573,10 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
 
     def test_option_values_needs_the_same_proof_as_the_scan(self):
         """The value walk steps over an unprovable `--` instead of stopping."""
-        values = dispatch.git_option_values
+
+        def values(args, option, shorts=None, subcommand="format-patch"):
+            return dispatch.git_option_values(args, option, shorts, subcommand)
+
         # unprovable: `--cc` may have eaten the `--`, so keep looking
         self.assertEqual(values(["--cc", "--", "--output=.env"], "--output"), [".env"])
         # provable: the `--` really ends options, so `--output=.env` is a file
@@ -490,6 +584,37 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
         self.assertEqual(values(["--cached", "--", "--output=.env"], "--output"), [])
         # a value the walk itself consumed never reaches the terminator test
         self.assertEqual(values(["--output", "--", "x"], "--output"), ["--"])
+        # outside the swept families a short flag proves nothing, so the walk
+        # keeps going and still finds the guarded option (PR #70 review)
+        for subcommand in ("clone", "init", None):
+            self.assertEqual(
+                values(
+                    ["-b", "--", "--separate-git-dir=.env"],
+                    "--separate-git-dir",
+                    subcommand=subcommand,
+                ),
+                [".env"],
+                subcommand,
+            )
+        # ...while inside a swept family `-b` really is valueless, so the same
+        # `--` still ends the walk
+        self.assertEqual(
+            values(["-b", "--", "--output=.env"], "--output", subcommand="diff"), []
+        )
+
+    def test_cross_family_flag_attacks_deny_at_every_tier(self):
+        for command in CROSS_FAMILY_FLAG_ATTACKS:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, _reason = decide(command, tier)
+                    self.assertNotEqual(decision, "allow", command)
+
+    def test_a_second_marker_stops_denying_what_git_really_runs(self):
+        for command in TWO_MARKER_SCANS_ALLOWED:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, reason = decide(command, tier)
+                    self.assertEqual(decision, "allow", f"{command} -> {reason}")
 
     def test_format_patch_still_truncates_at_a_proven_terminator(self):
         """The other direction: valueless format-patch flags still truncate."""
@@ -552,27 +677,48 @@ class PushRedirectionTests(unittest.TestCase):
 
     def test_strip_shell_redirections_helper(self):
         strip = dispatch.strip_shell_redirections
+
+        def shlex_strip(tokens):
+            return strip(tokens, descriptor_may_be_detached=True)
+
         # whitespace-split tokenizer (sanitized pass)
         self.assertEqual(strip(["origin", "fix/x", "2>&1"]), ["origin", "fix/x"])
         self.assertEqual(strip(["origin", "fix/x", "2>/dev/null"]), ["origin", "fix/x"])
         self.assertEqual(strip(["origin", "fix/x", ">>push.log"]), ["origin", "fix/x"])
         self.assertEqual(strip(["origin", "fix/x", "&>out"]), ["origin", "fix/x"])
         self.assertEqual(strip(["origin", "fix/x", "1>&2"]), ["origin", "fix/x"])
-        # shlex punctuation tokenizer (quote-aware pass)
+        # bash's noclobber override is operator text, not the target (PR #70)
         self.assertEqual(
-            strip(["origin", "fix/x", "2", ">&", "1"]), ["origin", "fix/x"]
+            strip(["origin", "fix/x", ">|", "out.txt"]), ["origin", "fix/x"]
+        )
+        self.assertEqual(strip(["origin", "fix/x", ">|out.txt"]), ["origin", "fix/x"])
+        self.assertEqual(strip(["origin", "fix/x", "2>|", "out"]), ["origin", "fix/x"])
+        # shlex punctuation tokenizer (quote-aware pass) may detach a descriptor
+        self.assertEqual(
+            shlex_strip(["origin", "fix/x", "2", ">&", "1"]), ["origin", "fix/x"]
         )
         self.assertEqual(
-            strip(["origin", "fix/x", ">", "out.txt"]), ["origin", "fix/x"]
+            shlex_strip(["origin", "fix/x", ">", "out.txt"]), ["origin", "fix/x"]
         )
         self.assertEqual(
-            strip(["origin", "fix/x", "2", ">", "/dev/null"]), ["origin", "fix/x"]
+            shlex_strip(["origin", "fix/x", "2", ">", "/dev/null"]),
+            ["origin", "fix/x"],
+        )
+        # ...but the whitespace pass proved the spacing, so `2` is an OPERAND
+        # there: measured on bash 5.2, `f z 2 >out` passes `[z] [2]` to f.
+        self.assertEqual(
+            strip(["origin", "fix/x", "2", ">out.txt"]), ["origin", "fix/x", "2"]
+        )
+        self.assertEqual(
+            strip(["origin", "fix/x", "2", ">", "out.txt"]), ["origin", "fix/x", "2"]
         )
         # an operand glued to a redirect keeps the operand
         self.assertEqual(strip(["origin", "fix/x>out.txt"]), ["origin", "fix/x"])
         # a second destination after the redirect is NOT eaten
         self.assertEqual(strip(["origin", "2>&1", "main"]), ["origin", "main"])
-        self.assertEqual(strip(["origin", ">", "out.txt", "main"]), ["origin", "main"])
+        self.assertEqual(
+            shlex_strip(["origin", ">", "out.txt", "main"]), ["origin", "main"]
+        )
         # commands without redirects are untouched
         self.assertEqual(strip(["origin", "main"]), ["origin", "main"])
         self.assertEqual(strip([]), [])
@@ -618,6 +764,20 @@ class PushRedirectionTests(unittest.TestCase):
             dispatch.strip_shell_redirections(["origin", "fix/x", "2>&1"]),
             ["origin", "fix/x"],
         )
+
+    def test_a_spaced_descriptor_is_a_refspec_not_a_descriptor(self):
+        for command in LEASE_SPACED_DESCRIPTOR_IS_A_REFSPEC:
+            for tier in TIERS:
+                with self.subTest(command=command, tier=tier):
+                    decision, _reason = decide(command, tier)
+                    self.assertNotEqual(decision, "allow", command)
+
+    def test_complete_redirection_operators_are_still_consumed(self):
+        for command in COMPLETE_REDIRECTION_OPERATORS_ALLOWED:
+            for tier in (1, 2, 3):
+                with self.subTest(command=command, tier=tier):
+                    decision, reason = decide(command, tier)
+                    self.assertEqual(decision, "allow", f"{command} -> {reason}")
 
     def test_dropping_operands_fails_closed(self):
         """An emptied destination list must refuse, not vacuously pass."""

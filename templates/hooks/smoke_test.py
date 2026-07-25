@@ -428,6 +428,30 @@ CASES = [
     ('git push --force-with-lease origin "fix/x"', 2, {}, "allow"),
     ("git push --force-with-lease origin 'fix/x' 2>&1", 2, {}, "allow"),
     ("bash -c 'git push --force-with-lease origin fix/x 2>&1'", 2, {}, "allow"),
+    # A descriptor has to be GLUED to the operator. Measured on bash 5.2:
+    # `f z 2 >out` passes `[z] [2]`, `f y 2>&1` passes only `[y]`. So a spaced
+    # numeric token is a refspec and the lease guard has to judge it (PR #70).
+    ("git push --force-with-lease origin fix/x 2 >out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x 2 > out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x 2 >& 1", 2, {}, "deny"),
+    # The complete operator is consumed, including bash's noclobber `>|`, whose
+    # target used to be left behind in the destination list and deny.
+    ("git push --force-with-lease origin fix/x 2>out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >| out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >|out.txt", 2, {}, "allow"),
+    # `-b` is valueless for grep/diff but takes a value for clone/init, so the
+    # shared allowlist may not end the scan outside its swept families. Measured
+    # on git 2.45.1: `git init -b -- --separate-git-dir=zzz repo` created `zzz`.
+    ("git clone -b -- --upload-pack=helper source dest", 2, {}, "deny"),
+    ("git init -b -- --separate-git-dir=.env repo", 2, {}, "deny"),
+    ("git clone -u -- --config=core.pager=helper source dest", 2, {}, "deny"),
+    ("git clone -b main source dest", 2, {}, "allow"),
+    # A second `--` bounds the scan under both readings, so what git really runs
+    # stops being denied: `git grep -e -- -- -Osh` searches the file `-Osh`.
+    ("git grep -e -- -- -Osh", 2, {}, "allow"),
+    ("git diff --output -- -- --ext-diff", 2, {}, "allow"),
+    ("git grep -e -- -Osh", 2, {}, "deny"),
+    ("git diff --output -- --ext-diff", 2, {}, "deny"),
     # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
