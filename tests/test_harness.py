@@ -2182,6 +2182,40 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
+        repo = self.make_repo()
+        # A hook source with a PreToolUse handler that is not a floor adapter at
+        # all: doctor must not report a current audit marker it never saw.
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 tools/lint_gate.py",
+                                        "commandWindows": "py -3 tools/lint_gate.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("declare no handler that reaches the shared floor", output)
+        self.assertNotIn("declare a current audit marker", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
     def test_doctor_reports_an_absent_platform_command_as_absent(self) -> None:
         repo = self.make_repo()
         pin = harness.normalized_text_sha256(

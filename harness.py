@@ -2618,18 +2618,22 @@ def codex_adapter_command_notes(
 
 def codex_adapter_contract_notes(
     current: str, source_label: str, expected_pin: str, *, source_kind: str = "json"
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], int]:
     """Inventory every candidate adapter handler in one hook source.
 
     `doctor` already fails a repo whose canonical adapter is unpinned or stale,
     but it reported only a count, which cannot distinguish "no marker" from
     "stale marker" from "no --runtime codex". Estate audits need the reason.
+
+    Returns (gaps, inventory, inspected_handlers). The count exists so a caller
+    can tell "checked and clean" apart from "there was nothing to check".
     """
     _current_data, _hooks, groups = parse_hooks_document(
         current, source_kind=source_kind
     )
     gaps: list[str] = []
     inventory: list[str] = []
+    inspected_handlers = 0
     for group_index, group in enumerate(groups):
         for handler_index, handler in enumerate(group.get("hooks", [])):
             if handler.get("type") != "command":
@@ -2653,6 +2657,7 @@ def codex_adapter_contract_notes(
                 )
             ):
                 continue
+            inspected_handlers += 1
             for field, text in commands.items():
                 label = (
                     f"{source_label}:pre_tool_use:{group_index}:{handler_index}"
@@ -2663,7 +2668,7 @@ def codex_adapter_contract_notes(
                 )
                 gaps.extend(command_gaps)
                 inventory.extend(command_inventory)
-    return gaps, inventory
+    return gaps, inventory, inspected_handlers
 
 
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
@@ -3077,19 +3082,33 @@ def doctor(args: argparse.Namespace) -> int:
             )
             adapter_gaps: list[str] = []
             adapter_inventory: list[str] = []
+            adapter_handler_count = 0
             for hooks, text, source_kind in repo_hook_sources:
-                source_gaps, source_inventory = codex_adapter_contract_notes(
+                (
+                    source_gaps,
+                    source_inventory,
+                    source_handlers,
+                ) = codex_adapter_contract_notes(
                     text, str(hooks), expected_pin, source_kind=source_kind
                 )
                 adapter_gaps.extend(source_gaps)
                 adapter_inventory.extend(source_inventory)
+                adapter_handler_count += source_handlers
             adapter_ok = not adapter_gaps
+            # With no adapter handler anywhere there is nothing to certify, and
+            # claiming a current marker would assert a fact about a file that
+            # declares none. Say which of the two clean states this is.
             adapter_detail = "; ".join(
                 [f"contract gap: {gap}" for gap in adapter_gaps]
                 + [f"note: {note}" for note in adapter_inventory]
             ) or (
+                f"{adapter_handler_count} adapter handler(s) across "
                 f"{len(repo_hook_sources)} inspected hook source(s) declare a "
                 "current audit marker and pass --event pre --runtime codex"
+                if adapter_handler_count
+                else f"{len(repo_hook_sources)} inspected hook source(s) declare no "
+                "handler that reaches the shared floor: nothing to check here, and "
+                "the project floor check owns that verdict"
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [
