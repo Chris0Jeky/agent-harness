@@ -2571,6 +2571,12 @@ def codex_adapter_command_notes(
     inventory note records a legitimate but non-default choice — a vendored
     dispatcher or a repo wrapper that carries the flags out of static view.
     """
+    if not command.strip():
+        # An undeclared platform command has no flags, no marker and no
+        # dispatcher by definition. Reporting each of those absences as its own
+        # violation sent readers hunting for a malformed command instead of a
+        # missing one.
+        return [f"{label} declares no command for this platform"], []
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
     delegates_to_wrapper = "invoke_deny_floor" in normalized

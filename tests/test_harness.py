@@ -2182,6 +2182,50 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_doctor_reports_an_absent_platform_command_as_absent(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"expected={pin}; python3 "
+                                            '"$HOME/.claude/hooks/dispatch.py" '
+                                            "--event pre --runtime codex"
+                                        ),
+                                        "timeout": 5,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(".commandWindows declares no command for this platform", output)
+        # The absence is reported once, not as three separate deviations of a
+        # command that does not exist.
+        self.assertNotIn(".commandWindows never passes", output)
+        self.assertNotIn(".commandWindows declares no expected=<sha256>", output)
+
     def test_doctor_ignores_a_commented_dispatcher_mention_in_a_sibling(self) -> None:
         repo = self.make_repo()
         valid_adapter = json.loads(
