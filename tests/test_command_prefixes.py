@@ -360,16 +360,42 @@ class WindowsGrammarSegmentationTests(unittest.TestCase):
         self.assertIn("echo x", segments)
         self.assertIn(">nul rd /s /q C:\\x", segments)
 
+    # Trailing backslash inside a double-quoted path: POSIX shlex rejects the
+    # line, so these are the allow-side commands that actually enter the
+    # recovery path the union widening lives on.
+    RECOVERED_ALLOW = (
+        r'Get-Content "C:\logs\app\" &> out.txt',
+        r'Write-Output "note\" &>> build.log',
+        r'Write-Output "C:\build\" &> "C:\logs\build.log"',
+        r'Get-ChildItem "C:\logs\" &>> listing.txt',
+    )
+
     def test_powershell_aggregate_redirect_stays_allowed(self):
-        commands = (
-            r'Get-Content "C:\logs\app\" &> out.txt',
-            r'Write-Output "note\" &>> build.log',
-            "npm test &> combined.log",
-        )
+        commands = (*self.RECOVERED_ALLOW, "npm test &> combined.log")
         for command in commands:
             with self.subTest(command=command):
                 decision, reason = decide(command)
                 self.assertEqual(decision, "allow", reason)
+
+    def test_the_allow_side_actually_samples_the_widened_union(self):
+        # Reachability, not usage: a benign command that never enters the
+        # recovery path proves nothing about the `&`-grammar widening.  If a
+        # future quoting change moves these onto the ordinary shlex path, the
+        # allow assertions above would keep passing while covering nothing --
+        # so pin that the cmd reading is genuinely produced and inspected.
+        for command in self.RECOVERED_ALLOW:
+            with self.subTest(command=command):
+                segments = [
+                    argv
+                    for argv, _op in dispatch.quote_aware_segments_with_operators(
+                        command
+                    )
+                ]
+                self.assertGreater(len(segments), 1, segments)
+                self.assertTrue(
+                    any(argv and argv[0].startswith(">") for argv in segments),
+                    segments,
+                )
 
 
 if __name__ == "__main__":
