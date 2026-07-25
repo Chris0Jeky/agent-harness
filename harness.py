@@ -1525,7 +1525,36 @@ def harness_reference_status(
             f"harness checkout {harness_root} has uncommitted templates/hooks "
             "changes, so its working tree is not the canonical reference",
         )
-    return True, f"harness checkout {harness_root} is clean on main"
+    # Clean on a local `main` is not the same as agreeing with the published
+    # one: unpushed commits to templates/hooks, or a main that is behind, would
+    # otherwise be called canonical. This reads refs only - no network - so an
+    # unfetched or absent `origin/main` leaves divergence unmeasured and said.
+    resolved, divergence = output_before_deadline(
+        command_runner,
+        ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
+        harness_root,
+        deadline,
+    )
+    counts = divergence.split() if resolved else []
+    if len(counts) == 2 and all(count.isdigit() for count in counts):
+        behind, ahead = counts
+        if behind != "0" or ahead != "0":
+            return (
+                False,
+                f"harness checkout {harness_root} is {ahead} ahead of and "
+                f"{behind} behind origin/main, so its working tree is not the "
+                "canonical reference",
+            )
+        return (
+            True,
+            f"harness checkout {harness_root} is clean on main and level with "
+            "origin/main",
+        )
+    return (
+        True,
+        f"harness checkout {harness_root} is clean on main; origin/main did not "
+        "resolve, so divergence from the published branch is unmeasured",
+    )
 
 
 def vendored_floor_findings(

@@ -46,8 +46,11 @@ Only a PUBLIC `origin` — the remote work is published to — is a `MISMATCH`; 
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
 degrades to `UNPROVEN` and exits 0. `audit --offline` runs no network resolver at all. Because the byte comparison reads the harness working
-tree, a non-`main` or dirty harness checkout is refused as the canonical reference and said
-so. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
+tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
+diverged from a resolvable `origin/main` is refused as the canonical reference and said so;
+where `origin/main` does not resolve, divergence is reported as unmeasured. A detached-HEAD
+CI checkout (what `actions/checkout` produces) is never a reference, so the canonical-template
+leg is permanently `UNPROVEN` there and live only on a checkout sitting on a clean `main`. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
 that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
 `--repo`, plus a global `floor version` check; when the reference is refused that check prints
 `[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.

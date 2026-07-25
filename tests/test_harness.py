@@ -5251,6 +5251,55 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("uncommitted templates/hooks changes", self.details(result))
         self.assertTrue(result["ok"])
 
+    def test_a_main_that_diverged_from_origin_is_not_the_reference(self) -> None:
+        # Clean on a local `main` is not agreement with the published one:
+        # unpushed templates/hooks commits would otherwise be canonical.
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {
+                "rev-parse": (True, "main"),
+                "status --porcelain": (True, ""),
+                "rev-list": (True, "0\t2"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("2 ahead of and 0 behind origin/main", self.details(result))
+
+    def test_an_unresolvable_origin_main_leaves_divergence_unmeasured(self) -> None:
+        # No network is ever required: an unfetched or absent origin/main keeps
+        # the clean-main verdict, and the detail says what was not measured.
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok)
+        self.assertIn("origin/main did not resolve", detail)
+        self.assertIn("unmeasured", detail)
+
+    def test_a_level_main_says_it_is_level_with_origin(self) -> None:
+        runner = FakeCommandRunner(
+            {
+                "rev-parse": (True, "main"),
+                "status --porcelain": (True, ""),
+                "rev-list": (True, "0\t0"),
+            }
+        )
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok)
+        self.assertIn("level with origin/main", detail)
+
     def test_floor_branch_checkout_is_not_treated_as_the_reference(self) -> None:
         repo = self.make_repo()
         for path in (
