@@ -34,12 +34,23 @@ could not obtain a verdict, so there is nothing to census. Those commands get
 the `toolfail` pseudo-decision, which is in no rate and in no delta bucket.
 
 4 is the same principle applied to the input side. A transcript that could not
-be opened, that failed mid-read, or a tree that could not be walked leaves the
-corpus short by an amount the script cannot know, so no absolute rate is
-quotable. Unlike 3 it is downgradable (`--allow-partial-corpus`): both versions
-replayed the same shortened list, so the deltas — the numbers that actually
-decide a merge — survive intact. Precedence when several apply: 3, then 2,
-then 4. Every banner prints regardless of which code wins.
+be opened, that failed mid-read, a tree that could not be walked, or a root
+that is not there at all leaves the corpus short by an amount the script cannot
+know, so no absolute rate is quotable. There is no opt-out, and the first
+version of this said there was: both versions do replay the same shortened
+list, but a command sitting in an unread transcript is in no delta bucket at
+all, so dropping the file can drop the very `newly_blocked` row a gate exists
+to catch. The deltas are sound for the subset that was read and are labelled
+subset-only; a caller that wants them anyway reads exit 4 and decides for
+itself, because the script will not report success over an input it could not
+read. Precedence when several apply: 3, then 2, then 4. Every banner prints
+regardless of which code wins, and each names the code the run actually
+returns.
+
+Nothing extracted at all is 1 only when the scan was clean. Transcripts that
+all failed to open produce an empty corpus and a full integrity ledger, and
+that is 4: "the tree was empty" and "the tree was unreadable" must not be the
+same answer.
 
 TOOL-SIDE FAILURE MUST NEVER READ AS POLICY
 -------------------------------------------
@@ -84,11 +95,15 @@ The rest of that audit, and what each failure is now counted as:
   (a skipped index, a short batch, a dropped result), NOT protection against a
   killed worker: `Pool.imap_unordered` blocks forever on a result that never
   arrives, so that shape hangs rather than returning short. See COVERAGE LIMITS.
-* an unreadable transcript file, a mid-file read error, or a transcript tree
-  that cannot be walked -> counted under `file-unreadable` / `file-read-error`
-  / `transcript-tree-unwalkable`, flagged in the extraction ledger, and given
-  its own banner and exit code (4) rather than being one row among twenty
-  followed by a block-rate table and exit 0. It does NOT catch every way the
+* an unreadable transcript file, a mid-file read error, a transcript tree that
+  cannot be walked, or a transcript root that does not exist -> counted under
+  `file-unreadable` / `file-read-error` / `transcript-tree-unwalkable` /
+  `codex-root-missing` / `claude-root-missing`, flagged in the extraction
+  ledger, and given its own banner and exit code (4) rather than being one row
+  among twenty followed by a block-rate table and exit 0. Pass `--codex-root
+  none` / `--claude-root none` to say a runtime is deliberately not scanned;
+  that is a stated premise, whereas a root that was asked for and was not there
+  is an unknown amount of missing corpus. It does NOT catch every way the
   corpus can come up short — see the `iter_transcripts` docstring and COVERAGE
   LIMITS for the subdirectory case pathlib still suppresses.
 * there is still no per-command watchdog, so a timeout cannot be counted as a
@@ -176,7 +191,8 @@ COVERAGE LIMITS (read before quoting a number)
   declares; the active set is printed in the header, labels every tier row, and
   is recorded in the JSON `run` block.
 * The corpus can still be silently short. A transcript that fails to open,
-  fails mid-read, or a tree whose walk raises is counted and exits 4, but
+  fails mid-read, a tree whose walk raises, or a root that is not there is
+  counted and exits 4, but
   CPython's pathlib suppresses per-directory errors *inside* `rglob`, so a
   locked profile subtree or a stale junction yields fewer files and increments
   nothing. There is no counter for it because there is nothing to count: the
@@ -276,11 +292,19 @@ EXIT_CORPUS_INCOMPLETE = 4
 # `unparsed-*` keys: a line that is not JSON, an argument that is not a literal
 # and an `exec` body that concatenates are records this corpus *decided* not to
 # model, are stable across runs, and do not vary with what happened to be
-# readable. These three do.
+# readable. These five do.
+#
+# The two missing-root keys belong here for the same reason as the rest, only
+# more so: a root that was asked for and is not there withholds an entire
+# runtime's transcripts, which is the largest silent shortfall this script can
+# suffer. `--codex-root none` / `--claude-root none` is how a machine that runs
+# only one of the two says so, and that is a premise rather than a failure.
 CORPUS_INTEGRITY_KEYS = (
     "unparsed-file-unreadable",
     "unparsed-file-read-error",
     "unparsed-transcript-tree-unwalkable",
+    "unparsed-codex-root-missing",
+    "unparsed-claude-root-missing",
 )
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
@@ -2150,12 +2174,21 @@ def toolfail_headline(
     return commands, "commands"
 
 
-def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> None:
+def print_toolfail_banner(
+    result: dict[str, Any], toolfails: dict[str, int], exit_code: int
+) -> None:
     """A malfunctioning instrument is never a measurement. Say so on both streams.
 
     Unlike the `check() RAISED` banner this one has no opt-out: `--allow-errors`
     exists to census *floor* crashes, and there is nothing to census when the
     script itself could not run the floor.
+
+    `exit_code` is passed rather than assumed for the same reason the other two
+    banners take it: the caller owns the precedence, and a banner is only worth
+    reading if the code it names is the code the run returns. This one always
+    wins, so it is always `EXIT_TOOL_FAILURE` today — asserted by the caller,
+    not by a literal here that a future precedence change would silently
+    falsify.
     """
     reasons: Counter[str] = Counter()
     for tier in result["tier_order"]:
@@ -2184,7 +2217,7 @@ def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> 
             "excluded from\n"
             "!! every rate and every delta bucket, so the numbers above "
             "understate coverage\n"
-            f"!! rather than misreport policy. Exiting {EXIT_TOOL_FAILURE}.",
+            f"!! rather than misreport policy. Exiting {exit_code}.",
             file=stream,
         )
         if reasons:
@@ -2194,16 +2227,20 @@ def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> 
         print("!" * 78, file=stream)
 
 
-def count_corpus_integrity_failures(result: dict[str, Any]) -> dict[str, int]:
+def integrity_failures(unparsed: dict[str, int] | Counter[str]) -> dict[str, int]:
     """Ledger entries meaning part of the transcripts was never read at all."""
-    unparsed = result["corpus"]["unparsed"]
     return {
         key: int(unparsed[key]) for key in CORPUS_INTEGRITY_KEYS if unparsed.get(key)
     }
 
 
+def count_corpus_integrity_failures(result: dict[str, Any]) -> dict[str, int]:
+    """`integrity_failures` against an assembled result's extraction ledger."""
+    return integrity_failures(result["corpus"]["unparsed"])
+
+
 def print_corpus_integrity_banner(
-    failures: dict[str, int], allowed: bool, total: int
+    failures: dict[str, int], total: int, exit_code: int
 ) -> None:
     """The same treatment `toolfail` gets, for the input side of the instrument.
 
@@ -2213,41 +2250,49 @@ def print_corpus_integrity_banner(
     rate table and exit 0. A gate or a human quoting "11.91% of N unique
     commands" had no signal that N was wrong.
 
-    The deltas do survive — both versions replay the same shortened list — so
-    unlike a missing verdict this is downgradable to a report. Say exactly that,
-    so the downgrade is an informed one.
+    It is not downgradable, and the first version of this banner was wrong to
+    say the deltas survive intact. Both versions did replay the same shortened
+    list, so the deltas are internally consistent — but a command that was in an
+    unread transcript is in no bucket at all, and if the two versions disagree
+    on it the run reports a `newly_blocked` / `newly_allowed` count lower than
+    the truth. Dropping the file can drop the regression, so a merge gate must
+    not see success. The deltas are sound **for the subset that was read**, and
+    that is all this banner will claim.
+
+    `exit_code` is what `main()` will actually return, not `EXIT_CORPUS_INCOMPLETE`:
+    a tool failure or a crashing floor outranks a short corpus, and a banner
+    that names an exit code the run does not produce sends the reader looking
+    for the wrong failure.
     """
     for stream in (sys.stdout, sys.stderr):
         print("!" * 78, file=stream)
         print(
             f"!! CORPUS INCOMPLETE: {sum(failures.values())} transcript source(s) "
-            "could not be fully read,",
+            "could not be read in full,",
             file=stream,
         )
         print(
-            f"!! so the {total} unique commands below are an unknown fraction of "
-            "what was run.\n"
-            "!! The DELTAS are still sound (both versions replayed the same "
-            "shortened corpus);\n"
-            "!! every ABSOLUTE rate and count is measured over a corpus of "
-            "unknown size.",
+            f"!! so the {total} unique commands replayed are an unknown fraction "
+            "of what was run.\n"
+            "!! Every ABSOLUTE rate and count is measured over a corpus of "
+            "unknown size.\n"
+            "!! The DELTAS are SUBSET-ONLY, not corpus-wide: both versions "
+            "replayed the same\n"
+            "!! shortened list, so the rows shown are consistent, but a command "
+            "in an unread\n"
+            "!! transcript is in no bucket — a regression it would have shown "
+            "is not reported.",
             file=stream,
         )
         for key, count in sorted(failures.items()):
             print(f"!!   {count:>6}  {key[len('unparsed-'):]}", file=stream)
-        print(
-            (
-                "!! Reported only: --allow-partial-corpus was passed."
-                if allowed
-                else f"!! Exiting {EXIT_CORPUS_INCOMPLETE}. Pass "
-                "--allow-partial-corpus to accept a delta-only run."
-            ),
-            file=stream,
-        )
+        print(f"!! Exiting {exit_code}.", file=stream)
         print("!" * 78, file=stream)
 
 
-def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
+def print_error_banner(
+    result: dict[str, Any], errors: dict[str, int], exit_code: int
+) -> None:
     """Refuse to let a crashing version be read as a clean comparison.
 
     `decide()` turns an exception into an `error` decision and `summarize_tier`
@@ -2274,7 +2319,7 @@ def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
             "texts are the\n"
             "!! `error` rows of the block-class tables. Fix the version, or "
             "pass --allow-errors\n"
-            f"!! to accept the numbers anyway. Exiting {EXIT_ERRORS_PRESENT}.",
+            f"!! to accept the numbers anyway. Exiting {exit_code}.",
             file=stream,
         )
         print("!" * 78, file=stream)
@@ -2288,6 +2333,18 @@ def default_codex_root() -> Path:
 
 def default_claude_root() -> Path:
     return Path.home() / ".claude" / "projects"
+
+
+def transcript_root(value: str) -> Path | None:
+    """`none` (or an empty value) means "this runtime is deliberately unscanned".
+
+    A root that is asked for and is not there counts as corpus incompleteness,
+    because an absent tree withholds every command a whole runtime ran. That is
+    right for a typo or an unmounted profile and wrong for a machine that simply
+    does not run Codex, so there has to be a way to state the intent — and
+    stating it is not the same as the script guessing it.
+    """
+    return None if value.strip().lower() in ("", "none") else Path(value)
 
 
 def module_version(module: ModuleType) -> str:
@@ -2362,8 +2419,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="worker processes (default 1; each loads both dispatch modules)",
     )
-    parser.add_argument("--codex-root", type=Path, default=default_codex_root())
-    parser.add_argument("--claude-root", type=Path, default=default_claude_root())
+    parser.add_argument(
+        "--codex-root",
+        type=transcript_root,
+        default=default_codex_root(),
+        help="Codex sessions tree, or 'none' to declare it deliberately unscanned",
+    )
+    parser.add_argument(
+        "--claude-root",
+        type=transcript_root,
+        default=default_claude_root(),
+        help="Claude projects tree, or 'none' to declare it deliberately unscanned",
+    )
     parser.add_argument(
         "--project-dir",
         type=Path,
@@ -2394,14 +2461,6 @@ def build_parser() -> argparse.ArgumentParser:
             "(for a deliberate crash census only; the deltas are not usable)"
         ),
     )
-    parser.add_argument(
-        "--allow-partial-corpus",
-        action="store_true",
-        help=(
-            "report a transcript that could not be fully read instead of "
-            "exiting non-zero (the deltas stay sound; no absolute rate does)"
-        ),
-    )
     return parser
 
 
@@ -2423,7 +2482,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         corpus, stats = build_corpus(
             args.codex_root, args.claude_root, not args.no_embedded
         )
+    # Classified here, not after the replay, because the two ways a run can end
+    # up with nothing are not the same answer. Every transcript failing to open
+    # produces an empty corpus AND a full integrity ledger; returning 1 there
+    # ("nothing to replay") is indistinguishable to a caller from a genuinely
+    # empty transcript tree, which is the exact exit-code ambiguity exit 4
+    # exists to remove.
+    corpus_failures = integrity_failures(stats)
     if not corpus:
+        if corpus_failures:
+            sys.stderr.write(
+                "no commands extracted, and the transcripts could not be read; "
+                "this is a broken scan, not an empty corpus\n"
+            )
+            print_corpus_integrity_banner(corpus_failures, 0, EXIT_CORPUS_INCOMPLETE)
+            return EXIT_CORPUS_INCOMPLETE
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
     if args.corpus_cache:
@@ -2445,6 +2518,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands, notes = select_commands(corpus, args.limit, args.max_command_chars)
     if not commands:
         sys.stderr.write("every command was filtered out; nothing to replay\n")
+        if corpus_failures:
+            # Same reasoning as above: a scan that could not read its inputs
+            # must not exit with the code that means "the inputs were fine and
+            # empty", whichever branch discovers there is nothing to replay.
+            print_corpus_integrity_banner(corpus_failures, 0, EXIT_CORPUS_INCOMPLETE)
+            return EXIT_CORPUS_INCOMPLETE
         return 1
 
     # Prove the whole instrument works on both versions before replaying
@@ -2566,6 +2645,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     errors = count_errors(result)
     toolfails = count_toolfails(result)
+    # Recomputed from the assembled ledger so the reported set is the one the
+    # JSON carries; identical to the early classification above.
     corpus_failures = count_corpus_integrity_failures(result)
     result["run"]["errors"] = errors
     result["run"]["toolfails"] = toolfails
@@ -2578,7 +2659,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
-    result["run"]["allow_partial_corpus"] = bool(args.allow_partial_corpus)
 
     print_report(result, args.top, args.sample_width)
     if args.json_path:
@@ -2587,23 +2667,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
-    if sum(errors.values()) and not args.allow_errors:
-        print_error_banner(result, errors)
-    if corpus_failures:
-        print_corpus_integrity_banner(
-            corpus_failures, bool(args.allow_partial_corpus), len(commands)
-        )
+    # Decided before anything is printed. Several of these hold at once on a
+    # bad run, every banner prints regardless of which one wins, and each of
+    # them names the exit code — so the code has to be known first or a banner
+    # sends the reader after a failure that is not the one being reported.
     # Precedence, most fundamental first: no verdict at all (3) beats a floor
-    # that crashed on its own terms (2), which beats a corpus that is sound but
-    # short (4). Every banner above is printed regardless of which one wins.
+    # that crashed on its own terms (2), which beats a corpus that could not be
+    # read in full (4).
+    crashed = bool(sum(errors.values())) and not args.allow_errors
     if sum(toolfails.values()):
-        print_toolfail_banner(result, toolfails)
-        return EXIT_TOOL_FAILURE
-    if sum(errors.values()) and not args.allow_errors:
-        return EXIT_ERRORS_PRESENT
-    if corpus_failures and not args.allow_partial_corpus:
-        return EXIT_CORPUS_INCOMPLETE
-    return 0
+        exit_code = EXIT_TOOL_FAILURE
+    elif crashed:
+        exit_code = EXIT_ERRORS_PRESENT
+    elif corpus_failures:
+        exit_code = EXIT_CORPUS_INCOMPLETE
+    else:
+        exit_code = 0
+    if crashed:
+        print_error_banner(result, errors, exit_code)
+    if corpus_failures:
+        print_corpus_integrity_banner(corpus_failures, len(commands), exit_code)
+    if sum(toolfails.values()):
+        print_toolfail_banner(result, toolfails, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

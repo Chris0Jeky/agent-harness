@@ -1941,26 +1941,32 @@ class CorpusIntegrityExitTests(EndToEndTestCase):
         self.assertEqual(
             result["run"]["corpus_integrity"], {"unparsed-file-unreadable": 1}
         )
-        self.assertFalse(result["run"]["allow_partial_corpus"])
 
-    def test_the_banner_says_which_numbers_survive(self):
+    def test_the_banner_labels_the_deltas_subset_only(self):
         _, out, _, _ = self.scan_scenario()
-        # The distinction the exit code exists to communicate: deltas sound,
-        # absolute rates not.
-        self.assertIn("DELTAS are still sound", out)
+        # The first version of this banner said the deltas "are still sound",
+        # which is only true of the subset that was read: a command in the
+        # unread transcript is in no bucket, so a regression it would have
+        # shown is simply absent from `newly_blocked`.
+        self.assertIn("SUBSET-ONLY", out)
+        self.assertIn("is not reported", out)
         self.assertIn("ABSOLUTE rate", out)
+        self.assertNotIn("DELTAS are still sound", out)
 
-    def test_allow_partial_corpus_downgrades_to_a_report(self):
-        code, out, _, result = self.scan_scenario("--allow-partial-corpus")
-        self.assertEqual(code, 0)
-        # Downgraded, not silenced: an informed downgrade still needs the
-        # warning, exactly as `--allow-errors` keeps its own.
+    def test_an_incomplete_corpus_has_no_route_back_to_exit_zero(self):
+        # A gate keying on exit 0 must not pass over a scan that omitted the
+        # transcripts holding the regression it exists to catch. The downgrade
+        # flag that used to allow that is gone; there is no argv that restores
+        # it.
+        code, out, _, _ = self.scan_scenario()
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
         self.assertIn("CORPUS INCOMPLETE", out)
-        self.assertIn("Reported only", out)
-        self.assertTrue(result["run"]["allow_partial_corpus"])
-        self.assertEqual(
-            result["run"]["corpus_integrity"], {"unparsed-file-unreadable": 1}
-        )
+
+    def test_the_downgrade_flag_is_gone_rather_than_ignored(self):
+        # Rejected by argparse, not silently accepted: a caller whose gate
+        # passed on exit 0 because of it has to find out.
+        with self.assertRaises(SystemExit):
+            self.scan_scenario("--allow-partial-corpus")
 
     def test_a_complete_scan_exits_zero_with_no_banner(self):
         # The negative control: the same scan without the broken transcript
@@ -1971,15 +1977,148 @@ class CorpusIntegrityExitTests(EndToEndTestCase):
         self.assertEqual(result["run"]["corpus_integrity"], {})
 
     def test_a_tool_failure_still_wins_the_exit_code(self):
-        # Precedence: no verdict at all (3) is more fundamental than a sound
-        # but short corpus (4). Both banners still print, because a caller
-        # reading only one of them would fix only one of the two problems.
+        # Precedence: no verdict at all (3) is more fundamental than a short
+        # corpus (4). Both banners still print, because a caller reading only
+        # one of them would fix only one of the two problems.
         spawning = self.dir / "spawning.py"
         spawning.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
         code, out, err, _ = self.scan_scenario("--baseline", str(spawning))
         self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
         self.assertIn("CORPUS INCOMPLETE", out)
         self.assertIn("REPLAY TOOL FAILURE", err)
+        # ...and the loser must not claim the exit code it did not get. A
+        # banner saying "Exiting 4" on a run that returns 3 sends the reader
+        # after the wrong failure.
+        self.assertIn(f"Exiting {replay.EXIT_TOOL_FAILURE}.", out)
+        self.assertNotIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+    def test_a_crashing_floor_and_a_short_corpus_agree_on_the_exit_code(self):
+        # The other overlap: `check() RAISED` (2) outranks the short corpus (4),
+        # so both banners must name 2.
+        crashing = self.write_dispatch("crashing", "1.0.0", 'raise ValueError("boom")')
+        code, out, _, _ = self.scan_scenario("--baseline", str(crashing))
+        self.assertEqual(code, replay.EXIT_ERRORS_PRESENT)
+        self.assertIn("check() RAISED", out)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertEqual(out.count(f"Exiting {replay.EXIT_ERRORS_PRESENT}."), 2)
+        self.assertNotIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+    def test_allow_errors_hands_the_exit_code_back_to_the_corpus(self):
+        # With the crash censused rather than fatal, 4 is what is left, and
+        # the corpus banner has to say so.
+        crashing = self.write_dispatch("crashing", "1.0.0", 'raise ValueError("boom")')
+        code, out, _, _ = self.scan_scenario(
+            "--baseline", str(crashing), "--allow-errors"
+        )
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+
+class UnreadableCorpusTests(EndToEndTestCase):
+    """Nothing extracted because nothing could be read is not an empty corpus.
+
+    Every transcript failing to open produces an empty corpus AND a full
+    integrity ledger. `main()` returned 1 from its `if not corpus` branch before
+    the integrity classification ran, so the run had neither the banner nor
+    exit 4 and was indistinguishable from a genuinely empty transcript tree —
+    the exact exit-code ambiguity the new code claims to remove.
+    """
+
+    def run_scan(self, codex, claude, *extra):
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_a_wholly_unreadable_tree_exits_four_not_one(self):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        # Every discovered "transcript" is a directory: the walk finds them,
+        # every open fails, and the corpus comes out empty.
+        for name in ("a.jsonl", "b.jsonl"):
+            (codex / name).mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        code, out, err = self.run_scan(codex, claude)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertNotEqual(code, 1)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("CORPUS INCOMPLETE", err)
+        self.assertIn("2  file-unreadable", out)
+        self.assertIn("broken scan, not an empty corpus", err)
+
+    def test_a_genuinely_empty_tree_still_exits_one(self):
+        # The negative control that keeps 4 meaning something: readable and
+        # empty is a different answer from unreadable.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        code, out, err = self.run_scan(codex, claude)
+        self.assertEqual(code, 1)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertIn("nothing to replay", err)
+
+    def test_a_missing_root_is_corpus_incompleteness(self):
+        # A root that was asked for and is not there withholds an entire
+        # runtime's transcripts — the largest silent shortfall available.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, out, _ = self.run_scan(codex, self.dir / "no-such-claude-tree")
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn("claude-root-missing", out)
+
+    def test_none_declares_a_runtime_deliberately_unscanned(self):
+        # Otherwise a machine that runs only one of the two runtimes could
+        # never get a clean exit, and a permanently red gate teaches people to
+        # ignore it.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, out, _ = self.run_scan(codex, "none")
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertIsNone(replay.transcript_root("none"))
+        self.assertIsNone(replay.transcript_root(""))
+        self.assertEqual(replay.transcript_root("x"), Path("x"))
 
 
 class CorpusIntegrityTests(unittest.TestCase):
