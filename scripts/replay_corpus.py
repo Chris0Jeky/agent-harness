@@ -77,19 +77,19 @@ The rest of that audit, and what each failure is now counted as:
 
 * `check()` raised -> `error` decision (still blocked), `EXIT_ERRORS_PRESENT`.
   Pre-existing; unchanged.
-* the offline guard fired (`OfflineSubprocess`, a floor version spawning a
-  subprocess the stub does not cover) -> `toolfail`, exit 3. It used to be an
+* the offline guard fired (`OfflineModule`, a floor version spawning through a
+  route the stub does not cover) -> `toolfail`, exit 3. It used to be an
   `error`, i.e. a block.
 * a floor that will not import, offers a `command_output` with no
   `command_runner` default bound to it (`make_module_offline`), or has an
   unbindable `check()` -> exit 3. A floor with no `command_output` at all is
   not a failure: it has no spawn seam, so it is already offline and replays.
-  That is the shipped floor 1.2.0, i.e. the exact baseline issue #39 is about.
-  `main()`
-  proves all three in the parent before any worker starts, and `_worker_init`
-  never raises: a raising `multiprocessing.Pool` initializer is respawned
-  forever, so a failure there would hang the run instead of ending it. It
-  stashes the failure and `_worker_run` re-raises it as a task exception.
+  That is the shipped floor 1.2.0, i.e. the exact baseline issue #39 is about,
+  and refusing it kept that baseline unmeasurable. `main()` proves all three in
+  the parent before any worker starts, and `_worker_init` never raises: a
+  raising `multiprocessing.Pool` initializer is respawned forever, so a failure
+  there would hang the run instead of ending it. It stashes the failure and
+  `_worker_run` re-raises it as a task exception.
 * a chunk came back with no verdict -> the run aborts with exit 3 instead of
   failing inside `summarize_tier` on a `None`. It is a bookkeeping backstop
   (a skipped index, a short batch, a dropped result), NOT protection against a
@@ -1123,7 +1123,7 @@ class OfflineModule:
     def __getattr__(self, name: str) -> Any:
         if name in self._blocked:
             raise ReplayHarnessError(
-                "corpus replay is offline but dispatch called " f"{self._label}.{name}"
+                f"corpus replay is offline but dispatch called {self._label}.{name}"
             )
         return getattr(self._real, name)
 
