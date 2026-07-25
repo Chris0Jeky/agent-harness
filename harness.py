@@ -1173,19 +1173,26 @@ def output_before_deadline(
     cwd: Path | None,
     deadline: float | None,
 ) -> tuple[bool, str]:
-    """Run a resolver without overrunning the audit's aggregate budget."""
+    """Run a resolver without overrunning the audit's aggregate budget.
+
+    The clock is read ONCE, before the call: an exhausted budget starts no new
+    process, and the per-command timeout is clamped to what is left, so the
+    whole sweep is bounded by the budget plus at most one in-flight command.
+    Unlike `dispatch.py`, a late answer is KEPT rather than discarded — a hook
+    must not delay a tool call, but an audit has no latency contract, and
+    throwing away a measurement that already proved a remote PUBLIC would turn
+    the exact finding this exists to make into an UNPROVEN.
+    """
     if deadline is None:
         return command_runner(argv, cwd)
     remaining = deadline - monotonic()
     if remaining <= 0:
         return False, ""
     if command_runner is bounded_command_output:
-        result = command_runner(
+        return command_runner(
             argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
         )
-    else:
-        result = command_runner(argv, cwd)
-    return result if monotonic() <= deadline else (False, "")
+    return command_runner(argv, cwd)
 
 
 def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:

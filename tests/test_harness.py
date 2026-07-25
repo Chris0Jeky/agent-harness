@@ -4790,6 +4790,23 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertTrue(result["ok"])
 
+    def test_a_measured_answer_survives_the_budget_expiring(self) -> None:
+        """The clock is read once per command, before it starts.
+
+        Discarding an answer that already proved a remote PUBLIC would turn
+        the one finding this check exists to make into an UNPROVEN.
+        """
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=[0.0, 0.0]):
+            result = self.audit(repo, runner, deadline=8.0)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+
     def test_repo_without_the_overlay_never_touches_the_network(self) -> None:
         repo = self.make_repo(sensitive_data=False)
         runner = FakeCommandRunner()
