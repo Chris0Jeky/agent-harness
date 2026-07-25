@@ -272,7 +272,6 @@ blast-radius ladder in §1.
 it is a subagent: a mechanical sweep handed to eight workers is still mechanical (cheap tier,
 medium/high effort, §3), and a single worker asked for an independent judgment is still judgment.
 
-
 Triage and classification sit on the **default** tier, not the cheap one: deciding what matters
 is judgment wearing mechanical clothes. That misclassification is what kept the Gardener
 definition (`~/.claude/agents/gardener.md` — the one canonical path this doc set uses for it)
