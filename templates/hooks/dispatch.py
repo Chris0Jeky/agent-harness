@@ -77,15 +77,25 @@ _HARNESS_INJECTED_MARKER_PREFIXES = (_INERT_QUOTED_PREFIX,)
 _INTERNAL_MARKER = re.compile(r"__HARNESS_[A-Z0-9_]*?__")
 
 
-def restore_quoted_literal_markers(value: str) -> str:
-    """Restore punctuation protected from shell expansion analysis."""
+def restore_quoted_literal_punctuation(value: str) -> str:
+    """Restore punctuation protected from shell expansion analysis.
+
+    Keeps the quote-provenance stamp, so a caller that re-reads the token as
+    ARGV still knows which tokens are wholly restored quoted text. Text that
+    leaves the tokenizer's world -- a recursed child command, a deny reason --
+    wants `restore_quoted_literal_markers` instead.
+    """
     return (
         value.replace(_LITERAL_COMMA, ",")
         .replace(_LITERAL_OPEN_BRACE, "{")
         .replace(_LITERAL_CLOSE_BRACE, "}")
         .replace(_LITERAL_BACKTICK, "`")
-        .replace(_QUOTED_SPAN_MARK, "")
     )
+
+
+def restore_quoted_literal_markers(value: str) -> str:
+    """Restore punctuation and DROP the provenance stamp."""
+    return restore_quoted_literal_punctuation(value).replace(_QUOTED_SPAN_MARK, "")
 
 
 def marker_is_floor_injected(marker: str) -> bool:
@@ -826,6 +836,64 @@ def token_holds_restored_quote(token: str) -> bool:
     return token.startswith(_QUOTED_SPAN_MARK)
 
 
+def stamp_whole_quoted_span(token: str, raw_token: str, quoted: dict[str, str]) -> str:
+    """Record that this token's payload is one whole quoted span, if it is.
+
+    The scriptblock brace may be GLUED to the string it wraps
+    (`ForEach-Object {"$($_.LineNumber):$($_.Line)"}` is ONE argv token), and the
+    body extractor peels the block open again. So the stamp is inserted where the
+    span starts rather than at position 0: an unpeeled token still has to open
+    with `{` or the block is not recognized at all, and the peeled body still has
+    to open with the stamp or the provenance is lost exactly where it is read.
+
+    The accepted wrappers stop at a bare `{`/`}` run. Admitting a glued ALIAS
+    head (`%{"..."}`) as well measured as a relaxation against origin/main -- in
+    that one spelling main catches a `.env` write inside the string that it
+    misses in every other -- so the generalization stops where the measurement
+    stops. `%{ "..." }` spaced is unaffected; it never glues in the first place.
+    """
+    opening = len(raw_token) - len(raw_token.lstrip("{"))
+    closing = len(raw_token) - len(raw_token.rstrip("}"))
+    if raw_token[opening : len(raw_token) - closing] not in quoted:
+        return token
+    payload = token[opening : len(token) - closing]
+    if not token_reads_as_executing_expression(payload):
+        return token
+    return (
+        f"{token[:opening]}{_QUOTED_SPAN_MARK}{payload}{token[len(token) - closing:]}"
+    )
+
+
+def token_without_quote_span_mark(token: str) -> str:
+    """Read a token as WRITTEN, ignoring recorded quote provenance.
+
+    The stamp answers one question -- "is this statement data or an
+    invocation?" -- and must not silently answer a different one. In HEAD
+    position the written text is what runs: `"$(...)"` as a statement of its own
+    evaluates the subexpression and executes the result, so the dynamic-head deny
+    has to see the `$(` the stamp displaced.
+    """
+    if token.startswith(_QUOTED_SPAN_MARK):
+        return token[len(_QUOTED_SPAN_MARK) :]
+    return token
+
+
+def token_reads_as_executing_expression(token: str) -> bool:
+    """Whether this token would be read as an expression that RUNS something.
+
+    Only asked of tokens the tokenizer already knows are one whole quoted span,
+    to decide whether recording that provenance can change any reading. A
+    LETTER-headed token is excluded because that is what `command_head` resolves
+    an executable from: stamping `'git' push --force` or `'rm' -rf /` would take
+    the head out of reach of every rule.
+    """
+    return bool(
+        token
+        and not token[0].isalpha()
+        and _POWERSHELL_EXECUTING_EXPRESSION.search(token)
+    )
+
+
 def powershell_block_depth(token: str) -> int:
     """Net `{`/`}` depth of a token, honouring PowerShell backtick escapes.
 
@@ -1283,6 +1351,17 @@ def requote_argv_token(token: str) -> str:
         # program structure and must be emitted bare. A `|` that came from a
         # quoted span is an ordinary token and stays quoted below.
         return separator
+    if token.startswith(_QUOTED_SPAN_MARK):
+        # Carry quote PROVENANCE across the recursion boundary, for the same
+        # reason the rejoin carries argument boundaries: the child re-parses
+        # TEXT, and `$($_.Name)` holds no character this tokenizer treats as
+        # structure, so emitting it bare hands the child a bare subexpression and
+        # the fact that it was written as a string is gone. Re-quoting lets the
+        # child derive the same provenance the parent did, which is what keeps
+        # `foreach ($p in $paths) { foreach ($i in 1..3) { "$($lines[$i])" } }`
+        # readable at every level of the nesting.
+        token = token[len(_QUOTED_SPAN_MARK) :]
+        return "'" + token.replace("'", "'\"'\"'") + "'"
     if not _ARGV_TOKEN_NEEDS_QUOTING.search(token):
         return token
     return "'" + token.replace("'", "'\"'\"'") + "'"
@@ -1472,8 +1551,20 @@ def powershell_literal_scriptblock_bodies(
             inner = [opening[1:], *toks[index + 1 : end]]
             if inner and inner[-1].endswith("}"):
                 inner[-1] = inner[-1][:-1]
-            inner = [restore_quoted_literal_markers(part) for part in inner if part]
-            bodies.append((rejoin_argv_as_command(inner), inner))
+            # The TOKENS keep their provenance stamp: the caller has to be able
+            # to tell `{ "$($_.Name)" }` (a string the shell prints) from
+            # `{ $($_.Name) }` (a subexpression it runs), and only the tokenizer
+            # ever knew which one was written. The body TEXT drops it, so every
+            # existing reading of that string stays byte-identical.
+            inner = [restore_quoted_literal_punctuation(part) for part in inner if part]
+            bodies.append(
+                (
+                    rejoin_argv_as_command(
+                        [restore_quoted_literal_markers(part) for part in inner]
+                    ),
+                    inner,
+                )
+            )
             index = end
             continue
         index += 1
@@ -2668,6 +2759,14 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             raw_token.startswith(placeholder) for placeholder in quoted
         ):
             token = f"{_QUOTED_SPAN_MARK}{token}"
+        else:
+            # The second ambiguity, recorded the same way: a statement that is
+            # ONE token spelled `$(...)` executes a subexpression, but the same
+            # text restored from a whole quoted span (`"$($_.Name)"`) is a string
+            # the shell only prints. A token merely CONTAINING a span
+            # (`x$(...)y`, `'git' push`) is NOT stamped, so head, path and flag
+            # matching keep seeing byte-identical text.
+            token = stamp_whole_quoted_span(token, raw_token, quoted)
         current.append(token)
     if current:
         result.append((current, ""))
@@ -7119,13 +7218,20 @@ def check(
     def _statement_invokes_a_command(statement: list[str]) -> bool:
         """Whether this body statement is a command invocation rather than data.
 
-        A lone token HOLDING WHITESPACE can only have come from a quoted span —
-        `tokens()` and shlex both split on whitespace, so nothing else puts it
-        back — and a bare quoted string statement (`{ 'git push --force origin
-        main' }`) only OUTPUTS its text. That keeps the floor's promise never to
-        treat quoted text as a target. A lone BAREWORD is a real invocation
+        A lone token that is WHOLLY restored quoted text is a string statement
+        (`{ 'git push --force origin main' }`, `{ "$($_.Name)" }`): the shell
+        only OUTPUTS it. That keeps the floor's promise never to treat quoted
+        text as a target. A lone BAREWORD is a real invocation
         (`{ Pop-Location }`), and reading it as inert dropped the relocation a
         sibling statement then depended on.
+
+        Provenance is asked of the tokenizer twice over, because two different
+        facts prove it. Holding whitespace is sufficient on its own — `tokens()`
+        and shlex both split on whitespace, so nothing but a quoted span puts it
+        back. Whitespace-FREE quoted text needs the recorded
+        `_QUOTED_SPAN_MARK`; deciding it on whitespace alone made the identical
+        idiom allow or deny on whether the string happened to contain a space:
+        `{ "line $_" }` allowed while `{ "$($_.Name)" }` denied.
 
         Beyond that, only a LETTER-headed head is a command: a pure expression or
         member access (`$_.Name`, `1..3`, `$i++`) is inert output.
@@ -7139,6 +7245,19 @@ def check(
         `$_.Name` has no `$(`, no backtick pair, and no `::`.
         """
         if not statement:
+            return False
+        # A block scan can leave the closing brace GLUED to another terminator,
+        # so `@($x | ForEach-Object { "$($_.name)" })` hands this a trailing
+        # `})` token and the string stopped looking like the only statement
+        # there is. Those tokens are structure, never content. Only the recorded
+        # provenance may look past them: a token holding whitespace proves
+        # nothing about the tokens beside it, so that test keeps asking about a
+        # genuinely lone token and cannot start reading a BARE `$(rm -rf /)` as
+        # data because a closer happened to follow it.
+        content = list(statement)
+        while len(content) > 1 and content[-1] and not content[-1].strip("})"):
+            content.pop()
+        if token_holds_restored_quote(content[0]) and len(content) == 1:
             return False
         if len(statement) == 1 and any(char.isspace() for char in statement[0]):
             return False
@@ -7374,7 +7493,9 @@ def check(
                 "deny",
                 "A BASH_ENV startup file runs opaque program text before the shell body.",
             )
-        if quote_aware and re.match(r"^(?:\$|%[^%]+%$|![^!]+!$|`|\$\()", toks[0]):
+        if quote_aware and re.match(
+            r"^(?:\$|%[^%]+%$|![^!]+!$|`|\$\()", token_without_quote_span_mark(toks[0])
+        ):
             return "deny", "A dynamic executable name cannot be inspected safely."
         if any(
             marker in token
