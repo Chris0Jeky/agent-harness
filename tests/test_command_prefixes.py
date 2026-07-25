@@ -377,12 +377,15 @@ class WindowsGrammarSegmentationTests(unittest.TestCase):
                 decision, reason = decide(command)
                 self.assertEqual(decision, "allow", reason)
 
-    def test_the_allow_side_actually_samples_the_widened_union(self):
+    def test_the_allow_side_actually_reaches_the_recovery_path(self):
         # Reachability, not usage: a benign command that never enters the
         # recovery path proves nothing about the `&`-grammar widening.  If a
         # future quoting change moves these onto the ordinary shlex path, the
         # allow assertions above would keep passing while covering nothing --
-        # so pin that the cmd reading is genuinely produced and inspected.
+        # so pin that these commands really do reach it.  The widening itself
+        # is pinned by test_both_separator_readings_are_recovered; both
+        # assertions below survive reverting it, so do not read this as its
+        # guard.
         for command in self.RECOVERED_ALLOW:
             with self.subTest(command=command):
                 segments = [

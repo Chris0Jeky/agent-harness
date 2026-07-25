@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.8 (2026-07-25)"
+FLOOR_VERSION = "1.6.9 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -4154,7 +4154,14 @@ def strip_leading_command_redirections(toks: list[str]) -> list[str]:
     scan for bare targets and by :func:`leading_redirection_write_targets` for
     inert-quoted ones -- and repository-config redirect state is recorded from
     the original argv.  Removing the prefix here therefore exposes the
-    executable without discarding either policy.
+    executable without discarding either of those two policies.
+
+    It DOES discard a third: :func:`has_opaque_posix_shell_input` reads the
+    input operands (``<``, ``<<<``, ``< <(...)``) that this strip removes, so a
+    leading redirection hides shell program text from it -- `bash < payload.sh`
+    denies while `< payload.sh bash` allows.  Pre-existing on both sides of this
+    normalization and tracked as issue #75; the fix is to collect the read
+    operands here the way write targets already are.
     """
     assignments: list[str] = []
     index = 0
