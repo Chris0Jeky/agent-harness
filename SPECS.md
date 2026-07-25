@@ -1,6 +1,6 @@
 # Harness Specs
 
-Last Updated: 2026-07-13 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
+Last Updated: 2026-07-25 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
 ## §1 Global `~/.claude/CLAUDE.md` — literal draft (~40 lines)
 
@@ -49,7 +49,8 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   "authority": { "push": "free", "merge": "gated" },
   "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
              "relaxed_work_loss_guards": false },
-  "model_routing": { "harness_and_review": "top", "slices": "mid", "maintenance": "cheap" },
+  "model_routing": { "harness_and_review": "top", "slices": "default",
+                     "maintenance_judgment": "default", "maintenance_mechanical": "cheap" },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
   "last_reviewed": "2026-07-06"
@@ -62,6 +63,18 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
+- `model_routing.*`: routing-tier names ONLY — `top` | `default` | `cheap`, the §8 vocabulary.
+  Never write a named model here; that is the `model-effort-routing` skill's job, and a model
+  name in a per-repo config file is a copy that will go stale silently.
+- Maintenance takes TWO keys, because §8 splits the class: `maintenance_judgment` (Gardener
+  triage, tombstone classification, promotion routing → `default`) and `maintenance_mechanical`
+  (bulk sweeps, doc rotation, formatting, test running → `cheap`). The single `maintenance` key
+  is RETIRED: with one key a consumer had to send mechanical sweeps to `default` against §8 or
+  ignore the file entirely. Readers should treat a legacy `maintenance` value as
+  `maintenance_judgment` and leave `maintenance_mechanical` unset (fall back to §8's `cheap`).
+  NOTE: `harness.py seed` currently emits the old three keys with values `sol` / `terra` /
+  `luna`, matching neither this schema nor §8, and is read by nothing — tracked in issue #47,
+  which now also covers emitting the split keys.
 - Read by: dispatcher hook, Gardener, bootstrapper, CI templates. The dispatcher also reads
   legacy `.claude/tier.json` files so existing estates can migrate without a flag day.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
@@ -268,23 +281,42 @@ False positives train hook-disabling; when in doubt, don't fire.
 
 ## §8 Model & effort routing (full table)
 
-| Task class | Model | Effort | Walls vs tripwires |
+Model tiers (`top` / `default` / `cheap`) are ROUTING tiers — unrelated to the T0–T4
+blast-radius ladder.
+
+| Task class | Model tier | Effort | Walls vs tripwires |
 |---|---|---|---|
-| Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: `.claude/agents` pins + review requirement |
-| Adversarial review, merge decisions | top | xhigh | wall at T4 (gate), tripwire below |
+| Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: agent `model:` pins + review requirement |
 | Region maps, skills, ADRs, global laws | top | xhigh | convention |
-| Feature slices in mapped regions | mid | medium–high | convention |
-| Bulk mechanical edits, test running | mid/cheap | low–medium | convention |
-| Gardener triage, doc rotation, formatting, tombstones | cheap | low | wall: gardener.md model pin + PR-only output |
+| Adversarial review, merge decisions | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
+| Code implementation, debugging, feature slices in mapped regions | default | high | convention |
+| Gardener triage, tombstone classification, promotion routing | default | low | wall: `~/.claude/agents/gardener.md` pin + PR-only output |
+| Judgment-bearing subagent work (a lens, a call, a triage), lookups, conversation | default | low | convention |
+| Bulk mechanical sweeps, doc rotation, formatting, test running — INCLUDING when fanned out across subagents | cheap | medium–high (never low) | convention |
 
 Effort is the first dial (cheaper than a model swap). Default-up when unsure. Interactive
 sessions: pick per the table at session start; don't leave xhigh pinned globally for
 maintenance work.
 
-The current concrete calibration — which named model at which effort, any temporary access
-window, and the fan-out fleet caps — lives in the `model-effort-routing` global skill, not here.
-This table is the durable judgment-vs-mechanical shape; the skill carries the model-specific
-detail so it updates without a SPECS edit.
+**Triage and classification are judgment, not mechanics** — deciding what matters is a call, so
+they sit on the default tier even though they run on a schedule. A cheap tier only earns work
+that is genuinely simple, well-specified, and hard to get wrong; and when it does, it runs at
+medium/high effort, because a cheap model at low effort compounds two handicaps.
+
+**Delegation is not a task class.** A subagent is routed by the work it does, not by the fact
+that it was delegated: wide mechanical fan-out follows the cheap row above and BLUEPRINT §3
+(medium/high effort, never low); a subagent asked for an independent lens or a call follows the
+default row. If a task matches both rows, the DEFAULT row wins: the ladder routes up when the
+class is unclear, because a cheap model on judgment work is the expensive mistake.
+
+**The tiers above are deliberately unnamed, and this table does not restate the ladder.** Which
+model fills `top` / `default` / `cheap`, and the fan-out fleet caps (≤3–5, ≤8–12 for a sweep),
+live in the `model-effort-routing` global skill — the single home. A named model written in two
+files is how a stale routing row survives repeated prose bans; if this table and the skill ever
+disagree, the skill wins and the local copy is the bug. The one model-level statement that is law
+rather than calibration — the standing family-wide Haiku ban — is declared in BLUEPRINT §5 and
+enforced by the config repo's `tests/check-agent-models.ps1`; it is deliberately not restated here. This table is the durable judgment-vs-mechanical shape and
+changes only when that shape changes.
 
 ## §9 Bootstrapper CLI + ESTATE.md
 
@@ -309,8 +341,35 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 ## §10 Gardener spec
 
-- Invocation: Claude Code scheduled routine (or Windows Task Scheduler fallback:
-  `claude -p "/gardener" --model haiku` with effort low), weekly per ACTIVE repo only.
+- Invocation: a Claude Code scheduled routine configured with the default-tier model at effort
+  low, weekly per ACTIVE repo only. Windows Task Scheduler fallback: `claude -p "<gardener
+  prompt>"` with the SESSION model bound through the routine/settings model setting, resolved
+  from the `model-effort-routing` skill at configuration time (rule 4 below explains why the
+  command line is not an option). Binding it is not optional: a headless `claude -p` run is a
+  TOP-LEVEL session, so the `model:` pin in `~/.claude/agents/gardener.md` binds the delegated
+  SUBAGENT, not the session that starts it, and a run that passes nothing inherits the ambient
+  default — the top tier — and §6's scheduled-spend cap silently does not apply.
+- **Where the model name may live (the derivation contract).** The `model-effort-routing` skill
+  is the SOURCE: it alone defines which named model fills `default`. Prose — this spec, the
+  blueprint, the scheduled-routine description — carries the tier name and points at the skill,
+  never a model name. Agent definitions are the ONE permitted DERIVED copy, because `model:` in
+  `~/.claude/agents/gardener.md` is a machine-read field that cannot hold an indirection. Being
+  permitted, that copy is governed rather than trusted:
+  1. Changing which model fills a tier in the skill is NOT DONE until every agent definition
+     pinned to that tier is re-pinned in the same change — one commit, both surfaces.
+  2. Nothing today records WHICH tier a given `model:` derives from, so the copy is currently
+     conventional rather than checkable. Making it checkable — a declared tier next to the pin,
+     and a check that compares the two — is the substance of issue #76.
+  3. `tests/check-agent-models.ps1` in the config repo is the enforcement surface. Today it
+     asserts only that no definition pins a banned model (the family-wide Haiku ban); extending
+     it to assert that each `model:` equals the skill's model for the declared tier is tracked
+     in agent-harness issue #76. Until that lands, rule 1 is a convention with a review step,
+     and this spec says so rather than implying a check that does not exist.
+  4. A command line (`claude -p … --model …`) is NOT a permitted copy: it is transient config
+     no check can see. Bind the scheduled session through the routine/settings model setting
+     resolved from the skill at configuration time.
+  The failure this replaces was exactly a stale second copy: a literal `--model haiku` sat in
+  this line while Haiku was banned in prose elsewhere in the estate.
 - Runs in its own worktree — never the live checkout (one-writer rule; scheduled agents must
   not race interactive sessions or wave agents).
 - Output contract: exactly ONE branch + PR, ≤100 changed lines, title `gardener: <repo> <date>`,
@@ -349,9 +408,11 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - 5 global process skills: safe-shell, small-safe-slice, verification-closeout (≤40 lines each,
   keep as-is); plus two ≤80-line workflow-mode skills — `guided-walkthrough` (backlog→numbered-q-N
   guided mode: per item context + suggested action + owner tag + step-by-step for human-only items)
-  and `model-effort-routing` (effort→model→fan-out ladder; Opus 4.8 default reach, Fable-with-fallback
-  for the hardest work, fleet caps ≤3–5 / ≤8–12). These are the single home for their behavior;
-  global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point at them.
+  and `model-effort-routing` (effort→model→fan-out ladder and fleet caps ≤3–5 / ≤8–12). These are
+  the single home for their behavior — in particular, `model-effort-routing` is the ONLY place that
+  names models and their effort bindings; §8 above and BLUEPRINT §5 carry the task-class→tier shape
+  and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
+  at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
 - Plugins: keep pr-review-toolkit/code-review/feature-dev ONLY where a repo hasn't chosen its
   local skill for that verb (record per-repo in ESTATE.md); delete disabled marketplace clones.
