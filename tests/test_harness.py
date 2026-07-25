@@ -5272,7 +5272,9 @@ class RealityCheckTests(unittest.TestCase):
             "We keep private repos for client work.",
             "It lives in a private GitHub repository.",
             "The repo is private and must stay that way.",
-            "Everything here is kept private.",
+            "Everything in this repository is kept private.",
+            "Keep the repo private.",
+            "These repos remain private.",
             "Pushes go to a private remote.",
         )
         for text in claiming:
@@ -5282,6 +5284,12 @@ class RealityCheckTests(unittest.TestCase):
             "Never commit a private key.",
             "Privately held opinions are out of scope.",
             "The repository is public.",
+            # Ordinary secrets-hygiene boilerplate: a claim about keys and
+            # secrets, not about this repository's visibility.
+            "Keep private keys out of version control.",
+            "Secrets remain private to the operator.",
+            "Private tokens stay private; rotate them quarterly.",
+            "Credentials are kept private in the vault.",
         )
         for text in not_claiming:
             with self.subTest(text=text):

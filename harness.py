@@ -1148,11 +1148,23 @@ PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
 # matched "private" immediately followed by one of three singular nouns, which
 # misses "this repository is private", "private repos" and "kept private" - the
 # most natural spellings - so the advertised converse check almost never fired.
+#
+# EVERY alternative requires one of these nouns inside the match. A bare
+# `(?:kept|keep|stays?|remains?)\s+private` fires on ordinary secrets-hygiene
+# boilerplate - "Keep private keys out of version control", "Secrets remain
+# private to the operator" - and then reports a two-word fragment as if the doc
+# had made a claim about the REPOSITORY. Requiring the noun both removes that
+# false positive and makes the quoted fragment show what is being kept private.
 _PRIVACY_NOUNS = r"(?:repo|repository|remote)s?"
+_PRIVACY_STATES = r"(?:is|are|was|were|stays?|stayed|remains?|remained|kept|keeps?)"
 PRIVACY_CLAIM_PATTERN = re.compile(
+    # "a private repo", "private GitHub repository"
     rf"private\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
-    rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+is\s+private\b"
-    r"|(?:kept|keep|stays?|remains?)\s+private\b",
+    # "this repository is private", "the repo stays private", "repos are kept private"
+    rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+{_PRIVACY_STATES}\s+private\b"
+    # "keep the repo private"
+    rf"|(?:keeps?|kept|stays?|remains?)\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    rf"(?:\s+\w+){{0,2}}\s+private\b",
     re.IGNORECASE,
 )
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
