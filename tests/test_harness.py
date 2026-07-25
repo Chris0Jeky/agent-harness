@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -5606,6 +5607,28 @@ class RealityCheckTests(unittest.TestCase):
         self.assertTrue(resolved)
         self.assertIn("origin", output)
         self.assertIn("�", output)
+
+    def test_a_timed_out_resolver_returns_within_its_bound(self) -> None:
+        # A resolver whose DESCENDANT inherits the captured pipes (ssh behind
+        # `git ls-remote`) kept the drain waiting long past the deadline the
+        # aggregate budget is built on, because `subprocess.run` kills only the
+        # process it started. The child now runs in its own group and the whole
+        # tree is killed, and the pipes are closed rather than drained again.
+        script = (
+            "import subprocess, sys, time;"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+            " stdout=sys.stdout, stderr=sys.stderr);"
+            "time.sleep(60)"
+        )
+        started = time.monotonic()
+        resolved, output = harness.bounded_command_output(
+            [sys.executable, "-c", script], timeout=1.0
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(resolved)
+        self.assertEqual(output, "")
+        # Generous, but far below the 60s the grandchild would otherwise hold.
+        self.assertLess(elapsed, 20.0, f"bounded_command_output took {elapsed:.1f}s")
 
     def test_embedded_credentials_never_reach_a_finding(self) -> None:
         # `git remote --verbose` keeps URL userinfo, so an audit that echoes

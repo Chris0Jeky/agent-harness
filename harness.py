@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1200,20 +1201,72 @@ def bounded_command_output(
     check is simply UNPROVEN. `errors="replace"` keeps whatever is decodable
     and leaves the rest as replacement characters; `UnicodeError` is still
     caught, because a caller may pass its own runner.
+
+    The timeout is a HARD bound on this function, not just on the direct child.
+    `subprocess.run` kills only the process it started, so `git ls-remote`'s ssh
+    helper — which inherits the captured pipes and carries its own much longer
+    network timeout — could keep the drain waiting long past the deadline the
+    aggregate budget is built on. The child is started in its own process group
+    (POSIX) and the whole tree is killed on timeout (`taskkill /T` on Windows);
+    the pipes are then closed without a second blocking read, so the bound
+    holds even if a descendant survives.
     """
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             cwd=str(cwd) if cwd is not None else None,
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
+            **popen_kwargs,
         )
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False, ""
-    return proc.returncode == 0, (proc.stdout or "").strip()
+    try:
+        stdout, _stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc)
+        return False, ""
+    except (OSError, ValueError, UnicodeError):
+        terminate_process_tree(proc)
+        return False, ""
+    return proc.returncode == 0, (stdout or "").strip()
+
+
+def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill a timed-out resolver and every descendant, then stop reading it.
+
+    Nothing here may block: this runs because a deadline was already missed.
+    The pipes are closed rather than drained, so a descendant that survives
+    cannot hold this process open — the file objects are released to the GC.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except (OSError, ValueError):
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except OSError:
+            pass
 
 
 # `git` is not by itself a local resolver: these subcommands contact the
