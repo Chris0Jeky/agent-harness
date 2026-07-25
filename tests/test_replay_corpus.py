@@ -1837,6 +1837,45 @@ class CorpusIntegrityTests(unittest.TestCase):
         # The complete case must stay silent.
         replay.assert_every_command_replayed([[("allow", "")]], [[("allow", "")]])
 
+    def test_a_short_batch_reaches_the_guard_through_replay(self):
+        """The guard's real trigger, exercised where it actually sits.
+
+        Not an OOM-killed worker: `Pool.imap_unordered` blocks forever on a
+        result that never arrives, so that shape hangs and never reaches here
+        (see COVERAGE LIMITS). What does reach it is bookkeeping coming up
+        short, so that is what is injected — a `_worker_run` that returns a
+        batch shorter than the chunk it was handed, exactly what a chunking or
+        result-mapping refactor would produce.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            floor = Path(tmp) / "floor.py"
+            floor.write_text(
+                STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+                encoding="utf-8",
+            )
+            real_worker_run = replay._worker_run
+
+            def short_batch(chunk):
+                batch, reads = real_worker_run(chunk)
+                return batch[:-1], reads
+
+            replay._worker_run = short_batch
+            try:
+                with self.assertRaises(replay.ReplayHarnessError) as caught:
+                    replay.replay(
+                        ["git status", "git log"],
+                        floor,
+                        floor,
+                        (2,),
+                        tmp,
+                        jobs=1,
+                        progress=False,
+                    )
+            finally:
+                replay._worker_run = real_worker_run
+        self.assertIn("1 of 2", str(caught.exception))
+        self.assertIn("not usable", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,8 +75,11 @@ The rest of that audit, and what each failure is now counted as:
   never raises: a raising `multiprocessing.Pool` initializer is respawned
   forever, so a failure there would hang the run instead of ending it. It
   stashes the failure and `_worker_run` re-raises it as a task exception.
-* a chunk came back with no verdict under `--jobs > 1` -> the run aborts with
-  exit 3 instead of failing inside `summarize_tier` on a `None`.
+* a chunk came back with no verdict -> the run aborts with exit 3 instead of
+  failing inside `summarize_tier` on a `None`. It is a bookkeeping backstop
+  (a skipped index, a short batch, a dropped result), NOT protection against a
+  killed worker: `Pool.imap_unordered` blocks forever on a result that never
+  arrives, so that shape hangs rather than returning short. See COVERAGE LIMITS.
 * an unreadable transcript file, a mid-file read error, or a transcript tree
   that cannot be walked -> counted under `file-unreadable` / `file-read-error`
   / `transcript-tree-unwalkable`, flagged in the extraction ledger, and given
@@ -184,6 +187,14 @@ COVERAGE LIMITS (read before quoting a number)
   rather than being counted as a block. None has been observed. This is the
   deliberate direction — a stalled run is visible, a command counted as blocked
   because it was slow is not.
+* There is no pool watchdog either. Under `--jobs > 1` a worker that dies
+  outright (OOM killer, segfault in a C extension) does not come back as a
+  missing result: `Pool.imap_unordered` blocks forever waiting for a task result
+  that will never arrive, so the run hangs. `assert_every_command_replayed`
+  does not and cannot catch that shape — it is a bookkeeping backstop, not a
+  liveness guard. Same deliberate direction as above: a hung run is visible and
+  produces no number, whereas a partial replay printed as a table is
+  indistinguishable from a measurement. `--jobs 1` has no such shape.
 * Commands longer than `--max-command-chars` are dropped before replay and are
   in no rate reported anywhere. Long commands skew blocked (nested
   scriptblocks, heredocs, dynamic tokens), so the exclusion biases the absolute
@@ -1326,11 +1337,25 @@ def assert_every_command_replayed(
 ) -> None:
     """Refuse to report on a replay that did not cover every command.
 
-    A chunk that never came back — a worker killed by the OOM killer, a pool
-    that lost a result — leaves `None` in these lists, and the run would then
-    die deep inside `summarize_tier` with a message about unpacking a
-    non-iterable. Worse, a future refactor that defaulted the gap to a verdict
-    would report a partial replay as a measurement.
+    A gap leaves `None` in these lists; the run would then die deep inside
+    `summarize_tier` on a non-iterable, and a future refactor that defaulted the
+    gap to a verdict would report a partial replay as a measurement. Both are
+    the failure this branch exists to prevent, so the gap is named here instead.
+
+    Be accurate about what reaches it, because a caller who trusts the wrong
+    guarantee stops looking for the real failure. It is NOT protection against a
+    killed worker: `Pool.imap_unordered` does not surface one as a missing
+    result — the pool blocks forever on a task result that will never arrive, so
+    an OOM-killed worker hangs the run rather than shortening these lists. **A
+    `--jobs > 1` run has no watchdog and can still hang**; that is a live
+    limitation, stated in COVERAGE LIMITS, not something this function fixes.
+
+    What it does catch is every way the *bookkeeping* can come up short: a chunk
+    plan that skips an index, a `_worker_run` that returns a batch shorter than
+    the chunk it was given, a mapping that drops a result, and any future
+    refactor of either. Cheap, total, and it runs on the single-process path too
+    — which is why the test drives it through `replay()` rather than only
+    calling it with a hand-built `None`.
     """
     unfilled = sum(
         1
