@@ -1164,11 +1164,6 @@ def seed_repo(args: argparse.Namespace) -> int:
         "name": TIER_NAMES[args.tier],
         "authority": {"push": args.push, "merge": args.merge},
         "flags": flags,
-        "model_routing": {
-            "harness_and_review": "sol",
-            "slices": "terra",
-            "maintenance": "luna",
-        },
         "budgets": {
             "standing_context_tokens": {1: 1000, 2: 3000, 3: 6000, 4: 8000}.get(
                 args.tier, 200

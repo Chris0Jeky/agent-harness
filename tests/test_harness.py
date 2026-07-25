@@ -286,6 +286,44 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(data["name"], "daily-driver")
         self.assertTrue(data["flags"]["sensitive_data"])
 
+    def test_seed_omits_unread_model_routing_block(self) -> None:
+        repo = self.make_repo()
+        args = SimpleNamespace(
+            path=str(repo),
+            tier=3,
+            push="free",
+            merge="gated",
+            human_todo=None,
+            sensitive_data=False,
+            relaxed_work_loss_guards=False,
+            dry_run=False,
+        )
+        self.assertEqual(harness.seed_repo(args), 0)
+        data = json.loads(
+            (repo / ".agent-harness" / "tier.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("model_routing", data)
+
+    def test_audit_ignores_legacy_model_routing_block(self) -> None:
+        repo = self.make_repo()
+        (repo / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
+        tier = {
+            "tier": 2,
+            "name": "daily-driver",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {"sensitive_data": False},
+            "model_routing": {
+                "harness_and_review": "sol",
+                "slices": "terra",
+                "maintenance": "luna",
+            },
+        }
+        target = repo / ".agent-harness" / "tier.json"
+        target.parent.mkdir()
+        target.write_text(json.dumps(tier), encoding="utf-8")
+        result = harness.audit_repo(repo)
+        self.assertTrue(result["ok"], result["issues"])
+
     def test_seed_refuses_overwrite(self) -> None:
         repo = self.make_repo()
         target = repo / ".agent-harness" / "tier.json"
