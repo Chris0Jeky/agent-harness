@@ -1659,6 +1659,20 @@ def requirements_hook_path_resolves_here(value: str) -> bool:
     return PurePosixPath(value).is_absolute()
 
 
+def requirements_hook_path_is_locally_probeable(value: str) -> bool:
+    """Return whether existence can be probed without reaching a network host.
+
+    A UNC value (`\\\\server\\share\\...`, or its `//server/share` spelling)
+    turns `is_dir()` into an SMB round trip: off-VPN or with the host down it
+    blocks on name resolution for tens of seconds and then answers about
+    reachability rather than about the directory. Existence therefore stays
+    UNPROVEN for those paths; absoluteness is still asserted. POSIX network
+    mounts are indistinguishable from local paths, so this narrowing can only
+    recognize the UNC spelling.
+    """
+    return not PureWindowsPath(value).drive.startswith(("\\\\", "//"))
+
+
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
     """Validate ManagedHooksRequirementsToml's optional path fields.
 
@@ -1682,6 +1696,8 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
                 f"{value!r}"
             )
         if not requirements_hook_path_resolves_here(value):
+            continue
+        if not requirements_hook_path_is_locally_probeable(value):
             continue
         try:
             resolvable = Path(value).is_dir()

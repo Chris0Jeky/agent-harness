@@ -168,7 +168,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   duplicate known fields, non-standard constants, invalid known strings, and invalid wrapper
   fields while traversing ignored unknown values iteratively; every supported event and handler is
   schema-valid; inline config hook state and managed requirements hook paths have their
-  source-specific shapes. Python's stdlib decoder imposes an explicit fail-closed boundary at
+  source-specific shapes. A managed hook directory must be absolute, and its existence is
+  probed — the only filesystem access in the parse path — for a value the running platform
+  resolves. A UNC value is exempt from that probe, so an audit never blocks on an unreachable
+  network share and that directory's existence stays unproven. Python's stdlib decoder imposes an explicit fail-closed boundary at
   pathological JSON nesting depths before ignored-value inspection. One malformed hook sibling
   invalidates the layer instead of leaving a countable `PreToolUse` floor. The harness does not
   fully schema-validate unrelated ConfigToml or requirements fields; exact Codex startup and

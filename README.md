@@ -42,7 +42,9 @@ system `hooks.json`, system `requirements.toml`, inline system/base and selectab
 hooks, and the legacy managed config file. On Windows it resolves the system layer through the
 ProgramData known folder, as Codex does. Before counting a floor, it validates the complete hook
 subtree and the hook-specific metadata it statically interprets: every supported event, the JSON
-object wrapper and parser constraints, config hook state, and managed requirements hook paths. It
+object wrapper and parser constraints, config hook state, and managed requirements hook paths — a
+managed hook directory must be absolute and, unless it is a UNC path no audit should block on,
+must exist on the platform that resolves it. It
 scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
 profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
 schema-validated. Ignored JSON values are traversed iteratively, but the stdlib JSON decoder still

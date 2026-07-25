@@ -953,6 +953,33 @@ class HarnessTests(unittest.TestCase):
                 json.dumps(document), source_kind="requirements"
             )
 
+    def test_requirements_unc_managed_dirs_are_never_stat_probed(self) -> None:
+        # An SMB stat blocks for tens of seconds off-VPN and then answers about
+        # reachability, so existence stays unproven for a UNC managed dir. Both
+        # spellings are recognized on both platforms.
+        for value in ("//fileserver/codex/hooks", "\\\\fileserver\\codex\\hooks"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        for value in ("C:/managed/hooks", "/managed/hooks"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        with mock.patch.object(
+            harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
+        ):
+            harness.validate_requirements_hook_paths(
+                {
+                    "managed_dir": "//fileserver/codex/hooks",
+                    "windows_managed_dir": "\\\\fileserver\\codex\\hooks",
+                }
+            )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
     def test_requirements_hook_paths_reject_managed_file(self) -> None:
         not_a_directory = Path(self.temp.name) / "managed-hooks-file"
         not_a_directory.write_text("", encoding="utf-8")
