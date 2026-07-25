@@ -135,6 +135,9 @@ class PrefixCrossProductTests(unittest.TestCase):
         "2>agent-harness-prefix.err ",
         "&>agent-harness-prefix.out ",
         ">&1 ",
+        # Bash's brace-named descriptor: `{fd}>file` truncates the file and
+        # stores the descriptor in `$fd`; the head is still the word after it.
+        "{harness_fd}>agent-harness-prefix.out ",
         "HARNESS_PREFIX=1 ",
         # Bash's APPEND assignment is a command-scoped prefix too, and `_ASSIGN`
         # used to match only `=`, so this spelling stood as the head.
@@ -160,6 +163,57 @@ class PrefixCrossProductTests(unittest.TestCase):
                     decision, reason = decide(prefix + command, tier, flags)
                     self.assertEqual(decision, "deny", reason)
         self.assertGreater(eligible, 1000)
+
+
+class BraceDescriptorPrefixTests(unittest.TestCase):
+    """`{name}>file` is a redirection, not a PowerShell script block."""
+
+    def test_brace_descriptor_exposes_the_head(self):
+        for command in (
+            "{fd}>out git push --force origin main",
+            "{fd}>>out git push --force origin main",
+            "{fd}>out rm -rf /critical/outside",
+            "{my_fd2}>out sudo id",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "deny")
+
+    def test_brace_descriptor_target_is_still_judged(self):
+        for command in (
+            "{fd}>'.env' true",
+            '{fd}>".env" true',
+            "{fd}<>'.env' true",
+            "{fd}>.env true",
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_a_script_block_no_longer_swallows_what_follows_it(self):
+        # The unwrap replaced the command with the block body and DROPPED any
+        # non-separator suffix, so everything after the brace run went
+        # uninspected.  Same hole the brace-descriptor bypass rode in on.
+        for command in (
+            "{ echo hi } rm -rf /critical/outside",
+            "{ echo hi } git push --force origin main",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "deny")
+
+    def test_ordinary_script_blocks_keep_their_verdicts(self):
+        self.assertEqual(decide("{ echo hi }")[0], "allow")
+        self.assertEqual(decide("{ echo hi } | Out-Null")[0], "allow")
+        self.assertEqual(decide("& { git push --force origin main }")[0], "deny")
+        self.assertEqual(decide("{ rm -rf /critical/outside }")[0], "deny")
+
+    def test_brace_expansion_is_not_read_as_a_descriptor(self):
+        # A descriptor name is a shell identifier; brace EXPANSION never is.
+        for token in ("{a,b}", "{1..3}", "{}"):
+            with self.subTest(token=token):
+                self.assertIsNone(
+                    dispatch._REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(token)
+                )
+        self.assertIsNotNone(dispatch._REDIRECTION_DESCRIPTOR_TOKEN.fullmatch("{fd}"))
 
 
 class AssignmentPrefixPolicyTests(unittest.TestCase):

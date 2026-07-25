@@ -3960,6 +3960,19 @@ _COMMAND_PREFIX_REDIRECTION_OPERATORS = (
     "<",
 )
 
+# A redirection's descriptor is a number, cmd's `*`, or -- in Bash -- a NAME in
+# braces: `{fd}>file` opens the file and stores the allocated descriptor in
+# `$fd`, so the file is truncated exactly as `1>file` truncates it and the word
+# after the target is still the executable. Recognizing only `\d+|\*` left
+# `{fd}>'.env' true` and `{fd}>out git push --force origin main` resolving `fd`
+# as the head, which matches no rule.
+#
+# The name pattern is Bash's own (a valid shell identifier), which is what keeps
+# brace EXPANSION out: `{a,b}` carries a comma, `{1..3}` a dot, `{}` is empty,
+# and `Remove-Item` a hyphen -- none of them can be read as a descriptor.
+_REDIRECTION_DESCRIPTOR = r"\d+|\*|\{[A-Za-z_][A-Za-z0-9_]*\}"
+_REDIRECTION_DESCRIPTOR_TOKEN = re.compile(rf"(?:{_REDIRECTION_DESCRIPTOR})")
+
 
 def command_prefix_redirection_token(
     token: str,
@@ -3970,7 +3983,7 @@ def command_prefix_redirection_token(
     sanitized whitespace pass keeps it as one.  Both passes enforce different
     rules, so command-head normalization must understand both representations.
     """
-    match = re.match(r"^(?P<descriptor>\d+|\*)", token)
+    match = re.match(rf"^(?P<descriptor>{_REDIRECTION_DESCRIPTOR})", token)
     has_descriptor = match is not None
     rest = token[match.end() :] if match else token
     for operator in _COMMAND_PREFIX_REDIRECTION_OPERATORS:
@@ -4061,7 +4074,7 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
     operator_index = index
     has_descriptor = False
     if (
-        re.fullmatch(r"(?:\d+|\*)", toks[index])
+        _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(toks[index])
         and index + 1 < len(toks)
         and _ARGV_REDIRECTION_TOKEN.fullmatch(toks[index + 1])
     ):
@@ -4146,7 +4159,7 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
                 ):
                     targets.append(glued_target)
                 continue
-            if re.fullmatch(r"(?:\d+|\*)", consumed):
+            if _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(consumed):
                 # A bare file descriptor, never a path.
                 continue
             if operator in _WRITING_REDIRECTION_OPERATORS and not (
@@ -6473,7 +6486,17 @@ def decode_powershell_command(value: str) -> str:
 
 
 def unwrap_powershell_scriptblock(script: str) -> str:
-    """Expose the executable body of a simple outer PowerShell script block."""
+    """Expose the executable body of a simple outer PowerShell script block.
+
+    Unwrapping REPLACES the command with the body, so it may only happen when
+    the body is the whole program. Text after the closing brace that is not a
+    separator was being dropped on the floor: `{fd}>out git push --force origin
+    main` unwrapped to `fd` and the force-push was never inspected, and the same
+    hole swallowed `{ echo hi } rm -rf /critical/outside`. Bash's `{name}>file`
+    is not a script block at all -- it is a redirection whose descriptor is
+    stored in `$name` -- so refusing to unwrap keeps BOTH readings inspectable
+    rather than guessing which shell is running.
+    """
     candidate = script.strip()
     candidate = re.sub(r"^[&.]\s*(?=\{)", "", candidate, count=1)
     if candidate.startswith("{"):
@@ -6503,6 +6526,8 @@ def unwrap_powershell_scriptblock(script: str) -> str:
                     suffix = candidate[index + 1 :].strip()
                     if suffix.startswith((";", "|", "&")):
                         return f"{body} {suffix}"
+                    if suffix:
+                        return candidate
                     return body
     return candidate
 
