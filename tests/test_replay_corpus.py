@@ -11,9 +11,13 @@ had to stay stable across runs for a smoke run and a full run to be comparable.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
+import os as os_module
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -22,6 +26,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY_PATH = ROOT / "scripts" / "replay_corpus.py"
+# `templates/hooks/dispatch.py` exactly as commit bd884ee7a3c708e3291d04e5bcb92b5
+# fb2a92f91 shipped it: the real floor 1.2.0, three-argument `check()`, no
+# `command_output`, no `subprocess`. Vendored rather than read out of git so the
+# case runs from a source tree with no history; the digest below is the guard
+# against anyone "fixing" the fixture into a synthetic one.
+FLOOR_1_2_0_PATH = ROOT / "tests" / "fixtures" / "floor_1_2_0_dispatch.py"
+FLOOR_1_2_0_SHA256 = "38ccb952831975f344fa1a42cb2384d4e85f16afb29c9726e3b9fb12b94dcc14"
 
 BACKSLASH = chr(92)
 QUOTE = chr(34)
@@ -446,8 +457,117 @@ class OfflineStubTests(unittest.TestCase):
 
         bare = load_module("replay_offline_probe_bare", REPLAY_PATH)
         bare.command_output = command_output
-        with self.assertRaises(RuntimeError):
+        # A `ReplayHarnessError`, not a bare `RuntimeError`: only the former
+        # reaches `main()`'s handler and exits 3. A plain RuntimeError escaped
+        # as a traceback with interpreter exit code 1, which this script
+        # documents as "nothing to replay".
+        with self.assertRaises(replay.ReplayHarnessError):
             replay.make_module_offline(bare)
+
+    def test_a_module_with_no_command_output_is_already_offline(self):
+        # The headline `--baseline <real floor 1.2.0>` case: a floor that
+        # predates the `command_output` seam. It cannot spawn, so there is
+        # nothing to stub and nothing to refuse. This used to abort the run —
+        # which made the one baseline issue #39 is about unmeasurable.
+        module = load_module("replay_offline_probe_no_output", FLOOR_1_2_0_PATH)
+        self.assertIsNone(getattr(module, "command_output", None))
+        self.assertEqual(replay.make_module_offline(module), 0)
+
+    def test_a_spawn_route_is_proxied_even_with_no_command_output(self):
+        # "No seam" is only safe because every spawn-capable global is still
+        # neutralised: an uncovered spawn site raises at the call instead of
+        # starting a real process.
+        module = load_module("replay_offline_probe_spawner", REPLAY_PATH)
+        module.subprocess = subprocess
+        module.os = os_module
+        self.assertEqual(replay.make_module_offline(module), 0)
+        for call in (
+            lambda: module.subprocess.run(["git", "status"]),
+            lambda: module.os.system("git status"),
+        ):
+            with self.assertRaises(replay.ReplayHarnessError):
+                call()
+        # Non-spawning attributes of the same modules keep working, or every
+        # path verdict in the floor would break.
+        self.assertIs(module.os.environ, os_module.environ)
+        self.assertIs(module.subprocess.PIPE, subprocess.PIPE)
+
+    def test_an_aliased_import_is_neutralised_by_identity(self):
+        # `import subprocess as sp`: a name-keyed lookup found no global called
+        # `subprocess`, so the floor was reported offline while `sp.run` spawned
+        # a real process and the run still printed "0 subprocesses spawned".
+        module = load_module("replay_offline_probe_alias", REPLAY_PATH)
+        module.sp = subprocess
+        self.assertEqual(replay.neutralise_spawn_routes(module).count("sp"), 1)
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            module.sp.run(["git", "--version"])
+        # Labelled by what it really is, not by the alias it was bound to.
+        self.assertIn("subprocess.run", str(caught.exception))
+
+    def test_a_direct_function_import_is_neutralised_too(self):
+        # `from subprocess import run` / `from os import system`: the global is
+        # the spawn entry point itself, with no module to proxy.
+        module = load_module("replay_offline_probe_direct", REPLAY_PATH)
+        module.run = subprocess.run
+        module.launch = os_module.system
+        replay.neutralise_spawn_routes(module)
+        for call, label in (
+            (lambda: module.run(["git", "--version"]), "subprocess.run"),
+            (lambda: module.launch("git --version"), "os.system"),
+        ):
+            with self.assertRaises(replay.ReplayHarnessError) as caught:
+                call()
+            self.assertIn(label, str(caught.exception))
+
+    def test_an_unrelated_global_of_the_same_name_is_left_alone(self):
+        # Identity, not name: a floor's own `run()` must keep working, or the
+        # guard would break the very version it is measuring.
+        module = load_module("replay_offline_probe_own_run", REPLAY_PATH)
+
+        def run(argv):
+            return "the floor's own helper"
+
+        module.run = run
+        module.path = os_module.path
+        replay.neutralise_spawn_routes(module)
+        self.assertEqual(module.run(["x"]), "the floor's own helper")
+        self.assertIs(module.path, os_module.path)
+
+    def test_neutralising_twice_leaves_the_proxy_alone(self):
+        module = load_module("replay_offline_probe_twice", REPLAY_PATH)
+        module.subprocess = subprocess
+        self.assertIn("subprocess", replay.neutralise_spawn_routes(module))
+        self.assertEqual(replay.neutralise_spawn_routes(module), [])
+        with self.assertRaises(replay.ReplayHarnessError):
+            module.subprocess.run(["git", "status"])
+
+
+class DispatchLoadTests(unittest.TestCase):
+    """An unimportable floor is a broken instrument, not an empty corpus."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_a_missing_file_raises_a_harness_error(self):
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.load_dispatch("replay_missing", self.dir / "nope.py")
+
+    def test_an_import_time_failure_raises_a_harness_error(self):
+        # A vendored old floor can fail on a SyntaxError under a newer
+        # interpreter, or on a module-level import this environment lacks.
+        path = self.dir / "unimportable.py"
+        path.write_text("def check(  # unterminated\n", encoding="utf-8")
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay.load_dispatch("replay_unimportable", path)
+        self.assertIn("SyntaxError", str(caught.exception))
+
+    def test_a_module_level_raise_is_wrapped_too(self):
+        path = self.dir / "raises.py"
+        path.write_text("raise ImportError('no such module')\n", encoding="utf-8")
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.load_dispatch("replay_raises", path)
 
 
 class EndToEndTestCase(unittest.TestCase):
@@ -782,6 +902,1673 @@ class MaxCommandCharsReportingTests(EndToEndTestCase):
         headline = text.split("block rate by tier")[1].split("=" * 78)[0]
         self.assertIn("excluded before replay: 1 command(s)", headline)
         self.assertIn("--max-command-chars (100)", headline)
+
+
+# Two throwaway floors that differ only in what `check()` declares. `LEGACY` is
+# the shape floor 1.2.0 actually ships (issue #39): three parameters, no
+# `command_cwd`, no `remote_resolver`. `MODERN` is today's shape. Both deny the
+# same one command, so any difference in their measured block rate is the
+# instrument, not the policy.
+LEGACY_FLOOR = '''
+FLOOR_VERSION = "1.2.0"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir):
+    """The pre-`remote_resolver` signature, verbatim from floor 1.2.0."""
+    if command == "git push --force":
+        return "deny", "no force variants at all"
+    return "allow", ""
+'''
+
+MODERN_FLOOR = """
+FLOOR_VERSION = "1.6.5"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(
+    command,
+    tier_cfg,
+    project_dir,
+    command_cwd,
+    _depth=0,
+    remote_resolver=None,
+    _remote_cache=None,
+):
+    assert command_cwd == project_dir
+    assert remote_resolver is not None
+    if command == "git push --force":
+        return "deny", "no force variants at all"
+    return "allow", ""
+"""
+
+# A floor that reaches for a subprocess the offline stub does not cover. The
+# harness's own guard fires; that is the *tool* failing, not a policy verdict.
+SPAWNING_FLOOR = """
+import subprocess
+
+FLOOR_VERSION = "9.9.9"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+    if command == "git push":
+        subprocess.run(["git", "config", "--get-regexp", "remote.*"])
+    return "allow", ""
+"""
+
+
+class PlanCheckCallTests(unittest.TestCase):
+    """The binding plan is what makes an old baseline measurable at all."""
+
+    def plan(self, function):
+        import inspect
+
+        return replay.plan_check_call(inspect.signature(function))
+
+    def test_the_legacy_three_parameter_shape_binds_positionally(self):
+        def check(command, tier_cfg, project_dir):  # pragma: no cover - not called
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        self.assertEqual(positional, ["command", "tier_cfg", "project_dir"])
+        self.assertEqual(keyword, [])
+
+    def test_the_current_shape_binds_cwd_and_the_resolver_too(self):
+        def check(  # pragma: no cover - not called
+            command,
+            tier_cfg,
+            project_dir,
+            command_cwd,
+            _depth=0,
+            remote_resolver=None,
+        ):
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        # `_depth` is unknown to the replay and has a default, so it is left
+        # alone -- which closes the positional run and sends `remote_resolver`
+        # through as a keyword.
+        self.assertEqual(
+            positional, ["command", "tier_cfg", "project_dir", "command_cwd"]
+        )
+        self.assertEqual(keyword, [("remote_resolver", "remote_resolver")])
+
+    def test_a_keyword_only_resolver_is_bound_by_name(self):
+        def check(  # pragma: no cover - not called
+            command, tier_cfg, project_dir, *, remote_resolver=None
+        ):
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        self.assertEqual(positional, ["command", "tier_cfg", "project_dir"])
+        self.assertEqual(keyword, [("remote_resolver", "remote_resolver")])
+
+    def test_an_unsupplied_required_parameter_is_refused_loudly(self):
+        # The whole point: never guess. A guess would raise per command and be
+        # counted as a block, which is the bug this replaces.
+        def check(command, tier_cfg, project_dir, audit_sink):  # pragma: no cover
+            return "allow", ""
+
+        with self.assertRaises(replay.CheckSignatureError) as caught:
+            self.plan(check)
+        self.assertIn("audit_sink", str(caught.exception))
+
+    def test_a_signature_without_the_replay_subject_is_refused(self):
+        def check(tier_cfg, project_dir=""):  # pragma: no cover - not called
+            return "allow", ""
+
+        with self.assertRaises(replay.CheckSignatureError) as caught:
+            self.plan(check)
+        self.assertIn("command", str(caught.exception))
+
+    def test_a_positional_only_parameter_after_a_skip_cannot_be_bound(self):
+        source = (
+            "def check(command, tier_cfg, unknown=1, project_dir='', /):\n"
+            "    return 'allow', ''\n"
+        )
+        namespace = {}
+        exec(source, namespace)  # noqa: S102 - a signature fixture, never called
+        with self.assertRaises(replay.CheckSignatureError):
+            self.plan(namespace["check"])
+
+    def test_build_check_caller_rejects_a_module_with_no_check(self):
+        class Empty:
+            __name__ = "empty"
+
+        with self.assertRaises(replay.CheckSignatureError):
+            replay.build_check_caller(Empty)
+
+
+class PremiseMismatchTests(EndToEndTestCase):
+    """Two signatures replay under two premises, and that must be said out loud.
+
+    `remote_resolver` is stubbed to "every remote is private" only for a version
+    that declares it. A version that does not keeps its internal resolver, which
+    reads through the offline `command_output` stub and reports the remote
+    unresolved. Under `sensitive_data` that is allow on one side and deny on the
+    other for the same push, so the whole class lands in NEWLY ALLOWED as if it
+    were a relaxation.
+    """
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def test_only_roles_are_compared_not_the_calling_convention(self):
+        # Positional versus keyword is a calling detail, never a premise.
+        self.assertEqual(
+            replay.check_parameter_delta(
+                ["command", "tier_cfg", "project_dir", "remote_resolver"],
+                [
+                    "command",
+                    "tier_cfg",
+                    "project_dir",
+                    "remote_resolver=remote_resolver",
+                ],
+            ),
+            [],
+        )
+
+    def test_a_role_bound_on_one_side_only_is_reported(self):
+        self.assertEqual(
+            replay.check_parameter_delta(
+                ["command", "tier_cfg", "project_dir"],
+                ["command", "tier_cfg", "project_dir", "remote_resolver"],
+            ),
+            ["remote_resolver"],
+        )
+
+    def test_the_asymmetry_is_warned_about_and_recorded(self):
+        corpus = self.write_corpus("git push")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        # A warning, not an abort: comparing two signatures is why this exists.
+        self.assertEqual(code, 0)
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("remote_resolver", text.split("PREMISE MISMATCH")[1][:400])
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(
+            run["check_parameter_delta"], ["command_cwd", "remote_resolver"]
+        )
+
+    # The two halves of the finding's scenario, as close to the real floors as a
+    # fixture gets: the old one resolves the remote itself (and therefore reads
+    # through the offline `command_output` stub, which returns ""), the new one
+    # takes a `remote_resolver` (and therefore gets `stub_resolver`'s "private").
+    RESOLVES_INTERNALLY = '''
+    FLOOR_VERSION = "1.2.0"
+
+
+    def command_output(argv, cwd="", timeout=None):
+        raise AssertionError("the replay must not spawn a subprocess")
+
+
+    def remote_url(project_dir, command_runner=command_output):
+        return command_runner(["git", "config", "--get", "remote.origin.url"], "")
+
+
+    def check(command, tier_cfg, project_dir):
+        """Pre-`remote_resolver`: resolves the remote through command_output."""
+        if command.startswith("git push") and tier_cfg["flags"].get("sensitive_data"):
+            if not remote_url(project_dir):
+                return "deny", (
+                    "sensitive_data repo: could not verify push remote "
+                    "privacy (origin)"
+                )
+        return "allow", ""
+    '''
+
+    TAKES_A_RESOLVER = '''
+    FLOOR_VERSION = "1.6.5"
+
+
+    def command_output(argv, cwd="", timeout=None):
+        raise AssertionError("the replay must not spawn a subprocess")
+
+
+    def remote_url(project_dir, command_runner=command_output):
+        return command_runner(["git", "config", "--get", "remote.origin.url"], "")
+
+
+    def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+        """Current shape: the replay hands it a resolver that says "private"."""
+        if command.startswith("git push") and tier_cfg["flags"].get("sensitive_data"):
+            public, _name = remote_resolver(["git", "push"], project_dir)
+            if public:
+                return "deny", "sensitive_data repo: refusing a push to public remote"
+        return "allow", ""
+    '''
+
+    def test_asymmetric_stubbing_reads_as_a_relaxation_and_is_flagged(self):
+        corpus = self.write_corpus("git push")
+        old = self.write_floor("resolves_internally", self.RESOLVES_INTERNALLY)
+        new = self.write_floor("takes_a_resolver", self.TAKES_A_RESOLVER)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(old),
+            "--candidate",
+            str(new),
+            "--tier",
+            "2",
+            "--flag",
+            "sensitive_data",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        # Same policy on both sides; the delta is produced entirely by which
+        # side got the stub. Without the warning a reviewer reads this as a
+        # relaxation needing security review.
+        self.assertEqual(payload["tiers"]["2"]["delta"]["newly_allowed_unique"], 1)
+        self.assertIn("could not verify push remote privacy", text)
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertEqual(
+            payload["run"]["check_parameter_delta"],
+            ["command_cwd", "remote_resolver"],
+        )
+
+    def test_matching_signatures_print_no_warning(self):
+        corpus = self.write_corpus("git push")
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(modern),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("PREMISE MISMATCH", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["check_parameter_delta"], [])
+
+
+class PremiseMismatchWordingTests(unittest.TestCase):
+    """The warning must name the difference that actually happened.
+
+    A reviewer who is told "these deltas may be stubbing artifacts" discounts
+    them. Saying it about a mismatch that does not involve `remote_resolver`
+    discounts the exact rows the run was made to measure.
+    """
+
+    def banner(self, *mismatch):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            replay.print_premise_mismatch(list(mismatch))
+        return out.getvalue()
+
+    def test_no_mismatch_prints_nothing(self):
+        self.assertEqual(self.banner(), "")
+
+    def test_a_cwd_only_transition_does_not_blame_the_remote_stub(self):
+        # Three-argument floor vs one that added cwd tracking: neither side
+        # declares remote_resolver, so nothing here is a stubbing artifact.
+        text = self.banner("command_cwd")
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("command_cwd", text)
+        self.assertNotIn("remote_resolver", text)
+        self.assertNotIn("private-remote stub", text)
+        self.assertIn("real modelling difference", text)
+
+    def test_a_resolver_transition_keeps_the_remote_privacy_explanation(self):
+        text = self.banner("remote_resolver")
+        self.assertIn("private-remote stub", text)
+        self.assertIn("stubbing", text)
+        self.assertNotIn("Only a version declaring command_cwd", text)
+
+    def test_both_roles_get_both_paragraphs(self):
+        # The real 1.2.0-vs-HEAD shape.
+        text = self.banner("command_cwd", "remote_resolver")
+        self.assertIn("private-remote stub", text)
+        self.assertIn("Only a version declaring command_cwd", text)
+
+    def test_an_unknown_role_still_gets_the_generic_warning(self):
+        text = self.banner("tier_cfg")
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("not a policy change", text)
+        self.assertNotIn("private-remote stub", text)
+
+
+class SignatureDispatchTests(EndToEndTestCase):
+    """Issue #39: a baseline several versions old must replay, not read 100%."""
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def test_decide_calls_a_legacy_three_parameter_check_successfully(self):
+        module = load_module(
+            "replay_legacy_floor", self.write_floor("legacy", LEGACY_FLOOR)
+        )
+        self.assertEqual(
+            replay.decide(module, "git push --force", 4, str(self.dir)),
+            ("deny", "no force variants at all"),
+        )
+        # And the ordinary command is allowed, rather than becoming an `error`
+        # decision that `summarize_tier` would count as a block.
+        self.assertEqual(
+            replay.decide(module, "git status", 4, str(self.dir))[0], "allow"
+        )
+
+    def test_two_signatures_measure_the_same_policy_identically(self):
+        corpus = self.write_corpus("git push --force", "git status", "ls")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "4",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        baseline = payload["tiers"]["4"]["baseline"]
+        candidate = payload["tiers"]["4"]["candidate"]
+        # Before the fix this row read 3 blocked / 100%, with three `error`
+        # decisions carrying "check() takes 3 positional arguments".
+        self.assertEqual(baseline["unique_blocked"], 1)
+        self.assertEqual(baseline["decisions"].get("error", 0), 0)
+        self.assertEqual(baseline["unique_blocked"], candidate["unique_blocked"])
+        delta = payload["tiers"]["4"]["delta"]
+        self.assertEqual(delta["newly_blocked_unique"], 0)
+        self.assertEqual(delta["newly_allowed_unique"], 0)
+        self.assertNotIn("check() RAISED", text)
+
+    def test_the_bound_parameters_are_recorded_and_printed(self):
+        corpus = self.write_corpus("git status")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["baseline"]["check_parameters"],
+            ["command", "tier_cfg", "project_dir"],
+        )
+        self.assertEqual(
+            payload["candidate"]["check_parameters"],
+            [
+                "command",
+                "tier_cfg",
+                "project_dir",
+                "command_cwd",
+                "remote_resolver=remote_resolver",
+            ],
+        )
+        # A reader must be able to see which shape produced the number.
+        self.assertIn("check(command, tier_cfg, project_dir)", text)
+
+    def test_an_unbindable_floor_aborts_before_any_number_is_printed(self):
+        corpus = self.write_corpus("git status")
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        broken = self.write_floor(
+            "broken",
+            """
+            FLOOR_VERSION = "0.0.1"
+
+
+            def check(command, tier_cfg, project_dir, audit_sink):
+                return "allow", ""
+            """,
+        )
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(broken),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("audit_sink", err)
+        # No block rate at all: an unmeasurable version gets no table.
+        self.assertNotIn("block rate by tier", text)
+
+
+class HarnessFailurePreflightTests(EndToEndTestCase):
+    """Every tool-side failure exits 3, in the parent, before the pool exists.
+
+    The PR's principle is that a tool-side failure must never be readable as a
+    measurement. These are the three that used to escape it: a floor that will
+    not import, one whose `command_output` has no `command_runner` default to
+    rebind, and one whose `check()` cannot be bound. All three raised a plain
+    `RuntimeError` that `main()` did not catch — a traceback with interpreter
+    exit code 1, which this script documents as "nothing to replay".
+
+    The counter-case matters just as much and is `RealLegacyFloorTests` below: a
+    floor with no seam at all is not a tool-side failure, and refusing it made
+    the one baseline this instrument exists to measure unmeasurable.
+    """
+
+    # `command_output` present, but bound to nothing the replay can rebind: the
+    # seam moved, so the offline claim is unprovable and the run must abort.
+    UNSTUBBABLE = """
+        FLOOR_VERSION = "1.2.0"
+
+
+        def command_output(argv, cwd="", timeout=None):
+            return ""
+
+
+        def check(command, tier_cfg, project_dir):
+            return "allow", ""
+        """
+
+    def scenario(self, broken_source, *extra):
+        corpus = self.write_corpus("git status")
+        broken = self.dir / "broken_floor.py"
+        broken.write_text(textwrap.dedent(broken_source).lstrip(), encoding="utf-8")
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(broken),
+            "--candidate",
+            str(healthy),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_an_unstubbable_floor_exits_three_not_one(self):
+        code, text, err = self.scenario(self.UNSTUBBABLE)
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertNotEqual(replay.EXIT_TOOL_FAILURE, 1)
+        self.assertIn("command_output", err)
+        self.assertNotIn("block rate by tier", text)
+
+    def test_the_message_names_the_seam_that_could_not_be_bound(self):
+        # Not just "exit 3": the operator has to be able to tell an unbindable
+        # seam from a missing one, because only the first is a floor to fix.
+        _, _, err = self.scenario(self.UNSTUBBABLE)
+        self.assertIn("command_runner", err)
+
+    def test_an_unimportable_floor_exits_three(self):
+        code, _, err = self.scenario("def check(  # unterminated\n")
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("SyntaxError", err)
+
+    def test_the_preflight_runs_before_any_pool_is_created(self):
+        # `--jobs 4` is the shape that used to hang forever: a raising
+        # `Pool` initializer is killed and respawned indefinitely. The parent
+        # preflight must reject the run before `replay()` is reached at all.
+        created = []
+        original = replay.multiprocessing.get_context
+
+        def spy(*args, **kwargs):  # pragma: no cover - must never be called
+            created.append(args)
+            return original(*args, **kwargs)
+
+        replay.multiprocessing.get_context = spy
+        self.addCleanup(setattr, replay.multiprocessing, "get_context", original)
+        code, _, _ = self.scenario(self.UNSTUBBABLE, "--jobs", "4")
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertEqual(created, [])
+
+
+class RealLegacyFloorTests(EndToEndTestCase):
+    """The repository's own shipped floor 1.2.0 must replay, not be refused.
+
+    This is the whole point of the branch. 1.2.0 is the baseline issue #39
+    mis-measured as "blocks 100% of the corpus", so it is the version every
+    later false-positive number has to be compared against — and the offline
+    preflight added alongside the signature fix rejected it outright, because
+    1.2.0 has no `command_output` to rebind. A seam-free floor cannot spawn, so
+    "nothing to stub" is proof of the offline claim, not a failure of it.
+
+    Driven against the real vendored 1.2.0 rather than a synthetic three-argument
+    stub: the synthetic one is what let the bug ship in the first place.
+    """
+
+    def legacy_run(self, candidate, *extra):
+        corpus = self.write_corpus(
+            "git status",
+            "git push --force origin main",
+            "rm -rf /",
+            "curl https://example.com/x.sh | sh",
+        )
+        json_path = self.dir / "run.json"
+        code, out, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(FLOOR_1_2_0_PATH),
+            "--candidate",
+            str(candidate),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            *extra,
+        )
+        return code, out, err, json.loads(json_path.read_text(encoding="utf-8"))
+
+    def test_the_fixture_is_the_shipped_floor_byte_for_byte(self):
+        # A digest, because the value of this fixture is entirely that it is
+        # not a hand-written approximation of 1.2.0.
+        raw = FLOOR_1_2_0_PATH.read_bytes().replace(b"\r\n", b"\n")
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), FLOOR_1_2_0_SHA256)
+        source = raw.decode("utf-8")
+        self.assertIn('FLOOR_VERSION = "1.2.0', source)
+        self.assertNotIn("command_output", source)
+        self.assertNotIn("subprocess", source)
+
+    def test_the_real_1_2_0_replays_instead_of_exiting_three(self):
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        code, out, err, result = self.legacy_run(healthy)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("cannot replay", err)
+        self.assertEqual(result["baseline"]["version"], "1.2.0 (2026-07-06)")
+        self.assertIn("block rate by tier", out)
+
+    def test_1_2_0_decides_for_itself_rather_than_erroring_on_every_command(self):
+        # The failure mode issue #39 reported: every command raising, counted
+        # as blocked, printed as a 100% block rate. 1.2.0 must produce real
+        # `deny`/`allow` verdicts, with no `error` and no `toolfail` anywhere.
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        _, _, _, result = self.legacy_run(healthy)
+        baseline = result["tiers"]["2"]["baseline"]
+        self.assertEqual(baseline["decisions"].get("error", 0), 0)
+        self.assertEqual(baseline.get("unique_toolfail", 0), 0)
+        self.assertGreater(baseline["decisions"]["deny"], 0)
+        self.assertGreater(baseline["decisions"]["allow"], 0)
+        self.assertEqual(result["run"]["errors"]["baseline"], 0)
+        self.assertEqual(result["run"]["toolfails"]["baseline"], 0)
+
+    def test_1_2_0_measures_against_the_floor_this_repo_actually_ships(self):
+        # The end the instrument exists for: 1.2.0 vs HEAD's dispatch.py, the
+        # comparison that was impossible before this fix.
+        code, _, err, result = self.legacy_run(replay.DEFAULT_DISPATCH)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result["run"]["errors"], {"baseline": 0, "candidate": 0})
+        self.assertEqual(result["run"]["toolfails"], {"baseline": 0, "candidate": 0})
+        # Different signatures, so the premise-mismatch record must be there.
+        self.assertEqual(
+            result["run"]["check_parameter_delta"], ["command_cwd", "remote_resolver"]
+        )
+
+    def test_the_offline_claim_still_holds_for_a_seam_free_floor(self):
+        # It spawns nothing because it *can* spawn nothing, and the run says so.
+        healthy = self.write_dispatch("healthy", "2.0.0", 'return "allow", ""')
+        _, out, _, result = self.legacy_run(healthy)
+        self.assertEqual(result["run"]["offline_git_config_reads"], 0)
+        self.assertIn("0 subprocesses spawned", out)
+
+
+class WorkerInitFailureTests(unittest.TestCase):
+    """`_worker_init` must never raise; the failure comes back as a task error.
+
+    A `multiprocessing.Pool` initializer that raises makes CPython kill the
+    worker and start another one, forever. The parent preflight above is the
+    first line of defence; this is the backstop for anything that only fails
+    inside a worker (a path that resolves differently there, a spawn-only
+    import error).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(replay._WORKER.clear)
+
+    def test_a_failing_init_stashes_instead_of_raising(self):
+        missing = self.dir / "not-a-floor.py"
+        replay._worker_init(str(missing), str(missing), (2,), str(self.dir), {})
+        self.assertIn("init_error", replay._WORKER)
+
+    def test_the_stashed_failure_is_raised_by_the_worker_task(self):
+        missing = self.dir / "not-a-floor.py"
+        replay._worker_init(str(missing), str(missing), (2,), str(self.dir), {})
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay._worker_run([(0, "git status")])
+        self.assertIn("replay worker could not start", str(caught.exception))
+
+    def test_the_single_process_path_fails_before_the_first_chunk(self):
+        missing = self.dir / "not-a-floor.py"
+        with self.assertRaises(replay.ReplayHarnessError):
+            replay.replay(
+                ["git status"], missing, missing, (2,), str(self.dir), 1, False, {}
+            )
+
+    def test_a_successful_init_leaves_no_stashed_failure(self):
+        path = self.dir / "floor.py"
+        path.write_text(
+            STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+            encoding="utf-8",
+        )
+        replay._worker_init(str(path), str(path), (2,), str(self.dir), {})
+        self.assertNotIn("init_error", replay._WORKER)
+        replay.raise_if_worker_init_failed()
+
+
+class MultiprocessReplayTests(unittest.TestCase):
+    """Actually run `--jobs > 1`, because it was previously never exercised.
+
+    It cannot be driven through the in-process `replay` module: under `spawn`,
+    `_worker_run` is pickled by qualified name and the child would have to
+    import `replay_corpus_under_test`, which exists only in this process. Run as
+    a real script it is `__main__`, which multiprocessing re-imports from the
+    path. So these shell out — the only way to prove the pool neither hangs nor
+    lies. Every one carries a timeout: a hang is the failure under test.
+    """
+
+    TIMEOUT = 180
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.corpus = self.dir / "corpus.jsonl"
+        self.corpus.write_text(
+            "".join(
+                json.dumps({"command": f"git status {n}", "codex": 1, "claude": 0})
+                + "\n"
+                for n in range(40)
+            ),
+            encoding="utf-8",
+        )
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def run_script(self, floor, jobs, candidate=None):
+        try:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(REPLAY_PATH),
+                    "--from-corpus",
+                    str(self.corpus),
+                    "--baseline",
+                    str(floor),
+                    "--candidate",
+                    str(candidate or floor),
+                    "--tier",
+                    "2",
+                    "--project-dir",
+                    str(self.dir),
+                    "--jobs",
+                    str(jobs),
+                    "--quiet",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:  # pragma: no cover - the bug being fixed
+            self.fail(f"--jobs {jobs} hung for {self.TIMEOUT}s instead of finishing")
+
+    def test_a_healthy_run_agrees_with_the_single_process_run(self):
+        floor = self.write_floor(
+            "healthy",
+            STUB_DISPATCH.format(
+                version="1.0.0",
+                decide='    return ("deny", "no") if "7" in command else ("allow", "")',
+            ),
+        )
+        serial = self.run_script(floor, 1)
+        parallel = self.run_script(floor, 2)
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stderr)
+        table = "block rate by tier"
+        self.assertIn(table, parallel.stdout)
+        # Identical numbers, not merely a clean exit: a pool that dropped a
+        # chunk would still exit 0 with a smaller, plausible-looking rate.
+        self.assertEqual(serial.stdout.split(table)[1], parallel.stdout.split(table)[1])
+
+    def test_a_floor_the_harness_cannot_stub_exits_three_without_hanging(self):
+        # The regression: `make_module_offline` raised a plain RuntimeError from
+        # inside a Pool initializer, which CPython respawns forever.
+        floor = self.write_floor(
+            "legacy",
+            """
+            FLOOR_VERSION = "1.2.0"
+
+
+            def command_output(argv, cwd="", timeout=None):
+                return ""
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """,
+        )
+        result = self.run_script(floor, 2)
+        self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("command_runner", result.stderr)
+        # It never reached a worker: the parent preflight is what refused it.
+        self.assertIn("cannot replay:", result.stderr)
+
+    def test_a_worker_only_failure_comes_back_as_a_task_error(self):
+        """The `_worker_init` stash/re-raise backstop, actually exercised.
+
+        Every other failure in this file is caught by the parent preflight, so
+        the documented multiprocess safety net had never run: `_worker_init`
+        stashing instead of raising was only ever proven by calling it directly,
+        in-process, with no pool. That leaves the claim it exists for — that a
+        raising `Pool` initializer would be respawned forever and hang the run —
+        untested end to end.
+
+        This floor imports cleanly exactly once. The parent preflight consumes
+        that import, so every spawned worker fails, which is the only shape that
+        reaches the backstop: init stashes, `_worker_run` re-raises, the task
+        exception propagates out of `imap_unordered` into `main()`, and the run
+        ends with exit 3 instead of spinning up replacement workers forever.
+        """
+        floor = self.write_floor(
+            "once",
+            """
+            import pathlib
+
+            FLOOR_VERSION = "9.9.9"
+
+            _MARKER = pathlib.Path(__file__).with_name("once.imported")
+            if _MARKER.exists():
+                raise RuntimeError("this floor imports exactly once")
+            _MARKER.write_text("x", encoding="utf-8")
+
+
+            def command_output(argv, cwd="", timeout=None):
+                return ""
+
+
+            def reads_git_config(project_dir, command_runner=command_output):
+                return command_runner(["git", "config"], project_dir)
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """,
+        )
+        healthy = self.write_floor(
+            "healthy_candidate",
+            STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+        )
+        result = self.run_script(floor, 2, candidate=healthy)
+        self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE, result.stderr)
+        # The parent preflight passed — this is the worker path, not the
+        # preflight path, which is the whole point of the case.
+        self.assertNotIn("cannot replay:", result.stderr)
+        self.assertIn("replay aborted:", result.stderr)
+        self.assertIn("replay worker could not start", result.stderr)
+        self.assertIn("this floor imports exactly once", result.stderr)
+        # No table: a run that lost its workers must never print numbers.
+        self.assertNotIn("block rate by tier", result.stdout)
+
+
+class ToolFailureBucketTests(EndToEndTestCase):
+    """A harness malfunction must be its own bucket, never a deny."""
+
+    def test_a_harness_error_is_toolfail_and_a_floor_crash_stays_error(self):
+        class HarnessBreaks:
+            __name__ = "harness_breaks"
+
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                raise replay.ReplayHarnessError("offline guard fired")
+
+        class FloorBreaks:
+            __name__ = "floor_breaks"
+
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                raise ValueError("the floor itself crashed")
+
+        self.assertEqual(replay.decide(HarnessBreaks, "x", 2, ".")[0], replay.TOOLFAIL)
+        self.assertEqual(replay.decide(FloorBreaks, "x", 2, ".")[0], "error")
+
+    def test_toolfail_is_in_no_rate(self):
+        commands = ["a", "b", "c", "d"]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        verdicts = [
+            [("allow", "")],
+            [("deny", "no")],
+            [(replay.TOOLFAIL, "ReplayHarnessError: offline guard fired")],
+            [(replay.TOOLFAIL, "ReplayHarnessError: offline guard fired")],
+        ]
+        summary = replay.summarize_tier(commands, corpus, verdicts, 0)
+        self.assertEqual(summary["unique_toolfail"], 2)
+        self.assertEqual(summary["unique_measured"], 2)
+        self.assertEqual(summary["unique_blocked"], 1)
+        # 1/2 measured, not 3/4: counting the two failures as blocked is exactly
+        # the artifact issue #39 mistook for a 100% block rate.
+        self.assertAlmostEqual(summary["unique_block_rate"], 0.5)
+        self.assertEqual(len(summary["reasons"]), 1)
+        self.assertEqual(summary["toolfail_reasons"][0]["unique"], 2)
+
+    def test_toolfail_never_lands_in_an_allow_edge_bucket(self):
+        commands = ["a", "b"]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        baseline = [[(replay.TOOLFAIL, "harness")], [("allow", "")]]
+        candidate = [[("allow", "")], [(replay.TOOLFAIL, "harness")]]
+        delta = replay.compare_tier(commands, corpus, baseline, candidate, 0, 5)
+        self.assertEqual(delta["tool_failed_unique"], 2)
+        for label in ("newly_blocked", "newly_allowed", "ask_gained", "crash_moved"):
+            self.assertEqual(delta[f"{label}_unique"], 0, label)
+
+    def test_the_offline_guard_produces_toolfail_and_exit_three(self):
+        corpus = self.write_corpus("git push", "git status")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertNotEqual(replay.EXIT_TOOL_FAILURE, replay.EXIT_ERRORS_PRESENT)
+        self.assertIn("REPLAY TOOL FAILURE", text)
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("REPLAY TOOL FAILURE", err)
+        self.assertIn("toolfail=1", text)
+
+    def test_allow_errors_cannot_suppress_a_tool_failure(self):
+        corpus = self.write_corpus("git push")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, _, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            "--allow-errors",
+        )
+        # --allow-errors censuses floor crashes; there is nothing to census when
+        # the script could not run the floor.
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+
+    def test_count_toolfails_sums_every_replayed_tier(self):
+        result = {
+            "tier_order": [1, 2],
+            "tiers": {
+                1: {
+                    "baseline": {"unique_toolfail": 2},
+                    "candidate": {"unique_toolfail": 0},
+                },
+                2: {
+                    "baseline": {"unique_toolfail": 5},
+                    "candidate": {"unique_toolfail": 1},
+                },
+            },
+        }
+        self.assertEqual(
+            replay.count_toolfails(result), {"baseline": 7, "candidate": 1}
+        )
+        # ...and the unit it is in, which the banner must not mislabel.
+        self.assertEqual(
+            replay.toolfail_headline(result, replay.count_toolfails(result)),
+            ({"baseline": 7, "candidate": 1}, "tier x command replays"),
+        )
+
+    def test_the_distinct_command_count_ignores_how_many_tiers_failed(self):
+        # One command failing at four tiers is one command, not four.
+        verdicts = [
+            [(replay.TOOLFAIL, "harness")] * 4,
+            [("allow", "")] * 4,
+            [("allow", ""), (replay.TOOLFAIL, "harness"), ("deny", "x"), ("allow", "")],
+        ]
+        self.assertEqual(replay.count_toolfail_commands(verdicts), 2)
+        self.assertEqual(replay.count_toolfail_commands([[("allow", "")]]), 0)
+
+    def test_the_headline_prefers_the_recorded_command_count(self):
+        result = {
+            "tier_order": [1, 2],
+            "run": {"toolfail_commands": {"baseline": 3, "candidate": 0}},
+            "tiers": {},
+        }
+        self.assertEqual(
+            replay.toolfail_headline(result, {"baseline": 6, "candidate": 0}),
+            ({"baseline": 3, "candidate": 0}, "commands"),
+        )
+
+    def test_the_banner_counts_commands_not_tier_pairs(self):
+        # The whole point of this instrument is that a printed number means
+        # what it says; "1 command" was reported as "4 commands" because
+        # unique_toolfail is per tier and the four default tiers were summed.
+        corpus = self.write_corpus("git push", "git status")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        json_path = self.dir / "toolfail.json"
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        result = json.loads(json_path.read_text(encoding="utf-8"))
+        run = result["run"]
+        # Four default tiers, one failing command: the inflation factor.
+        self.assertEqual(len(result["tier_order"]), 4)
+        self.assertEqual(run["toolfails"], {"baseline": 4, "candidate": 4})
+        self.assertEqual(run["toolfail_commands"], {"baseline": 1, "candidate": 1})
+        for stream in (text, err):
+            self.assertIn("baseline 1 / candidate 1 commands got no verdict", stream)
+            # The per-tier total is still shown, labelled, so the reason rows
+            # below it (which are per tier) still add up to something stated.
+            self.assertIn("(4 / 4 tier x command replays over 4 tier(s).)", stream)
+            self.assertIn("by reason (tier x command replays):", stream)
+        self.assertIn(
+            "(baseline 1 / candidate 1 commands)",
+            text,
+        )
+
+
+class CorpusIntegrityExitTests(EndToEndTestCase):
+    """A corpus that came up short must not print as a completed measurement.
+
+    Driven through a real transcript scan rather than `--from-corpus`, because
+    the whole point is the path from a filesystem that would not cooperate to
+    an exit code a gate can read.
+    """
+
+    def scan_scenario(self, *extra, break_a_transcript=True):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "payload": {
+                            "type": "function_call",
+                            "name": "shell_command",
+                            "arguments": json.dumps({"command": command}),
+                        }
+                    }
+                )
+                + "\n"
+                for command in ("git status", "git push")
+            ),
+            encoding="utf-8",
+        )
+        if break_a_transcript:
+            # A directory named like a transcript: the walk finds it, the open
+            # fails with OSError on every supported platform. A real filesystem
+            # reaching the counter, not an injected object.
+            (codex / "locked.jsonl").mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        json_path = self.dir / "run.json"
+        code, out, err = self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            *extra,
+        )
+        return code, out, err, json.loads(json_path.read_text(encoding="utf-8"))
+
+    def test_an_unreadable_transcript_exits_four_with_a_banner(self):
+        code, out, err, result = self.scan_scenario()
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertNotIn(replay.EXIT_CORPUS_INCOMPLETE, (0, 1))
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("CORPUS INCOMPLETE", err)
+        # ...and flagged in the ledger, so the row is not read as one of the
+        # ~20 "records this corpus deliberately does not model" rows.
+        self.assertIn("file-unreadable: 1   <== CORPUS INCOMPLETE", out)
+        self.assertEqual(
+            result["run"]["corpus_integrity"], {"unparsed-file-unreadable": 1}
+        )
+
+    def test_the_banner_labels_the_deltas_subset_only(self):
+        _, out, _, _ = self.scan_scenario()
+        # The first version of this banner said the deltas "are still sound",
+        # which is only true of the subset that was read: a command in the
+        # unread transcript is in no bucket, so a regression it would have
+        # shown is simply absent from `newly_blocked`.
+        self.assertIn("SUBSET-ONLY", out)
+        self.assertIn("is not reported", out)
+        self.assertIn("ABSOLUTE rate", out)
+        self.assertNotIn("DELTAS are still sound", out)
+
+    def test_an_incomplete_corpus_has_no_route_back_to_exit_zero(self):
+        # A gate keying on exit 0 must not pass over a scan that omitted the
+        # transcripts holding the regression it exists to catch. The downgrade
+        # flag that used to allow that is gone; there is no argv that restores
+        # it.
+        code, out, _, _ = self.scan_scenario()
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn("CORPUS INCOMPLETE", out)
+
+    def test_the_downgrade_flag_is_gone_rather_than_ignored(self):
+        # Rejected by argparse, not silently accepted: a caller whose gate
+        # passed on exit 0 because of it has to find out.
+        with self.assertRaises(SystemExit):
+            self.scan_scenario("--allow-partial-corpus")
+
+    def test_a_complete_scan_exits_zero_with_no_banner(self):
+        # The negative control: the same scan without the broken transcript
+        # must not learn to cry wolf.
+        code, out, _, result = self.scan_scenario(break_a_transcript=False)
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertEqual(result["run"]["corpus_integrity"], {})
+
+    def test_a_tool_failure_still_wins_the_exit_code(self):
+        # Precedence: no verdict at all (3) is more fundamental than a short
+        # corpus (4). Both banners still print, because a caller reading only
+        # one of them would fix only one of the two problems.
+        spawning = self.dir / "spawning.py"
+        spawning.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, out, err, _ = self.scan_scenario("--baseline", str(spawning))
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("REPLAY TOOL FAILURE", err)
+        # ...and the loser must not claim the exit code it did not get. A
+        # banner saying "Exiting 4" on a run that returns 3 sends the reader
+        # after the wrong failure.
+        self.assertIn(f"Exiting {replay.EXIT_TOOL_FAILURE}.", out)
+        self.assertNotIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+    def test_a_crashing_floor_and_a_short_corpus_agree_on_the_exit_code(self):
+        # The other overlap: `check() RAISED` (2) outranks the short corpus (4),
+        # so both banners must name 2.
+        crashing = self.write_dispatch("crashing", "1.0.0", 'raise ValueError("boom")')
+        code, out, _, _ = self.scan_scenario("--baseline", str(crashing))
+        self.assertEqual(code, replay.EXIT_ERRORS_PRESENT)
+        self.assertIn("check() RAISED", out)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertEqual(out.count(f"Exiting {replay.EXIT_ERRORS_PRESENT}."), 2)
+        self.assertNotIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+    def test_allow_errors_hands_the_exit_code_back_to_the_corpus(self):
+        # With the crash censused rather than fatal, 4 is what is left, and
+        # the corpus banner has to say so.
+        crashing = self.write_dispatch("crashing", "1.0.0", 'raise ValueError("boom")')
+        code, out, _, _ = self.scan_scenario(
+            "--baseline", str(crashing), "--allow-errors"
+        )
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn(f"Exiting {replay.EXIT_CORPUS_INCOMPLETE}.", out)
+
+
+class UnreadableCorpusTests(EndToEndTestCase):
+    """Nothing extracted because nothing could be read is not an empty corpus.
+
+    Every transcript failing to open produces an empty corpus AND a full
+    integrity ledger. `main()` returned 1 from its `if not corpus` branch before
+    the integrity classification ran, so the run had neither the banner nor
+    exit 4 and was indistinguishable from a genuinely empty transcript tree —
+    the exact exit-code ambiguity the new code claims to remove.
+    """
+
+    def run_scan(self, codex, claude, *extra):
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        return self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_a_wholly_unreadable_tree_exits_four_not_one(self):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        # Every discovered "transcript" is a directory: the walk finds them,
+        # every open fails, and the corpus comes out empty.
+        for name in ("a.jsonl", "b.jsonl"):
+            (codex / name).mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        code, out, err = self.run_scan(codex, claude)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertNotEqual(code, 1)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("CORPUS INCOMPLETE", err)
+        self.assertIn("2  file-unreadable", out)
+        self.assertIn("broken scan, not an empty corpus", err)
+
+    def test_a_genuinely_empty_tree_still_exits_one(self):
+        # The negative control that keeps 4 meaning something: readable and
+        # empty is a different answer from unreadable.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        code, out, err = self.run_scan(codex, claude)
+        self.assertEqual(code, 1)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertIn("nothing to replay", err)
+
+    def test_a_missing_root_is_corpus_incompleteness(self):
+        # A root that was asked for and is not there withholds an entire
+        # runtime's transcripts — the largest silent shortfall available.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, out, _ = self.run_scan(codex, self.dir / "no-such-claude-tree")
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn("claude-root-missing", out)
+
+    def test_none_declares_a_runtime_deliberately_unscanned(self):
+        # Otherwise a machine that runs only one of the two runtimes could
+        # never get a clean exit, and a permanently red gate teaches people to
+        # ignore it.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, out, _ = self.run_scan(codex, "none")
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertIsNone(replay.transcript_root("none"))
+        self.assertIsNone(replay.transcript_root(""))
+        self.assertEqual(replay.transcript_root("x"), Path("x"))
+
+    def test_an_unscanned_runtime_is_recorded_and_printed(self):
+        # A declared-out-of-scope runtime otherwise looks exactly like a real
+        # but empty tree: a zero row, no integrity entry, exit 0. The premise
+        # has to travel with the number, or "10% of commands blocked" silently
+        # means "of the Codex ones".
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        json_path = self.dir / "run.json"
+        code, out, _ = self.run_scan(codex, "none", "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertIn("NOT SCANNED (declared none)", out)
+        self.assertIn("describes the remaining runtime(s) only", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["unscanned_runtimes"], ["claude"])
+
+    def test_a_full_scan_records_no_unscanned_runtime(self):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        json_path = self.dir / "run.json"
+        code, out, _ = self.run_scan(codex, claude, "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertNotIn("NOT SCANNED", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["unscanned_runtimes"], [])
+
+
+class CorpusCacheProvenanceTests(EndToEndTestCase):
+    """A cache must not launder an incomplete scan into a clean exit.
+
+    `--corpus-cache` writes the shortened command set of a partial scan, and
+    `--from-corpus` rebuilt `stats` from nothing but a "loaded from file" count.
+    A run that correctly exited 4 therefore came back as exit 0 with no banner
+    after one round trip through two supported flags — the incompleteness gone,
+    the numbers unchanged and now presented as sound.
+    """
+
+    def partial_scan(self, cache):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (codex / "locked.jsonl").mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        self.floor = floor
+        return self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+
+    def replay_cache(self, cache, *extra):
+        return self.run_main(
+            "--from-corpus",
+            str(cache),
+            "--baseline",
+            str(self.floor),
+            "--candidate",
+            str(self.floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_the_cache_round_trip_keeps_the_corpus_incomplete(self):
+        cache = self.dir / "cache.jsonl"
+        code, _, _ = self.partial_scan(cache)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        code, out, _ = self.replay_cache(cache)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("file-unreadable", out)
+
+    def test_the_ledger_is_the_first_row_and_carries_no_command(self):
+        cache = self.dir / "cache.jsonl"
+        self.partial_scan(cache)
+        rows = [
+            json.loads(line)
+            for line in cache.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            rows[0],
+            {"replay_corpus_cache": {"integrity": {"unparsed-file-unreadable": 1}}},
+        )
+        # Still a corpus file: the header carries no `command`, so a reader
+        # that only looks for commands skips it rather than choking.
+        self.assertNotIn("command", rows[0])
+        self.assertEqual([row["command"] for row in rows[1:]], ["git status"])
+
+    def test_a_cache_from_a_clean_scan_still_exits_zero(self):
+        # The negative control: the ledger must not make every cache suspect.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        self.floor = floor
+        cache = self.dir / "cache.jsonl"
+        code, _, _ = self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        code, out, _ = self.replay_cache(cache)
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+
+    def test_a_headerless_corpus_is_flagged_as_unvouched_not_failed(self):
+        # A hand-written corpus is the caller's stated input, not a scan this
+        # script performed, so it is not an integrity failure — but the report
+        # must not imply the provenance was checked either.
+        self.floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache = self.write_corpus("git status")
+        json_path = self.dir / "run.json"
+        code, out, _ = self.replay_cache(cache, "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertIn("(no integrity record)", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertFalse(run["cache_integrity_recorded"])
+
+    def test_load_corpus_reports_what_the_file_carried(self):
+        path = self.dir / "hand.jsonl"
+        path.write_text(
+            json.dumps({"command": "git status", "codex": 1, "claude": 0}) + "\n",
+            encoding="utf-8",
+        )
+        corpus, integrity, recorded = replay.load_corpus(path)
+        self.assertEqual(list(corpus), ["git status"])
+        self.assertEqual(dict(integrity), {})
+        self.assertFalse(recorded)
+
+        written = self.dir / "written.jsonl"
+        replay.save_corpus(written, corpus, {"unparsed-file-read-error": 3})
+        corpus, integrity, recorded = replay.load_corpus(written)
+        self.assertEqual(list(corpus), ["git status"])
+        self.assertEqual(dict(integrity), {"unparsed-file-read-error": 3})
+        self.assertTrue(recorded)
+
+
+class CorpusIntegrityTests(unittest.TestCase):
+    """A shorter corpus that nobody was told about is a silent measurement bug."""
+
+    def test_an_unreadable_transcript_is_counted(self):
+        stats = Counter()
+        with tempfile.TemporaryDirectory() as tmp:
+            # Opening a directory raises OSError on every supported platform.
+            records = list(replay.iter_jsonl(Path(tmp), stats))
+        self.assertEqual(records, [])
+        self.assertEqual(stats["unparsed-file-unreadable"], 1)
+
+    def test_an_unwalkable_transcript_tree_is_counted(self):
+        class Unwalkable:
+            def rglob(self, pattern):
+                raise PermissionError("the profile subtree is locked")
+
+        stats = Counter()
+        self.assertEqual(replay.iter_transcripts(Unwalkable(), stats), [])
+        self.assertEqual(stats["unparsed-transcript-tree-unwalkable"], 1)
+
+    def test_a_mid_file_read_error_is_counted_not_swallowed(self):
+        """The open succeeded; the read fails partway through the file.
+
+        Injected, because there is no portable way to make a real file raise on
+        its second read. What this proves is the branch's accounting and that
+        the records read before the failure are still yielded — not that any
+        particular filesystem reaches it.
+        """
+        good = json.dumps({"payload": {"type": "function_call"}}) + "\n"
+
+        class FailingHandle:
+            def __init__(self, error):
+                self.error = error
+                self.lines = iter([good])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                line = next(self.lines, None)
+                if line is None:
+                    raise self.error
+                return line
+
+        class FailingPath:
+            def __init__(self, error):
+                self.error = error
+
+            def open(self, encoding=None, errors=None):
+                return FailingHandle(self.error)
+
+        for error in (OSError("device read error"), UnicodeError("bad decode")):
+            with self.subTest(error=type(error).__name__):
+                stats = Counter()
+                records = list(replay.iter_jsonl(FailingPath(error), stats))
+                # Truncated, not lost: the prefix is real data.
+                self.assertEqual(len(records), 1)
+                self.assertEqual(stats["unparsed-file-read-error"], 1)
+
+    def test_every_integrity_key_is_one_the_extractor_actually_writes(self):
+        # A key renamed in one place and not the other would silently stop
+        # triggering the banner, which is the whole failure mode being fixed.
+        stats = Counter()
+        with tempfile.TemporaryDirectory() as tmp:
+            list(replay.iter_jsonl(Path(tmp), stats))
+
+        class Unwalkable:
+            def rglob(self, pattern):
+                raise PermissionError("locked")
+
+        replay.iter_transcripts(Unwalkable(), stats)
+        for key in ("unparsed-file-unreadable", "unparsed-transcript-tree-unwalkable"):
+            self.assertIn(key, replay.CORPUS_INTEGRITY_KEYS)
+            self.assertEqual(stats[key], 1)
+        self.assertIn("unparsed-file-read-error", replay.CORPUS_INTEGRITY_KEYS)
+
+    def test_a_missing_verdict_aborts_instead_of_being_defaulted(self):
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay.assert_every_command_replayed(
+                [[("allow", "")], None], [[("allow", "")], [("allow", "")]]
+            )
+        self.assertIn("1 of 2", str(caught.exception))
+        # The complete case must stay silent.
+        replay.assert_every_command_replayed([[("allow", "")]], [[("allow", "")]])
+
+    def test_a_short_batch_reaches_the_guard_through_replay(self):
+        """The guard's real trigger, exercised where it actually sits.
+
+        Not an OOM-killed worker: `Pool.imap_unordered` blocks forever on a
+        result that never arrives, so that shape hangs and never reaches here
+        (see COVERAGE LIMITS). What does reach it is bookkeeping coming up
+        short, so that is what is injected — a `_worker_run` that returns a
+        batch shorter than the chunk it was handed, exactly what a chunking or
+        result-mapping refactor would produce.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            floor = Path(tmp) / "floor.py"
+            floor.write_text(
+                STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+                encoding="utf-8",
+            )
+            real_worker_run = replay._worker_run
+
+            def short_batch(chunk):
+                batch, reads = real_worker_run(chunk)
+                return batch[:-1], reads
+
+            replay._worker_run = short_batch
+            try:
+                with self.assertRaises(replay.ReplayHarnessError) as caught:
+                    replay.replay(
+                        ["git status", "git log"],
+                        floor,
+                        floor,
+                        (2,),
+                        tmp,
+                        jobs=1,
+                        progress=False,
+                    )
+            finally:
+                replay._worker_run = real_worker_run
+        self.assertIn("1 of 2", str(caught.exception))
+        self.assertIn("not usable", str(caught.exception))
 
 
 if __name__ == "__main__":

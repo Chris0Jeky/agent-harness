@@ -30,7 +30,6 @@ binds the families it was swept against, and a second `--` bounds the scan.
 """
 
 import importlib.util
-import os
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -44,22 +43,13 @@ _spec = importlib.util.spec_from_file_location(
 dispatch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch)
 
+_env_spec = importlib.util.spec_from_file_location(
+    "floor_environment_git_option_arity", ROOT / "tests" / "floor_environment.py"
+)
+floor_environment = importlib.util.module_from_spec(_env_spec)
+_env_spec.loader.exec_module(floor_environment)
+
 TIERS = (1, 2, 3, 4)
-
-# `check()` reads the ambient process environment (GIT_EDITOR/PAGER/EXTERNAL_DIFF
-# and friends make Git able to launch a helper). A developer with EDITOR set in
-# their shell would otherwise get different verdicts from CI.
-_HOSTILE_ENVIRONMENT_PREFIXES = ("GIT_",)
-_HOSTILE_ENVIRONMENT_NAMES = {"EDITOR", "VISUAL", "PAGER", "SSH_ASKPASS"}
-
-
-def hermetic_environment() -> dict[str, str]:
-    return {
-        name: value
-        for name, value in os.environ.items()
-        if not name.upper().startswith(_HOSTILE_ENVIRONMENT_PREFIXES)
-        and name.upper() not in _HOSTILE_ENVIRONMENT_NAMES
-    }
 
 
 def stub_resolver(
@@ -70,15 +60,22 @@ def stub_resolver(
 
 
 def decide(command: str, tier: int) -> tuple[str, str]:
+    """Decide `command` without the host's Git launch configuration.
+
+    `check()` reads the ambient environment (GIT_EDITOR/PAGER/EXTERNAL_DIFF and
+    friends make Git able to launch a helper), so a developer with EDITOR set
+    would get different verdicts from CI. `tests/floor_environment.py` owns
+    that isolation for every suite, so the cleared set cannot drift per file.
+    """
     project_dir = str(ROOT)
-    with unittest.mock.patch.dict(os.environ, hermetic_environment(), clear=True):
-        return dispatch.check(
-            command,
-            {"tier": tier, "flags": {}},
-            project_dir,
-            project_dir,
-            remote_resolver=stub_resolver,
-        )
+    return floor_environment.hermetic_check(
+        dispatch,
+        command,
+        {"tier": tier, "flags": {}},
+        project_dir,
+        project_dir,
+        remote_resolver=stub_resolver,
+    )
 
 
 # ---------------------------------------------------------------- issue #45

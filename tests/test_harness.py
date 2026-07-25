@@ -83,6 +83,24 @@ class HarnessTests(unittest.TestCase):
         return hooks
 
     @staticmethod
+    def requirements_hook_paths(existing_dir: Path) -> dict[str, str]:
+        """Point this platform's managed hook field at a real directory.
+
+        The other platform's field keeps a path that is absolute in its own
+        flavour but not in this one, which is exactly the value the harness
+        must accept without probing the filesystem.
+        """
+        if sys.platform == "win32":
+            return {
+                "managed_dir": "/managed/hooks",
+                "windows_managed_dir": str(existing_dir),
+            }
+        return {
+            "managed_dir": str(existing_dir),
+            "windows_managed_dir": "C:/managed/hooks",
+        }
+
+    @staticmethod
     def inline_floor_config_text() -> str:
         pin = harness.normalized_text_sha256(
             Path(harness.__file__).resolve().parent
@@ -378,7 +396,44 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.remove_managed_codex_floor(current, dispatcher)
 
-    def test_remove_managed_floor_normalizes_deep_ignored_rewrite(self) -> None:
+    def test_remove_managed_floor_normalizes_serializer_recursion(self) -> None:
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        kept_handler = {"type": "command", "command": "echo keep"}
+        current = json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [managed_handler, kept_handler]}]}}
+        )
+        # Baseline that keeps the assertion below non-vacuous: this exact input
+        # rewrites cleanly, so the failure can only come from the serializer.
+        rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        self.assertEqual(
+            json.loads(rewritten)["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"refusing to rewrite hooks\.json with an ignored value",
+            ):
+                harness.remove_managed_codex_floor(current, dispatcher)
+        # The rewrite reached serialization once, carrying the retained handler:
+        # the HarnessError is the serializer boundary, not an earlier reject.
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(
+            serialized[0]["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+    def test_deep_documents_never_leak_a_raw_recursion_error(self) -> None:
+        # Whether the stdlib decoder or encoder survives a given depth is a
+        # Python-version detail (3.11 fails in the decoder, 3.14.3 in the
+        # encoder, 3.14.4 in neither). The contract is only that a RecursionError
+        # is normalized instead of escaping as itself.
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
         ignored_depth = ('{"nested":' * 10000) + "0" + ("}" * 10000)
@@ -389,8 +444,21 @@ class HarnessTests(unittest.TestCase):
             + json.dumps(managed_handler)
             + "]}]}}"
         )
-        with self.assertRaises(harness.HarnessError):
-            harness.remove_managed_codex_floor(current, dispatcher)
+        try:
+            rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        except harness.HarnessError as error:
+            # Normalized, and normalized at one of the two depth boundaries -
+            # not swallowed by some unrelated rejection.
+            self.assertRegex(
+                str(error),
+                r"invalid existing hooks\.json|"
+                r"refusing to rewrite hooks\.json with an ignored value",
+            )
+        else:
+            # A Python that survives the depth must still rewrite correctly:
+            # the managed floor is gone and the ignored subtree is intact.
+            self.assertNotIn("dispatch.py", rewritten)
+            self.assertEqual(rewritten.count('"nested"'), 10000)
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -840,11 +908,10 @@ class HarnessTests(unittest.TestCase):
             }
         }
         harness.parse_hooks_document(json.dumps(valid_config), source_kind="config")
+        managed_dir = Path(self.temp.name) / "managed-hooks"
+        managed_dir.mkdir()
         valid_requirements = {
-            "hooks": {
-                "managed_dir": "/managed/hooks",
-                "windows_managed_dir": "C:/managed/hooks",
-            }
+            "hooks": self.requirements_hook_paths(managed_dir),
         }
         harness.parse_hooks_document(
             json.dumps(valid_requirements), source_kind="requirements"
@@ -871,6 +938,139 @@ class HarnessTests(unittest.TestCase):
                     harness.parse_hooks_document(
                         json.dumps(document), source_kind="requirements"
                     )
+
+    def test_requirements_hook_paths_reject_relative_managed_dirs(self) -> None:
+        for field in ("managed_dir", "windows_managed_dir"):
+            for value in ("relative", "hooks/managed", "./managed", ""):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        rf"requirements hooks\.{field} must be an absolute path",
+                    ):
+                        harness.parse_hooks_document(
+                            json.dumps({"hooks": {field: value}}),
+                            source_kind="requirements",
+                        )
+
+    def test_requirements_hook_paths_reject_missing_managed_dir(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        document = {"hooks": self.requirements_hook_paths(missing)}
+        field = "windows_managed_dir" if sys.platform == "win32" else "managed_dir"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            rf"requirements hooks\.{field} is not an existing directory",
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_requirements_unc_managed_dirs_are_never_stat_probed(self) -> None:
+        # An SMB stat blocks for tens of seconds off-VPN and then answers about
+        # reachability, so existence stays unproven for a UNC managed dir. Both
+        # spellings are recognized on both platforms.
+        for value in ("//fileserver/codex/hooks", "\\\\fileserver\\codex\\hooks"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        for value in ("C:/managed/hooks", "/managed/hooks"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_a_unc_windows_managed_dir_is_never_stat_probed(self) -> None:
+        with mock.patch.object(
+            harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": "\\\\fileserver\\codex\\hooks"}
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX-only managed field")
+    def test_a_double_slash_posix_managed_dir_is_probed(self) -> None:
+        # The UNC exemption answers about WINDOWS path semantics. On POSIX
+        # `//missing/share` is an ordinary absolute path, so reparsing it as a
+        # share would skip the probe and certify a directory Codex cannot load.
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths({"managed_dir": "//missing/share"})
+
+    def test_local_windows_device_paths_are_still_probed(self) -> None:
+        # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
+        # a LOCAL device: skipping the existence probe would let doctor certify
+        # a managed hook directory Codex will reject.
+        for value in ("//?/C:/managed", "\\\\?\\C:\\managed", "//./C:/managed"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The device spelling of a real share stays unprobeable.
+        for value in ("//?/UNC/fileserver/codex", "\\\\?\\UNC\\fileserver\\codex"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_missing_windows_device_managed_dir_is_rejected(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.windows_managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": f"//?/{missing.as_posix()}"}
+            )
+
+    def test_requirements_managed_dirs_are_validated_per_platform_flavor(self) -> None:
+        # Codex resolves `managed_dir` on POSIX and `windows_managed_dir` on
+        # Windows. Accepting either flavour for either field false-greens a
+        # value the consuming host will treat as relative.
+        wrong_flavour = (
+            ("managed_dir", "C:/managed/hooks"),
+            ("managed_dir", "\\\\fileserver\\codex\\hooks"),
+            ("windows_managed_dir", "/managed/hooks"),
+        )
+        for field, value in wrong_flavour:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    harness.HarnessError,
+                    rf"requirements hooks\.{field} must be an absolute path",
+                ):
+                    harness.validate_requirements_hook_paths({field: value})
+
+    def test_requirements_hook_paths_reject_managed_file(self) -> None:
+        not_a_directory = Path(self.temp.name) / "managed-hooks-file"
+        not_a_directory.write_text("", encoding="utf-8")
+        document = {"hooks": self.requirements_hook_paths(not_a_directory)}
+        with self.assertRaisesRegex(
+            harness.HarnessError, r"is not an existing directory"
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_doctor_rejects_relative_requirements_managed_dir(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements='[hooks]\nmanaged_dir = "relative"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.managed_dir must be an absolute path", output)
 
     def test_toml_config_rejects_out_of_range_integers(self) -> None:
         config = Path(self.temp.name) / "config.toml"
@@ -908,12 +1108,56 @@ class HarnessTests(unittest.TestCase):
 
     def test_inline_hook_conversions_normalize_serializer_recursion(self) -> None:
         config = Path(self.temp.name) / "config.toml"
+        config.write_text("hooks.nested.leaf = 0\n", encoding="utf-8")
+        # Baseline that keeps the assertions below non-vacuous.
+        self.assertEqual(
+            json.loads(harness.inline_hooks_document(config)),
+            {"hooks": {"nested": {"leaf": 0}}},
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            for convert in (
+                harness.inline_hooks_document,
+                harness.inline_hook_documents_from_config,
+            ):
+                with self.subTest(convert=convert.__name__):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        r"unsupported inline hooks value in .*fixture depth",
+                    ):
+                        convert(config)
+        self.assertEqual(serialized, [{"hooks": {"nested": {"leaf": 0}}}] * 2)
+
+    def test_deep_inline_hooks_never_leak_a_raw_recursion_error(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
         config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
 
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hooks_document(config)
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hook_documents_from_config(config)
+        for convert in (
+            harness.inline_hooks_document,
+            harness.inline_hook_documents_from_config,
+        ):
+            with self.subTest(convert=convert.__name__):
+                try:
+                    converted = convert(config)
+                except harness.HarnessError as error:
+                    self.assertRegex(
+                        str(error), r"unsupported inline hooks value in .*config\.toml"
+                    )
+                else:
+                    # A Python that survives the depth must carry the whole
+                    # inline document across, not a truncated prefix.
+                    document = (
+                        converted
+                        if isinstance(converted, str)
+                        else "".join(text for _location, text in converted)
+                    )
+                    self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
@@ -1079,6 +1323,78 @@ class HarnessTests(unittest.TestCase):
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_fails_closed_when_a_pin_contests_feature_disables(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[features]\nhooks = false\n", encoding="utf-8"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config="[features]\nhooks = false\n",
+            profile_configs={"custom.config.toml": "[features]\ncodex_hooks = false\n"},
+        )
+
+        # Codex's merge order for a managed requirements pin against stored
+        # config features is not statically provable, so the contest fails
+        # closed and names both sides instead of certifying a floor that a
+        # project-local opt-out may have already killed.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("contests 3 hook-feature disable(s)", output)
+        self.assertIn("UNPROVEN", output)
+        self.assertIn("features.hooks", output)
+        self.assertIn("features.codex_hooks", output)
+
+    def test_doctor_still_rejects_feature_disables_when_the_pin_is_false(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = false\n",
+            user_config="[features]\nhooks = false\n",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("inspectable activation blocker(s)", output)
+        # A pin of false agrees with the disable; there is nothing to contest.
+        self.assertNotIn("contests", output)
+
+    def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        hooks_path = self.write_hooks(repo, valid_adapter).resolve()
+        key = f"{hooks_path}:pre_tool_use:0:0"
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config=(
+                f"[features]\nhooks = false\n\n"
+                f"[hooks.state.{json.dumps(key)}]\nenabled = false\n"
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("enabled=false", output)
+        # The per-handler state blocker is independent of the feature contest:
+        # both are reported, and neither is cleared by the managed pin.
+        self.assertIn("contests 1 hook-feature disable(s)", output)
 
     def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
         requirements = Path(self.temp.name) / "requirements.toml"
@@ -1797,6 +2113,785 @@ allow_local_binding = true
             (second_skill / "SKILL.md").read_text(encoding="utf-8"),
             "intermediate skill\n",
         )
+
+    @staticmethod
+    def wrapper_adapter_text(pin: str, posix_wrapper: str, windows_wrapper: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        f"/bin/sh {posix_wrapper}"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        f"& {windows_wrapper}"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    @staticmethod
+    def direct_adapter_text(posix_command: str, windows_command: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": posix_command,
+                                    "commandWindows": windows_command,
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    def test_doctor_states_the_marker_is_audit_only(self) -> None:
+        # Issue #18: the adapter's expected=<sha256> value is a static audit
+        # marker, not runtime byte enforcement. Nothing may report it as the
+        # latter, in code or in docs.
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn(
+            "the expected=<sha256> value is an audit-only marker, never "
+            "verified at runtime",
+            output,
+        )
+
+    def test_shipped_docs_call_the_marker_audit_only(self) -> None:
+        root = Path(harness.__file__).resolve().parent
+        for name in ("README.md", "SPECS.md", "BLUEPRINT.md"):
+            with self.subTest(document=name):
+                text = (root / name).read_text(encoding="utf-8").lower()
+                self.assertIn("audit-only", text)
+
+    def test_doctor_names_an_unpinned_adapter(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                'python3 "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex',
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("declares no expected=<sha256> audit marker", output)
+        self.assertIn(".command", output)
+        self.assertIn(".commandWindows", output)
+
+    def test_doctor_names_a_stale_adapter_marker(self) -> None:
+        repo = self.make_repo()
+        stale = "b" * 64
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={stale}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre --runtime codex",
+                f"$expected='{stale}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn(f"declares a stale audit marker {stale[:12]}...", output)
+        self.assertNotIn("declares no expected=<sha256> audit marker", output)
+
+    def test_doctor_names_a_missing_runtime_flag(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={pin}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre",
+                f"$expected='{pin}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("never passes --runtime codex", output)
+
+    def test_doctor_inventories_a_vendored_dispatcher(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f"expected={pin}; python3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; py -3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        # A vendored dispatcher is an ESTATE-recorded choice, so it reads as
+        # inventory rather than a contract gap.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("names a repo-local dispatcher copy", output)
+        self.assertNotIn("contract gap", output)
+        # It is still not a certifiable floor: the shape check rejects it.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_join_path_dispatcher_is_not_called_a_repo_local_copy(self) -> None:
+        # PowerShell's `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`
+        # is a shared home-anchored dispatcher the floor recognizer accepts;
+        # the inventory must not contradict it by naming a repo-local copy.
+        pin = "a" * 64
+        shared = (
+            f"$dispatcher=Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'; "
+            f"$expected='{pin}'; & py -3 $dispatcher --event pre --runtime codex"
+        )
+        gaps, inventory = harness.codex_adapter_command_notes(shared, "win", pin)
+        self.assertEqual(gaps, [])
+        self.assertEqual(inventory, [])
+        # A genuinely repo-local dispatcher is still inventoried.
+        vendored = (
+            f"$expected='{pin}'; & py -3 .claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        _gaps, vendored_inventory = harness.codex_adapter_command_notes(
+            vendored, "win", pin
+        )
+        self.assertIn(
+            "win names a repo-local dispatcher copy rather than the shared "
+            "home-anchored one",
+            vendored_inventory,
+        )
+
+    def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
+        repo = self.make_repo()
+        # A hook source with a PreToolUse handler that is not a floor adapter at
+        # all: doctor must not report a current audit marker it never saw.
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 tools/lint_gate.py",
+                                        "commandWindows": "py -3 tools/lint_gate.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("declare no handler that reaches the shared floor", output)
+        self.assertNotIn("declare a current audit marker", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_reports_an_absent_platform_command_as_absent(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"expected={pin}; python3 "
+                                            '"$HOME/.claude/hooks/dispatch.py" '
+                                            "--event pre --runtime codex"
+                                        ),
+                                        "timeout": 5,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(".commandWindows declares no command for this platform", output)
+        # The absence is reported once, not as three separate deviations of a
+        # command that does not exist.
+        self.assertNotIn(".commandWindows never passes", output)
+        self.assertNotIn(".commandWindows declares no expected=<sha256>", output)
+
+    def test_doctor_ignores_a_commented_dispatcher_mention_in_a_sibling(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = json.loads(
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        # A second, unrelated PreToolUse handler that only MENTIONS the
+        # dispatcher inside a comment. The floor candidate count already
+        # strips comments, so the contract check must agree or a lint gate
+        # next door turns a valid adapter into a failure.
+        valid_adapter["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "^Bash$",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo hi # see ~/.claude/hooks/dispatch.py",
+                        "commandWindows": "echo hi # see ~/.claude/hooks/dispatch.py",
+                    }
+                ],
+            }
+        )
+        self.write_hooks(repo, json.dumps(valid_adapter))
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_doctor_inventories_wrapper_flag_delegation(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("leaves --runtime codex to a repo wrapper", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_repo_floor_rejects_session_cwd_relative_wrapper_paths(self) -> None:
+        pin = "a" * 64
+        cases = (
+            (".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"),
+            ("tools/invoke_deny_floor.sh", "tools/invoke_deny_floor.ps1"),
+            ("$w/invoke_deny_floor.sh", "$w/invoke_deny_floor.ps1"),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                # Codex resolves the wrapper from the session cwd, so a relative
+                # path only certifies when that is the hook source root.
+                self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+                self.assertEqual(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=True
+                    ),
+                    [],
+                )
+
+    def test_repo_floor_keeps_home_anchored_wrappers_outside_the_source_root(
+        self,
+    ) -> None:
+        # A HOME-anchored wrapper names the same file from every session cwd,
+        # so a subdirectory or linked-worktree audit must still certify it
+        # instead of reporting zero valid floor handlers.
+        pin = "a" * 64
+        cases = (
+            ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
+            (
+                # POSIX: quoted, because an unquoted expansion is field-split.
+                '"$HOME/work/repo/invoke_deny_floor.sh"',
+                "$env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+            ),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                for reject in (False, True):
+                    self.assertEqual(
+                        len(
+                            harness.repo_codex_floor_groups(
+                                text, pin, reject_relative_wrapper=reject
+                            )
+                        ),
+                        1,
+                        posix_wrapper,
+                    )
+
+    def test_home_anchored_wrapper_bound_to_a_variable_survives(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=$HOME/work/repo/invoke_deny_floor.sh; "
+                                        "/bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        '$w="$env:USERPROFILE'
+                                        '/work/repo/invoke_deny_floor.ps1"; '
+                                        "& $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject in (False, True):
+            self.assertEqual(
+                len(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=reject
+                    )
+                ),
+                1,
+            )
+
+    def test_home_anchored_wrapper_grammar_rejects_cwd_smuggling(self) -> None:
+        # The relaxation must not let a cwd-dependent expansion ride in behind
+        # the home anchor, nor accept a sibling script name.
+        for token in (
+            "$HOME/$PWD/invoke_deny_floor.sh",
+            "$HOME/${cwd}/invoke_deny_floor.sh",
+            "$HOMEDIR/work/invoke_deny_floor.sh",
+            "$HOME/work/invoke_deny_floor.sh.evil",
+        ):
+            with self.subTest(token=token):
+                self.assertFalse(
+                    harness.token_is_wrapper(token, set(), reject_relative=True), token
+                )
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        token, reject_relative_wrapper=True
+                    ),
+                    token,
+                )
+
+    def test_a_powershell_home_anchor_is_not_cwd_independent_on_posix(self) -> None:
+        # `$env:USERPROFILE` is PowerShell-only: a POSIX shell expands `$env`
+        # to nothing and runs `:USERPROFILE/...`, so the floor never starts.
+        # Certifying it from a foreign cwd would be a false green.
+        value = "$env:USERPROFILE/work/repo/invoke_deny_floor.sh"
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=False
+            )
+        )
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=True
+            )
+        )
+        self.assertFalse(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=False)
+        )
+        self.assertTrue(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=True)
+        )
+        # `$HOME` and `~` expand in both shells, so they are accepted on both.
+        for portable in (
+            "$HOME/work/repo/invoke_deny_floor.sh",
+            "~/work/repo/invoke_deny_floor.sh",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=portable, windows=windows):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            portable, reject_relative_wrapper=True, windows=windows
+                        )
+                    )
+
+    def test_a_single_quoted_home_anchor_never_expands(self) -> None:
+        # Single quotes suppress expansion in BOTH sh and PowerShell, so the
+        # shell invokes a literal `$HOME` directory and the floor never runs.
+        for value in (
+            "'$HOME/work/repo/invoke_deny_floor.sh'",
+            "'~/work/repo/invoke_deny_floor.sh'",
+            "'$env:USERPROFILE/work/repo/invoke_deny_floor.ps1'",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=value, windows=windows):
+                    self.assertFalse(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=True, windows=windows
+                        ),
+                        value,
+                    )
+        # A double-quoted variable still expands; a double-quoted `~` does not.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                '"$HOME/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                '"~/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_quoted_or_escaped_wrapper_anchor_is_not_certified(self) -> None:
+        # The same rule at the invocation site: `shlex` removes the quote or
+        # escape, so the raw segment is consulted for the character that
+        # introduced the token. Every one of these leaves the shell with a
+        # literal, session-cwd-relative path.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh '~/work/repo/invoke_deny_floor.sh'",
+            '/bin/sh "~/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh \\~/work/repo/invoke_deny_floor.sh",
+            "/bin/sh \\$HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertFalse(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
+        # The spellings the shell really does expand into ONE operand certify.
+        for segment in (
+            '/bin/sh "$HOME/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh ~/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
+
+    def test_an_unquoted_posix_home_operand_is_field_split(self) -> None:
+        # `/bin/sh $HOME/…` hands sh several operands when HOME contains
+        # whitespace, and the wrapper never starts. `"$HOME/…"` is one word;
+        # tilde expansion results are exempt from field splitting.
+        self.assertFalse(
+            harness.segment_invokes_wrapper(
+                "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+                set(),
+                reject_relative=True,
+            )
+        )
+        # PowerShell does not field-split, so the Windows command is unaffected.
+        self.assertTrue(
+            harness.segment_invokes_wrapper(
+                "powershell -File $env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+                set(),
+                reject_relative=True,
+                windows=True,
+            )
+        )
+        # The assignment form is not an operand: an assignment RHS is not
+        # field-split, so binding it bare and dereferencing it stays valid.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                "$HOME/work/repo/invoke_deny_floor.sh", reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_lowercase_posix_home_variable_is_a_different_variable(self) -> None:
+        # POSIX variable names are case-sensitive: `$home` normally expands to
+        # nothing, so the command runs an absolute path with no home prefix.
+        # The recognizer lowercases before matching, so the original spelling
+        # has to be re-checked.
+        for spelling in ("$home", "$HoMe", "${home}"):
+            value = f"{spelling}/work/repo/invoke_deny_floor.sh"
+            with self.subTest(spelling=spelling):
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=False
+                    ),
+                    value,
+                )
+                # PowerShell variables really are case-insensitive.
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=True
+                    ),
+                    value,
+                )
+        for exact in ("$HOME", "${HOME}"):
+            with self.subTest(spelling=exact):
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        f"{exact}/work/repo/invoke_deny_floor.sh",
+                        reject_relative_wrapper=True,
+                    )
+                )
+        # Both still parse as a wrapper invocation when relativity is allowed.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(harness.segment_invokes_wrapper(segment, set()))
+
+    def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=.codex/invoke_deny_floor.sh; /bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        "$w='.codex/invoke_deny_floor.ps1'; & $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+        # Indirection through a variable does not make the path resolvable.
+        self.assertEqual(
+            harness.repo_codex_floor_groups(text, pin, reject_relative_wrapper=True),
+            [],
+        )
+
+    def test_reject_relative_wrapper_drops_only_the_wrapper_shape(self) -> None:
+        # Guards the composition of the two pattern tuples: dropping the wrapper
+        # must not quietly drop the home/system-anchored shapes with it.
+        self.assertEqual(
+            len(harness._FLOOR_VALUE_PATTERNS),
+            len(harness._CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS) + 1,
+        )
+        cwd_independent = (
+            "$HOME/.claude/hooks/dispatch.py",
+            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
+            "$env:SYSTEMROOT/py.exe",
+        )
+        for value in cwd_independent:
+            with self.subTest(value=value):
+                for reject in (False, True):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=reject
+                        ),
+                        value,
+                    )
+        wrapper = ".codex/invoke_deny_floor.sh"
+        self.assertTrue(harness.value_binds_anchored_floor_path(wrapper))
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                wrapper, reject_relative_wrapper=True
+            )
+        )
+
+    def test_direct_adapters_survive_a_foreign_session_cwd(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; python3 "
+                                        '"$HOME/.claude/hooks/dispatch.py" '
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; py -3 "
+                                        "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject_relative_wrapper in (False, True):
+            with self.subTest(reject_relative_wrapper=reject_relative_wrapper):
+                self.assertEqual(
+                    len(
+                        harness.repo_codex_floor_groups(
+                            text,
+                            pin,
+                            reject_relative_wrapper=reject_relative_wrapper,
+                        )
+                    ),
+                    1,
+                )
+
+    def test_doctor_certifies_a_relative_wrapper_from_the_source_root(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        # The cwd dependency is a property of the adapter text, so it is
+        # reported even from the cwd where it happens to resolve.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("session-cwd-relative wrapper path", output)
+        # The note names the hook source root as doctor resolved it; the exact
+        # spelling of a temp path is platform-dependent (8.3 names on Windows,
+        # /private on macOS), so assert the claim, not the rendering.
+        self.assertIn("only for sessions started in", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_doctor_reports_a_relative_wrapper_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("session cwd", output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
+        self.assertIn("0 project floor handler(s)", output)
+        self.assertIn("0 current audit-marker handler(s)", output)
+
+    def test_doctor_certifies_a_direct_adapter_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("session-cwd-relative wrapper path", output)
 
     def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
         direct = {
@@ -3215,6 +4310,30 @@ allow_local_binding = true
         self.assertIn(str(root_hooks.resolve()), output)
         self.assertIn("authoritative root source is absent", output)
         self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
+
+    def test_doctor_reports_a_relative_wrapper_in_a_linked_worktree(self) -> None:
+        # Codex sources the adapter from the root checkout but runs it from the
+        # linked worktree, so a repo-relative wrapper path never resolves.
+        root, linked = self.make_linked_worktree()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        adapter = self.wrapper_adapter_text(
+            pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+        )
+        root_hooks = self.write_hooks(root, adapter)
+        self.write_hooks(linked, adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(linked)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex hook source: linked worktree", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
 
     def test_doctor_uses_identical_root_checkout_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()

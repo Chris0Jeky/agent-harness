@@ -21,7 +21,7 @@ import sys
 import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -724,10 +724,12 @@ def codex_project_hook_activation_status(
         if managed_only:
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
     required_hook_feature = requirements_hook_feature_declaration(requirements_path)
+    hook_feature_pin: bool | None = None
+    pin_location = ""
     if required_hook_feature is not None:
-        location, enabled = required_hook_feature
-        if not enabled:
-            blockers.append(f"{location}=false")
+        pin_location, hook_feature_pin = required_hook_feature
+        if not hook_feature_pin:
+            blockers.append(f"{pin_location}=false")
 
     stored_feature_paths = [
         system_config,
@@ -735,8 +737,11 @@ def codex_project_hook_activation_status(
         *profile_paths,
         codex_managed_config_path(codex_home),
     ]
+    # Every layer is still parsed and schema-checked, because a malformed
+    # feature value fails the typed load no matter which layer wins.
+    feature_disables: list[str] = []
     for config_path in dict.fromkeys(stored_feature_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, reject_legacy_profile=True
@@ -744,13 +749,23 @@ def codex_project_hook_activation_status(
             if not enabled
         )
     for config_path in dict.fromkeys(project_config_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, project_local=True
             )
             if not enabled
         )
+    # A managed requirements pin of the hook feature TRUE and a lower-layer
+    # disable contest each other, and which one Codex applies is not statically
+    # provable from anything inspectable here: the shipped binary documents the
+    # requirements schema but states no merge order for `[features]`, and the
+    # one merge rule it does state out loud ("Codex merges these rules with
+    # other config and uses the most restrictive result") is about prefix rules.
+    # `doctor` certifies floors, so an unprovable conflict fails closed and
+    # names both declarations rather than assuming the administrator wins.
+    contested_disables = feature_disables if hook_feature_pin is True else []
+    blockers.extend(feature_disables)
 
     user_paths = [codex_home / "config.toml", *profile_paths]
     for config_path in dict.fromkeys(user_paths):
@@ -764,6 +779,13 @@ def codex_project_hook_activation_status(
         "CLI/session/managed-cloud feature, policy, and state overrides remain "
         "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
     )
+    if contested_disables:
+        boundary = (
+            f"{pin_location}=true contests {len(contested_disables)} "
+            "hook-feature disable(s), but Codex's merge order for managed "
+            "requirements against stored config features is UNPROVEN here, so "
+            f"the conflict fails closed; {boundary}"
+        )
     if blockers:
         return (
             False,
@@ -1186,7 +1208,7 @@ def tree_digest(root: Path) -> str | None:
     except OSError as exc:
         raise HarnessError(f"cannot inspect skill tree {root}: {exc}") from exc
 
-    entries: list[tuple[bytes, bytes, Path | None]] = []
+    entries: list[tuple[bytes, bytes, Path]] = [(b"", b"D", root)]
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -1215,42 +1237,46 @@ def tree_digest(root: Path) -> str | None:
                 raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
             relative = path.relative_to(root).as_posix().encode("utf-8")
             if stat.S_ISDIR(mode):
-                entries.append((relative, b"D", None))
+                entries.append((relative, b"D", path))
                 pending.append(path)
             elif stat.S_ISREG(mode):
                 entries.append((relative, b"F", path))
             else:
                 raise HarnessError(f"unsupported skill tree entry: {path}")
 
-    for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
+    for relative, kind, entry_path in sorted(entries, key=lambda entry: entry[0]):
         payload = b""
-        executable = b"-"
-        if file_path is not None:
-            if path_is_alias(file_path):
-                raise HarnessError(f"unsafe skill tree alias: {file_path}")
-            try:
-                entry_mode = file_path.lstat().st_mode
-                if not stat.S_ISREG(entry_mode):
-                    raise HarnessError(
-                        f"skill tree changed during inspection: {file_path}"
-                    )
-                # A helper script whose bytes match but whose executable bit has
-                # drifted (source 0755, installed 0644) is NOT the same tree: the
-                # installed skill cannot run it, and same_tree would otherwise make
-                # `sync-global --apply` skip the copy that would restore the mode.
-                # Only the executable bit is digested — the rest of the mode is
-                # umask/filesystem noise and Windows reports no meaningful bits.
-                if entry_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                    executable = b"X"
-                payload = file_path.read_bytes()
-            except FileNotFoundError as exc:
+        if path_is_alias(entry_path):
+            raise HarnessError(f"unsafe skill tree alias: {entry_path}")
+        try:
+            entry_mode = entry_path.lstat().st_mode
+            expected_kind = (
+                stat.S_ISREG(entry_mode) if kind == b"F" else stat.S_ISDIR(entry_mode)
+            )
+            if not expected_kind:
                 raise HarnessError(
-                    f"skill tree changed during inspection: {file_path}"
-                ) from exc
-            except OSError as exc:
-                raise HarnessError(
-                    f"cannot inspect skill tree {file_path}: {exc}"
-                ) from exc
+                    f"skill tree changed during inspection: {entry_path}"
+                )
+            # A file or directory whose bytes/children match but whose executable
+            # tuple has drifted is NOT the same tree: a script may no longer run,
+            # or a directory may no longer be searchable. same_tree would otherwise
+            # make `sync-global --apply` skip the copy that restores access.
+            # The remaining mode bits are umask/filesystem noise, and Windows
+            # reports no meaningful POSIX executable bits.
+            executable = bytes(
+                int(bool(entry_mode & bit))
+                for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+            )
+            if kind == b"F":
+                payload = entry_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise HarnessError(
+                f"skill tree changed during inspection: {entry_path}"
+            ) from exc
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect skill tree {entry_path}: {exc}"
+            ) from exc
         digest.update(kind)
         digest.update(executable)
         digest.update(len(relative).to_bytes(8, byteorder="big"))
@@ -1622,12 +1648,98 @@ def validate_config_hook_state(hooks: dict[str, Any]) -> None:
             )
 
 
+# Codex reads `managed_dir` on POSIX hosts and `windows_managed_dir` on
+# Windows, and each field carries its own path flavour. Validating a field
+# under the other flavour false-greens a value Codex will reject as relative.
+_REQUIREMENTS_HOOK_PATH_FIELDS: tuple[tuple[str, type[PurePath], str, str], ...] = (
+    ("managed_dir", PurePosixPath, "POSIX", "posix"),
+    ("windows_managed_dir", PureWindowsPath, "Windows", "nt"),
+)
+
+
+def requirements_hook_field_is_active_here(field: str) -> bool:
+    """Return whether THIS host is the one that consumes this managed field.
+
+    Existence is only asserted for the field the running platform actually
+    reads — the other field describes a different machine's filesystem, so
+    probing it would produce a portability-dependent verdict rather than a
+    check.
+    """
+    for name, _flavour, _label, os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if name == field:
+            return os.name == os_name
+    return False
+
+
+# `\\?\C:\dir` and `\\.\C:\dir` are the extended-length/device spellings of a
+# LOCAL drive: they carry a `\\`-prefixed drive but never leave the machine.
+# `\\?\UNC\server\share` is the device spelling of a real network share.
+_WINDOWS_LOCAL_DEVICE_DRIVE = re.compile(r"(?i)^[\\/]{2}[?.][\\/](?!unc[\\/])")
+
+
+def requirements_hook_path_is_locally_probeable(value: str) -> bool:
+    """Return whether existence can be probed without reaching a network host.
+
+    A UNC value (`\\\\server\\share\\...`, or its `//server/share` spelling)
+    turns `is_dir()` into an SMB round trip: off-VPN or with the host down it
+    blocks on name resolution for tens of seconds and then answers about
+    reachability rather than about the directory. Existence therefore stays
+    UNPROVEN for those paths; absoluteness is still asserted. POSIX network
+    mounts are indistinguishable from local paths, so this narrowing can only
+    recognize the UNC spelling.
+
+    Only a genuine server/share is exempted: the `\\\\?\\C:\\...` and
+    `\\\\.\\C:\\...` device spellings address a local drive and are still
+    probed, so `doctor` cannot certify a missing directory written that way.
+
+    This answers about WINDOWS path semantics, so callers must apply it only to
+    a value in the Windows flavour. On POSIX `//missing/share` is an ordinary
+    absolute path, not a share, and reparsing it here would skip the probe and
+    let `doctor` certify a directory Codex cannot load.
+    """
+    drive = PureWindowsPath(value).drive
+    if not drive.startswith(("\\\\", "//")):
+        return True
+    return bool(_WINDOWS_LOCAL_DEVICE_DRIVE.match(drive))
+
+
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
-    """Validate ManagedHooksRequirementsToml's optional path fields."""
-    for field in ("managed_dir", "windows_managed_dir"):
-        if field in hooks and not isinstance(hooks[field], str):
+    """Validate ManagedHooksRequirementsToml's optional path fields.
+
+    Codex documents both fields as absolute paths and refuses to load managed
+    hooks from a relative or missing directory, so a `str` type check alone
+    false-greens a managed hook source Codex would reject. Fail closed instead.
+    """
+    for field, flavour, flavour_label, _os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if field not in hooks:
+            continue
+        value = hooks[field]
+        if not isinstance(value, str):
             raise HarnessError(
                 f"existing requirements hooks.{field} must be a path string"
+            )
+        if not flavour(value).is_absolute():
+            raise HarnessError(
+                f"existing requirements hooks.{field} must be an absolute path "
+                f"in {flavour_label} form: {value!r}"
+            )
+        if not requirements_hook_field_is_active_here(field):
+            continue
+        if (
+            flavour is PureWindowsPath
+            and not requirements_hook_path_is_locally_probeable(value)
+        ):
+            continue
+        try:
+            resolvable = Path(value).is_dir()
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect requirements hooks.{field} {value!r}: {exc}"
+            ) from exc
+        if not resolvable:
+            raise HarnessError(
+                f"existing requirements hooks.{field} is not an existing directory: "
+                f"{value!r}"
             )
 
 
@@ -2052,25 +2164,75 @@ _FLOOR_WRAPPER = r"invoke_deny_floor\.(?:sh|ps1|cmd|bat)"
 # variable must match ONE of these whole-value forms — anything else (rebinding,
 # glued prefixes/suffixes, quote concatenation, relative dispatcher/interpreter)
 # fails closed, because char-level anchoring proved to be repeated whack-a-mole.
-_FLOOR_VALUE_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
-        rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
-        rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
-        rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
-        # interpreter (py.exe): SYSTEM-variable anchored, never relative
-        rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
-        rf"{_SYSTEM_VAR}\+'/py\.exe'",
-        rf"join-path {_SYSTEM_VAR} 'py\.exe'",
-        # wrapper: a repo-relative path whose final component is the wrapper
-        # script (the project's own adapter, trusted via a /hooks review)
-        rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?",
-    )
+# These shapes are anchored to HOME or a system variable, so they resolve the
+# same wherever Codex starts the session.
+_CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
+    # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
+    rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
+    rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
+    rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
+    # interpreter (py.exe): SYSTEM-variable anchored, never relative
+    rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
+    rf"{_SYSTEM_VAR}\+'/py\.exe'",
+    rf"join-path {_SYSTEM_VAR} 'py\.exe'",
+)
+# wrapper, HOME-anchored: `~/work/repo/invoke_deny_floor.sh` resolves to the
+# same file from every session cwd, so it belongs with the cwd-independent
+# shapes even though it names the project's own wrapper script.
+#
+# Unlike the dispatcher shapes above, this one is built PER PLATFORM and
+# refuses single quotes, because "cwd-independent" is only true if the anchor
+# actually expands where the command runs:
+#   * `$env:USERPROFILE` is PowerShell-only. A POSIX shell expands `$env` to
+#     nothing and runs `:USERPROFILE/...`, so the floor never starts.
+#   * single quotes suppress expansion in BOTH sh and PowerShell, so
+#     `w='$HOME/…/invoke_deny_floor.sh'` invokes a literal `$HOME` directory.
+#   * `~` is expanded by the shell only when it is unquoted; inside double
+#     quotes sh keeps it literal.
+#   * POSIX variable names are CASE-SENSITIVE, so `$home` is a different (and
+#     normally empty) variable. The recognizer lowercases before matching, so
+#     the original spelling is re-checked separately for the POSIX side;
+#     PowerShell really is case-insensitive and keeps the loose match.
+_POSIX_HOME_ENV_VAR = r"\$\{?home\}?"
+_WINDOWS_HOME_ENV_VAR = rf"(?:{_POSIX_HOME_ENV_VAR}|\$\{{?env:userprofile\}}?)"
+_WRAPPER_TAIL = rf"/(?:[\w.-]+/)*{_FLOOR_WRAPPER}"
+# Applied to the ORIGINAL-CASE text, never the lowercased normalization.
+_POSIX_HOME_ANCHOR_EXACT = re.compile(r"^(?:~|\$\{?HOME\}?)/")
+
+
+def posix_home_anchor_case_is_exact(text: str) -> bool:
+    """Whether a POSIX HOME anchor is spelled the way sh will expand it."""
+    return bool(_POSIX_HOME_ANCHOR_EXACT.match(text.strip("'\"").replace("\\", "/")))
+
+
+def _home_anchored_wrapper_source(windows: bool) -> str:
+    home_var = _WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR
+    return rf'(?:~{_WRAPPER_TAIL}|"?{home_var}{_WRAPPER_TAIL}"?)'
+
+
+_HOME_ANCHORED_WRAPPER_VALUE_PATTERNS = {
+    windows: re.compile(_home_anchored_wrapper_source(windows))
+    for windows in (False, True)
+}
+# wrapper, relative: a repo-relative path whose final component is the wrapper
+# script (the project's own adapter, trusted via a /hooks review). Being
+# relative, it only resolves when Codex's session cwd is the hook source root,
+# which is why it is the one shape `reject_relative_wrapper` drops.
+_WRAPPER_FLOOR_VALUE_SOURCE = (
+    rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
+)
+
+_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
+    re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
+)
+_FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
+    re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
 )
 
 
-def value_binds_anchored_floor_path(value: str) -> bool:
+def value_binds_anchored_floor_path(
+    value: str, *, reject_relative_wrapper: bool = False, windows: bool = False
+) -> bool:
     """Return whether an assignment value resolves to a genuine floor path.
 
     Uses a strict whitelist of the exact known-good value shapes rather than
@@ -2079,13 +2241,32 @@ def value_binds_anchored_floor_path(value: str) -> bool:
     variable's runtime value can never diverge from the pinned floor via a
     rebind, a glued prefix (``x.claude/...`` / ``evil'.claude/...'``), or
     concatenation past the marker.
+
+    ``reject_relative_wrapper`` additionally drops the RELATIVE wrapper shape,
+    which is only meaningful when the session cwd is the hook source root. A
+    HOME-anchored wrapper path survives, because it names the same file from
+    every cwd — but only under an anchor ``windows`` says this command's shell
+    actually expands, and never single-quoted.
     """
     normalized = value.lower().replace("\\", "/")
-    return any(pattern.fullmatch(normalized) for pattern in _FLOOR_VALUE_PATTERNS)
+    patterns = (
+        _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS
+        if reject_relative_wrapper
+        else _FLOOR_VALUE_PATTERNS
+    )
+    if any(pattern.fullmatch(normalized) for pattern in patterns):
+        return True
+    if not _HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized):
+        return False
+    return windows or posix_home_anchor_case_is_exact(value)
 
 
 def is_inert_floor_setup_segment(
-    segment: str, allowed_variables: set[str], *, windows: bool
+    segment: str,
+    allowed_variables: set[str],
+    *,
+    windows: bool,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     assignment = inert_floor_assignment(segment, windows=windows)
     if assignment is None:
@@ -2095,7 +2276,11 @@ def is_inert_floor_setup_segment(
         # A floor variable may only be (re)bound to the anchored floor path; any
         # other value — an attacker rebind or concatenation past the marker —
         # is rejected so the executed path cannot diverge from the pinned one.
-        return value_binds_anchored_floor_path(value)
+        return value_binds_anchored_floor_path(
+            value,
+            reject_relative_wrapper=reject_relative_wrapper,
+            windows=windows,
+        )
     literal = value.strip()
     if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
         literal = literal[1:-1]
@@ -2249,30 +2434,91 @@ def segment_invokes_direct_floor(
 _WRAPPER_PATH_TOKEN = re.compile(
     rf"^(?:{_PATH_COMPONENT}/)*invoke_deny_floor\.(?:sh|ps1|cmd|bat)$"
 )
+# The subset of wrapper path tokens that name the same file from every session
+# cwd. Intermediate components are restricted to literal words so a smuggled
+# `$pwd`/`$cwd` expansion cannot ride in behind the home anchor, and the anchor
+# itself must be one this command's shell expands (see the value patterns).
+_HOME_ANCHORED_WRAPPER_TOKENS = {
+    windows: re.compile(
+        rf"^(?:~|{_WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR})"
+        rf"{_WRAPPER_TAIL}$"
+    )
+    for windows in (False, True)
+}
 
 
-def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
+def token_is_wrapper(
+    token: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: bool = False,
+    double_quoted: bool = False,
+) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
     # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
     # (`x=.../invoke_deny_floor.sh`) can pass.
     if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
-        return True
+        # Under ``reject_relative`` only the HOME-anchored spelling survives:
+        # every other recognized literal form resolves against the session cwd.
+        # A quoted or escaped anchor is not an anchor — the shell passes
+        # `$HOME`/`~` through literally — so it fails closed with the
+        # relative shapes.
+        if not reject_relative:
+            return True
+        if anchor_is_literal:
+            return False
+        if not _HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped):
+            return False
+        if windows:
+            return True
+        if not posix_home_anchor_case_is_exact(token):
+            return False
+        # An UNQUOTED `$HOME` expansion is subject to field splitting, so a
+        # home directory containing whitespace hands `sh` several operands and
+        # the wrapper never starts. `"$HOME/…"` is one word; tilde expansion
+        # results are exempt from field splitting, so bare `~/…` is safe.
+        return double_quoted or stripped.startswith("~")
+    # A variable-bound wrapper is admitted here on name alone; the anchoring of
+    # the value is enforced separately, because `platform_project_floor_command`
+    # requires every setup segment to pass `is_inert_floor_setup_segment` under
+    # the same ``reject_relative_wrapper`` flag.
     return token_references_variable(token, wrapper_variables)
 
 
 def shell_script_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
     if index < len(tokens) and tokens[index] == "--":
         index += 1
-    return index < len(tokens) and token_is_wrapper(tokens[index], wrapper_variables)
+    return index < len(tokens) and token_is_wrapper(
+        tokens[index],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[index])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[index])),
+    )
 
 
 def powershell_file_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -2282,14 +2528,34 @@ def powershell_file_operand_is_wrapper(
         return False
     if len(tokens) < 3:
         return False
-    return token_is_wrapper(tokens[2], wrapper_variables)
+    return token_is_wrapper(
+        tokens[2],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[2])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[2])),
+    )
 
 
-def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
+def segment_invokes_wrapper(
+    segment: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+) -> bool:
     """Recognize conservative project-wrapper execution shapes.
 
     The wrapper must be the EXECUTED script operand — a `-c` command string or a
     trailing argument that merely mentions the wrapper path does not qualify.
+
+    ``reject_relative`` fails closed on a session-cwd-relative wrapper path.
+    Codex runs hook commands from the session cwd, so when that directory is not
+    the hook source root the relative path resolves somewhere else entirely. A
+    HOME-anchored wrapper (`~/work/repo/invoke_deny_floor.sh`) names the same
+    file from every cwd and is still certified there — but only under an anchor
+    ``windows`` says this shell expands, and never single-quoted.
     """
     stripped = segment.strip()
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
@@ -2304,9 +2570,53 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
         return False
     if not tokens:
         return False
+
+    def anchor_is_literal(token: str) -> bool:
+        """Whether the shell passes this token's anchor through UNEXPANDED.
+
+        `shlex` has already removed quotes and escapes, so the token alone
+        cannot tell `$HOME/x` from `'$HOME/x'`, `\\$HOME/x` or `"~/x"` — all of
+        which the shell hands over literally, leaving a session-cwd-relative
+        path. The raw segment is consulted for the character that introduced
+        the token:
+
+        * a backslash escapes either anchor kind;
+        * `~` expands only when wholly unquoted (sh keeps `"~/x"` literal);
+        * a variable expands inside double quotes but not single ones.
+
+        A token that is not present verbatim in the raw segment lost an escape
+        or quote INSIDE itself, which is unrecognizable, so it fails closed.
+        """
+        index = stripped.find(token)
+        if index < 0:
+            return True
+        preceding = stripped[index - 1] if index else ""
+        if preceding == "\\":
+            return True
+        if token.startswith("~"):
+            return preceding in {"'", '"'}
+        return preceding == "'"
+
+    def double_quoted(token: str) -> bool:
+        """Whether the token was written as one double-quoted shell word.
+
+        An unquoted `$HOME` expansion is subject to field splitting, so a home
+        directory containing whitespace turns one operand into several and the
+        wrapper never starts.
+        """
+        index = stripped.find(token)
+        return index > 0 and stripped[index - 1] == '"'
+
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
-    if token_is_wrapper(head, wrapper_variables):
+    if token_is_wrapper(
+        head,
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=anchor_is_literal(head),
+        double_quoted=double_quoted(head),
+    ):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
     # The shell/PowerShell interpreter that runs the wrapper must be a bare
@@ -2320,13 +2630,37 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     head_base = normalized_head.lower().rsplit("/", 1)[-1]
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
-        return shell_script_operand_is_wrapper(tokens, wrapper_variables)
+        return shell_script_operand_is_wrapper(
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
+        )
     if head_base in {"powershell", "pwsh"}:
-        return powershell_file_operand_is_wrapper(tokens, wrapper_variables)
+        return powershell_file_operand_is_wrapper(
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
+        )
     return False
 
 
 def command_binds_pin(command: str, expected_pin: str | None) -> bool:
+    """Return whether the command declares this audit marker.
+
+    AUDIT-ONLY (issue #18). The `expected=<sha256>` value is a declaration
+    inside the Codex hook definition, not a runtime integrity control: nothing
+    exports it to the dispatcher, and `dispatch.py` takes no expected-hash
+    argument. It proves only that the trusted hook DEFINITION was written
+    against these dispatcher bytes, which is why a dispatcher change obliges an
+    estate-wide marker refresh plus a fresh-session `/hooks` re-trust. Runtime
+    byte integrity is separate evidence and is deliberately not claimed here.
+    """
     if expected_pin is None:
         return True
     return bool(
@@ -2344,7 +2678,11 @@ def matcher_targets_bash(matcher: Any) -> bool:
 
 
 def platform_project_floor_command(
-    command: str, expected_pin: str | None, *, windows: bool = False
+    command: str,
+    expected_pin: str | None,
+    *,
+    windows: bool = False,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
@@ -2369,7 +2707,12 @@ def platform_project_floor_command(
             segment_invokes_direct_floor(
                 segment, dispatcher_variables, interpreter_variables
             )
-            or segment_invokes_wrapper(segment, wrapper_variables)
+            or segment_invokes_wrapper(
+                segment,
+                wrapper_variables,
+                reject_relative=reject_relative_wrapper,
+                windows=windows,
+            )
         )
     ]
     if len(invocation_indexes) != 1:
@@ -2380,7 +2723,12 @@ def platform_project_floor_command(
     setup_segments = segments[:invocation_index]
     allowed_variables = dispatcher_variables | wrapper_variables | interpreter_variables
     if not all(
-        is_inert_floor_setup_segment(segment, allowed_variables, windows=windows)
+        is_inert_floor_setup_segment(
+            segment,
+            allowed_variables,
+            windows=windows,
+            reject_relative_wrapper=reject_relative_wrapper,
+        )
         for segment in setup_segments
     ):
         return False
@@ -2416,6 +2764,136 @@ def repo_codex_floor_candidates(
     return result
 
 
+# Any `name=<64 hex>` assignment, i.e. the audit marker an adapter declares.
+# Deliberately looser than `command_binds_pin`, so a marker that is present but
+# STALE reads as a stale marker instead of as no marker at all.
+_AUDIT_MARKER = re.compile(
+    r"(?i)(?:^|[\s{(;&|])\$?[a-z_][a-z0-9_]*\s*=\s*[\"']?([0-9a-f]{64})[\"']?"
+    r"(?=$|[\s;}})])"
+)
+
+
+# A command names the SHARED dispatcher when the `.claude/hooks/dispatch.py`
+# suffix is anchored to a home variable. Both spellings the floor recognizer
+# accepts must be recognized here too, or the inventory reports a repo-local
+# copy for an adapter the recognizer just certified: the adjacent forms
+# (`$HOME/...`, `$env:USERPROFILE+'/...'`) and PowerShell's whitespace-separated
+# `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`.
+_SHARED_DISPATCHER_REFERENCE = re.compile(
+    rf"{_HOME_VAR}[^\s;]*{_FLOOR_DISPATCH}"
+    rf"|join-path\s+{_HOME_VAR}\s+['\"]?[^\s;'\"]*{_FLOOR_DISPATCH}"
+)
+
+
+def codex_adapter_command_notes(
+    command: str, label: str, expected_pin: str
+) -> tuple[list[str], list[str]]:
+    """Describe one platform command's deviations from the adapter contract.
+
+    Returns (gaps, inventory). A gap is a deviation nothing else can supply; an
+    inventory note records a legitimate but non-default choice — a vendored
+    dispatcher or a repo wrapper that carries the flags out of static view.
+    """
+    if not command.strip():
+        # An undeclared platform command has no flags, no marker and no
+        # dispatcher by definition. Reporting each of those absences as its own
+        # violation sent readers hunting for a malformed command instead of a
+        # missing one.
+        return [f"{label} declares no command for this platform"], []
+    inspected = strip_shell_comments(command)
+    normalized = inspected.lower().replace("\\", "/")
+    delegates_to_wrapper = "invoke_deny_floor" in normalized
+    gaps: list[str] = []
+    inventory: list[str] = []
+    for flag, value in (("event", "pre"), ("runtime", "codex")):
+        if command_has_flag_value(inspected, flag, value):
+            continue
+        if delegates_to_wrapper:
+            inventory.append(
+                f"{label} leaves --{flag} {value} to a repo wrapper; follow the "
+                "launcher to confirm it"
+            )
+        else:
+            gaps.append(f"{label} never passes --{flag} {value}")
+    markers = {match.group(1).lower() for match in _AUDIT_MARKER.finditer(inspected)}
+    if not markers:
+        gaps.append(f"{label} declares no expected=<sha256> audit marker")
+    elif expected_pin not in markers:
+        gaps.append(
+            f"{label} declares a stale audit marker "
+            f"{sorted(markers)[0][:12]}... (installed dispatcher "
+            f"{expected_pin[:12]}...)"
+        )
+    if not _SHARED_DISPATCHER_REFERENCE.search(normalized):
+        if ".claude/hooks/dispatch.py" in normalized:
+            inventory.append(
+                f"{label} names a repo-local dispatcher copy rather than the "
+                "shared home-anchored one"
+            )
+        elif delegates_to_wrapper:
+            inventory.append(
+                f"{label} reaches a dispatcher only through a repo wrapper"
+            )
+        else:
+            inventory.append(f"{label} names no shared dispatcher")
+    return gaps, inventory
+
+
+def codex_adapter_contract_notes(
+    current: str, source_label: str, expected_pin: str, *, source_kind: str = "json"
+) -> tuple[list[str], list[str], int]:
+    """Inventory every candidate adapter handler in one hook source.
+
+    `doctor` already fails a repo whose canonical adapter is unpinned or stale,
+    but it reported only a count, which cannot distinguish "no marker" from
+    "stale marker" from "no --runtime codex". Estate audits need the reason.
+
+    Returns (gaps, inventory, inspected_handlers). The count exists so a caller
+    can tell "checked and clean" apart from "there was nothing to check".
+    """
+    _current_data, _hooks, groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
+    gaps: list[str] = []
+    inventory: list[str] = []
+    inspected_handlers = 0
+    for group_index, group in enumerate(groups):
+        for handler_index, handler in enumerate(group.get("hooks", [])):
+            if handler.get("type") != "command":
+                continue
+            commands = {
+                "command": handler.get("command", ""),
+                "commandWindows": decode_windows_hook_command(
+                    windows_hook_command(handler)
+                ),
+            }
+            # Candidacy must agree with `repo_codex_floor_candidates`, which
+            # decides on comment-stripped text. A commented-out mention of the
+            # dispatcher is not an adapter handler; treating it as one reported
+            # contract gaps against a handler every floor check ignores, which
+            # turned an unrelated commented command into a false red.
+            if not any(
+                ".claude/hooks/dispatch.py" in stripped.lower().replace("\\", "/")
+                or "invoke_deny_floor" in stripped.lower()
+                for stripped in (
+                    strip_shell_comments(text) for text in commands.values()
+                )
+            ):
+                continue
+            inspected_handlers += 1
+            for field, text in commands.items():
+                label = (
+                    f"{source_label}:pre_tool_use:{group_index}:{handler_index}"
+                    f".{field}"
+                )
+                command_gaps, command_inventory = codex_adapter_command_notes(
+                    text, label, expected_pin
+                )
+                gaps.extend(command_gaps)
+                inventory.extend(command_inventory)
+    return gaps, inventory, inspected_handlers
+
+
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
     """Reject handler shapes Codex would not run as a blocking PreToolUse gate.
 
@@ -2431,6 +2909,7 @@ def repo_codex_floor_entries(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[tuple[int, int, Any]]:
     """Return positions and groups for platform-complete project floor handlers."""
     _current_data, _hooks, groups = parse_hooks_document(
@@ -2452,9 +2931,14 @@ def repo_codex_floor_entries(
         command = handler.get("command", "")
         windows_command = decode_windows_hook_command(windows_hook_command(handler))
         if platform_project_floor_command(
-            command, expected_pin
+            command,
+            expected_pin,
+            reject_relative_wrapper=reject_relative_wrapper,
         ) and platform_project_floor_command(
-            windows_command, expected_pin, windows=True
+            windows_command,
+            expected_pin,
+            windows=True,
+            reject_relative_wrapper=reject_relative_wrapper,
         ):
             result.append((group_index, 0, group))
     return result
@@ -2465,17 +2949,27 @@ def repo_codex_floor_groups(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[Any]:
     """Return one group entry per platform-complete project floor handler."""
     return [
         group
         for _group_index, _handler_index, group in repo_codex_floor_entries(
-            current, expected_pin, source_kind=source_kind
+            current,
+            expected_pin,
+            source_kind=source_kind,
+            reject_relative_wrapper=reject_relative_wrapper,
         )
     ]
 
 
 def normalized_text_sha256(path: Path) -> str:
+    """Hash a file's LF-normalized text; the value adapters declare as a marker.
+
+    Line endings are normalized so the same checkout hashes identically on
+    Windows and POSIX. See `command_binds_pin` for what the declared value does
+    and does not prove.
+    """
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -2742,38 +3236,128 @@ def doctor(args: argparse.Namespace) -> int:
                 for hooks in repo_hook_paths
                 if (text := read_optional_text(hooks)) is not None
             ]
-            json_hook_texts = [text for _hooks, text in json_hook_documents]
-            inline_hook_texts = [
-                document
+            inline_hook_documents = [
+                (hooks, document)
                 for hooks in repo_hook_paths
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
-            repo_hook_sources = [(text, "json") for text in json_hook_texts] + [
-                (text, "config") for text in inline_hook_texts
-            ]
+
+            # Codex runs a hook command from the SESSION cwd, not from the
+            # directory that owns the hook source. Wherever those differ — a
+            # `--repo <subdir>` audit, or a linked worktree sourcing hooks from
+            # the root checkout — a repo-relative wrapper path resolves
+            # somewhere other than the hook source root, so it cannot be
+            # certified.
+            def wrapper_is_cwd_relative_here(hooks: Path) -> bool:
+                return hooks.parent.parent.resolve() != requested_path
+
+            repo_hook_sources = [
+                (hooks, text, "json") for hooks, text in json_hook_documents
+            ] + [(hooks, text, "config") for hooks, text in inline_hook_documents]
             project_floor_count = sum(
-                len(repo_codex_floor_groups(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                len(
+                    repo_codex_floor_groups(
+                        text,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
+                )
+                for hooks, text, source_kind in repo_hook_sources
             )
             candidate_floor_count = sum(
                 len(repo_codex_floor_candidates(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                for _hooks, text, source_kind in repo_hook_sources
             )
+            # Binding a repo-relative wrapper is a property of the adapter TEXT,
+            # not of this audit's cwd. Detect it for every source so the
+            # dependency is reported even from the one cwd where it happens to
+            # resolve; only the cwd that actually breaks it fails the floor.
+            cwd_relative_wrapper_sources = [
+                (hooks, source_kind, lenient - strict)
+                for hooks, text, source_kind in repo_hook_sources
+                if (
+                    lenient := len(
+                        repo_codex_floor_groups(text, source_kind=source_kind)
+                    )
+                )
+                != (
+                    strict := len(
+                        repo_codex_floor_groups(
+                            text,
+                            source_kind=source_kind,
+                            reject_relative_wrapper=True,
+                        )
+                    )
+                )
+            ]
+            unresolvable_wrapper_sources = [
+                f"{hooks} ({source_kind}): "
+                f"{count} handler(s) bind a session-cwd-relative wrapper path"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if wrapper_is_cwd_relative_here(hooks)
+            ]
+            cwd_dependent_wrapper_notes = [
+                f"{hooks} ({source_kind}): {count} handler(s) bind a "
+                "session-cwd-relative wrapper path, so this adapter certifies "
+                f"only for sessions started in {hooks.parent.parent}"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if not wrapper_is_cwd_relative_here(hooks)
+            ]
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
             current_floor_count = sum(
                 len(
-                    repo_codex_floor_groups(text, expected_pin, source_kind=source_kind)
+                    repo_codex_floor_groups(
+                        text,
+                        expected_pin,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
                 )
-                for text, source_kind in repo_hook_sources
+                for hooks, text, source_kind in repo_hook_sources
+            )
+            adapter_gaps: list[str] = []
+            adapter_inventory: list[str] = []
+            adapter_handler_count = 0
+            for hooks, text, source_kind in repo_hook_sources:
+                (
+                    source_gaps,
+                    source_inventory,
+                    source_handlers,
+                ) = codex_adapter_contract_notes(
+                    text, str(hooks), expected_pin, source_kind=source_kind
+                )
+                adapter_gaps.extend(source_gaps)
+                adapter_inventory.extend(source_inventory)
+                adapter_handler_count += source_handlers
+            adapter_inventory.extend(cwd_dependent_wrapper_notes)
+            adapter_ok = not adapter_gaps
+            # With no adapter handler anywhere there is nothing to certify, and
+            # claiming a current marker would assert a fact about a file that
+            # declares none. Say which of the two clean states this is.
+            adapter_detail = "; ".join(
+                [f"contract gap: {gap}" for gap in adapter_gaps]
+                + [f"note: {note}" for note in adapter_inventory]
+            ) or (
+                f"{adapter_handler_count} adapter handler(s) across "
+                f"{len(repo_hook_sources)} inspected hook source(s) declare a "
+                "current audit marker and pass --event pre --runtime codex"
+                if adapter_handler_count
+                else f"{len(repo_hook_sources)} inspected hook source(s) declare no "
+                "handler that reaches the shared floor: nothing to check here, and "
+                "the project floor check owns that verdict"
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [
                 entry
                 for hooks, hooks_text in json_hook_documents
                 if hooks == canonical_hooks
-                for entry in repo_codex_floor_entries(hooks_text, expected_pin)
+                for entry in repo_codex_floor_entries(
+                    hooks_text,
+                    expected_pin,
+                    reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                )
             ]
             canonical_root_floor_count = len(canonical_root_floor_entries)
             # Hook IDs use Codex's lexical source path. Preserve an explicit
@@ -2795,12 +3379,23 @@ def doctor(args: argparse.Namespace) -> int:
             except (HarnessError, OSError, UnicodeError) as exc:
                 activation_ok = False
                 activation_detail = str(exc)
+            wrapper_detail = (
+                "session cwd "
+                f"{requested_path} is not the hook source root, so "
+                f"{'; '.join(unresolvable_wrapper_sources)}"
+                " that Codex would resolve under the session cwd instead; "
+                if unresolvable_wrapper_sources
+                else ""
+            )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
-                f"{current_floor_count} current pinned handler(s); "
+                f"{current_floor_count} current audit-marker handler(s); "
                 f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
-                f"{source_detail}; trust is checked manually in /hooks"
+                f"{wrapper_detail}"
+                f"{source_detail}; the expected=<sha256> value is an audit-only "
+                "marker, never verified at runtime; trust is checked manually "
+                "in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
@@ -2810,7 +3405,10 @@ def doctor(args: argparse.Namespace) -> int:
             source_ok = False
             source_detail = str(exc)
             project_detail = str(exc)
+            adapter_ok = False
+            adapter_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
+        checks.append(("Codex adapter contract", adapter_ok, adapter_detail))
         checks.append(
             ("Codex project hook activation", activation_ok, activation_detail)
         )
