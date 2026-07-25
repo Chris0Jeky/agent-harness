@@ -299,9 +299,12 @@ pinned to a cheap model through three separate prose bans.
   a blueprint edit. A model name written in two places is how a stale routing row outlives three
   separate prose bans; when in doubt, delete the local copy and point at the skill.
   The one model-level statement that is law rather than calibration, and therefore does belong
-  here — in THIS file only, with SPECS §8 pointing at it: **never Haiku, any version**
-  (standing owner directive — quality too low). Family-wide on purpose: a ban pinned to one
-  version number reads as permission for the next one.
+  here: **never Haiku, any version** (standing owner directive — quality too low). Family-wide
+  on purpose: a ban pinned to one version number reads as permission for the next one. This
+  prose is where the ban is DECLARED; the enforced banned set lives in the config repo's
+  `tests/check-agent-models.ps1`, which is what actually rejects a definition. If the two ever
+  disagree, the script is the one that binds and the mismatch is the bug — so widening the ban
+  means editing both in the same change.
 - **Spend the top tier on STRUCTURE, not chores** — global CLAUDE.md, deny floor + dispatcher,
   region maps for Taskdeck/olb, agent definitions, this repo — then adversarially review them
   with it. Judgment encoded in structure is judgment a cheaper model inherits for free. Mechanical

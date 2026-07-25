@@ -306,15 +306,16 @@ medium/high effort, because a cheap model at low effort compounds two handicaps.
 **Delegation is not a task class.** A subagent is routed by the work it does, not by the fact
 that it was delegated: wide mechanical fan-out follows the cheap row above and BLUEPRINT §3
 (medium/high effort, never low); a subagent asked for an independent lens or a call follows the
-default row. If a task matches both rows, it is mechanical — the cheap row wins.
+default row. If a task matches both rows, the DEFAULT row wins: the ladder routes up when the
+class is unclear, because a cheap model on judgment work is the expensive mistake.
 
 **The tiers above are deliberately unnamed, and this table does not restate the ladder.** Which
 model fills `top` / `default` / `cheap`, and the fan-out fleet caps (≤3–5, ≤8–12 for a sweep),
 live in the `model-effort-routing` global skill — the single home. A named model written in two
 files is how a stale routing row survives repeated prose bans; if this table and the skill ever
 disagree, the skill wins and the local copy is the bug. The one model-level statement that is law
-rather than calibration — the standing family-wide Haiku ban — is stated once, in BLUEPRINT §5,
-and deliberately not repeated here. This table is the durable judgment-vs-mechanical shape and
+rather than calibration — the standing family-wide Haiku ban — is declared in BLUEPRINT §5 and
+enforced by the config repo's `tests/check-agent-models.ps1`; it is deliberately not restated here. This table is the durable judgment-vs-mechanical shape and
 changes only when that shape changes.
 
 ## §9 Bootstrapper CLI + ESTATE.md
@@ -342,9 +343,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 - Invocation: a Claude Code scheduled routine configured with the default-tier model at effort
   low, weekly per ACTIVE repo only. Windows Task Scheduler fallback: `claude -p "<gardener
-  prompt>"` with the SESSION model bound explicitly — through the routine/settings model
-  setting or an explicit model argument carrying the default-tier model named in the
-  `model-effort-routing` skill. Binding it is not optional: a headless `claude -p` run is a
+  prompt>"` with the SESSION model bound through the routine/settings model setting, resolved
+  from the `model-effort-routing` skill at configuration time (rule 4 below explains why the
+  command line is not an option). Binding it is not optional: a headless `claude -p` run is a
   TOP-LEVEL session, so the `model:` pin in `~/.claude/agents/gardener.md` binds the delegated
   SUBAGENT, not the session that starts it, and a run that passes nothing inherits the ambient
   default — the top tier — and §6's scheduled-spend cap silently does not apply.
@@ -356,8 +357,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
   permitted, that copy is governed rather than trusted:
   1. Changing which model fills a tier in the skill is NOT DONE until every agent definition
      pinned to that tier is re-pinned in the same change — one commit, both surfaces.
-  2. Each such definition records the tier it derives from (`# routing tier: default`) next to
-     its `model:`, so the copy is checkable rather than merely conventional.
+  2. Nothing today records WHICH tier a given `model:` derives from, so the copy is currently
+     conventional rather than checkable. Making it checkable — a declared tier next to the pin,
+     and a check that compares the two — is the substance of issue #76.
   3. `tests/check-agent-models.ps1` in the config repo is the enforcement surface. Today it
      asserts only that no definition pins a banned model (the family-wide Haiku ban); extending
      it to assert that each `model:` equals the skill's model for the declared tier is tracked
