@@ -51,6 +51,8 @@ _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 _LITERAL_OPEN_BRACE = "__HARNESS_LITERAL_OPEN_BRACE_2D91__"
 _LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
 _LITERAL_BACKTICK = "__HARNESS_LITERAL_BACKTICK_2D91__"
+_LITERAL_OPEN_PAREN = "__HARNESS_LITERAL_OPEN_PAREN_2D91__"
+_LITERAL_CLOSE_PAREN = "__HARNESS_LITERAL_CLOSE_PAREN_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 # Minted by the tokenizer AFTER the scrub, and read by command_head: it pushes a
@@ -95,6 +97,8 @@ def restore_quoted_literal_punctuation(value: str) -> str:
         .replace(_LITERAL_OPEN_BRACE, "{")
         .replace(_LITERAL_CLOSE_BRACE, "}")
         .replace(_LITERAL_BACKTICK, "`")
+        .replace(_LITERAL_OPEN_PAREN, "(")
+        .replace(_LITERAL_CLOSE_PAREN, ")")
     )
 
 
@@ -928,10 +932,19 @@ def token_reads_as_executing_expression(token: str) -> bool:
     an executable from: stamping `'git' push --force` or `'rm' -rf /` would take
     the head out of reach of every rule.
     """
+    # Restore the paren mask first. This predicate asks what the text READS as,
+    # and `"$($_.Name)"` is a subexpression however its parentheses reached this
+    # token; leaving them masked demoted every `$(...)`-inside-a-string case to
+    # "not an expression" and denied a pipeline that only prints. The backtick
+    # mask is deliberately left alone: a backtick out of a quoted span is data
+    # the shell prints, which is the opposite question.
+    restored = token.replace(_LITERAL_OPEN_PAREN, "(").replace(
+        _LITERAL_CLOSE_PAREN, ")"
+    )
     return bool(
         token
         and not token[0].isalpha()
-        and _POWERSHELL_EXECUTING_EXPRESSION.search(token)
+        and _POWERSHELL_EXECUTING_EXPRESSION.search(restored)
     )
 
 
@@ -2612,11 +2625,22 @@ def strip_windows_execution_prefix(candidate: str) -> str:
     # eagerly stripping it turns ``&>file command`` into ``>file command`` and
     # turns ``>&1 command`` into an unrecognizable ``>`` form.
     candidate = re.sub(r"^[\s\"'({}@]+", "", candidate)
+    # `\+?=` and the brace-descriptor alternatives keep this recovery path in
+    # step with the argv parser: the cross-product gate runs every deny case
+    # behind every recognized prefix, and a prefix the argv parser strips but
+    # this one does not is a hole in exactly the Windows-quoting commands that
+    # only reach the floor through here.
+    #
+    # `[A-Za-z_][A-Za-z0-9_]*\}` is the SECOND spelling of the same descriptor:
+    # the leading-character scrub above has already eaten the opening `{` by the
+    # time this pattern runs. Over-stripping here can only expose a LATER token
+    # as the head, which adds scrutiny; under-stripping hides one.
     prefix = re.compile(
         r"(?is)^(?:"
         r"--%\s+"
-        r"|[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s]*)\s+"
-        r"|(?:\d+|\*)?(?:&>>|&>|>>|>\||>&|<<|<&|<>|>|<)\s*"
+        r"|[A-Za-z_][A-Za-z0-9_]*\+?=(?:\"[^\"]*\"|'[^']*'|[^\s]*)\s+"
+        r"|(?:\d+|\*|\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*\})?"
+        r"(?:&>>|&>|>>|>\||>&|<<|<&|<>|>|<)\s*"
         r"(?:&?\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
         r")"
     )
@@ -2857,6 +2881,15 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             # what lets powershell_block_depth honour the remaining bare
             # backticks as the escape characters they provably are.
             .replace("`", _LITERAL_BACKTICK)
+            # Same argument, same mechanism, for the parenthesis balance walk in
+            # process_substitution_end: `< <(printf ")x" harmless) 'git' push
+            # --force origin main` closed the substitution on the QUOTED `)`,
+            # resolved `harmless` as the head, and let the force-push through.
+            # A per-token provenance stamp cannot fix this -- `x")"x` is one
+            # token that is only PARTLY quoted -- so the provenance has to be
+            # carried at character granularity, which is what these markers are.
+            .replace("(", _LITERAL_OPEN_PAREN)
+            .replace(")", _LITERAL_CLOSE_PAREN)
         )
         quoted[placeholder] = value
         return placeholder
@@ -9971,7 +10004,18 @@ def check(
             # value-parameter fed `(Get-Content foo)`) would go uninspected. A
             # balanced single-token subexpression keeps alignment, so only the
             # unbalanced case fails closed.
-            if any(token.count("(") > token.count(")") for token in toks[1:]):
+            #
+            # Counts the RESTORED text: the tokenizer masks parentheses that came
+            # out of a quoted span so the process-substitution balance walk stops
+            # reading data as syntax, and this guard must not inherit that
+            # relaxation second-hand. Whether a quoted `"("` should still fail
+            # this guard closed is a separate question from the leading-redirect
+            # prefix, so it keeps the verdict it had.
+            if any(
+                (restored := restore_quoted_literal_punctuation(token)).count("(")
+                > restored.count(")")
+                for token in toks[1:]
+            ):
                 return (
                     "deny",
                     "A parenthesized secret-mutation subexpression cannot be inspected safely.",

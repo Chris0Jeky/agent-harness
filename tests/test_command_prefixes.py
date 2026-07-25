@@ -105,20 +105,51 @@ class CommandHeadPrefixTests(unittest.TestCase):
         )
 
     def test_undelimited_operand_denies_instead_of_hiding_the_head(self):
-        # A paren restored from a QUOTED span is data, but the balance walk
-        # cannot tell it from syntax, so it unbalances the operand. Every head
-        # after it is a guess; deny rather than run whichever one we picked.
+        # No provenance survives a BACKSLASH-escaped paren -- POSIX shlex
+        # consumes the escape and the token is byte-identical to a bare `(` --
+        # so the operand's extent stays unknown. Every head after it is a guess;
+        # deny rather than run whichever one we picked.
         for command in (
-            "< <(echo '(' ) rm -rf ~",
-            "< <(echo '(' ) git push --force origin main",
-            "< <(printf '(' ) sudo id",
-            "< <(printf '(' ) git status",
             r"< <(echo \( ) rm -rf ~",
+            r"< <(printf \( ) git status",
+            "< <(git show",
         ):
             with self.subTest(command=command):
                 decision, reason = decide(command)
                 self.assertEqual(decision, "deny", reason)
                 self.assertIn("delimit", reason)
+
+    def test_a_quoted_paren_no_longer_unbalances_the_operand(self):
+        # A paren restored from a QUOTED span is DATA to the shell, and the
+        # tokenizer now masks it so the balance walk stops counting it as
+        # syntax. The operand really does close at the bare `)`, so the real
+        # head is reachable -- in BOTH directions.
+        for command, expected in (
+            ("< <(echo '(' ) rm -rf ~", "deny"),
+            ("< <(echo '(' ) git push --force origin main", "deny"),
+            ("< <(printf '(' ) sudo id", "deny"),
+            # ... and these are the false positives the old count produced.
+            ("< <(printf '(' ) git status", "allow"),
+            ("< <(echo '(' ) cat -", "allow"),
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, expected, reason)
+
+    def test_a_quoted_paren_cannot_close_the_operand_early(self):
+        # The bypass this closes: the quoted `)` closed the substitution before
+        # the real one, `harmless` was resolved as the head, and the quoted
+        # `'git'` was masked out of the sanitized pass. The second spelling
+        # balances the remainder, which defeats any "did the rest go negative"
+        # heuristic -- only real provenance answers it.
+        for command in (
+            "< <(printf \")x\" harmless) 'git' push --force origin main",
+            "< <(printf \")\" harmless \"(\" ) 'git' push --force origin main",
+            "< <(printf \")x\" harmless) 'rm' -rf /critical/outside",
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
 
     def test_balanced_process_substitutions_still_resolve_the_head(self):
         # The deny above must stay scoped to the undelimited case; an ordinary
