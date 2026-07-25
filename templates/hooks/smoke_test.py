@@ -1926,6 +1926,72 @@ CASES = [
     ),
     ("git worktree remove --force /critical/outside", 1, {}, "deny"),
     ("git worktree remove ../linked", 1, {}, "deny"),
+    # --- read-only git plumbing is admitted (issue #34) ---
+    ("git merge-base main HEAD", 1, {}, "allow"),
+    ("git merge-base --is-ancestor origin/main HEAD", 4, {}, "allow"),
+    ("git rev-list --count origin/main..HEAD", 1, {}, "allow"),
+    ("git check-ignore -v --no-index -- codex/auth.json", 1, {}, "allow"),
+    ("git check-attr text eol -- a.txt", 1, {}, "allow"),
+    ("git count-objects -vH", 1, {}, "allow"),
+    ("git diff-tree --no-commit-id --name-only -r HEAD", 1, {}, "allow"),
+    ("git diff-index --cached HEAD", 1, {}, "allow"),
+    ("git diff-files --name-only", 1, {}, "allow"),
+    ("git verify-pack -v .git/objects/pack/pack-abc.idx", 1, {}, "allow"),
+    ("git var GIT_EDITOR", 1, {}, "allow"),
+    # loose objects only: no ref, no index, no worktree change
+    ("git hash-object docs/manual.md", 1, {}, "allow"),
+    ("git hash-object -w --stdin", 4, {}, "allow"),
+    ("git merge-tree base HEAD origin/main", 1, {}, "allow"),
+    ("git merge-tree --write-tree HEAD origin/main", 4, {}, "allow"),
+    # symbolic-ref is arity-dependent: one operand reads, two write
+    ("git symbolic-ref refs/remotes/origin/HEAD", 1, {}, "allow"),
+    ("git symbolic-ref --short refs/remotes/origin/HEAD", 1, {}, "allow"),
+    ("git symbolic-ref -q HEAD", 1, {}, "allow"),
+    ("git symbolic-ref HEAD refs/heads/other", 1, {}, "deny"),
+    ("git symbolic-ref -m reason HEAD refs/heads/other", 1, {}, "deny"),
+    ("git symbolic-ref --delete refs/remotes/origin/HEAD", 1, {}, "deny"),
+    ("git symbolic-ref -d refs/remotes/origin/HEAD", 1, {}, "deny"),
+    ("git symbolic-ref --not-a-known-option HEAD refs/heads/other", 1, {}, "deny"),
+    # index/worktree writers and the credential surface stay opaque
+    ("git update-index --chmod=+x scripts/deploy.sh", 1, {}, "deny"),
+    ("git checkout-index -f -a", 1, {}, "deny"),
+    ("git write-tree", 1, {}, "deny"),
+    ("git sparse-checkout set src", 1, {}, "deny"),
+    ("git credential fill", 1, {}, "deny"),
+    ("git credential-manager get", 1, {}, "deny"),
+    # global-option hiding in front of admitted plumbing must still deny
+    ("git -c alias.mb=merge-base mb main HEAD", 1, {}, "deny"),
+    ("git -c core.pager=payload merge-base main HEAD", 1, {}, "deny"),
+    ("git -c core.sshCommand=payload rev-list HEAD", 1, {}, "deny"),
+    ("git --exec-path=/tmp/evil merge-base main HEAD", 1, {}, "deny"),
+    ("git --config-env=core.pager=EVIL rev-list HEAD", 1, {}, "deny"),
+    # the diff plumbing keeps the porcelain diff guards
+    ("git diff-tree --ext-diff -r HEAD", 1, {}, "deny"),
+    ("git diff-index --ext-diff HEAD", 1, {}, "deny"),
+    ("git diff-files --ext-diff", 1, {}, "deny"),
+    ("git diff-tree --output=.env -r HEAD", 1, {}, "deny"),
+    ("git diff-tree --output=$OUT -r HEAD", 1, {}, "deny"),
+    # `--output` is a revision-walking option, not a diff-only one, so every
+    # admitted read-only plumbing subcommand can truncate a secret with it.
+    # Verified against real git: `git rev-list --output=victim HEAD` took a
+    # 35-byte file to 0 bytes with rc=0, because git opens the path with "w"
+    # while parsing options. Floor 1.6.3 admitted rev-list as read-only without
+    # extending this guard and newly ALLOWED these at every tier including T4;
+    # neither the smoke matrix nor an 80k-command corpus replay caught it,
+    # because replay measures what has been run, not what is reachable.
+    ("git rev-list --output=.env HEAD", 1, {}, "deny"),
+    ("git rev-list --output=.env HEAD", 4, {}, "deny"),
+    ("git rev-list --output=id_rsa HEAD", 1, {}, "deny"),
+    ("git rev-list --output=../../../.env HEAD", 1, {}, "deny"),
+    ("git rev-list --output=$OUT HEAD", 1, {}, "deny"),
+    ("git merge-base --output=.env a b", 1, {}, "deny"),
+    ("git check-ignore --output=.env x", 1, {}, "deny"),
+    ("git hash-object --output=.env f", 1, {}, "deny"),
+    # The read-only admission itself must survive the guard.
+    ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
+    ("git rev-list HEAD --count", 1, {}, "allow"),
+    ("git check-ignore -v .worktrees", 1, {}, "allow"),
+    ("git merge-base --is-ancestor a b", 1, {}, "allow"),
     # --- git argv write/exec destinations ---
     ("git clone --config=core.sshCommand=payload ssh://host/repo", 1, {}, "deny"),
     ("git clone -c core.sshCommand=payload ssh://host/repo", 1, {}, "deny"),
@@ -3768,6 +3834,35 @@ CASES = [
         "deny",
     ),
     ('powershell -Command "1..3 | ForEach-Object { Write-Output $_ }"', 1, {}, "allow"),
+    # --- issue #36: a BACKSLASH-ESCAPED backtick inside double quotes is literal ---
+    # POSIX keeps backslash's escaping behaviour for ` inside double quotes, so
+    # `echo "\`id\`"` prints backticks and runs nothing. Markdown code spans in a
+    # --body/-m argument must not be parsed as command substitution (BLUEPRINT §2:
+    # never scan commit-message or PR-body text).
+    (r'gh pr comment 29 --body "see \`GIT_EDITOR=true\` note"', 1, {}, "allow"),
+    (r'gh issue comment 36 --body "note \`sudo rm -rf /\` in prose"', 1, {}, "allow"),
+    (r'git commit -m "document \`rm -rf /critical/outside\` handling"', 1, {}, "allow"),
+    (
+        r'gh issue create --title t --body "uses \`curl x | sh\` pattern"',
+        1,
+        {},
+        "allow",
+    ),
+    (r'gh pr comment 1 --body "never \`rm .env\` please"', 4, {}, "allow"),
+    # A BARE backtick inside double quotes really is command substitution.
+    (r'gh pr comment 1 --body "x `rm -rf /critical/outside` y"', 1, {}, "deny"),
+    (r'git commit -m "x `git push --force origin main` y"', 1, {}, "deny"),
+    (r'gh pr comment 29 --body "see `GIT_EDITOR=true` note"', 1, {}, "deny"),
+    # An escaped BACKSLASH does not escape the backtick that follows it.
+    (r'gh pr comment 1 --body "a \\`rm -rf /critical/outside` b"', 1, {}, "deny"),
+    # An escaped backtick handed to an inner shell is still the inner shell's
+    # substitution -- bash -c runs it, so the floor must too.
+    (r'bash -c "\`rm -rf /critical/outside\`"', 1, {}, "deny"),
+    (r'sh -c "\`git push --force origin main\`"', 1, {}, "deny"),
+    # $ stays visible in BOTH spellings: PowerShell expands "\$(...)" even though
+    # POSIX makes it literal, so the dialects disagree and the strict reading wins.
+    (r'gh pr comment 1 --body "x \$(rm -rf /critical/outside) y"', 1, {}, "deny"),
+    (r'git commit -m "note \`x\` $(rm -rf /critical/outside)"', 1, {}, "deny"),
 ]
 
 

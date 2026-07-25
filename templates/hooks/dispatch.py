@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.1 (2026-07-24)"
+FLOOR_VERSION = "1.6.5 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -75,6 +75,11 @@ _HARNESS_INJECTED_MARKERS = frozenset(
 # `wsl.exe bash -lc 'echo hi'` became "a nested shell with no program text".
 _HARNESS_INJECTED_MARKER_PREFIXES = (_INERT_QUOTED_PREFIX,)
 _INTERNAL_MARKER = re.compile(r"__HARNESS_[A-Z0-9_]*?__")
+# POSIX: inside double quotes a backslash keeps its escaping behaviour for
+# exactly these characters and is otherwise a literal backslash. Consuming the
+# pair matters for correctness, not just for backticks: in "a\\`b`" the first
+# backslash escapes the SECOND backslash, so the backtick after it is bare.
+_POSIX_DOUBLE_QUOTE_ESCAPES = frozenset({"$", "`", '"', "\\", "\n"})
 
 
 def restore_quoted_literal_punctuation(value: str) -> str:
@@ -171,8 +176,38 @@ def segment_separator_operator(token: str) -> str | None:
 
 
 def has_shell_expansion_marker(value: str) -> bool:
-    """Keep $ and backtick visible because escaping differs across runtimes."""
-    return any(char in {"$", "`"} for char in value)
+    """Return whether a DOUBLE-QUOTED body can still expand at runtime.
+
+    ``$`` always counts. POSIX makes ``\\$`` literal, but PowerShell treats the
+    backslash as an ordinary character and still expands ``$(...)``/``$var``,
+    so the dialects disagree and the conservative reading wins.
+
+    A backslash-escaped backtick is inert in EVERY runtime the floor parses:
+    POSIX specifies that inside double quotes a backslash escapes ``` ` ```
+    (`echo "\\`id\\`"` prints the backticks and runs nothing), PowerShell has no
+    backtick command substitution at all, and cmd.exe gives the character no
+    meaning. Treating it as a substitution made markdown code spans in a
+    ``--body``/``-m`` argument deny on whatever the prose happened to quote
+    (issue #36), which is exactly the commit-message/PR-body scanning
+    BLUEPRINT §2 forbids. A BARE backtick still counts -- inside double quotes
+    that really is command substitution.
+    """
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char == "\\" and index + 1 < length:
+            escaped = value[index + 1]
+            if escaped == "$":
+                # POSIX-literal but PowerShell-live: stay visible.
+                return True
+            if escaped in _POSIX_DOUBLE_QUOTE_ESCAPES:
+                index += 2
+                continue
+        elif char in {"$", "`"}:
+            return True
+        index += 1
+    return False
 
 
 def has_cmd_expansion_marker(value: str) -> bool:
@@ -3965,7 +4000,23 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         ):
             return "A custom Git merge strategy can execute outside floor inspection."
     diff_args = None
-    if subcommand in {"diff", "format-patch", "log", "show", "whatchanged"}:
+    if (
+        subcommand
+        in {
+            "diff",
+            "format-patch",
+            "log",
+            "show",
+            "whatchanged",
+        }
+        # Every admitted read-only plumbing subcommand gets the same guard. The
+        # diff plumbing (diff-files/diff-index/diff-tree) takes --ext-diff just
+        # like porcelain diff, and naming the family rather than listing members
+        # means admitting a new subcommand to _GIT_READ_ONLY_PLUMBING cannot
+        # silently leave it unguarded -- which is exactly how `rev-list
+        # --output=` slipped through.
+        or subcommand in _GIT_READ_ONLY_PLUMBING
+    ):
         diff_args = args
     elif subcommand == "stash" and args and args[0].lower() == "show":
         diff_args = args[1:]
@@ -4539,6 +4590,96 @@ _GIT_EXTERNAL_DIFF_SUBCOMMANDS = {
     "stash",
     "whatchanged",
 }
+# Documented, stable read-only plumbing. A user alias cannot shadow a real Git
+# subcommand, so these can never be the "unknown alias" the opacity rule guards
+# against, and none of them can mutate a ref, the index, or the working tree.
+# Enumerating the SAFE set is the direction that fails safely: a plumbing verb
+# nobody listed here keeps its current deny.
+#
+# Per-entry justification (issue #34):
+#   check-attr        reads .gitattributes; prints to stdout
+#   check-ignore      reads .gitignore rules; prints to stdout
+#   count-objects     reports object-store size; reads only
+#   diff-files        index-vs-worktree comparison; does NOT refresh the index
+#   diff-index        tree-vs-index/worktree comparison; reads only
+#   diff-tree         tree-vs-tree comparison; reads only
+#   hash-object       prints an object id.  With `-w` it writes a LOOSE object
+#                     into .git/objects and nothing else -- no ref, no index, no
+#                     worktree change, and an unreferenced loose object is
+#                     garbage-collected.  Not a work-loss shape.
+#   merge-base        ancestry arithmetic (`--is-ancestor`, `--fork-point`)
+#   merge-tree        trial merge.  Without `--write-tree` it writes nothing;
+#                     with it, loose objects only (same reasoning as
+#                     hash-object -w).  This is the NON-destructive way to test
+#                     whether two branches conflict, and denying it pushed
+#                     agents into doing a real merge instead.
+#   rev-list          history walk to stdout
+#   var               prints a logical/config variable; it does not RUN the
+#                     editor or pager it can name
+#   verify-pack       validates a packfile; reads only
+#
+# `symbolic-ref` is admitted separately because it is arity-dependent (see
+# git_symbolic_ref_is_read_only).  Deliberately NOT admitted, though they look
+# adjacent: update-index / checkout-index / write-tree / sparse-checkout (they
+# write the index or the working tree), credential and credential-* (a secret
+# surface), and everything already excluded by name elsewhere in this block.
+_GIT_READ_ONLY_PLUMBING = {
+    "check-attr",
+    "check-ignore",
+    "count-objects",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "hash-object",
+    "merge-base",
+    "merge-tree",
+    "rev-list",
+    "var",
+    "verify-pack",
+}
+
+
+def git_symbolic_ref_is_read_only(args: list[str]) -> bool:
+    """Return whether `git symbolic-ref` only reads.
+
+    `git symbolic-ref <name>` prints where a symbolic ref points; adding a
+    second operand (`git symbolic-ref HEAD refs/heads/other`) REWRITES it, and
+    `-d`/`--delete` removes it.  Only the read arity is admitted.
+
+    Unknown options are counted as operands rather than skipped, so an option
+    this function has not heard of pushes the count over the limit and denies.
+    """
+    operands: list[str] = []
+    index = 0
+    saw_separator = False
+    while index < len(args):
+        token = args[index]
+        if token == "--" and not saw_separator:
+            saw_separator = True
+            index += 1
+            continue
+        lowered = token.lower()
+        if not saw_separator and token.startswith("-"):
+            if lowered in {"-d", "--delete"} or git_option_abbreviates(
+                lowered, "--delete"
+            ):
+                return False
+            if lowered in {"-q", "--quiet", "--short"} or any(
+                git_option_abbreviates(lowered, long_option)
+                for long_option in ("--quiet", "--short")
+            ):
+                index += 1
+                continue
+            if lowered == "-m" or lowered.split("=", 1)[0] == "--reason":
+                # A reason only accompanies a write; treat it as one.
+                return False
+            # Anything unrecognised counts as an operand: unknown option shapes
+            # must push toward deny, never past the arity check.
+        operands.append(token)
+        index += 1
+    return len(operands) <= 1
+
+
 _GIT_PAGER_SUBCOMMANDS = {
     "blame",
     "branch",
@@ -8161,7 +8302,15 @@ def check(
                         "deny",
                         "Git patch application under an opaque or secret-looking directory root is floor-blocked.",
                     )
-            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
+            # The admitted read-only plumbing is guarded here too. `--output` is a
+            # revision-walking option, not a diff-only one: `git rev-list
+            # --output=<file>` opens the file with "w" during option parsing and
+            # TRUNCATES it before writing any revisions, so it destroys a secret
+            # just as `git diff --output=` would. Verified against real git: a
+            # 35-byte file became 0 bytes with rc=0. Guarding a subcommand that
+            # does not accept --output costs nothing, so the set is deliberately
+            # wider than the options each subcommand documents.
+            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in _GIT_READ_ONLY_PLUMBING:
                 diff_outputs = git_option_values(args, "--output")
                 if sub == "format-patch":
                     diff_outputs = diff_outputs + git_option_values(
@@ -8557,7 +8706,18 @@ def check(
                 "whatchanged",
                 "worktree",
             }
-            if sub not in known_git_subcommands | {"push"}:
+            if sub == "symbolic-ref" and not git_symbolic_ref_is_read_only(args):
+                return (
+                    "deny",
+                    "Git symbolic-ref rewrites a ref in this form; "
+                    "only the read form is admitted through the floor.",
+                )
+            admitted_git_subcommands = (
+                known_git_subcommands
+                | _GIT_READ_ONLY_PLUMBING
+                | {"push", "symbolic-ref"}
+            )
+            if sub not in admitted_git_subcommands:
                 return (
                     "deny",
                     "An unknown git alias/subcommand is opaque to the deny floor.",

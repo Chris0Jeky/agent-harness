@@ -19,6 +19,15 @@ actually ran, replays each one through `dispatch.check()` offline, and reports:
     (baseline refused, candidate allows: a relaxation needing security review);
   * blocks grouped by deny reason, reproducing issue #21's block-class table.
 
+EXIT CODES
+----------
+0 clean; 1 nothing to replay; 2 at least one command made `check()` raise in
+one of the two versions. 2 is not cosmetic: an exception becomes an `error`
+decision, `error` counts as blocked, and the two allow-edge buckets then move in
+opposite unsafe directions — NEWLY ALLOWED is inflated and NEWLY BLOCKED is
+suppressed to zero. `--allow-errors` downgrades it to a report for a deliberate
+crash census.
+
 PRIVACY
 -------
 The corpus is real work: repository paths, branch names, occasionally a token
@@ -26,6 +35,11 @@ pasted into a command. stdout therefore only ever carries reason strings and
 `--top N` command samples truncated to `--sample-width` characters. Full command
 text is written only to `--json` / `--corpus-cache`, which belong in a scratch
 directory outside any repository. Nothing is copied out of the transcript trees.
+
+That makes `--json` the only place a reviewer can audit the whole of a delta,
+so every bucket is written there untruncated as `<bucket>_all` (`--top` stays a
+stdout display limit). A gate that reports "1,674 newly allowed commands need
+security review" has to be able to produce all 1,674.
 
 "Reason strings" is not automatically safe: several deny reasons interpolate
 command-derived text — `Redirecting output into a secret-looking file ({path})`,
@@ -60,6 +74,18 @@ COVERAGE LIMITS (read before quoting a number)
   11,739. `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` are deliberately kept —
   the floor resolves `~` and home-root comparisons through them. The run prints
   the names (never the values) of everything it cleared.
+* A run measures one overlay combination. `tier.json` carries flags as well as a
+  tier (`sensitive_data`, `wave_mode`, `dormant_production`,
+  `relaxed_work_loss_guards`) and the floor keys real branches on them —
+  `strict = tier >= 4 or wave_mode` turns the work-loss guards into denies, and
+  `sensitive_data` adds the public-remote push denies. With no `--flag`, every
+  row describes a repo whose flags are all false, which is not what
+  `hq-private` (`sensitive_data`) or `wealthlens-hq`
+  (`relaxed_work_loss_guards`) run. Measured at T2 on this corpus,
+  `git reset --hard HEAD~1`, `git push` and `git checkout -- .` are allow with
+  no flags and deny under `wave_mode`. Pass `--flag` per overlay the gated repo
+  declares; the active set is printed in the header, labels every tier row, and
+  is recorded in the JSON `run` block.
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -70,6 +96,12 @@ COVERAGE LIMITS (read before quoting a number)
   not shell logs, and are not sources.
 * There is no per-command watchdog: a pathological command would stall the run
   rather than being counted as a block. None has been observed.
+* Commands longer than `--max-command-chars` are dropped before replay and are
+  in no rate reported anywhere. Long commands skew blocked (nested
+  scriptblocks, heredocs, dynamic tokens), so the exclusion biases the absolute
+  rate downward — the unsafe direction for a gate. 4 of 80,891 unique commands
+  on the current corpus, so immaterial today; the count is printed with the
+  block-rate table rather than only in the corpus notes.
 
 Usage:
     py -3 scripts/replay_corpus.py --baseline <path> --candidate <path> \
@@ -96,6 +128,20 @@ DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
 DEFAULT_TIERS = (1, 2, 3, 4)
 DECISIONS = ("allow", "ask", "deny", "error")
 RUNTIMES = ("codex", "claude")
+# Tier overlays a repo may declare in `tier.json` (SPECS §2). The floor branches
+# on these, so a row measured without them describes a repo none of the estate
+# actually is. `choices` on `--flag` rejects a typo instead of quietly measuring
+# the no-overlay case under an overlay's name.
+OVERLAY_FLAGS = (
+    "sensitive_data",
+    "wave_mode",
+    "dormant_production",
+    "relaxed_work_loss_guards",
+)
+# Exit code when a replayed version raised inside `check()`. Distinct from 1
+# ("nothing to replay") so a caller can tell an unusable corpus from an
+# unusable comparison.
+EXIT_ERRORS_PRESENT = 2
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
@@ -717,12 +763,19 @@ def decide(
     command: str,
     tier: int,
     project_dir: str,
+    flags: dict[str, bool] | None = None,
 ) -> tuple[str, str]:
-    """Return (decision, reason); an exception inside `check()` is its own class."""
+    """Return (decision, reason); an exception inside `check()` is its own class.
+
+    `flags` is the tier-overlay set (`wave_mode`, `sensitive_data`, ...) exactly
+    as `tier.json` would declare it. A fresh dict is handed to every call so a
+    floor version that normalises its config in place cannot leak state from one
+    command into the next.
+    """
     try:
         decision, reason = module.check(
             command,
-            {"tier": tier, "flags": {}},
+            {"tier": tier, "flags": dict(flags or {})},
             project_dir,
             project_dir,
             remote_resolver=stub_resolver,
@@ -742,6 +795,7 @@ def _worker_init(
     candidate_path: str,
     tiers: Sequence[int],
     project_dir: str,
+    flags: dict[str, bool] | None = None,
 ) -> None:
     # Cleared before the modules load, then again with what they declare they
     # read. Workers are forked/spawned copies, so the parent's clearing does not
@@ -756,6 +810,7 @@ def _worker_init(
     _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
     _WORKER["project_dir"] = project_dir
+    _WORKER["flags"] = dict(flags or {})
 
 
 def _worker_run(
@@ -763,13 +818,14 @@ def _worker_run(
 ) -> tuple[list[tuple[int, list, list]], int]:
     tiers = _WORKER["tiers"]
     project_dir = _WORKER["project_dir"]
+    flags = _WORKER["flags"]
     baseline = _WORKER["baseline"]
     candidate = _WORKER["candidate"]
     before = _OFFLINE_READS["count"]
     results = []
     for index, command in chunk:
-        base = [decide(baseline, command, tier, project_dir) for tier in tiers]
-        cand = [decide(candidate, command, tier, project_dir) for tier in tiers]
+        base = [decide(baseline, command, tier, project_dir, flags) for tier in tiers]
+        cand = [decide(candidate, command, tier, project_dir, flags) for tier in tiers]
         results.append((index, base, cand))
     return results, _OFFLINE_READS["count"] - before
 
@@ -782,9 +838,11 @@ def replay(
     project_dir: str,
     jobs: int,
     progress: bool,
+    flags: dict[str, bool] | None = None,
 ) -> tuple[list[list[tuple[str, str]]], list[list[tuple[str, str]]], int]:
     """Return (baseline, candidate) verdicts indexed [command][tier], and the
     number of git-config reads the offline stub answered instead of spawning."""
+    overlay = dict(flags or {})
     total = len(commands)
     baseline_out: list[Any] = [None] * total
     candidate_out: list[Any] = [None] * total
@@ -804,6 +862,7 @@ def replay(
                 str(candidate_path),
                 tuple(tiers),
                 project_dir,
+                overlay,
             ),
         )
         with pool:
@@ -816,7 +875,9 @@ def replay(
                 if progress:
                     report_progress(done, total)
     else:
-        _worker_init(str(baseline_path), str(candidate_path), tiers, project_dir)
+        _worker_init(
+            str(baseline_path), str(candidate_path), tiers, project_dir, overlay
+        )
         for chunk in chunks:
             batch, reads = _worker_run(chunk)
             for index, base, cand in batch:
@@ -990,6 +1051,13 @@ def compare_tier(
     matters when reading the block-class tables side by side: a rule whose count
     grows in the candidate has not necessarily started blocking anything new, it
     may have inherited commands another rule used to claim.
+
+    Every bucket is emitted twice: `<bucket>_top` is the `--top` slice stdout
+    prints, and `<bucket>_all` is the complete list. Only `_top` existed, so a
+    reviewer told "1,674 relaxations need security review" could see 15 of them
+    and had no supported way to enumerate the rest. `_all` carries raw command
+    text and therefore only ever reaches `--json`, which the module docstring
+    already restricts to a scratch directory; stdout still prints `_top`.
     """
     matrix: Counter[str] = Counter()
     reclassified: Counter[str] = Counter()
@@ -1037,6 +1105,7 @@ def compare_tier(
         "transitions": dict(matrix),
         "reclassified_unique": sum(reclassified.values()),
         "reclassified_top": reclassified.most_common(top),
+        "reclassified_all": reclassified.most_common(),
     }
     for label, rows in buckets.items():
         rows.sort(key=lambda row: (-row["invocations"], row["command"]))
@@ -1048,6 +1117,7 @@ def compare_tier(
             ).most_common()
         )
         result[f"{label}_top"] = rows[:top]
+        result[f"{label}_all"] = rows
     return result
 
 
@@ -1074,16 +1144,52 @@ def clip(text: str, width: int) -> str:
     return flat[: width - 3] + "..."
 
 
+def print_rest_of_bucket(
+    delta: dict[str, Any], label: str, top: int, tier_key: Any
+) -> None:
+    """Point at the untruncated list instead of leaving the reader with `--top`.
+
+    stdout deliberately never carries whole commands (see PRIVACY), so the
+    remainder cannot simply be printed; naming its exact JSON path is what makes
+    the count auditable.
+    """
+    remaining = delta[f"{label}_unique"] - top
+    if remaining > 0:
+        print(
+            f"    ... and {remaining} more; the complete list is in --json at "
+            f"tiers.{tier_key}.delta.{label}_all"
+        )
+
+
+def tier_label(tier: Any, overlays: Sequence[str]) -> str:
+    """`T2`, or `T2+wave_mode` — a rate is only meaningful with its overlay set.
+
+    A row labelled plain `T2` claims to describe every T2 repo. It describes
+    only the ones that declare no flags, which `hq-private` and `wealthlens-hq`
+    are not, so the overlay travels with the label everywhere a tier is named.
+    """
+    return f"T{tier}" + ("".join(f"+{name}" for name in overlays))
+
+
 def print_report(result: dict[str, Any], top: int, width: int) -> None:
     corpus = result["corpus"]
     baseline = result["baseline"]
     candidate = result["candidate"]
+    overlays = list(result["run"].get("overlays") or [])
     print("=" * 78)
     print("deny-floor corpus replay")
     print("=" * 78)
     print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
     print(f"candidate : floor {candidate['version']}  {candidate['path']}")
     print(f"project   : {result['project_dir']}")
+    print(
+        "overlays  : "
+        + (
+            ", ".join(overlays)
+            if overlays
+            else "(none) - every row describes a repo declaring no tier.json flags"
+        )
+    )
     cleared = result["run"].get("cleared_host_env") or []
     print(
         "host env  : cleared "
@@ -1136,21 +1242,38 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         "  ask -> deny for Codex. For Claude an ask is a prompt, not a refusal;\n"
         "  the Claude-semantics refusal rate (deny + error) is per tier below."
     )
+    skipped = int(corpus["notes"].get("skipped-over-max-chars", 0))
+    print(
+        f"  excluded before replay: {skipped} command(s) longer than "
+        f"--max-command-chars ({result['run'].get('max_command_chars')}). Long\n"
+        "  commands skew blocked, so every rate below is biased slightly low."
+    )
+    print(
+        "  'err' = check() raised. Any non-zero value invalidates the deltas on\n"
+        "  that row: an error counts as blocked, so error->allow inflates 'new\n"
+        "  alw' and error->deny never reaches 'new blk'."
+    )
+    labels = {key: tier_label(key, overlays) for key in result["tier_order"]}
+    label_width = max([len("tier")] + [len(text) for text in labels.values()]) + 2
     header = (
-        f"  {'tier':<5}{'baseline':>18}{'candidate':>18}"
-        f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}"
+        f"  {'tier':<{label_width}}{'baseline':>18}{'candidate':>18}"
+        f"{'new blk':>9}{'new alw':>9}{'+ask':>7}{'-ask':>7}{'err b/c':>10}"
     )
     print(header)
     for tier_key in result["tier_order"]:
         base = result["tiers"][tier_key]["baseline"]
         cand = result["tiers"][tier_key]["candidate"]
         delta = result["tiers"][tier_key]["delta"]
+        errors = (
+            f"{base['decisions'].get('error', 0)}/{cand['decisions'].get('error', 0)}"
+        )
         print(
-            f"  T{tier_key:<4}"
+            f"  {labels[tier_key]:<{label_width}}"
             f"{base['unique_blocked']:>8} {base['unique_block_rate'] * 100:>8.2f}%"
             f"{cand['unique_blocked']:>8} {cand['unique_block_rate'] * 100:>8.2f}%"
             f"{delta['newly_blocked_unique']:>9}{delta['newly_allowed_unique']:>9}"
             f"{delta['ask_gained_unique']:>7}{delta['ask_lost_unique']:>7}"
+            f"{errors:>10}"
         )
     asked = any(
         result["tiers"][tier_key][label]["unique_ask"]
@@ -1163,7 +1286,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     for tier_key in result["tier_order"]:
         tier = result["tiers"][tier_key]
         print("=" * 78)
-        print(f"tier {tier_key}")
+        print(f"tier {tier_key}  [overlays: {', '.join(overlays) or 'none'}]")
         print("-" * 78)
         for label in ("baseline", "candidate"):
             summary = tier[label]
@@ -1224,6 +1347,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"{clip(row['command'], width)}"
             )
             print(f"           reason: {clip(row['reason'], width)}")
+        print_rest_of_bucket(delta, "newly_blocked", top, tier_key)
         print(
             f"  NEWLY ALLOWED (baseline block -> candidate allow): "
             f"{delta['newly_allowed_unique']} unique / "
@@ -1235,6 +1359,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"{clip(row['command'], width)}"
             )
             print(f"           was: {clip(row['reason'], width)}")
+        print_rest_of_bucket(delta, "newly_allowed", top, tier_key)
         for label, caption in (
             (
                 "ask_gained",
@@ -1264,6 +1389,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                     f"{clip(row['command'], width)}"
                 )
                 print(f"           reason: {clip(row['reason'], width)}")
+            print_rest_of_bucket(delta, label, top, tier_key)
         residual = {
             key: value
             for key, value in delta["transitions"].items()
@@ -1284,6 +1410,50 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
+
+
+def count_errors(result: dict[str, Any]) -> dict[str, int]:
+    """Per-version total of `check()` exceptions across every replayed tier."""
+    return {
+        version: sum(
+            int(result["tiers"][tier][version]["decisions"].get("error", 0))
+            for tier in result["tier_order"]
+        )
+        for version in ("baseline", "candidate")
+    }
+
+
+def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
+    """Refuse to let a crashing version be read as a clean comparison.
+
+    `decide()` turns an exception into an `error` decision and `summarize_tier`
+    counts every non-allow as blocked, so a version that crashes looks maximally
+    strict. That corrupts both gate numbers in the unsafe direction at once:
+    error -> allow lands in NEWLY ALLOWED (a relaxation looks larger and better
+    evidenced than it is) and error -> deny lands in `crash_moved`, never in
+    NEWLY BLOCKED — so a crashing baseline drives the regression count to zero.
+    A stub baseline with a pre-`remote_resolver` `check()` signature produced
+    `new blocks 0 / new allows 1` and exit 0 before this guard existed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            "!! check() RAISED: baseline "
+            f"{errors['baseline']} / candidate {errors['candidate']} error "
+            "decisions.",
+            file=stream,
+        )
+        print(
+            "!! Every delta above is unusable. An error counts as blocked, so "
+            "NEWLY ALLOWED\n"
+            "!! is inflated and NEWLY BLOCKED is suppressed. The exception "
+            "texts are the\n"
+            "!! `error` rows of the block-class tables. Fix the version, or "
+            "pass --allow-errors\n"
+            f"!! to accept the numbers anyway. Exiting {EXIT_ERRORS_PRESENT}.",
+            file=stream,
+        )
+        print("!" * 78, file=stream)
 
 
 def default_codex_root() -> Path:
@@ -1331,6 +1501,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tiers",
         choices=[0, 1, 2, 3, 4],
         help="tier to replay (repeatable; default 1 2 3 4)",
+    )
+    parser.add_argument(
+        "--flag",
+        action="append",
+        dest="flags",
+        choices=sorted(OVERLAY_FLAGS),
+        help=(
+            "tier.json overlay to enable for every replayed command (repeatable; "
+            "default: none, i.e. a repo that declares no flags)"
+        ),
     )
     parser.add_argument("--limit", type=int, help="replay a deterministic sample only")
     parser.add_argument(
@@ -1382,12 +1562,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore commands embedded in Codex `exec` JS (issue #21 parity)",
     )
     parser.add_argument("--quiet", action="store_true", help="no progress on stderr")
+    parser.add_argument(
+        "--allow-errors",
+        action="store_true",
+        help=(
+            "report an exception inside check() instead of exiting non-zero "
+            "(for a deliberate crash census only; the deltas are not usable)"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     tiers = sorted(set(args.tiers)) if args.tiers else list(DEFAULT_TIERS)
+    overlays = sorted(set(args.flags or ()))
+    flags = {name: True for name in overlays}
     progress = not args.quiet
 
     if args.from_corpus:
@@ -1446,6 +1636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.project_dir),
             max(1, args.jobs),
             progress,
+            flags,
         )
     finally:
         os.environ.update(injected)
@@ -1464,6 +1655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "project_dir": str(args.project_dir),
         "tier_order": tiers,
         "run": {
+            "flags": flags,
+            "overlays": overlays,
             "limit": args.limit,
             "max_command_chars": args.max_command_chars,
             "jobs": max(1, args.jobs),
@@ -1512,6 +1705,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.top,
             ),
         }
+    errors = count_errors(result)
+    result["run"]["errors"] = errors
+    result["run"]["allow_errors"] = bool(args.allow_errors)
+
     print_report(result, args.top, args.sample_width)
     if args.json_path:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1519,6 +1716,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
+    if sum(errors.values()) and not args.allow_errors:
+        print_error_banner(result, errors)
+        return EXIT_ERRORS_PRESENT
     return 0
 
 
