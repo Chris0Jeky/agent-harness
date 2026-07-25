@@ -1409,6 +1409,58 @@ _ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
 # A punctuation run that still holds a redirection character. Segmentation only
 # consumes runs made purely of `;&|\n`, so anything matching this is structure.
 _ARGV_REDIRECTION_TOKEN = re.compile(r"[;&|<>]*[<>][;&|<>]*")
+# The file-descriptor prefix of a redirection (`2>&1`, `1>out`, `&>log`).
+_ARGV_REDIRECTION_DESCRIPTOR = re.compile(r"[0-9]+|&")
+_ARGV_REDIRECTION_CHARACTER = re.compile(r"[<>]")
+
+
+def strip_shell_redirections(tokens: list[str]) -> list[str]:
+    """Drop redirection operators, their descriptors and their targets.
+
+    The SHELL consumes redirections; the program never sees them in its argv.
+    A guard that classifies operands therefore has to see the same argv git
+    does, or `git push --force-with-lease origin fix/x 2>&1` reads as a push to
+    the two destinations `fix/x` and `2>&1`, and the lease guard refuses the one
+    spelling every agent actually types (issue #44).
+
+    Both of the floor's tokenizers are handled, because they disagree here:
+    the quote-aware pass runs shlex with punctuation characters and yields
+    ``['2', '>&', '1']``, while the sanitized pass splits on whitespace and
+    yields ``['2>&1']``. So a redirection is recognised from the first ``<``/
+    ``>`` inside a token: text before it is an operand and is kept
+    (``fix/x>out`` really is the operand ``fix/x`` plus a redirect), a bare
+    file-descriptor prefix is dropped with the operator, and the target is
+    dropped whether it is glued on (``2>/dev/null``) or the next token
+    (``> out.txt``).
+
+    Whitespace is already gone by the time argv exists, so `cmd 2 >f` (an
+    operand `2`, then a redirect) is indistinguishable from `cmd 2>f` and the
+    descriptor is dropped in both. That direction is safe for the caller:
+    dropping an operand can only SHRINK the operand list, and a shorter list
+    fails closed -- `force_with_lease_targets_are_features([])` is False, and
+    fewer positionals means a push counts as refspec-less.
+    """
+    kept: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        match = _ARGV_REDIRECTION_CHARACTER.search(token)
+        if match is None:
+            kept.append(token)
+            index += 1
+            continue
+        prefix = token[: match.start()]
+        target = token[match.start() :].lstrip("<>&")
+        if prefix and not _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(prefix):
+            kept.append(prefix)
+        elif not prefix and kept and _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(kept[-1]):
+            # shlex emitted the descriptor as its own token before the operator.
+            kept.pop()
+        index += 1
+        if not target:
+            # The redirection target is the following token.
+            index += 1
+    return kept
 
 
 def rejoin_argv_as_command(parts: list[str]) -> str:
@@ -9020,14 +9072,20 @@ def check(
                 # they are server-side push-option data, not selectors, and the push
                 # is still refspec-less. `git push -o --all origin` used to skip the
                 # bare-push guard entirely (PR #23 review).
+                # The shell eats redirections before git is executed, so the
+                # operand walk has to run over the argv git really receives.
+                # Leaving `2>&1` in made it a second lease destination (and, in
+                # the other direction, made a refspec-LESS push look explicit
+                # enough to skip the configured-force resolution). Issue #44.
+                push_argv = strip_shell_redirections(args)
                 positionals = []
                 explicit_selector = False
                 repository_via_option = False
                 index = 0
-                while index < len(args):
-                    token = args[index]
+                while index < len(push_argv):
+                    token = push_argv[index]
                     if token == "--":
-                        positionals.extend(args[index + 1 :])
+                        positionals.extend(push_argv[index + 1 :])
                         break
                     if token == "--repo":
                         repository_via_option = True
