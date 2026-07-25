@@ -1143,8 +1143,17 @@ REALITY_MISMATCH = "MISMATCH"
 REALITY_UNPROVEN = "UNPROVEN"
 REALITY_ADVISORY = "advisory"
 PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
+
+# The phrasings a doc actually uses to claim privacy. The first version only
+# matched "private" immediately followed by one of three singular nouns, which
+# misses "this repository is private", "private repos" and "kept private" - the
+# most natural spellings - so the advertised converse check almost never fired.
+_PRIVACY_NOUNS = r"(?:repo|repository|remote|fork|mirror)s?"
 PRIVACY_CLAIM_PATTERN = re.compile(
-    r"private\s+(?:repo\b|repository\b|remote\b)", re.IGNORECASE
+    rf"private\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+is\s+private\b"
+    r"|(?:kept|keep|stays?|remains?)\s+private\b",
+    re.IGNORECASE,
 )
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
 # The remote work is actually published to. A public remote under any other

@@ -5108,6 +5108,36 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.statuses(result, "remote visibility"), [])
 
+    def test_privacy_claims_match_the_phrasings_docs_actually_use(self) -> None:
+        claiming = (
+            "This private repository versions the user's config.",
+            "This repository is private.",
+            "We keep private repos for client work.",
+            "It lives in a private GitHub repository.",
+            "The repo is private and must stay that way.",
+            "Everything here is kept private.",
+            "Pushes go to a private remote.",
+        )
+        for text in claiming:
+            with self.subTest(text=text):
+                self.assertIsNotNone(harness.PRIVACY_CLAIM_PATTERN.search(text))
+        not_claiming = (
+            "Never commit a private key.",
+            "Privately held opinions are out of scope.",
+            "The repository is public.",
+        )
+        for text in not_claiming:
+            with self.subTest(text=text):
+                self.assertIsNone(harness.PRIVACY_CLAIM_PATTERN.search(text))
+
+    def test_a_natural_privacy_claim_raises_the_advisory(self) -> None:
+        repo = self.make_repo(
+            sensitive_data=False,
+            agents_text="This repository is private; do not publish it.\n",
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "documented privacy"), ["advisory"])
+
     def test_documented_privacy_without_the_overlay_is_an_advisory_split(self) -> None:
         repo = self.make_repo(
             sensitive_data=False,
