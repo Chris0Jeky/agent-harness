@@ -90,11 +90,42 @@ class CommandHeadPrefixTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(dispatch.command_head(argv)[0], expected)
 
-    def test_unterminated_process_substitution_does_not_skip_ahead(self):
-        # No balancing `)`: keep the operator as the head rather than guessing
-        # where the operand ended.
+    def test_unterminated_process_substitution_is_undecidable(self):
+        # No balancing `)`: the operand's extent is unknown, so no token can be
+        # trusted as the executable. Resolving the operator as the head would be
+        # an ALLOW (`<` matches no rule), not the conservative answer.
         self.assertIsNone(dispatch.process_substitution_end(["(git", "show"], 0))
-        self.assertEqual(dispatch.command_head(["<", "<", "(git", "show"])[0], "<")
+        self.assertEqual(
+            dispatch.leading_redirection_end(["<", "<", "(git", "show"], 0),
+            dispatch._UNTERMINATED_REDIRECTION_OPERAND,
+        )
+        self.assertEqual(
+            dispatch.command_head(["<", "<", "(git", "show"])[0],
+            dispatch._UNDELIMITED_REDIRECTION,
+        )
+
+    def test_undelimited_operand_denies_instead_of_hiding_the_head(self):
+        # A paren restored from a QUOTED span is data, but the balance walk
+        # cannot tell it from syntax, so it unbalances the operand. Every head
+        # after it is a guess; deny rather than run whichever one we picked.
+        for command in (
+            "< <(echo '(' ) rm -rf ~",
+            "< <(echo '(' ) git push --force origin main",
+            "< <(printf '(' ) sudo id",
+            "< <(printf '(' ) git status",
+            r"< <(echo \( ) rm -rf ~",
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("delimit", reason)
+
+    def test_balanced_process_substitutions_still_resolve_the_head(self):
+        # The deny above must stay scoped to the undelimited case; an ordinary
+        # process substitution keeps exposing the real executable.
+        self.assertEqual(decide("< <(git show HEAD:file) diff -")[0], "allow")
+        self.assertEqual(decide("< <(printf x) sort -u")[0], "allow")
+        self.assertEqual(decide("< <(git show HEAD:file) rm -rf ~")[0], "deny")
 
 
 class PrefixCrossProductTests(unittest.TestCase):

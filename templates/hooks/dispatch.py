@@ -3296,6 +3296,10 @@ _WRAPPERS = {
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
 _OPAQUE_WRAPPER = "__harness_opaque_wrapper__"
+# Head returned when a command-leading process substitution has no balancing `)`
+# in the token stream. The operand's extent is then unknown, so every token after
+# it is a guess about what the shell would run -- see command_head.
+_UNDELIMITED_REDIRECTION = "__harness_undelimited_redirection__"
 # Cmdlets whose scriptblock argument may be written glued to the name (`%{ ... }`,
 # `?{ ... }`). Splitting the head is restricted to these so an unrelated token that
 # happens to contain a brace keeps its current head resolution.
@@ -3960,6 +3964,11 @@ def command_prefix_redirection_token(
     return None
 
 
+# Sentinel index: the token stream begins a process-substitution operand that
+# never closes, so the prefix has no end and no head can be resolved behind it.
+_UNTERMINATED_REDIRECTION_OPERAND = -1
+
+
 def process_substitution_end(toks: list[str], index: int) -> int | None:
     """Return the index after a ``<(...)``/``>(...)`` operand, or ``None``.
 
@@ -3967,9 +3976,14 @@ def process_substitution_end(toks: list[str], index: int) -> int | None:
     tokens (``<(git show HEAD:f)`` becomes ``['<', '(git', 'show', 'HEAD:f)']``),
     so consuming a fixed token count lands the head INSIDE the substitution and
     resolves an attacker-influenced word as the executable.  Scan to the
-    balancing ``)`` instead; the walk is bounded by the token count, and an
-    unterminated substitution returns ``None`` so the caller keeps the operator
-    as the head rather than skipping past text it cannot delimit.
+    balancing ``)`` instead; the walk is bounded by the token count.
+
+    ``None`` means the operand never closed.  Callers must treat that as
+    UNDECIDABLE, not as "no redirection here": the parenthesis count also sees
+    parens restored from quoted spans (``< <(echo '(' ) rm -rf ~`` yields
+    ``['<', '<', '(echo', '(', ')', 'rm', ...]``), so a stray one silently
+    unbalances the walk.  Resolving the operator as the head instead would leave
+    every head-gated rule unevaluated for whatever follows.
     """
     depth = 0
     while index < len(toks):
@@ -3993,6 +4007,11 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
     redirection attached to a later executable.  The tokenizer splits it into
     an operator plus a ``("`-headed token, so retain that spelling as a head
     rather than skipping past it.
+
+    ``None`` means "no redirection starts here".  A substitution operand that
+    never closes returns :data:`_UNTERMINATED_REDIRECTION_OPERAND` instead --
+    a distinct answer, because the prefix demonstrably IS there and only its
+    extent is unknown.  Callers must not collapse the two.
     """
     if index >= len(toks):
         return None
@@ -4021,7 +4040,8 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
             and target_index + 1 < len(toks)
             and toks[target_index + 1].lstrip().startswith("(")
         ):
-            return process_substitution_end(toks, target_index + 1)
+            end = process_substitution_end(toks, target_index + 1)
+            return _UNTERMINATED_REDIRECTION_OPERAND if end is None else end
         return target_index + 1
     operator_index = index
     has_descriptor = False
@@ -4051,7 +4071,8 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
         and target_index + 1 < len(toks)
         and toks[target_index + 1].lstrip().startswith("(")
     ):
-        return process_substitution_end(toks, target_index + 1)
+        end = process_substitution_end(toks, target_index + 1)
+        return _UNTERMINATED_REDIRECTION_OPERAND if end is None else end
     return target_index + 1
 
 
@@ -4080,7 +4101,9 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
             index += 1
             continue
         redirect_end = leading_redirection_end(toks, index)
-        if redirect_end is None:
+        if redirect_end is None or redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # An undelimited operand has no targets to read; command_head denies
+            # the whole segment instead.
             break
         operator: str | None = None
         for consumed in toks[index:redirect_end]:
@@ -4125,7 +4148,10 @@ def strip_leading_command_redirections(toks: list[str]) -> list[str]:
             index += 1
             continue
         redirect_end = leading_redirection_end(toks, index)
-        if redirect_end is None:
+        if redirect_end is None or redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # Retain the argv rather than guessing where an undelimited operand
+            # ended: keeping tokens is the conservative view for every positional
+            # scanner that reads this normalization.
             break
         index = redirect_end
     return [*assignments, *toks[index:]]
@@ -4160,6 +4186,14 @@ def command_head(toks):
             i += 1
             continue
         redirect_end = leading_redirection_end(toks, i)
+        if redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # The operand never closed, so which token is the executable is a
+            # guess. Resolving the redirect operator as the head is not the
+            # conservative answer -- it is an ALLOW: `<` matches no rule, so
+            # every head-gated guard behind it goes unevaluated. Report the
+            # segment as undecidable and let check() fail closed, the same way
+            # an uninspectable wrapper or an undecodable word does.
+            return _UNDELIMITED_REDIRECTION, toks[i:]
         if redirect_end is not None:
             i = redirect_end
             continue
@@ -8078,6 +8112,11 @@ def check(
             return "deny", "Cannot safely decode an executable shell word."
         if head == _OPAQUE_WRAPPER:
             return "deny", "Cannot safely inspect wrapper options that alter execution."
+        if head == _UNDELIMITED_REDIRECTION:
+            return (
+                "deny",
+                "Cannot safely delimit a leading process substitution.",
+            )
         if head in {"eval", "iex", "invoke-expression"}:
             evaluated_args = list(toks[1:])
             if evaluated_args and evaluated_args[0] == "--":
