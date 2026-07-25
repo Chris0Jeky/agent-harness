@@ -345,10 +345,16 @@ def cmd_unescape(text: str) -> str:
     return re.sub(r"\^(.)", r"\1", text, flags=re.DOTALL)
 
 
+_CMD_SETUP_SWITCH = (
+    r"/(?:d|q|a|u|s|e:(?:on|off)|f:(?:on|off)|v:(?:on|off)|t:[0-9a-f]{2})"
+)
 _CMD_NESTED_COMMAND = re.compile(
-    r"^(?:/(?:d|q|a|u|s|e:(?:on|off)|f:(?:on|off)|v:(?:on|off)|"
-    r"t:[0-9a-f]{2}))*/(?P<mode>[ck])(?P<tail>.*)$",
+    rf"^(?:{_CMD_SETUP_SWITCH})*/(?P<mode>[ck])(?P<tail>.*)$",
     re.IGNORECASE,
+)
+_CMD_NESTED_RAW_COMMAND = re.compile(
+    rf"^cmd(?:\.exe)?\b.*?\s(?:{_CMD_SETUP_SWITCH})*/[ck]\s*(?P<child>.+)$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -2711,10 +2717,7 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
             r"realtime|abovenormal|belownormal|wait)"
         )
-        cmd_wrapper = re.match(
-            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck]\s*(?P<child>.+)$",
-            candidate,
-        )
+        cmd_wrapper = _CMD_NESTED_RAW_COMMAND.match(candidate)
         wrapper = cmd_wrapper
         if not wrapper:
             wrapper = re.match(

@@ -132,15 +132,21 @@ class AggregateConfigRedirectTests(unittest.TestCase):
 
 class CmdAggregateSeparatorTests(unittest.TestCase):
     def test_cmd_aggregate_spelling_exposes_the_following_delete(self):
-        for launcher in ("cmd", "cmd.exe /d"):
-            for switch in ("c", "k"):
+        for switch in ("c", "k"):
+            switch_prefixes = (
+                f"cmd /{switch}",
+                f"cmd.exe /d /{switch}",
+                f"cmd.exe /d/{switch}",
+                f"cmd /q/{switch}",
+            )
+            for switch_prefix in switch_prefixes:
                 for operator in ("&>", "&>>"):
                     commands = (
-                        rf"""{launcher} /{switch} "echo harmless {operator}nul """
+                        rf"""{switch_prefix} "echo harmless {operator}nul """
                         r'''rd /s /q C:\critical\outside path\"''',
-                        rf"""{launcher} /{switch}"echo harmless {operator}nul """
+                        rf"""{switch_prefix}"echo harmless {operator}nul """
                         r'''rd /s /q C:\critical\outside path\"''',
-                        rf"""{launcher} /{switch}echo harmless {operator}nul """
+                        rf"""{switch_prefix}echo harmless {operator}nul """
                         r'''rd /s /q "C:\critical\outside path\"''',
                     )
                     for command in commands:
