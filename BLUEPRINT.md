@@ -265,8 +265,13 @@ blast-radius ladder in §1.
 | Harness growth: deny floor/dispatcher, region maps, skills, hooks, ADRs, global laws; promotion/demotion audits; anything irreversible | top | xhigh |
 | Adversarial review, merge decisions | top | high (xhigh when irreversible or wide blast radius) |
 | Code implementation, debugging, feature slices inside mapped regions, routine PRs | default | high |
-| Gardener triage, tombstone classification, routing/promotion calls, subagent work, lookups | default | low |
-| Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong | cheap | medium–high, never low |
+| Gardener triage, tombstone classification, routing/promotion calls, judgment-bearing subagent work, lookups | default | low |
+| Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong — including wide mechanical fan-out (§3) | cheap | medium–high, never low |
+
+**Delegation is not a task class.** Route a subagent by what it is DOING, never by the fact that
+it is a subagent: a mechanical sweep handed to eight workers is still mechanical (cheap tier,
+medium/high effort, §3), and a single worker asked for an independent judgment is still judgment.
+
 
 Triage and classification sit on the **default** tier, not the cheap one: deciding what matters
 is judgment wearing mechanical clothes. That misclassification is what kept the Gardener
@@ -282,6 +287,10 @@ pinned to a cheap model through three separate prose bans.
   (convention — hooks cannot reliably see the running model, so this part is honestly a
   tripwire). A `model:` pin binds the SUBAGENT it defines, never the session that delegates to
   it: a top-level or headless run must bind its own model (see SPECS §10 for the scheduled case).
+  An agent `model:` pin is the ONE permitted derived copy of a model name — a machine-read field
+  cannot hold an indirection — and it is governed, not trusted: SPECS §10 carries the derivation
+  contract (re-pin every affected definition in the same commit that changes the skill; declare
+  the tier beside the pin; issue #76 tracks making the check enforce agreement).
 - **Acceptance test for the whole blueprint**: a weaker model completes one mapped-region task
   per active repo without reading outside the region. That passing is the success criterion.
 - **Do NOT restate the ladder here.** Which named model fills `top` / `default` / `cheap`, at
