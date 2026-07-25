@@ -2727,6 +2727,20 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     return recovered_deletes
 
 
+#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
+#: destination file. The quote-aware token scan has to recognise the same grammar the
+#: text-mode fallback regex already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it only
+#: knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked while
+#: their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a descriptor
+#: number rather than a path, so it decides on the token that follows.
+#:
+#: The tokenizer's quote-provenance mask below reads the SAME pattern on purpose. The two
+#: are one decision seen from both sides — "is this token an operator?" — so recognising a
+#: spelling in the scan without masking it in the tokenizer turns a quoted operator
+#: LITERAL into a false deny, and masking without recognising re-opens the bypass.
+_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
+
+
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
     """Tokenize executable argv while protecting quoted operator characters.
 
@@ -2835,7 +2849,16 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         token = raw_token
         for placeholder, value in quoted.items():
             replacement = value
-            if raw_token == placeholder and value in (">", ">>"):
+            # A quoted span that is EXACTLY an operator spelling is DATA in every shell
+            # this floor parses, so it is masked into text that matches nothing. The mask
+            # is keyed on the same pattern the token scan tests (`_OUTPUT_REDIRECT_OPERATOR`)
+            # rather than on a hard-coded `('>', '>>')`: widening the scan to `&>`/`>|`/
+            # `2>` while the mask still knew only two spellings made `echo "&>" .env` a
+            # false deny, with the byte-identical `echo ">" .env` still allowed. The
+            # suffix carries no meaning — nothing reads this placeholder back, it exists
+            # only to be a token no rule can match — so the length collision between `>>`
+            # and `>|` is inert.
+            if raw_token == placeholder and _OUTPUT_REDIRECT_OPERATOR.fullmatch(value):
                 replacement = f"__HARNESS_LITERAL_REDIRECT_{len(value)}__"
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
@@ -3171,15 +3194,6 @@ def brace_expansion_mentions_secret_path(token: str) -> bool:
         if not changed:
             break
     return expanded and any(is_secret_path(variant) for variant in variants)
-
-
-#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
-#: destination file. The quote-aware token scan has to recognise the same grammar the
-#: text-mode fallback regex below already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it
-#: only knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked
-#: while their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a
-#: descriptor number rather than a path, so it decides on the token that follows.
-_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
 
 
 def token_mentions_secret_path(token: str) -> bool:

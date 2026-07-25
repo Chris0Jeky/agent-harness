@@ -357,6 +357,23 @@ CASES = [
     # is `1`, so the quoted `.env` here is an argument and stays allowed.
     ("2>&1 '.env' echo hi", 1, {}, "allow"),
     ("git commit -m 'redirect &> .env is blocked'", 1, {}, "allow"),
+    # ...and the mirror of the widened operator set: a quoted span that IS an operator
+    # spelling is DATA. Every deny above has this twin so the two halves of the change
+    # cannot drift apart — widening the token scan without widening the tokenizer's
+    # quote-provenance mask made these false denies while `echo ">" .env` still allowed.
+    ("echo x &> .env", 1, {}, "deny"),
+    ('echo "&>" .env', 1, {}, "allow"),
+    ("echo x >| .env", 1, {}, "deny"),
+    ('echo ">|" .env', 1, {}, "allow"),
+    ("echo x 2> .env", 1, {}, "deny"),
+    ('echo "2>" .env', 1, {}, "allow"),
+    ("echo x &>> .env", 1, {}, "deny"),
+    ('echo "&>>" .env', 1, {}, "allow"),
+    ("echo x >& .env", 1, {}, "deny"),
+    ('echo ">&" .env', 1, {}, "allow"),
+    ("echo x 1>> .env", 1, {}, "deny"),
+    ('echo "1>>" .env', 1, {}, "allow"),
+    ("echo '&>' .env", 1, {}, "allow"),
     ("echo secret > .{env,notes}", 1, {}, "deny"),
     ("echo secret > 'dir,one/'.{env,txt}", 1, {}, "deny"),
     ("rm .env", 1, {}, "deny"),

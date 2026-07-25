@@ -787,6 +787,21 @@ QUOTED_BENIGN_REDIRECTS = [
     # BLUEPRINT §2: quoted prose is never program text
     "git commit -m 'redirect &> .env is blocked'",
     'git commit -m "echo secret > .env must deny"',
+    # A quoted span that is EXACTLY an operator spelling is data too, and it is the
+    # half the first version of the fix missed: widening the token scan to `&>`/`>|`/
+    # `2>` without widening the tokenizer's quote-provenance mask denied these while
+    # the byte-identical `echo ">" .env` still allowed. A multi-word quoted span (the
+    # commit messages above) restores as ONE token that cannot fullmatch the operator
+    # pattern, so it never exercised this at all.
+    'echo ">" .env',
+    'echo ">>" .env',
+    'echo "&>" .env',
+    'echo "&>>" .env',
+    'echo ">|" .env',
+    'echo ">&" .env',
+    'echo "2>" .env',
+    'echo "1>>" .env',
+    "echo '&>' .env",
 ]
 
 #: How many ENFORCED shapes deny each charter probe FOR THE PROBE'S OWN RULE — the
