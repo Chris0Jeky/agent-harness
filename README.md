@@ -41,14 +41,19 @@ emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisor
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
 repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
 `UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
-Only a PUBLIC `origin` — the remote work is published to — is a `MISMATCH`; a public
-`upstream` or mirror on a private fork is reported as an `advisory` naming the remote.
+Only a PUBLIC endpoint work is actually PUSHED to is a `MISMATCH`: the push URL of `origin`,
+or of any remote when no `origin` is configured. A public `upstream` or mirror on a private
+fork, and a public fetch URL behind a private `pushurl`, are reported as an `advisory` naming
+the remote and the reason. Any credential embedded in a remote URL is redacted before it
+reaches a finding.
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
-degrades to `UNPROVEN` and exits 0. `audit --offline` runs no network resolver at all. Because the byte comparison reads the harness working
+degrades to `UNPROVEN` and exits 0. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
 tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
-diverged from a resolvable `origin/main` is refused as the canonical reference and said so;
-where `origin/main` does not resolve, divergence is reported as unmeasured. A detached-HEAD
+diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
+is a local tracking ref, so currency is proven against the published tip with a bounded
+`git ls-remote`; a stale tracking ref, or a published tip that cannot be read (offline,
+unreachable), refuses the reference rather than assuming it. A detached-HEAD
 CI checkout (what `actions/checkout` produces) is never a reference, so the canonical-template
 leg is permanently `UNPROVEN` there and live only on a checkout sitting on a clean `main`. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
 that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for

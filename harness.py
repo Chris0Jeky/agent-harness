@@ -1210,6 +1210,32 @@ def bounded_command_output(
     return proc.returncode == 0, (proc.stdout or "").strip()
 
 
+# `git` is not by itself a local resolver: these subcommands contact the
+# remote, so `--offline` has to refuse them by name rather than trust the
+# binary. `remote --verbose` reads config and stays; `remote show/update`
+# does not.
+NETWORK_GIT_SUBCOMMANDS = frozenset(
+    {"clone", "fetch", "pull", "push", "ls-remote", "submodule", "archive"}
+)
+NETWORK_GIT_REMOTE_ACTIONS = frozenset({"show", "update", "prune"})
+
+
+def command_reaches_the_network(argv: list[str]) -> bool:
+    """Whether this resolver would contact a host; `--offline` refuses these."""
+    if argv[:1] != ["git"]:
+        return True
+    operands = [token for token in argv[1:] if not token.startswith("-")]
+    if not operands:
+        return False
+    if operands[0] in NETWORK_GIT_SUBCOMMANDS:
+        return True
+    return (
+        operands[0] == "remote"
+        and len(operands) > 1
+        and operands[1] in NETWORK_GIT_REMOTE_ACTIONS
+    )
+
+
 def local_only_command_output(
     argv: list[str],
     cwd: Path | None = None,
@@ -1221,7 +1247,7 @@ def local_only_command_output(
     reports as UNPROVEN — the audit stays honest about what it did not
     measure instead of pretending an unmeasured remote is fine.
     """
-    if argv[:1] != ["git"]:
+    if command_reaches_the_network(argv):
         return False, ""
     return bounded_command_output(argv, cwd, timeout)
 
@@ -1628,8 +1654,8 @@ def harness_reference_status(
         )
     # Clean on a local `main` is not the same as agreeing with the published
     # one: unpushed commits to templates/hooks, or a main that is behind, would
-    # otherwise be called canonical. This reads refs only - no network - so an
-    # unfetched or absent `origin/main` leaves divergence unmeasured and said.
+    # otherwise be called canonical. This first query reads refs only, so it
+    # answers the common case cheaply and with a diagnosis.
     resolved, divergence = output_before_deadline(
         command_runner,
         ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
@@ -1646,15 +1672,43 @@ def harness_reference_status(
                 f"{behind} behind origin/main, so its working tree is not the "
                 "canonical reference",
             )
+    # `origin/main` is a LOCAL tracking ref. Unfetched, it can be arbitrarily
+    # far behind the published branch, and `rev-list` then reports `0 0` for a
+    # working tree that is stale — a vendored copy matching that obsolete
+    # template would report `ok` while it has drifted from the published floor.
+    # Prove currency against the remote, and when the remote cannot be asked
+    # (offline, unreachable) say the reference is unproven rather than assume
+    # it: `vendored_floor_findings` renders that as UNPROVEN, never as a pass.
+    resolved_head, head = output_before_deadline(
+        command_runner, ["git", "rev-parse", "HEAD"], harness_root, deadline
+    )
+    resolved_published, published = output_before_deadline(
+        command_runner,
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        harness_root,
+        deadline,
+    )
+    fields = published.split() if resolved_published else []
+    published_tip = fields[0] if fields else ""
+    if not resolved_head or not published_tip:
         return (
-            True,
-            f"harness checkout {harness_root} is clean on main and level with "
-            "origin/main",
+            False,
+            f"harness checkout {harness_root} is clean on main, but the published "
+            "main tip could not be read (offline, or origin is unreachable), so "
+            "this working tree cannot be proven current",
+        )
+    if head.strip() != published_tip:
+        return (
+            False,
+            f"harness checkout {harness_root} is clean on main at "
+            f"{head.strip()[:12]}, but published main is at {published_tip[:12]} — "
+            "the local origin/main is stale, so this working tree is not the "
+            "canonical reference",
         )
     return (
         True,
-        f"harness checkout {harness_root} is clean on main; origin/main did not "
-        "resolve, so divergence from the published branch is unmeasured",
+        f"harness checkout {harness_root} is clean on main and level with "
+        f"origin/main at the published tip {published_tip[:12]}",
     )
 
 
@@ -3934,6 +3988,15 @@ def doctor(args: argparse.Namespace) -> int:
                 reality_tier_data,
                 harness_root=harness_root,
                 claude_home=claude_home,
+                # `doctor --repo` runs the same reality checks as `audit`, so
+                # it needs the same escape hatch: without it an operator off
+                # network waits out the whole probe budget on `gh` and remote
+                # ref lookups before every one of them degrades to UNPROVEN.
+                command_runner=(
+                    local_only_command_output
+                    if getattr(args, "offline", False)
+                    else bounded_command_output
+                ),
             )
             statuses = {finding["status"] for finding in findings}
             reality_ok: bool | str = True
@@ -4063,6 +4126,12 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--skills-home")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
+    )
+    check.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver in the --repo reality checks; "
+        "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
     return root

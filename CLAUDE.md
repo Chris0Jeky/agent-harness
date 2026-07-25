@@ -32,7 +32,7 @@ py -3 -m black --check <same file list as ruff>
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v
 
 # Harness CLI (inspect first; installation is never implicit)
-py -3 harness.py doctor [--repo <path>]
+py -3 harness.py doctor [--repo <path>] [--offline]
 py -3 harness.py audit <repo> [--json] [--offline]
 py -3 harness.py seed <repo> --tier N [--sensitive-data]
 py -3 harness.py sync-global --config-root <claude-config checkout> [--apply]

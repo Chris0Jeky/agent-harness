@@ -172,6 +172,7 @@ class HarnessTests(unittest.TestCase):
         system_hooks: str | None = None,
         system_requirements: str | None = None,
         managed_config: str | None = None,
+        offline: bool = False,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -207,6 +208,7 @@ class HarnessTests(unittest.TestCase):
             claude_home=str(claude_home),
             skills_home=str(skills_home),
             repo=str(repo),
+            offline=offline,
         )
         original_run = harness.run
 
@@ -4810,6 +4812,49 @@ allow_local_binding = true
         # Unprovable is not a defect in the audited floor, so it does not fail.
         self.assertEqual(result, 0, output)
 
+    def test_doctor_repo_has_the_same_offline_switch_as_audit(self) -> None:
+        # `doctor --repo` runs the same reality checks as `audit`, which means
+        # the same `gh` and remote-ref probes. Without the switch an operator
+        # off network waits out the whole budget with no way to skip it.
+        parsed = harness.parser().parse_args(["doctor", "--repo", ".", "--offline"])
+        self.assertTrue(parsed.offline)
+        self.assertFalse(harness.parser().parse_args(["doctor", "--repo", "."]).offline)
+
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: dict[str, object] = {}
+
+        def record(*_args: object, **kwargs: object) -> list[object]:
+            captured["runner"] = kwargs.get("command_runner")
+            return []
+
+        with mock.patch.object(harness, "reality_findings", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo, offline=True)
+        self.assertIs(captured["runner"], harness.local_only_command_output)
+
+    def test_doctor_repo_uses_the_network_resolver_by_default(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: dict[str, object] = {}
+
+        def record(*_args: object, **kwargs: object) -> list[object]:
+            captured["runner"] = kwargs.get("command_runner")
+            return []
+
+        with mock.patch.object(harness, "reality_findings", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo)
+        self.assertIs(captured["runner"], harness.bounded_command_output)
+
     def test_doctor_fails_on_a_reality_mismatch(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -4864,6 +4909,8 @@ GITHUB_REMOTE_OUTPUT = (
     "origin\thttps://github.com/acme/widgets.git (fetch)\n"
     "origin\thttps://github.com/acme/widgets.git (push)"
 )
+# The commit a canonical harness checkout sits on AND publishes as `main`.
+PUBLISHED_MAIN_TIP = "0123456789abcdef0123456789abcdef01234567"
 
 
 class RealityCheckTests(unittest.TestCase):
@@ -4926,6 +4973,25 @@ class RealityCheckTests(unittest.TestCase):
 
     def details(self, result: dict[str, object]) -> str:
         return " | ".join(finding["detail"] for finding in result["reality"])
+
+    def canonical_reference_runner(
+        self, **overrides: tuple[bool, str]
+    ) -> FakeCommandRunner:
+        """A harness checkout that can PROVE it is the canonical reference.
+
+        Clean, on `main`, level with the local tracking ref, and sitting on the
+        commit `origin` publishes as `main`. Needles are ordered so the
+        specific `rev-parse HEAD` answer wins over the branch-name one.
+        """
+        responses: dict[str, tuple[bool, str]] = {
+            "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
+            "rev-parse": (True, "main"),
+            "status --porcelain": (True, ""),
+            "rev-list": (True, "0\t0"),
+            "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
+        }
+        responses.update(overrides)
+        return FakeCommandRunner(responses)
 
     def write_floor(self, path: Path, version: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -5368,9 +5434,7 @@ class RealityCheckTests(unittest.TestCase):
         self.write_floor(
             self.claude_home / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)"
         )
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         result = self.audit(repo, runner)
         self.assertEqual(
             self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
@@ -5388,9 +5452,7 @@ class RealityCheckTests(unittest.TestCase):
             self.claude_home / "hooks" / "dispatch.py",
         ):
             self.write_floor(path, "1.6.5 (2026-07-25)")
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         result = self.audit(repo, runner)
         self.assertEqual(self.statuses(result, "vendored hooks/dispatch.py"), ["ok"])
         self.assertTrue(result["ok"], result["issues"])
@@ -5438,32 +5500,74 @@ class RealityCheckTests(unittest.TestCase):
         )
         self.assertIn("2 ahead of and 0 behind origin/main", self.details(result))
 
-    def test_an_unresolvable_origin_main_leaves_divergence_unmeasured(self) -> None:
-        # No network is ever required: an unfetched or absent origin/main keeps
-        # the clean-main verdict, and the detail says what was not measured.
+    def test_an_unreadable_published_main_is_not_the_reference(self) -> None:
+        # `origin/main` is a LOCAL tracking ref. When the published tip cannot
+        # be read, currency is unproven — and an unproven reference must never
+        # render as a pass.
         runner = FakeCommandRunner(
             {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
         )
         ok, detail = harness.harness_reference_status(
             self.harness_root, runner, deadline=None
         )
-        self.assertTrue(ok)
-        self.assertIn("origin/main did not resolve", detail)
-        self.assertIn("unmeasured", detail)
+        self.assertFalse(ok)
+        self.assertIn("published main tip could not be read", detail)
+        self.assertIn("cannot be proven current", detail)
 
-    def test_a_level_main_says_it_is_level_with_origin(self) -> None:
-        runner = FakeCommandRunner(
-            {
-                "rev-parse": (True, "main"),
-                "status --porcelain": (True, ""),
-                "rev-list": (True, "0\t0"),
-            }
+    def test_a_stale_tracking_ref_is_not_the_reference(self) -> None:
+        # `rev-list origin/main...HEAD` returns 0 0 against an unfetched
+        # tracking ref, so an obsolete working tree was called canonical and a
+        # vendored copy matching that stale template reported `ok`.
+        runner = self.canonical_reference_runner(
+            **{"ls-remote": (True, "f" * 40 + "\trefs/heads/main")}
         )
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("local origin/main is stale", detail)
+        self.assertIn("ffffffffffff", detail)
+
+    def test_a_level_main_at_the_published_tip_is_the_reference(self) -> None:
+        runner = self.canonical_reference_runner()
         ok, detail = harness.harness_reference_status(
             self.harness_root, runner, deadline=None
         )
         self.assertTrue(ok)
         self.assertIn("level with origin/main", detail)
+        self.assertIn(PUBLISHED_MAIN_TIP[:12], detail)
+
+    def test_an_offline_run_never_asks_the_remote_for_the_published_tip(self) -> None:
+        # `git` is not by itself a local resolver: `ls-remote` contacts the
+        # host, so `--offline` still made a network call.
+        self.assertFalse(
+            harness.command_reaches_the_network(["git", "remote", "--verbose"])
+        )
+        for argv in (
+            ["git", "ls-remote", "origin", "refs/heads/main"],
+            ["git", "fetch", "origin"],
+            ["git", "remote", "show", "origin"],
+            ["gh", "repo", "view", "acme/widgets"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertTrue(harness.command_reaches_the_network(argv))
+                self.assertEqual(harness.local_only_command_output(argv), (False, ""))
+
+        # An otherwise canonical checkout audited offline: the reference is
+        # UNPROVEN with the reason, never a silent pass.
+        class OfflineRunner(FakeCommandRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                if harness.command_reaches_the_network(argv):
+                    self.calls.append(list(argv))
+                    return False, ""
+                return super().__call__(argv, cwd, **kwargs)
+
+        offline = OfflineRunner(self.canonical_reference_runner().responses)
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, offline, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("published main tip could not be read", detail)
 
     def test_floor_branch_checkout_is_not_treated_as_the_reference(self) -> None:
         repo = self.make_repo()
@@ -5495,9 +5599,7 @@ class RealityCheckTests(unittest.TestCase):
         self.write_floor(
             self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
         )
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         result = self.audit(repo, runner)
         self.assertEqual(
             self.statuses(result, "vendored hooks/dispatch.py"), ["advisory"]
@@ -5518,9 +5620,7 @@ class RealityCheckTests(unittest.TestCase):
         self.write_floor(
             self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
         )
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         result = self.audit(repo, runner)
         self.assertEqual(
             self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
@@ -5562,9 +5662,7 @@ class RealityCheckTests(unittest.TestCase):
             self.harness_root / "templates" / "hooks" / "dispatch.py", "1.6.5"
         )
         self.write_floor(self.claude_home / "hooks" / "dispatch.py", "1.6.5")
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         result = self.audit(repo, runner)
         self.assertEqual(
             self.statuses(result, "vendored .claude/hooks/dispatch.py"), ["MISMATCH"]
@@ -5616,9 +5714,7 @@ class RealityCheckTests(unittest.TestCase):
         # machine running the tests.
         repo = self.make_repo()
         self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
-        runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
-        )
+        runner = self.canonical_reference_runner()
         self.render_audit(repo, runner)
         self.assertTrue(runner.calls, "the injected resolver was never consulted")
         for argv in runner.calls:
