@@ -3864,14 +3864,32 @@ def doctor(args: argparse.Namespace) -> int:
     return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
-def audit_command(args: argparse.Namespace) -> int:
-    result = audit_repo(
-        Path(args.path),
-        command_runner=(
+def audit_command(
+    args: argparse.Namespace,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any | None = None,
+) -> int:
+    """Render one audit. The seams exist so a test never runs the real world.
+
+    `audit_repo` already takes the harness checkout, the deployed `~/.claude`
+    copy and the resolver as arguments; without the same seams here, any test
+    that exercises the RENDERING falls back to the real harness checkout, the
+    real home directory and a real `git`/`gh` — which is exactly the
+    auditing-machine dependence these checks exist to remove.
+    """
+    if command_runner is None:
+        command_runner = (
             local_only_command_output
             if getattr(args, "offline", False)
             else bounded_command_output
-        ),
+        )
+    result = audit_repo(
+        Path(args.path),
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
     )
     if args.json:
         print(json.dumps(result, indent=2))

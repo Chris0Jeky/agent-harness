@@ -5411,12 +5411,23 @@ class RealityCheckTests(unittest.TestCase):
 
     # --- reporting ------------------------------------------------------------
 
-    def test_audit_command_prints_findings_and_fails_on_a_mismatch(self) -> None:
-        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+    def render_audit(
+        self, repo: Path, runner: FakeCommandRunner, *, as_json: bool = False
+    ) -> tuple[int, str]:
+        """Run `audit_command` against the FIXTURE world, never the real one."""
         output = io.StringIO()
         with redirect_stdout(output):
-            code = harness.audit_command(SimpleNamespace(path=str(repo), json=False))
-        text = output.getvalue()
+            code = harness.audit_command(
+                SimpleNamespace(path=str(repo), json=as_json),
+                harness_root=self.harness_root,
+                claude_home=self.claude_home,
+                command_runner=runner,
+            )
+        return code, output.getvalue()
+
+    def test_audit_command_prints_findings_and_fails_on_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        code, text = self.render_audit(repo, FakeCommandRunner())
         self.assertEqual(code, 1)
         self.assertIn("[MISMATCH] human_todo vs the file on disk", text)
         self.assertNotIn("[ok] harness audit", text)
@@ -5432,19 +5443,29 @@ class RealityCheckTests(unittest.TestCase):
         result = self.audit(repo, runner)
         self.assertEqual(result["unproven"], 1)
         self.assertTrue(result["ok"])
-        output = io.StringIO()
-        with redirect_stdout(output):
-            harness.audit_command(SimpleNamespace(path=str(repo), json=False))
-        text = output.getvalue()
+        _code, text = self.render_audit(repo, runner)
         self.assertIn("[UNPROVEN]", text)
         self.assertNotIn("\n[ok] harness audit\n", text)
 
+    def test_the_rendered_audit_never_reads_the_real_harness_checkout(self) -> None:
+        # Regression guard: without injection this leg fell back to the real
+        # `Path(harness.__file__).parent`, the real `~/.claude` and a real
+        # `git`, so its verdict depended on the branch and cleanliness of the
+        # machine running the tests.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        self.render_audit(repo, runner)
+        self.assertTrue(runner.calls, "the injected resolver was never consulted")
+        for argv in runner.calls:
+            self.assertEqual(argv[0], "git")
+
     def test_audit_json_output_carries_every_finding(self) -> None:
         repo = self.make_repo(tier=3, human_todo=None)
-        output = io.StringIO()
-        with redirect_stdout(output):
-            code = harness.audit_command(SimpleNamespace(path=str(repo), json=True))
-        payload = json.loads(output.getvalue())
+        code, text = self.render_audit(repo, FakeCommandRunner(), as_json=True)
+        payload = json.loads(text)
         self.assertEqual(code, 0)
         self.assertEqual(
             [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
