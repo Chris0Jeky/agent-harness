@@ -53,6 +53,10 @@ _LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
 _LITERAL_BACKTICK = "__HARNESS_LITERAL_BACKTICK_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
+# Minted by the tokenizer AFTER the scrub, and read by command_head: it pushes a
+# quoted group's `(`/`{` off position 0 so `'(git)' push --force` cannot resolve
+# an executable. Deliberately NOT exempt from the scrub -- a typed copy must be
+# deleted, and deleting it in a recursed child restores the text as written.
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
 _QUOTED_SPAN_MARK = "__HARNESS_QUOTED_SPAN_5B4E__"
 _SEGMENT_SEPARATOR_PREFIX = "__HARNESS_SEGMENT_SEPARATOR_"
@@ -63,6 +67,13 @@ _SEGMENT_SEPARATOR_SUFFIX = "__"
 _HARNESS_INJECTED_MARKERS = frozenset(
     {"__HARNESS_ASSIGNMENT_LITERAL__", "__HARNESS_INERT_SCRIPTBLOCK__"}
 )
+# Same, except minted per inspection pass with a numbered tail, so it has to be
+# matched by PREFIX. `strip_quotes` substitutes one of these for every inert
+# quoted span, and the sanitized pass then hands that text to check() as a
+# wrapper's child command (`wsl`, `call`, a nested shell's `-c` payload).
+# Deleting the placeholder there deletes the child's PAYLOAD, and
+# `wsl.exe bash -lc 'echo hi'` became "a nested shell with no program text".
+_HARNESS_INJECTED_MARKER_PREFIXES = (_INERT_QUOTED_PREFIX,)
 _INTERNAL_MARKER = re.compile(r"__HARNESS_[A-Z0-9_]*?__")
 
 
@@ -74,6 +85,13 @@ def restore_quoted_literal_markers(value: str) -> str:
         .replace(_LITERAL_CLOSE_BRACE, "}")
         .replace(_LITERAL_BACKTICK, "`")
         .replace(_QUOTED_SPAN_MARK, "")
+    )
+
+
+def marker_is_floor_injected(marker: str) -> bool:
+    """Whether the floor minted this sentinel into text it will re-read itself."""
+    return marker in _HARNESS_INJECTED_MARKERS or marker.startswith(
+        _HARNESS_INJECTED_MARKER_PREFIXES
     )
 
 
@@ -90,10 +108,17 @@ def scrub_internal_markers(text: str) -> str:
     means a typed `__HARNESS_LITERAL_OPEN_BRACE_2D91__` becomes a literal `{`
     rather than vanishing, which grants nothing -- `{` can be typed directly --
     but keeps the brace depth honest.
+
+    Exempting the floor's own `_INERT_QUOTED_PREFIX` namespace costs nothing on
+    the forgery axis: `inert_placeholder_prefix` picks an index whose prefix is
+    ABSENT from the text it is about to rewrite, so a typed placeholder can never
+    equal a live one and `decode_inert_git_token` -- the only reader that turns a
+    placeholder back into a value -- can never resolve it. A surviving typed
+    marker is one more opaque word in argv, which is what the user typed.
     """
     return _INTERNAL_MARKER.sub(
         lambda match: (
-            match.group(0) if match.group(0) in _HARNESS_INJECTED_MARKERS else ""
+            match.group(0) if marker_is_floor_injected(match.group(0)) else ""
         ),
         restore_quoted_literal_markers(text),
     )
@@ -2558,6 +2583,12 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             except (IndexError, ValueError):
                 value = token[1:-1]
         if len(value) >= 2 and (value[0], value[-1]) in {("(", ")"), ("{", "}")}:
+            # Read by command_head, which resolves an executable through a
+            # leading `(`/`{` (`(git) push`). A group that came out of a QUOTED
+            # span is data, so displacing the parenthesis off position 0 is what
+            # keeps `'(git)' push --force` and `'(rm)' -rf /` from resolving.
+            # Unforgeable because scrub_internal_markers deletes a typed copy
+            # from the incoming command before this mints the real one.
             value = f"{_QUOTED_GROUP_LITERAL_PREFIX}{value}"
         value = (
             value.replace(",", _LITERAL_COMMA)
