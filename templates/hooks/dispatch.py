@@ -2913,8 +2913,19 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         token = raw_token
         for placeholder, value in quoted.items():
             replacement = value
-            if raw_token == placeholder and value in (">", ">>"):
-                replacement = f"__HARNESS_LITERAL_REDIRECT_{len(value)}__"
+            # A word whose FIRST characters are a quoted redirection operator is
+            # a command NAME to the shell, never syntax: `'<' input rm -rf /`
+            # asks bash to execute a program called `<`, and `'&>'out cmd` a
+            # program called `&>out`. Restoring the operator verbatim handed
+            # both to the prefix parser, which stripped them and denied a delete
+            # and a force-push that the shell would never have reached.
+            #
+            # The marker is keyed by the OPERATOR, not by len(value): the old
+            # `__HARNESS_LITERAL_REDIRECT_{len}__` spelling could not tell `>|`
+            # from `>&` from `&>`, which is the constraint issue #74 records
+            # against widening this beyond `>`/`>>`.
+            if raw_token.startswith(placeholder):
+                replacement = _LITERAL_REDIRECT_MARKERS.get(value, value)
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
         # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
@@ -3972,6 +3983,19 @@ _COMMAND_PREFIX_REDIRECTION_OPERATORS = (
 # and `Remove-Item` a hyphen -- none of them can be read as a descriptor.
 _REDIRECTION_DESCRIPTOR = r"\d+|\*|\{[A-Za-z_][A-Za-z0-9_]*\}"
 _REDIRECTION_DESCRIPTOR_TOKEN = re.compile(rf"(?:{_REDIRECTION_DESCRIPTOR})")
+
+# Read by the tokenizer: an operator restored from a quoted span is replaced by
+# its marker so no later pass can read the DATA as syntax. Spelled from the
+# operator's characters (`&>>` -> AMPGTGT) so every operator gets a distinct
+# marker, and inside the `__HARNESS_[A-Z0-9_]*__` namespace so a typed copy is
+# deleted by `scrub_internal_markers` before the real one is minted.
+_LITERAL_REDIRECT_CHARACTER_NAMES = {">": "GT", "<": "LT", "&": "AMP", "|": "PIPE"}
+_LITERAL_REDIRECT_MARKERS = {
+    operator: "__HARNESS_LITERAL_REDIRECT_"
+    + "".join(_LITERAL_REDIRECT_CHARACTER_NAMES[char] for char in operator)
+    + "__"
+    for operator in _COMMAND_PREFIX_REDIRECTION_OPERATORS
+}
 
 
 def command_prefix_redirection_token(

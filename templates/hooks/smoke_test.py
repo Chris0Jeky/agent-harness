@@ -358,6 +358,14 @@ CASES = [
     ("{fd}>out rm -rf /critical/outside", 1, {}, "deny"),
     ("{ echo hi } rm -rf /critical/outside", 1, {}, "deny"),
     ("{fd}>build.log make all", 1, {}, "allow"),
+    # A QUOTED operator in head position is a command NAME: bash looks for a
+    # program called `<` and never reaches the delete behind it.
+    ("'<' input rm -rf /critical/outside", 1, {}, "allow"),
+    ("'&>' out git push --force origin main", 1, {}, "allow"),
+    ("'>|' out git push --force origin main", 1, {}, "allow"),
+    ("'<>' x rm -rf /critical/outside", 1, {}, "allow"),
+    ('"<<" x sudo id', 1, {}, "allow"),
+    ("'&>'out git push --force origin main", 1, {}, "allow"),
     ("2>err.log git status", 1, {}, "allow"),
     ("&>combined.log npm test", 1, {}, "allow"),
     ("> build.log make all", 1, {}, "allow"),

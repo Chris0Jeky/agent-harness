@@ -216,6 +216,53 @@ class BraceDescriptorPrefixTests(unittest.TestCase):
         self.assertIsNotNone(dispatch._REDIRECTION_DESCRIPTOR_TOKEN.fullmatch("{fd}"))
 
 
+class LiteralRedirectionOperatorTests(unittest.TestCase):
+    """A QUOTED operator in head position is a command name, not syntax.
+
+    `'<' input rm -rf /critical/outside` asks the shell to execute a program
+    called `<`; the delete never runs, so denying it is a pure false positive on
+    a floor whose measured defect is over-blocking. Only `>` and `>>` were
+    protected, and the placeholder encoded len(value), which cannot tell `>|`
+    from `>&` from `&>` -- the constraint issue #74 records.
+    """
+
+    OPERATORS = ("<", ">", ">>", ">|", ">&", "&>", "&>>", "<>", "<&", "<<", "<<<")
+
+    def test_a_quoted_operator_head_is_inert(self):
+        for operator in self.OPERATORS:
+            for command in (
+                f"'{operator}' input rm -rf /critical/outside",
+                f"'{operator}' out git push --force origin main",
+                f'"{operator}" out git push --force origin main',
+                f"'{operator}'out git push --force origin main",
+            ):
+                with self.subTest(command=command):
+                    decision, reason = decide(command)
+                    self.assertEqual(decision, "allow", reason)
+
+    def test_every_operator_gets_a_distinct_marker(self):
+        markers = [
+            dispatch._LITERAL_REDIRECT_MARKERS[operator] for operator in self.OPERATORS
+        ]
+        self.assertEqual(len(set(markers)), len(markers))
+
+    def test_a_typed_marker_cannot_be_forged(self):
+        for marker in dispatch._LITERAL_REDIRECT_MARKERS.values():
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, dispatch.scrub_internal_markers(marker))
+
+    def test_the_bare_operator_still_denies(self):
+        # The relaxation is scoped to QUOTED text; every bare spelling that the
+        # prefix gate was built for keeps its verdict.
+        for operator in ("<", ">", ">>", "&>", "&>>", ">|", "<>"):
+            with self.subTest(operator=operator):
+                self.assertEqual(
+                    decide(f"{operator} out git push --force origin main")[0], "deny"
+                )
+        self.assertEqual(decide("> '.env' echo hi")[0], "deny")
+        self.assertEqual(decide("1>'.env' true")[0], "deny")
+
+
 class AssignmentPrefixPolicyTests(unittest.TestCase):
     def test_exposed_shell_keeps_bash_env_policy(self):
         decision, reason = decide("HARNESS_PREFIX=1 BASH_ENV=/tmp/opaque bash -c :")
