@@ -1235,6 +1235,23 @@ def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
     return {"check": check, "status": status, "detail": detail}
 
 
+# `git remote --verbose` preserves URL userinfo, so a remote configured as
+# `https://ci-user:PAT@host/acme/repo.git` carries a live credential. Every
+# finding this module renders reaches stdout, `--json` and the `doctor --repo`
+# detail, so the token is stripped before it is stored, never at the printer.
+_REMOTE_USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", re.IGNORECASE)
+
+
+def redact_remote_url(url: str) -> str:
+    """Return the remote URL with any embedded credential replaced.
+
+    Only scheme-qualified userinfo is redacted: `git@github.com:owner/repo` is
+    scp syntax whose `git` is a fixed account name, not a secret, and blanking
+    it would make the finding harder to act on for no gain.
+    """
+    return _REMOTE_USERINFO.sub(r"\1***@", url.strip())
+
+
 def github_repo_slug(remote: str) -> str:
     """Return owner/repo for a github.com remote, without any credentials."""
     patterns = (
@@ -1341,10 +1358,11 @@ def sensitive_data_findings(
         ]
     findings: list[dict[str, str]] = []
     for name, url in remotes:
+        shown = redact_remote_url(url)
         if LOCAL_REMOTE_PATTERN.match(url):
             findings.append(
                 reality_finding(
-                    check, REALITY_OK, f"{name} {url} is a local-only remote"
+                    check, REALITY_OK, f"{name} {shown} is a local-only remote"
                 )
             )
             continue
@@ -1354,7 +1372,7 @@ def sensitive_data_findings(
                 reality_finding(
                     check,
                     REALITY_UNPROVEN,
-                    f"{name} {url} is not a github.com remote; its visibility is "
+                    f"{name} {shown} is not a github.com remote; its visibility is "
                     "not machine-checkable here",
                 )
             )
@@ -1375,7 +1393,7 @@ def sensitive_data_findings(
                         else REALITY_ADVISORY
                     ),
                     f"flags.sensitive_data is declared true but remote {name} "
-                    f"{url} resolves to the PUBLIC repository {slug} — evidence: "
+                    f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
                     f"`gh repo view {slug} --json visibility` -> PUBLIC"
                     + (
                         ""

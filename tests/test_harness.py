@@ -5044,6 +5044,45 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
 
+    def test_embedded_credentials_never_reach_a_finding(self) -> None:
+        # `git remote --verbose` keeps URL userinfo, so an audit that echoes
+        # the raw URL leaks a PAT into the terminal, --json and CI logs.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://ci-user:s3cr3t-pat@gitlab.example/acme/repo.git"
+                    " (fetch)\n"
+                    "mirror\thttps://token@github.com/acme/widgets.git (fetch)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("ci-user", rendered)
+        self.assertNotIn("token@", rendered)
+        self.assertIn("https://***@gitlab.example/acme/repo.git", rendered)
+        self.assertIn("https://***@github.com/acme/widgets.git", rendered)
+
+    def test_redaction_keeps_scp_syntax_actionable(self) -> None:
+        # `git@github.com:owner/repo` carries a fixed account name, not a
+        # secret; blanking it would only make the finding harder to act on.
+        self.assertEqual(
+            harness.redact_remote_url("git@github.com:acme/widgets.git"),
+            "git@github.com:acme/widgets.git",
+        )
+        self.assertEqual(
+            harness.redact_remote_url("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets.git",
+        )
+        self.assertEqual(
+            harness.redact_remote_url("ssh://git:pw@github.com/acme/widgets.git"),
+            "ssh://***@github.com/acme/widgets.git",
+        )
+
     def test_local_only_remote_is_a_pass(self) -> None:
         repo = self.make_repo(sensitive_data=True)
         runner = FakeCommandRunner(
