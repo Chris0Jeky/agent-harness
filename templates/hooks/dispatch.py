@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.6 (2026-07-25)"
+FLOOR_VERSION = "1.6.7 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1439,6 +1439,16 @@ def strip_shell_redirections(tokens: list[str]) -> list[str]:
     dropping an operand can only SHRINK the operand list, and a shorter list
     fails closed -- `force_with_lease_targets_are_features([])` is False, and
     fewer positionals means a push counts as refspec-less.
+
+    QUOTING IS STRUCTURE, so this MUST be given tokens whose inert quoted spans
+    are still MASKED as `strip_quotes` placeholders -- never tokens already
+    decoded by `decode_inert_git_token`. In `git push --force-with-lease origin
+    fix/x "2>&1"` the quotes make `2>&1` an ordinary argv entry: git really does
+    push to `refs/heads/2>&1` (`git check-ref-format --branch '2>&1'` accepts
+    the name), so it is a lease destination and must be classified as one. A
+    placeholder holds no `<`/`>`, so running the search over the masked tokens
+    removes exactly the redirection structure the SHELL consumed and leaves
+    every quoted literal intact; decoding afterwards restores the real argv.
     """
     kept: list[str] = []
     index = 0
@@ -9268,6 +9278,11 @@ def check(
                 # is still refspec-less. `git push -o --all origin` used to skip the
                 # bare-push guard entirely (PR #23 review).
                 positionals = []
+                # The same operands with their quoted spans still masked, kept
+                # in step with `positionals`, so the redirection strip below can
+                # tell shell structure from a quoted literal (see
+                # strip_shell_redirections).
+                masked_positionals = []
                 explicit_selector = False
                 repository_via_option = False
                 index = 0
@@ -9275,6 +9290,7 @@ def check(
                     token = args[index]
                     if token == "--":
                         positionals.extend(args[index + 1 :])
+                        masked_positionals.extend(raw_args[index + 1 :])
                         break
                     if token == "--repo":
                         repository_via_option = True
@@ -9303,6 +9319,7 @@ def check(
                         index += 1
                         continue
                     positionals.append(token)
+                    masked_positionals.append(raw_args[index])
                     index += 1
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
@@ -9396,7 +9413,16 @@ def check(
                 # [push-config-unverifiable]. That bypass is real and tracked in
                 # issue #65; closing it belongs with the work on that rule's
                 # own false-positive rate, not in this fix.
-                lease_destinations = strip_shell_redirections(positionals)
+                #
+                # The strip runs over the MASKED operands and decodes after,
+                # because only an unquoted `2>&1` is structure the shell eats:
+                # quoted, it is a refspec git pushes to `refs/heads/2>&1`, and
+                # stripping it there let a non-feature destination through the
+                # lease guard (PR #70 review).
+                lease_destinations = [
+                    decode_inert_git_token(token, inert_placeholders)
+                    for token in strip_shell_redirections(masked_positionals)
+                ]
                 if lease_requested and (
                     explicit_selector
                     or not force_with_lease_targets_are_features(lease_destinations[1:])
