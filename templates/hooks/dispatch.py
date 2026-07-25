@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.7 (2026-07-25)"
+FLOOR_VERSION = "1.6.8 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1410,11 +1410,23 @@ _ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
 # consumes runs made purely of `;&|\n`, so anything matching this is structure.
 _ARGV_REDIRECTION_TOKEN = re.compile(r"[;&|<>]*[<>][;&|<>]*")
 # The file-descriptor prefix of a redirection (`2>&1`, `1>out`, `&>log`).
+#
+# PowerShell's all-stream `*>` is deliberately ABSENT. `*` is a descriptor there
+# but a glob in POSIX, where `cmd *> f` passes `*` as an argument, and the floor
+# cannot know which shell will run the text. Keeping `*` as an operand is the
+# fail-closed reading of that ambiguity (PR #70 review).
 _ARGV_REDIRECTION_DESCRIPTOR = re.compile(r"[0-9]+|&")
 _ARGV_REDIRECTION_CHARACTER = re.compile(r"[<>]")
+# Characters that continue a redirection OPERATOR rather than start its target:
+# the duplication `&` (`2>&1`), a second angle (`>>`), and bash's noclobber
+# override `>|`. `|` is only ever operator text here -- a pipe is consumed by
+# segmentation long before argv, and no redirection target starts with one.
+_ARGV_REDIRECTION_OPERATOR_CHARACTERS = "<>&|"
 
 
-def strip_shell_redirections(tokens: list[str]) -> list[str]:
+def strip_shell_redirections(
+    tokens: list[str], descriptor_may_be_detached: bool = False
+) -> list[str]:
     """Drop redirection operators, their descriptors and their targets.
 
     The SHELL consumes redirections; the program never sees them in its argv.
@@ -1433,12 +1445,16 @@ def strip_shell_redirections(tokens: list[str]) -> list[str]:
     dropped whether it is glued on (``2>/dev/null``) or the next token
     (``> out.txt``).
 
-    Whitespace is already gone by the time argv exists, so `cmd 2 >f` (an
-    operand `2`, then a redirect) is indistinguishable from `cmd 2>f` and the
-    descriptor is dropped in both. That direction is safe for the caller:
-    dropping an operand can only SHRINK the operand list, and a shorter list
-    fails closed -- `force_with_lease_targets_are_features([])` is False, and
-    fewer positionals means a push counts as refspec-less.
+    A DETACHED descriptor is only ever popped when the caller says its tokenizer
+    could have detached one, because the two passes differ exactly there. The
+    whitespace pass keeps `2>f` glued as one token, so a separate `2` in front of
+    `>f` really was a separate argv word -- bash passes `2` to the program in
+    `cmd 2 >f` -- and popping it dropped a real operand. The shlex pass cannot
+    tell the two spellings apart (both yield ``['2', '>&', '1']``), so it still
+    pops. Since a deny in EITHER pass denies, the unambiguous pass decides:
+    `git push --force-with-lease origin fix/x 2 >out.txt` now keeps `2` as the
+    refspec it is and the lease guard refuses it (PR #70 review), while
+    `... fix/x 2>&1` is stripped by both and stays allowed.
 
     QUOTING IS STRUCTURE, so this MUST be given tokens whose inert quoted spans
     are still MASKED as `strip_quotes` placeholders -- never tokens already
@@ -1460,10 +1476,15 @@ def strip_shell_redirections(tokens: list[str]) -> list[str]:
             index += 1
             continue
         prefix = token[: match.start()]
-        target = token[match.start() :].lstrip("<>&")
+        target = token[match.start() :].lstrip(_ARGV_REDIRECTION_OPERATOR_CHARACTERS)
         if prefix and not _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(prefix):
             kept.append(prefix)
-        elif not prefix and kept and _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(kept[-1]):
+        elif (
+            descriptor_may_be_detached
+            and not prefix
+            and kept
+            and _ARGV_REDIRECTION_DESCRIPTOR.fullmatch(kept[-1])
+        ):
             # shlex emitted the descriptor as its own token before the operator.
             kept.pop()
         index += 1
@@ -3999,9 +4020,17 @@ def git_subcommand(toks):
 
 
 def git_option_values(
-    args: list[str], long_option: str, short_options: set[str] | None = None
+    args: list[str],
+    long_option: str,
+    short_options: set[str] | None = None,
+    subcommand: str | None = None,
 ) -> list[str | None]:
-    """Return values for a Git option, including attached/abbreviated spellings."""
+    """Return values for a Git option, including attached/abbreviated spellings.
+
+    ``subcommand`` only widens the terminator proof, and only for the families
+    the valueless-flag allowlist was swept against; omitting it is the
+    conservative reading (see git_terminator_is_provable).
+    """
     short_options = short_options or set()
     values: list[str | None] = []
     index = 0
@@ -4015,7 +4044,7 @@ def git_option_values(
             # --output=.env -1` sets Cc to `--` and then writes .env (measured,
             # git 2.45.1). Keep scanning rather than stop short of the guard's
             # own option -- the fail-closed direction.
-            if git_terminator_is_provable(args, index):
+            if git_terminator_is_provable(args, index, subcommand):
                 break
             index += 1
             continue
@@ -4046,9 +4075,12 @@ def git_option_values(
 
 
 def git_option_is_present(
-    args: list[str], long_option: str, short_options: set[str] | None = None
+    args: list[str],
+    long_option: str,
+    short_options: set[str] | None = None,
+    subcommand: str | None = None,
 ) -> bool:
-    return bool(git_option_values(args, long_option, short_options))
+    return bool(git_option_values(args, long_option, short_options, subcommand))
 
 
 # Flags that Git's revision / diff / grep parsers treat as COMPLETE: none of
@@ -4062,8 +4094,10 @@ def git_option_is_present(
 # are case-sensitive and lowercasing conflates `-I` (`git diff -I <regex>`,
 # which takes a value) with `-i`.
 #
-# One shared set serves every family the terminator is consulted for, so an
-# entry has to be valueless in ALL of them. That is why these are absent:
+# One shared set serves the SWEPT families (_GIT_TERMINATOR_SWEPT_SUBCOMMANDS),
+# so an entry has to be valueless in all of those. Subcommands outside that set
+# never consult it at all -- `git clone -b <branch>` proved a cross-family
+# entry cannot be trusted globally. That is why these are absent even here:
 #   -n  --line-number for grep, but --max-count=<n> for log
 #   -l  --files-with-matches for grep, but <num> for diff
 #   -m  -m for log, but --max-count=<num> for grep
@@ -4183,7 +4217,33 @@ _GIT_TERMINATOR_SAFE_FLAGS = {
 }
 
 
-def git_terminator_is_provable(args: list[str], index: int) -> bool:
+# The subcommand families the flag allowlist above was actually swept against.
+# Outside them the SAME short spelling takes a value -- `git clone -b <branch>`
+# and `-u <upload-pack>`, `git merge -s <strategy>` and `-F <file>`,
+# `git apply -p <n>`, `patch -z <suffix>` -- so a `--` behind a short flag there
+# proves nothing. Measured: `git init -b -- --separate-git-dir=zzz repo` really
+# created `zzz`, and `git clone -b -- --upload-pack=helper src dst` really
+# parsed the upload-pack option (git 2.45.1); both were `allow` before this gate
+# (PR #70 review). Restricting the allowlist to the swept families is a strict
+# TIGHTENING: elsewhere the scan simply keeps going, which is fail-closed.
+_GIT_TERMINATOR_SWEPT_SUBCOMMANDS = {
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "format-patch",
+    "grep",
+    "log",
+    "rev-list",
+    "show",
+    "stash",
+    "whatchanged",
+}
+
+
+def git_terminator_is_provable(
+    args: list[str], index: int, subcommand: str | None = None
+) -> bool:
     """Return True when the bare ``--`` at ``index`` really ends option parsing.
 
     ``--`` only ends option parsing when the parser is BETWEEN options. When an
@@ -4199,35 +4259,54 @@ def git_terminator_is_provable(args: list[str], index: int) -> bool:
     Proof is therefore required, not assumed: ``--`` is the first token, the
     token before it is an operand (an option waiting for a value would have
     eaten that operand instead), the token before it carries its value glued
-    with ``=``, or the token before it is a known valueless flag. Anything else
-    is unprovable, and the caller keeps scanning -- the fail-closed direction.
+    with ``=``, the token before it is ITSELF a bare ``--``, or the token before
+    it is a known valueless flag of a swept family. Anything else is unprovable,
+    and the caller keeps scanning -- the fail-closed direction.
+
+    The ``--`` before ``--`` case is proof under both readings, which is why it
+    needs no arity knowledge: if the earlier marker really terminated options
+    then this one is an ordinary operand and stopping here scans a SUPERSET of
+    the true option region, and if the earlier marker was swallowed as some
+    option's value then the parser is between options again and this one really
+    does terminate. Measured: ``git grep -e -- -- -Osh`` searches the file
+    ``-Osh`` without a pager (git 2.43/2.45.1), and refusing to look past the
+    first marker denied it (PR #70 review).
     """
     if index == 0:
         return True
     previous = args[index - 1]
     if previous == "-" or not previous.startswith("-"):
         return True
-    if "=" in previous:
+    if previous == "--" or "=" in previous:
         return True
+    if subcommand not in _GIT_TERMINATOR_SWEPT_SUBCOMMANDS:
+        return False
     return previous in _GIT_TERMINATOR_SAFE_FLAGS
 
 
-def git_end_of_options_index(args: list[str]) -> int | None:
+def git_end_of_options_index(
+    args: list[str], subcommand: str | None = None
+) -> int | None:
     """Return the index of the bare ``--`` Git would treat as end-of-options.
 
-    None when the first ``--`` cannot be proved to be a terminator (see
-    git_terminator_is_provable), which makes the caller scan the whole of argv.
+    Scanning does not stop at the first unprovable ``--``: an option may have
+    swallowed it, in which case a LATER marker is the real terminator (see
+    git_terminator_is_provable). None when no marker can be proved, which makes
+    the caller scan the whole of argv.
     """
     for index, token in enumerate(args):
         if token != "--":
             continue
-        return index if git_terminator_is_provable(args, index) else None
+        if git_terminator_is_provable(args, index, subcommand):
+            return index
     return None
 
 
-def git_options_before_terminator(args: list[str]) -> list[str]:
+def git_options_before_terminator(
+    args: list[str], subcommand: str | None = None
+) -> list[str]:
     """Return the argv slice Git parses as options, per the proven terminator."""
-    terminator = git_end_of_options_index(args)
+    terminator = git_end_of_options_index(args, subcommand)
     return args if terminator is None else args[:terminator]
 
 
@@ -4243,7 +4322,7 @@ _BUILTIN_GIT_MERGE_STRATEGIES = {
 
 def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
     """Return a reason when Git argv can select an arbitrary child process."""
-    grep_option_args = git_options_before_terminator(args)
+    grep_option_args = git_options_before_terminator(args, subcommand)
     if subcommand == "grep" and any(
         token == "-O"
         or token.startswith("-O")
@@ -4271,20 +4350,25 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
             args,
             "--upload-pack",
             {"-u"} if subcommand == "clone" else None,
+            subcommand,
         )
     ):
         return "A custom git upload-pack program can execute outside floor inspection."
     if subcommand == "clone":
         # clone --config takes effect before fetch: core.sshCommand and friends
         # run during the clone itself, exactly like a global `git -c` override.
-        for config in git_option_values(args, "--config", {"-c"}):
+        for config in git_option_values(args, "--config", {"-c"}, subcommand):
             if config is None or has_dynamic_shell_token(config.split("=", 1)[0]):
                 return "A git clone --config value is opaque to floor inspection."
             if protected_git_config_key(config.split("=", 1)[0].lower()):
                 return "Git clone --config can inject execution or destination config."
-    if subcommand == "archive" and git_option_is_present(args, "--exec"):
+    if subcommand == "archive" and git_option_is_present(
+        args, "--exec", subcommand=subcommand
+    ):
         return "A custom git archive program can execute outside floor inspection."
-    if subcommand == "rebase" and git_option_is_present(args, "--exec", {"-x"}):
+    if subcommand == "rebase" and git_option_is_present(
+        args, "--exec", {"-x"}, subcommand
+    ):
         return "A git rebase exec command is opaque to floor inspection."
     if subcommand == "bisect" and args and args[0].lower() == "run":
         return "A git bisect run command is opaque to floor inspection."
@@ -4301,7 +4385,7 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         if action == "set-url":
             return "Git submodule destination mutation is floor-blocked."
     if subcommand in {"merge", "rebase"}:
-        strategies = git_option_values(args, "--strategy", {"-s"})
+        strategies = git_option_values(args, "--strategy", {"-s"}, subcommand)
         if any(
             strategy is None or strategy.lower() not in _BUILTIN_GIT_MERGE_STRATEGIES
             for strategy in strategies
@@ -4333,7 +4417,7 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         # separate value swallows `--` instead (`git diff --output --
         # --ext-diff` writes to a file named `--` and then runs the helper), so
         # an unprovable `--` leaves the whole of argv in the scan.
-        diff_args = git_options_before_terminator(diff_args)
+        diff_args = git_options_before_terminator(diff_args, subcommand)
         if any(
             token.lower() == "--ext-diff"
             or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
@@ -5129,7 +5213,7 @@ def git_network_helper_is_reachable(subcommand: str, args: list[str]) -> bool:
     if subcommand in {"clone", "fetch", "ls-remote", "pull", "push"}:
         return True
     if subcommand == "archive":
-        return git_option_is_present(args, "--remote")
+        return git_option_is_present(args, "--remote", subcommand=subcommand)
     if subcommand == "remote":
         action = next(
             (token.lower() for token in args if not token.startswith("-")), ""
@@ -8694,7 +8778,7 @@ def check(
             if launcher_reason:
                 return "deny", launcher_reason
             if sub == "archive":
-                archive_outputs = git_option_values(args, "--output", {"-o"})
+                archive_outputs = git_option_values(args, "--output", {"-o"}, sub)
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -8709,6 +8793,7 @@ def check(
                 fake_ancestor_outputs = git_option_values(
                     args,
                     "--build-fake-ancestor",
+                    subcommand=sub,
                 )
                 if any(
                     target is None
@@ -8727,7 +8812,7 @@ def check(
                     "floor-blocked.",
                 )
             if sub in {"apply", "am"}:
-                directory_roots = git_option_values(args, "--directory")
+                directory_roots = git_option_values(args, "--directory", subcommand=sub)
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -8752,10 +8837,10 @@ def check(
             if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in (
                 _GIT_PLUMBING_WITH_DIFF_OPTIONS
             ):
-                diff_outputs = git_option_values(args, "--output")
+                diff_outputs = git_option_values(args, "--output", subcommand=sub)
                 if sub == "format-patch":
                     diff_outputs = diff_outputs + git_option_values(
-                        args, "--output-directory", {"-o"}
+                        args, "--output-directory", {"-o"}, sub
                     )
                 if any(
                     target is None
@@ -8800,7 +8885,9 @@ def check(
                     "",
                 )
                 if action in {"register", "unregister"}:
-                    config_outputs = git_option_values(args, "--config-file")
+                    config_outputs = git_option_values(
+                        args, "--config-file", subcommand=sub
+                    )
                     if any(
                         target is None
                         or has_dynamic_shell_token(target)
@@ -8812,7 +8899,9 @@ def check(
                             "Git maintenance config output to an opaque or secret-looking file is floor-blocked.",
                         )
             if sub == "clone":
-                separate_git_dirs = git_option_values(args, "--separate-git-dir")
+                separate_git_dirs = git_option_values(
+                    args, "--separate-git-dir", subcommand=sub
+                )
                 if any(
                     target is None
                     or has_dynamic_shell_token(target)
@@ -8848,7 +8937,9 @@ def check(
                         "Git clone into an opaque or secret-looking destination is floor-blocked.",
                     )
             if sub == "init":
-                init_targets = git_option_values(args, "--separate-git-dir")
+                init_targets = git_option_values(
+                    args, "--separate-git-dir", subcommand=sub
+                )
                 for token in args:
                     if not token.startswith("-"):
                         init_targets.append(token)  # optional [<directory>] operand
@@ -9421,7 +9512,9 @@ def check(
                 # lease guard (PR #70 review).
                 lease_destinations = [
                     decode_inert_git_token(token, inert_placeholders)
-                    for token in strip_shell_redirections(masked_positionals)
+                    for token in strip_shell_redirections(
+                        masked_positionals, descriptor_may_be_detached=quote_aware
+                    )
                 ]
                 if lease_requested and (
                     explicit_selector
@@ -9818,6 +9911,10 @@ def check(
                 )
         if head == "patch":
             # patch -o/--output FILE and -r/--reject-file FILE write named files.
+            # No `subcommand` is passed on purpose: GNU patch is not a swept
+            # family and gives several of git's valueless short flags a value
+            # (`-z <suffix>`, `-i <file>`, `-p <num>`), so only the arity-free
+            # terminator proofs apply here.
             for value in git_option_values(
                 toks[1:], "--output", {"-o"}
             ) + git_option_values(toks[1:], "--reject-file", {"-r"}):
