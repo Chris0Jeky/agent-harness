@@ -292,21 +292,38 @@ class SiblingSuiteHermeticityTests(unittest.TestCase):
                     verdict[0] if isinstance(verdict, tuple) else verdict, "allow"
                 )
 
-    def test_every_suite_that_calls_check_uses_the_shared_helper(self):
-        """A new suite cannot quietly re-introduce a hand-rolled helper."""
+    # This module deliberately calls the raw check() to prove the helper is
+    # load-bearing (see bare()), so it is the one permitted exception.
+    RAW_CHECK_ALLOWED = {"test_floor_environment.py"}
+
+    def test_no_suite_calls_the_raw_check(self):
+        """A new suite cannot quietly re-introduce a hand-rolled helper.
+
+        A substring scan is not enough: `hermetic_check(...)` and
+        `dispatch.check(...)` differ by one character. Match the call shape
+        `<anything>.check(...)` in the AST instead, in any file that loads the
+        real dispatch.py.
+        """
         offenders = []
         for path in sorted(TESTS_DIR.glob("test_*.py")):
+            if path.name in self.RAW_CHECK_ALLOWED:
+                continue
             source = path.read_text(encoding="utf-8")
-            loads_real_dispatch = '"dispatch.py"' in source
-            calls_check = ".check(" in source
-            if loads_real_dispatch and calls_check:
-                if "floor_environment" not in source:
-                    offenders.append(path.name)
+            if '"dispatch.py"' not in source:
+                continue
+            for node in ast.walk(ast.parse(source)):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "check"
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(
             offenders,
             [],
-            "these suites call the real dispatch.check without "
-            "tests/floor_environment.py, so their verdicts depend on the host",
+            "these call the real dispatch.check directly instead of "
+            "tests/floor_environment.hermetic_check, so their verdicts depend "
+            "on the host's Git configuration",
         )
 
 
