@@ -181,7 +181,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   duplicate known fields, non-standard constants, invalid known strings, and invalid wrapper
   fields while traversing ignored unknown values iteratively; every supported event and handler is
   schema-valid; inline config hook state and managed requirements hook paths have their
-  source-specific shapes. Python's stdlib decoder imposes an explicit fail-closed boundary at
+  source-specific shapes. A managed hook directory must be absolute, and its existence is
+  probed — the only filesystem access in the parse path — for a value the running platform
+  resolves. A UNC value is exempt from that probe, so an audit never blocks on an unreachable
+  network share and that directory's existence stays unproven. Python's stdlib decoder imposes an explicit fail-closed boundary at
   pathological JSON nesting depths before ignored-value inspection. One malformed hook sibling
   invalidates the layer instead of leaving a countable `PreToolUse` floor. The harness does not
   fully schema-validate unrelated ConfigToml or requirements fields; exact Codex startup and
@@ -189,10 +192,28 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
   runtime boundary for exact-session `/hooks`; the static check never represents those sources as
   inspected.
+- **The adapter's `expected=<sha256>` value is an AUDIT-ONLY marker, not runtime enforcement.**
+  Nothing exports it to the dispatcher and `dispatch.py` takes no expected-hash argument, so it
+  proves only that the trusted hook *definition* was written against those dispatcher bytes.
+  Consequences, which are mandatory, not advisory: changing `templates/hooks/dispatch.py` obliges
+  bumping `FLOOR_VERSION`, refreshing the marker in **every** consumer `.codex/hooks.json`, and a
+  fresh-session `/hooks` re-trust per repo in its exact CWD; a rollout PR must enumerate and
+  sequence those consumers rather than let their markers go stale silently. `doctor` reports
+  marker currency; runtime byte integrity and definition-hash trust are separate evidence, proved
+  only by `/hooks` plus a live safe/deny canary. No doc, PR, or commit may describe the marker as
+  runtime pin enforcement.
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
-  shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
-  and use a matcher that positively includes Bash. The canonical `commandWindows` field and its
+  shared dispatcher or that wrapper, declare the normalized dispatcher hash marker in a named
+  variable, and use a matcher that positively includes Bash. Because Codex runs a hook command
+  from the SESSION cwd rather than the hook source root, a repo-relative wrapper path certifies
+  only when those directories are the same; from a subdirectory cwd or a linked worktree, `doctor`
+  fails that adapter closed and names it. A HOME-anchored wrapper path (`~/…`, `$HOME/…`,
+  `$env:USERPROFILE/…`) names the same file from every cwd and certifies everywhere; only literal
+  path components are allowed after the anchor, so a `$PWD`-style expansion cannot ride in behind
+  it. From the source root itself the same adapter certifies,
+  but the cwd dependency is still reported as an adapter-contract note, because it is a property
+  of the adapter text rather than of the audit's cwd. The canonical `commandWindows` field and its
   official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
   uses the Git-root layer walk
   only when all inspectable top-level `project_root_markers` declarations in system, base-user, and
@@ -202,11 +223,17 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   qualified topology, `doctor` audits every active `.codex` layer from the checkout root through
   the requested directory and both declaration forms Codex loads: `hooks.json` and inline
   `[hooks]` in `config.toml`. Across all active sources it requires exactly one candidate, one
-  conservatively recognized execution shape, and one current pin. The recognized current floor
+  conservatively recognized execution shape, and one current audit marker. It also reports, per
+  candidate handler and platform command, whether the adapter declares no marker, declares a stale
+  marker, or never passes `--event pre --runtime codex`; a vendored dispatcher and wrapper flag
+  delegation are recorded as inventory notes, not failures. The recognized current floor
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
   but no hooks are valid. The project floor also fails when inspectable system requirements allow
   only managed hooks or pin the hook feature off, an active persisted canonical/legacy feature
-  setting disables hooks, or the exact canonical handler state is disabled. Stored legacy
+  setting disables hooks, or the exact canonical handler state is disabled. A managed requirements
+  pin of the hook feature ON does not clear such a disable: Codex publishes no merge order for
+  `[features]` across managed requirements and stored config, so that contest is UNPROVEN and
+  fails closed with both declarations named. Stored legacy
   `profile` selectors are rejected;
   feature values in their inactive legacy profile maps are schema-checked but never applied.
   Project-local `profile` and `profiles` values are ignored with Codex's denylist. Commented or
