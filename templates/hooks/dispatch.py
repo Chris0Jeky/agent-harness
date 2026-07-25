@@ -3999,7 +3999,16 @@ def git_option_values(
         token = args[index]
         lowered = token.lower()
         if token == "--":
-            break
+            # Only a PROVEN terminator ends the walk. An option this scan does
+            # not know is stepped over as if valueless, so a `--` behind one may
+            # really be that option's value: `git format-patch --cc --
+            # --output=.env -1` sets Cc to `--` and then writes .env (measured,
+            # git 2.45.1). Keep scanning rather than stop short of the guard's
+            # own option -- the fail-closed direction.
+            if git_terminator_is_provable(args, index):
+                break
+            index += 1
+            continue
         option_name, separator, attached = lowered.partition("=")
         if option_name == long_option or git_option_abbreviates(
             option_name, long_option
@@ -4051,6 +4060,20 @@ def git_option_is_present(
 #   -v  --invert-match for grep, but --reroll-count=<n> for format-patch
 #   -G  --basic-regexp for grep, but -G<regex> for diff
 #   -A -B -C  context counts for grep
+#   --cc  the dense-combined-diff flag for log/diff, but `--cc <email>` (an
+#         extra Cc: header) for format-patch, which IS an external-diff family
+#         member.  Measured on git 2.45.1: `git format-patch --cc -- -1
+#         --stdout` emits `Cc: --`, and the token after the swallowed `--` is
+#         then parsed as an OPTION (`--name-only` there fails with "does not
+#         make sense" instead of being taken as a pathspec).  Listing it would
+#         have let `git format-patch --cc -- --ext-diff` truncate the scan and
+#         reach the helper -- the exact bypass this allowlist exists to stop.
+#
+# Every entry below was checked the same way, by sweeping each flag through
+# `git <family> <flag> -- --zzz-sentinel-opt` for log, diff, show, grep,
+# whatchanged, format-patch, rev-list, diff-tree, diff-index and diff-files and
+# asserting the sentinel never comes back as a parsed option.  `--cc` under
+# format-patch was the only swallow the sweep found.
 _GIT_TERMINATOR_SAFE_FLAGS = {
     "-E",
     "-F",
@@ -4074,7 +4097,6 @@ _GIT_TERMINATOR_SAFE_FLAGS = {
     "--binary",
     "--boundary",
     "--cached",
-    "--cc",
     "--check",
     "--cherry-pick",
     "--children",
@@ -4151,36 +4173,45 @@ _GIT_TERMINATOR_SAFE_FLAGS = {
 }
 
 
+def git_terminator_is_provable(args: list[str], index: int) -> bool:
+    """Return True when the bare ``--`` at ``index`` really ends option parsing.
+
+    ``--`` only ends option parsing when the parser is BETWEEN options. When an
+    option is still waiting for a separate value, Git hands it the ``--``
+    instead. Measured on git 2.45.1: ``git format-patch --cc -- -1 --stdout``
+    emits ``Cc: --``, and ``git grep -f -- pattern`` reports ``cannot open
+    '--'``. In both cases the tokens AFTER the ``--`` are then parsed as
+    options, so truncating there would hide the very token a scan is looking
+    for. (Not every option behaves this way -- the diff/revision parser rejects
+    it outright, ``git diff --output --`` errors with "requires a value" -- but
+    the floor cannot tell those apart from argv alone.)
+
+    Proof is therefore required, not assumed: ``--`` is the first token, the
+    token before it is an operand (an option waiting for a value would have
+    eaten that operand instead), the token before it carries its value glued
+    with ``=``, or the token before it is a known valueless flag. Anything else
+    is unprovable, and the caller keeps scanning -- the fail-closed direction.
+    """
+    if index == 0:
+        return True
+    previous = args[index - 1]
+    if previous == "-" or not previous.startswith("-"):
+        return True
+    if "=" in previous:
+        return True
+    return previous in _GIT_TERMINATOR_SAFE_FLAGS
+
+
 def git_end_of_options_index(args: list[str]) -> int | None:
     """Return the index of the bare ``--`` Git would treat as end-of-options.
 
-    ``--`` only ends option parsing when the parser is BETWEEN options. Git's
-    parse-options otherwise hands it to whatever option is still waiting for a
-    separate value, so ``git diff --output -- --ext-diff`` writes the diff to a
-    file literally named ``--`` and then parses ``--ext-diff`` as an option and
-    launches the configured external-diff helper. Truncating argv at the first
-    ``--`` would hide the very token the caller is scanning for.
-
-    So the terminator is honoured only where argv proves it: ``--`` is the first
-    token, the token before it is an operand (an option waiting for a value
-    would have eaten that operand instead), the token before it carries its
-    value glued with ``=``, or the token before it is a known valueless flag.
-    Anything else is unprovable and returns None, which makes the caller scan
-    the whole of argv -- the fail-closed direction.
+    None when the first ``--`` cannot be proved to be a terminator (see
+    git_terminator_is_provable), which makes the caller scan the whole of argv.
     """
     for index, token in enumerate(args):
         if token != "--":
             continue
-        if index == 0:
-            return index
-        previous = args[index - 1]
-        if previous == "-" or not previous.startswith("-"):
-            return index
-        if "=" in previous:
-            return index
-        if previous in _GIT_TERMINATOR_SAFE_FLAGS:
-            return index
-        return None
+        return index if git_terminator_is_provable(args, index) else None
     return None
 
 
