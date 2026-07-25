@@ -1636,6 +1636,116 @@ class ToolFailureBucketTests(EndToEndTestCase):
         )
 
 
+class CorpusIntegrityExitTests(EndToEndTestCase):
+    """A corpus that came up short must not print as a completed measurement.
+
+    Driven through a real transcript scan rather than `--from-corpus`, because
+    the whole point is the path from a filesystem that would not cooperate to
+    an exit code a gate can read.
+    """
+
+    def scan_scenario(self, *extra, break_a_transcript=True):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "payload": {
+                            "type": "function_call",
+                            "name": "shell_command",
+                            "arguments": json.dumps({"command": command}),
+                        }
+                    }
+                )
+                + "\n"
+                for command in ("git status", "git push")
+            ),
+            encoding="utf-8",
+        )
+        if break_a_transcript:
+            # A directory named like a transcript: the walk finds it, the open
+            # fails with OSError on every supported platform. A real filesystem
+            # reaching the counter, not an injected object.
+            (codex / "locked.jsonl").mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        json_path = self.dir / "run.json"
+        code, out, err = self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+            *extra,
+        )
+        return code, out, err, json.loads(json_path.read_text(encoding="utf-8"))
+
+    def test_an_unreadable_transcript_exits_four_with_a_banner(self):
+        code, out, err, result = self.scan_scenario()
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertNotIn(replay.EXIT_CORPUS_INCOMPLETE, (0, 1))
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("CORPUS INCOMPLETE", err)
+        # ...and flagged in the ledger, so the row is not read as one of the
+        # ~20 "records this corpus deliberately does not model" rows.
+        self.assertIn("file-unreadable: 1   <== CORPUS INCOMPLETE", out)
+        self.assertEqual(
+            result["run"]["corpus_integrity"], {"unparsed-file-unreadable": 1}
+        )
+        self.assertFalse(result["run"]["allow_partial_corpus"])
+
+    def test_the_banner_says_which_numbers_survive(self):
+        _, out, _, _ = self.scan_scenario()
+        # The distinction the exit code exists to communicate: deltas sound,
+        # absolute rates not.
+        self.assertIn("DELTAS are still sound", out)
+        self.assertIn("ABSOLUTE rate", out)
+
+    def test_allow_partial_corpus_downgrades_to_a_report(self):
+        code, out, _, result = self.scan_scenario("--allow-partial-corpus")
+        self.assertEqual(code, 0)
+        # Downgraded, not silenced: an informed downgrade still needs the
+        # warning, exactly as `--allow-errors` keeps its own.
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("Reported only", out)
+        self.assertTrue(result["run"]["allow_partial_corpus"])
+        self.assertEqual(
+            result["run"]["corpus_integrity"], {"unparsed-file-unreadable": 1}
+        )
+
+    def test_a_complete_scan_exits_zero_with_no_banner(self):
+        # The negative control: the same scan without the broken transcript
+        # must not learn to cry wolf.
+        code, out, _, result = self.scan_scenario(break_a_transcript=False)
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+        self.assertEqual(result["run"]["corpus_integrity"], {})
+
+    def test_a_tool_failure_still_wins_the_exit_code(self):
+        # Precedence: no verdict at all (3) is more fundamental than a sound
+        # but short corpus (4). Both banners still print, because a caller
+        # reading only one of them would fix only one of the two problems.
+        spawning = self.dir / "spawning.py"
+        spawning.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, out, err, _ = self.scan_scenario("--baseline", str(spawning))
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("REPLAY TOOL FAILURE", err)
+
+
 class CorpusIntegrityTests(unittest.TestCase):
     """A shorter corpus that nobody was told about is a silent measurement bug."""
 
@@ -1655,6 +1765,68 @@ class CorpusIntegrityTests(unittest.TestCase):
         stats = Counter()
         self.assertEqual(replay.iter_transcripts(Unwalkable(), stats), [])
         self.assertEqual(stats["unparsed-transcript-tree-unwalkable"], 1)
+
+    def test_a_mid_file_read_error_is_counted_not_swallowed(self):
+        """The open succeeded; the read fails partway through the file.
+
+        Injected, because there is no portable way to make a real file raise on
+        its second read. What this proves is the branch's accounting and that
+        the records read before the failure are still yielded — not that any
+        particular filesystem reaches it.
+        """
+        good = json.dumps({"payload": {"type": "function_call"}}) + "\n"
+
+        class FailingHandle:
+            def __init__(self, error):
+                self.error = error
+                self.lines = iter([good])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                line = next(self.lines, None)
+                if line is None:
+                    raise self.error
+                return line
+
+        class FailingPath:
+            def __init__(self, error):
+                self.error = error
+
+            def open(self, encoding=None, errors=None):
+                return FailingHandle(self.error)
+
+        for error in (OSError("device read error"), UnicodeError("bad decode")):
+            with self.subTest(error=type(error).__name__):
+                stats = Counter()
+                records = list(replay.iter_jsonl(FailingPath(error), stats))
+                # Truncated, not lost: the prefix is real data.
+                self.assertEqual(len(records), 1)
+                self.assertEqual(stats["unparsed-file-read-error"], 1)
+
+    def test_every_integrity_key_is_one_the_extractor_actually_writes(self):
+        # A key renamed in one place and not the other would silently stop
+        # triggering the banner, which is the whole failure mode being fixed.
+        stats = Counter()
+        with tempfile.TemporaryDirectory() as tmp:
+            list(replay.iter_jsonl(Path(tmp), stats))
+
+        class Unwalkable:
+            def rglob(self, pattern):
+                raise PermissionError("locked")
+
+        replay.iter_transcripts(Unwalkable(), stats)
+        for key in ("unparsed-file-unreadable", "unparsed-transcript-tree-unwalkable"):
+            self.assertIn(key, replay.CORPUS_INTEGRITY_KEYS)
+            self.assertEqual(stats[key], 1)
+        self.assertIn("unparsed-file-read-error", replay.CORPUS_INTEGRITY_KEYS)
 
     def test_a_missing_verdict_aborts_instead_of_being_defaulted(self):
         with self.assertRaises(replay.ReplayHarnessError) as caught:

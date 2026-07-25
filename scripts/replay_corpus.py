@@ -22,15 +22,24 @@ actually ran, replays each one through `dispatch.check()` offline, and reports:
 EXIT CODES
 ----------
 0 clean; 1 nothing to replay; 2 at least one command made `check()` raise in
-one of the two versions; 3 the replay *itself* failed. 2 is not cosmetic: an
-exception becomes an `error` decision, `error` counts as blocked, and the two
-allow-edge buckets then move in opposite unsafe directions — NEWLY ALLOWED is
-inflated and NEWLY BLOCKED is suppressed to zero. `--allow-errors` downgrades it
-to a report for a deliberate crash census.
+one of the two versions; 3 the replay *itself* failed; 4 part of the corpus
+could never be read. 2 is not cosmetic: an exception becomes an `error`
+decision, `error` counts as blocked, and the two allow-edge buckets then move in
+opposite unsafe directions — NEWLY ALLOWED is inflated and NEWLY BLOCKED is
+suppressed to zero. `--allow-errors` downgrades it to a report for a deliberate
+crash census.
 
 3 is the separate, more fundamental failure and has no opt-out: the instrument
 could not obtain a verdict, so there is nothing to census. Those commands get
 the `toolfail` pseudo-decision, which is in no rate and in no delta bucket.
+
+4 is the same principle applied to the input side. A transcript that could not
+be opened, that failed mid-read, or a tree that could not be walked leaves the
+corpus short by an amount the script cannot know, so no absolute rate is
+quotable. Unlike 3 it is downgradable (`--allow-partial-corpus`): both versions
+replayed the same shortened list, so the deltas — the numbers that actually
+decide a merge — survive intact. Precedence when several apply: 3, then 2,
+then 4. Every banner prints regardless of which code wins.
 
 TOOL-SIDE FAILURE MUST NEVER READ AS POLICY
 -------------------------------------------
@@ -69,9 +78,12 @@ The rest of that audit, and what each failure is now counted as:
 * a chunk came back with no verdict under `--jobs > 1` -> the run aborts with
   exit 3 instead of failing inside `summarize_tier` on a `None`.
 * an unreadable transcript file, a mid-file read error, or a transcript tree
-  that cannot be walked -> counted in the extraction ledger under
-  `file-unreadable` / `file-read-error` / `transcript-tree-unwalkable` and
-  printed, instead of silently shortening the corpus.
+  that cannot be walked -> counted under `file-unreadable` / `file-read-error`
+  / `transcript-tree-unwalkable`, flagged in the extraction ledger, and given
+  its own banner and exit code (4) rather than being one row among twenty
+  followed by a block-rate table and exit 0. It does NOT catch every way the
+  corpus can come up short — see the `iter_transcripts` docstring and COVERAGE
+  LIMITS for the subdirectory case pathlib still suppresses.
 * there is still no per-command watchdog, so a timeout cannot be counted as a
   block — nothing times out. The floor's own `_remote_deadline` fail-opens to
   `""` ("unresolved -> not dangerous"), and the replay stubs every reader it
@@ -150,6 +162,16 @@ COVERAGE LIMITS (read before quoting a number)
   no flags and deny under `wave_mode`. Pass `--flag` per overlay the gated repo
   declares; the active set is printed in the header, labels every tier row, and
   is recorded in the JSON `run` block.
+* The corpus can still be silently short. A transcript that fails to open,
+  fails mid-read, or a tree whose walk raises is counted and exits 4, but
+  CPython's pathlib suppresses per-directory errors *inside* `rglob`, so a
+  locked profile subtree or a stale junction yields fewer files and increments
+  nothing. There is no counter for it because there is nothing to count: the
+  walk never learns the directory existed. What follows is that a *rising*
+  `unique commands extracted` between two runs of the same corpus is
+  meaningful, an absolute one is a lower bound, and the deltas — computed over
+  whatever was read, identically for both versions — are the only numbers this
+  limitation does not touch.
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -221,6 +243,24 @@ EXIT_ERRORS_PRESENT = 2
 # `--allow-errors` exists to census floor crashes, and a malfunctioning harness
 # is not a census of anything.
 EXIT_TOOL_FAILURE = 3
+# Exit code when part of the corpus could never be read, so the run measured an
+# unknown fraction of the transcripts. Distinct from 3, which reports a replay
+# that produced no verdict for a command it *did* extract. Downgraded to a
+# report by `--allow-partial-corpus`, because unlike a missing verdict a
+# truncated corpus still compares like with like: both versions replay the same
+# shortened list, so the deltas survive and only the absolute rate is unsound.
+EXIT_CORPUS_INCOMPLETE = 4
+# Extraction-ledger keys that mean the corpus is shorter than the transcripts
+# are, by an amount the script cannot know. Deliberately not the other
+# `unparsed-*` keys: a line that is not JSON, an argument that is not a literal
+# and an `exec` body that concatenates are records this corpus *decided* not to
+# model, are stable across runs, and do not vary with what happened to be
+# readable. These three do.
+CORPUS_INTEGRITY_KEYS = (
+    "unparsed-file-unreadable",
+    "unparsed-file-read-error",
+    "unparsed-transcript-tree-unwalkable",
+)
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
@@ -462,11 +502,28 @@ def command_from_argv(argv: Sequence[Any]) -> str | None:
 def iter_transcripts(root: Path, stats: Counter[str]) -> list[Path]:
     """List a transcript tree's `*.jsonl`, counting a walk that cannot complete.
 
-    `Path.rglob` raises straight out of the generator on an unreadable directory
-    (a locked profile subtree, a stale junction), which would silently truncate
-    the corpus mid-walk if it were consumed lazily inside a `for`. Materialising
-    it here turns that into one counted, reported ledger entry instead of a
-    corpus whose size depends on which directories happened to be readable.
+    Be precise about what this does and does not buy, because an earlier version
+    of this docstring overclaimed and a caveat a reader relies on has to be true.
+
+    It is NOT a fix for a lazily consumed walk: the call it replaced was already
+    `for path in sorted(root.rglob(...))`, and `sorted()` consumes the generator
+    eagerly, so an escaping `OSError` already aborted the run loudly. The only
+    change is the counted `except`.
+
+    Nor does the counter catch the cause it is named for. CPython's pathlib
+    suppresses per-directory errors *inside* the walk (3.11/3.12
+    `_RecursiveWildcardSelector._iterate_directories`, 3.13+ `pathlib._glob`), so
+    a locked profile subtree or a stale junction still yields fewer files and
+    increments nothing. Measured on 3.14: a missing root and a root that is a
+    plain file both return `[]` without raising. **A silently short corpus from
+    an unreadable subdirectory therefore remains a live limitation of this
+    instrument** — it is stated in COVERAGE LIMITS, not fixed here.
+
+    What is left is the residual: an error raised before the walk can suppress
+    anything, a non-pathlib root (the injected one in the tests), and any future
+    pathlib that stops suppressing. That is worth a backstop, and when it fires
+    it is loud (`CORPUS_INTEGRITY_KEYS` -> banner -> `EXIT_CORPUS_INCOMPLETE`)
+    rather than one row among twenty in the ledger.
     """
     try:
         return sorted(root.rglob("*.jsonl"))
@@ -1697,7 +1754,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
             else "    (not measured: this run reused a cached corpus)"
         )
     for key, value in sorted(unparsed.items()):
-        print(f"    {key[len('unparsed-'):]}: {value}")
+        # The integrity keys mean the corpus is short by an unknown amount; the
+        # rest are records this corpus deliberately does not model. They must
+        # not read as the same kind of row.
+        marker = "   <== CORPUS INCOMPLETE" if key in CORPUS_INTEGRITY_KEYS else ""
+        print(f"    {key[len('unparsed-'):]}: {value}{marker}")
     print()
     print("block rate by tier (unique commands)")
     print("-" * 78)
@@ -1945,6 +2006,59 @@ def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> 
         print("!" * 78, file=stream)
 
 
+def count_corpus_integrity_failures(result: dict[str, Any]) -> dict[str, int]:
+    """Ledger entries meaning part of the transcripts was never read at all."""
+    unparsed = result["corpus"]["unparsed"]
+    return {
+        key: int(unparsed[key]) for key in CORPUS_INTEGRITY_KEYS if unparsed.get(key)
+    }
+
+
+def print_corpus_integrity_banner(
+    failures: dict[str, int], allowed: bool, total: int
+) -> None:
+    """The same treatment `toolfail` gets, for the input side of the instrument.
+
+    A tool-side failure must never be readable as a measurement, and a corpus
+    that stopped early is exactly that: `unparsed-file-read-error: 1` was
+    previously one row among ~20 in the extraction ledger, followed by a block
+    rate table and exit 0. A gate or a human quoting "11.91% of N unique
+    commands" had no signal that N was wrong.
+
+    The deltas do survive — both versions replay the same shortened list — so
+    unlike a missing verdict this is downgradable to a report. Say exactly that,
+    so the downgrade is an informed one.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            f"!! CORPUS INCOMPLETE: {sum(failures.values())} transcript source(s) "
+            "could not be fully read,",
+            file=stream,
+        )
+        print(
+            f"!! so the {total} unique commands below are an unknown fraction of "
+            "what was run.\n"
+            "!! The DELTAS are still sound (both versions replayed the same "
+            "shortened corpus);\n"
+            "!! every ABSOLUTE rate and count is measured over a corpus of "
+            "unknown size.",
+            file=stream,
+        )
+        for key, count in sorted(failures.items()):
+            print(f"!!   {count:>6}  {key[len('unparsed-'):]}", file=stream)
+        print(
+            (
+                "!! Reported only: --allow-partial-corpus was passed."
+                if allowed
+                else f"!! Exiting {EXIT_CORPUS_INCOMPLETE}. Pass "
+                "--allow-partial-corpus to accept a delta-only run."
+            ),
+            file=stream,
+        )
+        print("!" * 78, file=stream)
+
+
 def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
     """Refuse to let a crashing version be read as a clean comparison.
 
@@ -2090,6 +2204,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "report an exception inside check() instead of exiting non-zero "
             "(for a deliberate crash census only; the deltas are not usable)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-partial-corpus",
+        action="store_true",
+        help=(
+            "report a transcript that could not be fully read instead of "
+            "exiting non-zero (the deltas stay sound; no absolute rate does)"
         ),
     )
     return parser
@@ -2256,9 +2378,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
     errors = count_errors(result)
     toolfails = count_toolfails(result)
+    corpus_failures = count_corpus_integrity_failures(result)
     result["run"]["errors"] = errors
     result["run"]["toolfails"] = toolfails
+    result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
+    result["run"]["allow_partial_corpus"] = bool(args.allow_partial_corpus)
 
     print_report(result, args.top, args.sample_width)
     if args.json_path:
@@ -2269,13 +2394,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if sum(errors.values()) and not args.allow_errors:
         print_error_banner(result, errors)
+    if corpus_failures:
+        print_corpus_integrity_banner(
+            corpus_failures, bool(args.allow_partial_corpus), len(commands)
+        )
+    # Precedence, most fundamental first: no verdict at all (3) beats a floor
+    # that crashed on its own terms (2), which beats a corpus that is sound but
+    # short (4). Every banner above is printed regardless of which one wins.
     if sum(toolfails.values()):
-        # Reported after the floor-crash banner and wins the exit code: a broken
-        # instrument is the more fundamental failure of the two.
         print_toolfail_banner(result, toolfails)
         return EXIT_TOOL_FAILURE
     if sum(errors.values()) and not args.allow_errors:
         return EXIT_ERRORS_PRESENT
+    if corpus_failures and not args.allow_partial_corpus:
+        return EXIT_CORPUS_INCOMPLETE
     return 0
 
 
