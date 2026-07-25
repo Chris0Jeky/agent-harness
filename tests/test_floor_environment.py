@@ -147,10 +147,25 @@ class DerivedIsolationSetTests(unittest.TestCase):
             set(smoke.GIT_HELPER_ENVIRONMENT),
             set(floor_environment.isolated_environment_names(dispatch)),
         )
-        for name in ("GIT_CONFIG_COUNT", "GIT_TRACE_REDACT", "GIT_INDEX_FILE"):
-            with self.subTest(name=name):
-                self.assertTrue(smoke.is_inherited_git_helper(name))
-                self.assertNotIn(name, smoke.clean_dispatch_environment())
+        # The names MUST be exported first. Asserting absence from a clean
+        # host's environment is vacuous: it holds however broken the sanitizer
+        # is, so it would certify a coverage that does not exist.
+        names = ("GIT_CONFIG_COUNT", "GIT_TRACE_REDACT", "GIT_INDEX_FILE")
+        with patch.dict(os.environ, {name: "sentinel" for name in names}):
+            for name in names:
+                with self.subTest(name=name):
+                    self.assertIn(name, os.environ)
+                    self.assertTrue(smoke.is_inherited_git_helper(name))
+                    self.assertNotIn(name, smoke.clean_dispatch_environment())
+            # ...and it must remove ONLY those, or the smoke run would lose the
+            # PATH / SystemRoot it needs to launch a subprocess at all.
+            cleaned = smoke.clean_dispatch_environment()
+            self.assertEqual(
+                sorted(set(os.environ) - set(cleaned)),
+                sorted(
+                    name for name in os.environ if smoke.is_inherited_git_helper(name)
+                ),
+            )
 
 
 class AmbientReadInventoryTests(unittest.TestCase):
