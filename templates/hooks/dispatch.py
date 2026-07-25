@@ -1441,13 +1441,18 @@ _ARGV_TOKEN_NEEDS_QUOTING = re.compile(r"[\s'\";&|<>]")
 # A punctuation run that still holds a redirection character. Segmentation only
 # consumes runs made purely of `;&|\n`, so anything matching this is structure.
 _ARGV_REDIRECTION_TOKEN = re.compile(r"[;&|<>]*[<>][;&|<>]*")
-# The file-descriptor prefix of a redirection (`2>&1`, `1>out`, `&>log`).
+# The file-descriptor prefix of a redirection (`2>&1`, `1>out`, `&>log`), plus
+# bash's named form (`{log}>out`), which bash consumes exactly like a numeric
+# one -- so leaving it in argv made `git push --force-with-lease origin fix/x
+# {log}>out` read as a third positional and deny a lease push bash would have
+# handed Git as two.
 #
 # PowerShell's all-stream `*>` is deliberately ABSENT. `*` is a descriptor there
 # but a glob in POSIX, where `cmd *> f` passes `*` as an argument, and the floor
 # cannot know which shell will run the text. Keeping `*` as an operand is the
-# fail-closed reading of that ambiguity (PR #70 review).
-_ARGV_REDIRECTION_DESCRIPTOR = re.compile(r"[0-9]+|&")
+# fail-closed reading of that ambiguity (PR #70 review). The named form carries
+# no such ambiguity: `{name}` is not a glob in either shell.
+_ARGV_REDIRECTION_DESCRIPTOR = re.compile(r"[0-9]+|&|\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ARGV_REDIRECTION_CHARACTER = re.compile(r"[<>]")
 # Characters that continue a redirection OPERATOR rather than start its target:
 # the duplication `&` (`2>&1`), a second angle (`>>`), and bash's noclobber

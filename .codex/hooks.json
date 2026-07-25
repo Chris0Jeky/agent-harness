@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "expected=2f2771d095f05ece67a626d0a3e3a64ecce0265bb1c47461cbecfa73d61dfbb0; python3 \"$HOME/.claude/hooks/dispatch.py\" --event pre --runtime codex",
-            "commandWindows": "$expected='2f2771d095f05ece67a626d0a3e3a64ecce0265bb1c47461cbecfa73d61dfbb0'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex",
+            "command": "expected=bfbf29fccd4ef0c5ee1656aa750eb50843e3451176cc607d5699be3dd9192029; python3 \"$HOME/.claude/hooks/dispatch.py\" --event pre --runtime codex",
+            "commandWindows": "$expected='bfbf29fccd4ef0c5ee1656aa750eb50843e3451176cc607d5699be3dd9192029'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex",
             "timeout": 5,
             "statusMessage": "Checking irreversible-command policy"
           }

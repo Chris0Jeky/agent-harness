@@ -271,6 +271,12 @@ LEASE_WITH_REDIRECT_ALLOWED = (
     "git push --force-with-lease origin feat/y 1>out.txt 2>&1",
     "git push --force-with-lease origin feat/y &> out.txt",
     "git push --force-with-lease origin chore/z 2>&1 | Select-Object -Last 4",
+    # Bash's NAMED descriptor. Bash consumes `{log}>out` exactly like `2>out`,
+    # so leaving it in argv read it as a third positional and refused a lease
+    # push bash would have handed Git as two (PR #70 review).
+    "git push --force-with-lease origin fix/x {log}>out",
+    "git push --force-with-lease origin fix/x {fd}>>push.log",
+    "git push --force-with-lease origin feat/y {log}>out 2>&1",
 )
 
 LEASE_NON_FEATURE_STILL_DENIED = (
@@ -295,6 +301,11 @@ LEASE_NON_FEATURE_STILL_DENIED = (
     "git push --force origin fix/x 2>&1",
     "git push -f origin fix/x 2>&1",
     "git push --force origin fix/x > out.txt",
+    # ... including behind the named descriptor, so admitting that spelling
+    # cannot become a way to hide a destination or a force.
+    "git push --force origin fix/x {log}>out",
+    "git push --force-with-lease origin main {log}>out",
+    "git push --force-with-lease origin fix/x {log}>out master",
 )
 
 # The other direction of the SAME fix. Quoting turns a redirection into data:
