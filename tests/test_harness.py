@@ -5044,6 +5044,41 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
 
+    def test_github_slugs_survive_every_supported_remote_spelling(self) -> None:
+        # A captured port became the owner, so `gh` was asked about `22/owner`
+        # and a public origin degraded to UNPROVEN instead of a mismatch.
+        for remote, slug in (
+            ("ssh://git@github.com:22/acme/widgets.git", "acme/widgets"),
+            ("ssh://git@github.com:2222/acme/widgets", "acme/widgets"),
+            ("ssh://github.com/acme/widgets.git", "acme/widgets"),
+            ("ssh://git@github.com:acme/widgets.git", "acme/widgets"),
+            ("https://github.com/acme/widgets.git", "acme/widgets"),
+            ("https://token@github.com/acme/widgets.git", "acme/widgets"),
+            ("git@github.com:acme/widgets.git", "acme/widgets"),
+            ("https://gitlab.example/acme/widgets.git", ""),
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual(harness.github_repo_slug(remote), slug)
+
+    def test_a_ported_ssh_origin_is_probed_by_its_real_slug(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tssh://git@github.com:22/acme/widgets.git (fetch)\n"
+                    "origin\tssh://git@github.com:22/acme/widgets.git (push)",
+                ),
+                "gh repo view acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertIn(
+            ["gh", "repo", "view", "acme/widgets", "--json", "visibility"],
+            [argv[:6] for argv in runner.calls],
+        )
+
     def test_undecodable_resolver_output_never_aborts_the_audit(self) -> None:
         # Under a UTF-8 locale, `subprocess.run(text=True)` raises
         # UnicodeDecodeError while building its result (and leaves stdout None

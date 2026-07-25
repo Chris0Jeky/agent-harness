@@ -1264,10 +1264,18 @@ def redact_remote_url(url: str) -> str:
 
 
 def github_repo_slug(remote: str) -> str:
-    """Return owner/repo for a github.com remote, without any credentials."""
+    """Return owner/repo for a github.com remote, without any credentials.
+
+    An `ssh://` URL may carry a port (`ssh://git@github.com:22/owner/repo.git`,
+    which git resolves as `ssh -p 22 git@github.com` with path `/owner/repo`).
+    Without `(?::\\d+)?` the port was captured as the owner, so `gh` was asked
+    about `22/owner` and a genuinely public origin degraded to UNPROVEN instead
+    of raising the mismatch. `(?::\\d+)?` is optional and backtracks, so the
+    portless `ssh://git@github.com:owner/repo` spelling still parses.
+    """
     patterns = (
-        r"^(?:https?|git)://(?:[^/@]+@)?github\.com/([^/?#]+/[^/?#]+)",
-        r"^ssh://(?:[^@/]+@)?github\.com[:/]([^/?#]+/[^/?#]+)",
+        r"^(?:https?|git)://(?:[^/@]+@)?github\.com(?::\d+)?/([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
         r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
     )
     for pattern in patterns:
