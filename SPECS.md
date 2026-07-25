@@ -278,11 +278,11 @@ blast-radius ladder.
 
 | Task class | Model tier | Effort | Walls vs tripwires |
 |---|---|---|---|
-| Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: `.claude/agents` pins + review requirement |
+| Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: agent `model:` pins + review requirement |
 | Region maps, skills, ADRs, global laws | top | xhigh | convention |
 | Adversarial review, merge decisions | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
 | Code implementation, debugging, feature slices in mapped regions | default | high | convention |
-| Gardener triage, tombstone classification, promotion routing | default | low | wall: gardener.md model pin + PR-only output |
+| Gardener triage, tombstone classification, promotion routing | default | low | wall: `~/.claude/agents/gardener.md` pin + PR-only output |
 | Subagent work, lookups, conversation, small mechanical edits | default | low | convention |
 | Bulk mechanical sweeps, doc rotation, formatting, test running | cheap | medium–high (never low) | convention |
 
@@ -300,8 +300,9 @@ model fills `top` / `default` / `cheap`, and the fan-out fleet caps (≤3–5, �
 live in the `model-effort-routing` global skill — the single home. A named model written in two
 files is how a stale routing row survives repeated prose bans; if this table and the skill ever
 disagree, the skill wins and the local copy is the bug. The one model-level statement that is law
-rather than calibration: **never Haiku 4.5** (standing owner directive). This table is the durable
-judgment-vs-mechanical shape and changes only when that shape changes.
+rather than calibration — the standing family-wide Haiku ban — is stated once, in BLUEPRINT §5,
+and deliberately not repeated here. This table is the durable judgment-vs-mechanical shape and
+changes only when that shape changes.
 
 ## §9 Bootstrapper CLI + ESTATE.md
 
@@ -326,11 +327,18 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 ## §10 Gardener spec
 
-- Invocation: Claude Code scheduled routine (or Windows Task Scheduler fallback:
-  `claude -p "/gardener"` at effort low), weekly per ACTIVE repo only. Pass no `--model` flag:
-  the model comes from the `model:` pin in `agents/gardener.md`, which is the wall. A model named
-  on the command line silently overrides that wall and drifts independently of it — a literal
-  `--model haiku` sat in this line while Haiku was banned in prose elsewhere in the estate.
+- Invocation: a Claude Code scheduled routine configured with the default-tier model at effort
+  low, weekly per ACTIVE repo only. Windows Task Scheduler fallback: `claude -p "<gardener
+  prompt>"` with the SESSION model bound explicitly — through the routine/settings model
+  setting or an explicit model argument carrying the default-tier model named in the
+  `model-effort-routing` skill. Binding it is not optional: a headless `claude -p` run is a
+  TOP-LEVEL session, so the `model:` pin in `~/.claude/agents/gardener.md` binds the delegated
+  SUBAGENT, not the session that starts it, and a run that passes nothing inherits the ambient
+  default — the top tier — and §6's scheduled-spend cap silently does not apply. Two rules
+  survive from the older wording: whatever names the model, the NAME lives only in the
+  `model-effort-routing` skill (the command line carries a reference, never a second copy of
+  the ladder), and it must match the agent pin — a literal `--model haiku` sat in this line
+  while Haiku was banned in prose elsewhere in the estate.
 - Runs in its own worktree — never the live checkout (one-writer rule; scheduled agents must
   not race interactive sessions or wave agents).
 - Output contract: exactly ONE branch + PR, ≤100 changed lines, title `gardener: <repo> <date>`,
