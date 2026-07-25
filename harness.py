@@ -1175,6 +1175,17 @@ PRIVACY_CLAIM_PATTERN = re.compile(
 # "local-only" printed `ok` without measuring who can read it.
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[.~]|/(?!/)|\\(?!\\))")
 UNC_REMOTE_PATTERN = re.compile(r"^(?://|\\\\)[^/\\]")
+# `file:////server/share/repo.git` is the file-URL spelling of a UNC path, so
+# the share test has to see the path INSIDE the URL; matching `file://` first
+# would call a network share local before the UNC rule ever ran.
+_FILE_URL_PREFIX = re.compile(r"(?i)^file://(?:localhost)?")
+
+
+def remote_path_for_share_test(url: str) -> str:
+    """The filesystem path a remote names, with any `file://` wrapper removed."""
+    return _FILE_URL_PREFIX.sub("", url.strip(), count=1)
+
+
 # The remote work is actually published to. A public remote under any other
 # name (a fork's upstream, a mirror) is a topology note, not an exposure.
 PUBLISHING_REMOTE = "origin"
@@ -1366,11 +1377,23 @@ _REMOTE_USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", re.IGNORECASE)
 def redact_remote_url(url: str) -> str:
     """Return the remote URL with any embedded credential replaced.
 
-    Only scheme-qualified userinfo is redacted: `git@github.com:owner/repo` is
-    scp syntax whose `git` is a fixed account name, not a secret, and blanking
-    it would make the finding harder to act on for no gain.
+    Two places a credential rides in a remote URL, and both reach stdout,
+    `--json` and the `doctor --repo` detail:
+
+    * userinfo — `https://ci-user:PAT@host/acme/repo.git`. Only
+      scheme-qualified userinfo is redacted: `git@github.com:owner/repo` is scp
+      syntax whose `git` is a fixed account name, not a secret, and blanking it
+      would make the finding harder to act on for no gain.
+    * query/fragment — `https://gitlab.example/acme/repo.git?private_token=PAT`.
+      Nothing downstream needs it (`github_repo_slug` already stops at `?`), so
+      the whole tail is dropped rather than parsed for known parameter names,
+      which would keep failing open on the next host's spelling.
     """
-    return _REMOTE_USERINFO.sub(r"\1***@", url.strip())
+    redacted = _REMOTE_USERINFO.sub(r"\1***@", url.strip())
+    parts = re.split(r"([?#])", redacted, maxsplit=1)
+    if len(parts) == 1:
+        return redacted
+    return f"{parts[0]}{parts[1]}<redacted>"
 
 
 def github_repo_slug(remote: str) -> str:
@@ -1484,10 +1507,27 @@ def publishing_remote_endpoints(
 def github_visibility(
     slug: str, repo: Path, command_runner: Any, deadline: float | None
 ) -> str:
-    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked."""
+    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked.
+
+    The slug is pinned to `github.com/`. `gh repo view` accepts
+    `[HOST/]OWNER/REPO` and resolves a bare `OWNER/REPO` against `GH_HOST` or
+    the default authenticated host, so on a machine pointed at a GitHub
+    Enterprise instance the probe could answer PRIVATE about an entirely
+    different repository that happens to share the slug — while the
+    github.com remote this finding is about is public.
+    """
     resolved, output = output_before_deadline(
         command_runner,
-        ["gh", "repo", "view", slug, "--json", "visibility", "--jq", ".visibility"],
+        [
+            "gh",
+            "repo",
+            "view",
+            f"github.com/{slug}",
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility",
+        ],
         repo,
         deadline,
     )
@@ -1553,7 +1593,7 @@ def sensitive_data_findings(
     findings: list[dict[str, str]] = []
     for name, url, publishes, note in publishing_remote_endpoints(remotes):
         shown = redact_remote_url(url)
-        if UNC_REMOTE_PATTERN.match(url):
+        if UNC_REMOTE_PATTERN.match(remote_path_for_share_test(url)):
             findings.append(
                 reality_finding(
                     check,

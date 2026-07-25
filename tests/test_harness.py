@@ -5286,6 +5286,7 @@ class RealityCheckTests(unittest.TestCase):
             "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
             "rev-parse": (True, "main"),
             "status --porcelain": (True, ""),
+            "ls-files": (True, "H templates/hooks/dispatch.py"),
             "rev-list": (True, "0\t0"),
             "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
         }
@@ -5484,7 +5485,7 @@ class RealityCheckTests(unittest.TestCase):
                     "origin\thttps://github.com/acme/widgets.git (fetch)\n"
                     "origin\thttps://github.com/acme/widgets.git (push)",
                 ),
-                "gh repo view acme/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
                 "gh repo view": (True, "PRIVATE"),
             }
         )
@@ -5507,8 +5508,8 @@ class RealityCheckTests(unittest.TestCase):
                     "origin\thttps://github.com/acme/widgets.git (fetch)\n"
                     "origin\thttps://github.com/acme/widgets-private.git (push)",
                 ),
-                "gh repo view acme/widgets-private": (True, "PRIVATE"),
-                "gh repo view acme/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
             }
         )
         result = self.audit(repo, runner)
@@ -5528,8 +5529,8 @@ class RealityCheckTests(unittest.TestCase):
                     "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
                     "origin\thttps://github.com/acme/widgets.git (push)",
                 ),
-                "gh repo view acme/widgets-private": (True, "PRIVATE"),
-                "gh repo view acme/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
             }
         )
         result = self.audit(repo, runner)
@@ -5584,13 +5585,13 @@ class RealityCheckTests(unittest.TestCase):
                     "origin\tssh://git@github.com:22/acme/widgets.git (fetch)\n"
                     "origin\tssh://git@github.com:22/acme/widgets.git (push)",
                 ),
-                "gh repo view acme/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
             }
         )
         result = self.audit(repo, runner)
         self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
         self.assertIn(
-            ["gh", "repo", "view", "acme/widgets", "--json", "visibility"],
+            ["gh", "repo", "view", "github.com/acme/widgets", "--json", "visibility"],
             [argv[:6] for argv in runner.calls],
         )
 
@@ -5652,6 +5653,82 @@ class RealityCheckTests(unittest.TestCase):
         self.assertNotIn("token@", rendered)
         self.assertIn("https://***@gitlab.example/acme/repo.git", rendered)
         self.assertIn("https://***@github.com/acme/widgets.git", rendered)
+
+    def test_a_credential_in_the_query_string_is_redacted_too(self) -> None:
+        # Userinfo is not the only place a token rides: several hosts accept
+        # `?private_token=`/`?access_token=`, and the whole tail is dropped
+        # rather than matched against known parameter names, which would fail
+        # open on the next host's spelling.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://gitlab.example/acme/repo.git"
+                    "?private_token=s3cr3t-pat (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("private_token=", rendered)
+        self.assertIn("https://gitlab.example/acme/repo.git?<redacted>", rendered)
+        self.assertEqual(
+            harness.redact_remote_url("https://h/a/b.git#frag=PAT"),
+            "https://h/a/b.git#<redacted>",
+        )
+        # A URL with no query keeps its exact spelling.
+        self.assertEqual(
+            harness.redact_remote_url("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets.git",
+        )
+
+    def test_a_file_url_wrapping_a_unc_path_is_not_local(self) -> None:
+        # `file:////server/share/repo.git` is the file-URL spelling of a UNC
+        # path; matching `file://` first called a network share local.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tfile:////fileserver/git/secrets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+        # A file URL naming a genuinely local path is still local.
+        for url in ("file:///srv/git/widgets.git", "file://localhost/srv/git/w.git"):
+            with self.subTest(url=url):
+                local_repo = self.make_repo(sensitive_data=True)
+                local_runner = FakeCommandRunner(
+                    {"remote --verbose": (True, f"origin\t{url} (fetch)")}
+                )
+                local_result = self.audit(local_repo, local_runner)
+                self.assertEqual(
+                    self.statuses(local_result, "remote visibility"), ["ok"]
+                )
+
+    def test_the_visibility_probe_is_pinned_to_github_dot_com(self) -> None:
+        # `gh repo view OWNER/REPO` resolves against GH_HOST or the default
+        # authenticated host, so on a machine pointed at GitHub Enterprise the
+        # probe could answer PRIVATE about a different repository with the same
+        # slug while the github.com remote is public.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertTrue(probes)
+        for argv in probes:
+            self.assertTrue(argv[3].startswith("github.com/"), argv)
 
     def test_redaction_keeps_scp_syntax_actionable(self) -> None:
         # `git@github.com:owner/repo` carries a fixed account name, not a
@@ -5923,6 +6000,7 @@ class RealityCheckTests(unittest.TestCase):
             {
                 "rev-parse": (True, "main"),
                 "status --porcelain": (True, ""),
+                "ls-files": (True, "H templates/hooks/dispatch.py"),
                 "rev-list": (True, "0\t2"),
             }
         )
@@ -5937,7 +6015,11 @@ class RealityCheckTests(unittest.TestCase):
         # be read, currency is unproven — and an unproven reference must never
         # render as a pass.
         runner = FakeCommandRunner(
-            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+            {
+                "rev-parse": (True, "main"),
+                "status --porcelain": (True, ""),
+                "ls-files": (True, "H templates/hooks/dispatch.py"),
+            }
         )
         ok, detail = harness.harness_reference_status(
             self.harness_root, runner, deadline=None
