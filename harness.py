@@ -1148,6 +1148,11 @@ PRIVACY_CLAIM_PATTERN = re.compile(
 )
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
 VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
+# Both shapes a repo can carry its own floor bytes in. `.claude/hooks/` is the
+# one `doctor` already recognizes as "a repo-local dispatcher copy rather than
+# the shared home-anchored one"; probing only `hooks/` made the drift check a
+# silent no-op for every repo that vendors the way this estate actually does.
+VENDORED_FLOOR_DIRS = (PurePosixPath("hooks"), PurePosixPath(".claude/hooks"))
 
 
 def bounded_command_output(
@@ -1469,18 +1474,30 @@ def vendored_floor_findings(
 ) -> list[dict[str, str]]:
     """Compare a repo's vendored floor bytes with template and deployed copies."""
     vendored = [
-        (name, repo / "hooks" / name)
+        (f"{directory}/{name}", repo / directory / name)
+        for directory in VENDORED_FLOOR_DIRS
         for name in VENDORED_FLOOR_FILES
-        if (repo / "hooks" / name).is_file()
+        if (repo / directory / name).is_file()
     ]
     if not vendored:
-        return []
+        # Say it. A leg that emits nothing at all cannot be told apart from a
+        # leg that ran and found no drift.
+        return [
+            reality_finding(
+                "vendored floor bytes vs canonical bytes",
+                REALITY_OK,
+                "no vendored floor copy under "
+                + " or ".join(f"{directory}/" for directory in VENDORED_FLOOR_DIRS)
+                + f" in {repo}; nothing to drift from the shared dispatcher",
+            )
+        ]
     reference_ok, reference_detail = harness_reference_status(
         harness_root, command_runner, deadline
     )
     findings: list[dict[str, str]] = []
-    for name, path in vendored:
-        check = f"vendored hooks/{name} vs canonical bytes"
+    for label, path in vendored:
+        name = path.name
+        check = f"vendored {label} vs canonical bytes"
         repo_digest, repo_version = floor_identity(path)
         template = harness_root / "templates" / "hooks" / name
         deployed = claude_home / "hooks" / name

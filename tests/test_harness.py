@@ -5114,8 +5114,30 @@ class RealityCheckTests(unittest.TestCase):
     def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
         repo = self.make_repo()
         runner = FakeCommandRunner()
-        self.audit(repo, runner)
+        result = self.audit(repo, runner)
         self.assertEqual(runner.calls, [])
+        # The leg still reports: "nothing vendored" must be distinguishable
+        # from "this check never ran".
+        self.assertEqual(self.statuses(result, "vendored floor bytes"), ["ok"])
+        self.assertIn("no vendored floor copy under", self.details(result))
+
+    def test_a_dot_claude_vendored_floor_is_compared_too(self) -> None:
+        # `.claude/hooks/` is the vendored shape doctor itself recognizes;
+        # probing only `hooks/` made the whole leg a permanent no-op.
+        repo = self.make_repo()
+        self.write_floor(repo / ".claude" / "hooks" / "dispatch.py", "1.6.0")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py", "1.6.5"
+        )
+        self.write_floor(self.claude_home / "hooks" / "dispatch.py", "1.6.5")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored .claude/hooks/dispatch.py"), ["MISMATCH"]
+        )
+        self.assertFalse(result["ok"])
 
     # --- reporting ------------------------------------------------------------
 
@@ -5137,7 +5159,7 @@ class RealityCheckTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(
-            [finding["status"] for finding in payload["reality"]], ["advisory"]
+            [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
         )
 
 
