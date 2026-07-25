@@ -22,11 +22,47 @@ actually ran, replays each one through `dispatch.check()` offline, and reports:
 EXIT CODES
 ----------
 0 clean; 1 nothing to replay; 2 at least one command made `check()` raise in
-one of the two versions. 2 is not cosmetic: an exception becomes an `error`
-decision, `error` counts as blocked, and the two allow-edge buckets then move in
-opposite unsafe directions — NEWLY ALLOWED is inflated and NEWLY BLOCKED is
-suppressed to zero. `--allow-errors` downgrades it to a report for a deliberate
-crash census.
+one of the two versions; 3 the replay *itself* failed. 2 is not cosmetic: an
+exception becomes an `error` decision, `error` counts as blocked, and the two
+allow-edge buckets then move in opposite unsafe directions — NEWLY ALLOWED is
+inflated and NEWLY BLOCKED is suppressed to zero. `--allow-errors` downgrades it
+to a report for a deliberate crash census.
+
+3 is the separate, more fundamental failure and has no opt-out: the instrument
+could not obtain a verdict, so there is nothing to census. Those commands get
+the `toolfail` pseudo-decision, which is in no rate and in no delta bucket.
+
+TOOL-SIDE FAILURE MUST NEVER READ AS POLICY
+-------------------------------------------
+Issue #39 reported floor 1.2.0 "blocking 100% of the corpus". It blocked
+nothing: 1.2.0's `check()` is `(command, tier_cfg, project_dir)` and this script
+called the current five-argument form, so every command raised `TypeError`, and
+an exception counts as blocked. The verdict-shaped output of a broken tool was
+read as a policy measurement.
+
+The invocation is therefore derived from each loaded module's own
+`inspect.signature` (`build_check_caller`) and bound per version, so a baseline
+several minor versions old replays with the arguments it declares. If no binding
+exists the run aborts with exit 3 before replaying anything, rather than
+counting a per-command `TypeError`.
+
+The rest of that audit, and what each failure is now counted as:
+
+* `check()` raised -> `error` decision (still blocked), `EXIT_ERRORS_PRESENT`.
+  Pre-existing; unchanged.
+* the offline guard fired (`OfflineSubprocess`, a floor version spawning a
+  subprocess the stub does not cover) -> `toolfail`, exit 3. It used to be an
+  `error`, i.e. a block.
+* a chunk came back with no verdict under `--jobs > 1` -> the run aborts with
+  exit 3 instead of failing inside `summarize_tier` on a `None`.
+* an unreadable transcript file, a mid-file read error, or a transcript tree
+  that cannot be walked -> counted in the extraction ledger under
+  `file-unreadable` / `file-read-error` / `transcript-tree-unwalkable` and
+  printed, instead of silently shortening the corpus.
+* there is still no per-command watchdog, so a timeout cannot be counted as a
+  block — nothing times out. The floor's own `_remote_deadline` fail-opens to
+  `""` ("unresolved -> not dangerous"), and the replay stubs every reader it
+  guards anyway, so it cannot produce a deny either.
 
 PRIVACY
 -------
@@ -95,7 +131,9 @@ COVERAGE LIMITS (read before quoting a number)
   `~/.codex/history.jsonl` and `~/.claude/history.jsonl` are user-prompt logs,
   not shell logs, and are not sources.
 * There is no per-command watchdog: a pathological command would stall the run
-  rather than being counted as a block. None has been observed.
+  rather than being counted as a block. None has been observed. This is the
+  deliberate direction — a stalled run is visible, a command counted as blocked
+  because it was slow is not.
 * Commands longer than `--max-command-chars` are dropped before replay and are
   in no rate reported anywhere. Long commands skew blocked (nested
   scriptblocks, heredocs, dynamic tokens), so the exclusion biases the absolute
@@ -113,6 +151,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import multiprocessing
 import os
@@ -121,12 +160,18 @@ import sys
 from collections import Counter
 from pathlib import Path
 from types import FunctionType, ModuleType
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
 DEFAULT_TIERS = (1, 2, 3, 4)
 DECISIONS = ("allow", "ask", "deny", "error")
+# Not a decision any floor can return: the replay harness itself failed to obtain
+# a verdict for this command (its offline guard fired, or the loaded module's
+# `check()` could not be invoked). Kept out of `DECISIONS` so a floor returning
+# the literal string is still rejected as unexpected, and kept out of every rate
+# so a broken instrument can never read as a strict policy.
+TOOLFAIL = "toolfail"
 RUNTIMES = ("codex", "claude")
 # Tier overlays a repo may declare in `tier.json` (SPECS §2). The floor branches
 # on these, so a row measured without them describes a repo none of the estate
@@ -142,6 +187,12 @@ OVERLAY_FLAGS = (
 # ("nothing to replay") so a caller can tell an unusable corpus from an
 # unusable comparison.
 EXIT_ERRORS_PRESENT = 2
+# Exit code when the *instrument* failed on at least one command: the offline
+# guard fired, or `check()` could not be invoked. Distinct from 2, which reports
+# a floor that crashed on its own terms. Not suppressible by `--allow-errors`:
+# `--allow-errors` exists to census floor crashes, and a malfunctioning harness
+# is not a census of anything.
+EXIT_TOOL_FAILURE = 3
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
@@ -380,6 +431,22 @@ def command_from_argv(argv: Sequence[Any]) -> str | None:
     return None
 
 
+def iter_transcripts(root: Path, stats: Counter[str]) -> list[Path]:
+    """List a transcript tree's `*.jsonl`, counting a walk that cannot complete.
+
+    `Path.rglob` raises straight out of the generator on an unreadable directory
+    (a locked profile subtree, a stale junction), which would silently truncate
+    the corpus mid-walk if it were consumed lazily inside a `for`. Materialising
+    it here turns that into one counted, reported ledger entry instead of a
+    corpus whose size depends on which directories happened to be readable.
+    """
+    try:
+        return sorted(root.rglob("*.jsonl"))
+    except OSError:
+        stats["unparsed-transcript-tree-unwalkable"] += 1
+        return []
+
+
 def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
     """Yield each JSON object in a transcript, counting what will not parse."""
     try:
@@ -388,7 +455,18 @@ def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
         stats["unparsed-file-unreadable"] += 1
         return
     with handle:
-        for line in handle:
+        while True:
+            # `for line in handle` would let a mid-file read error escape as an
+            # uncaught OSError, killing a multi-hour run; and swallowing it
+            # without a count would silently shorten the corpus. Neither is a
+            # measurement, so the truncation is counted and reported.
+            try:
+                line = next(handle, None)
+            except (OSError, UnicodeError):
+                stats["unparsed-file-read-error"] += 1
+                return
+            if line is None:
+                return
             line = line.strip()
             if not line:
                 continue
@@ -418,7 +496,7 @@ def extract_codex_commands(
     every other `function_call` / `custom_tool_call` name is an MCP or planning
     tool, and no `js_repl` body contains a `tools.shell_command(` call.
     """
-    for path in sorted(root.rglob("*.jsonl")):
+    for path in iter_transcripts(root, stats):
         stats["extracted-codex-files"] += 1
         for record in iter_jsonl(path, stats):
             payload = record.get("payload")
@@ -468,7 +546,7 @@ def extract_codex_commands(
 
 def extract_claude_commands(root: Path, stats: Counter[str]) -> Iterator[str]:
     """Yield every command Claude's Bash/PowerShell tools were asked to run."""
-    for path in sorted(root.rglob("*.jsonl")):
+    for path in iter_transcripts(root, stats):
         stats["extracted-claude-files"] += 1
         for record in iter_jsonl(path, stats):
             message = record.get("message")
@@ -606,6 +684,163 @@ def stub_resolver(
     return False, "corpus-replay-stub-private"
 
 
+class ReplayHarnessError(RuntimeError):
+    """The instrument failed, so this command has no verdict.
+
+    Never a policy result. Anything raised as one of these is bucketed as
+    `toolfail`, excluded from every rate, and aborts the run — as opposed to a
+    plain exception out of `check()`, which is the *floor* crashing and is
+    reported as an `error` decision (see `EXIT_ERRORS_PRESENT`).
+    """
+
+
+class CheckSignatureError(ReplayHarnessError):
+    """A loaded floor's `check()` cannot be invoked by this replay at all."""
+
+
+# Every argument the replay knows how to supply, and the parameter names a
+# floor version has used for it. Floors older than the `remote_resolver`
+# parameter take `(command, tier_cfg, project_dir)` and nothing else (issue
+# #39); the current one takes eleven parameters. Binding by *role* rather than
+# by a fixed arity is what lets one instrument measure both.
+CHECK_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "command": ("command", "command_line", "cmd"),
+    "tier_cfg": ("tier_cfg", "tier_config", "cfg", "config"),
+    "project_dir": ("project_dir", "project_root", "project"),
+    "command_cwd": ("command_cwd", "cwd"),
+    "remote_resolver": ("remote_resolver",),
+}
+CHECK_ROLE_BY_NAME = {
+    name: role for role, names in CHECK_ROLE_ALIASES.items() for name in names
+}
+# Without these three there is no meaningful replay subject; the rest are
+# supplied only when the loaded version declares them.
+CHECK_REQUIRED_ROLES = ("command", "tier_cfg", "project_dir")
+
+
+def plan_check_call(
+    signature: inspect.Signature,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Decide how to call one floor's `check()`; raise if it cannot be called.
+
+    Returns `(positional_roles, keyword_bindings)`. The rule is deliberately
+    conservative in the loud direction: a parameter the replay does not know how
+    to supply is left to its default, and if it *has* no default the plan is
+    refused outright rather than guessed at. A wrong guess would be recorded as
+    a per-command exception, and `decide()` turns an exception into a blocked
+    verdict — which is precisely how "floor 1.2.0 blocks 100%" was manufactured.
+    """
+    positional: list[str] = []
+    keyword: list[tuple[str, str]] = []
+    filled: set[str] = set()
+    # Set once a parameter is skipped: everything after it must be passed by
+    # keyword, and a positional-only parameter after it cannot be passed at all.
+    positional_closed = False
+    for name, param in signature.parameters.items():
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        role = CHECK_ROLE_BY_NAME.get(name)
+        if role is None or role in filled:
+            if param.default is param.empty:
+                raise CheckSignatureError(
+                    f"check() requires a parameter the replay cannot supply: {name!r}"
+                )
+            if param.kind is not param.KEYWORD_ONLY:
+                positional_closed = True
+            continue
+        if param.kind is param.POSITIONAL_ONLY:
+            if positional_closed:
+                raise CheckSignatureError(
+                    f"check() takes {name!r} positionally after a parameter the "
+                    "replay cannot supply, so it cannot be bound"
+                )
+            positional.append(role)
+        elif param.kind is param.POSITIONAL_OR_KEYWORD and not positional_closed:
+            positional.append(role)
+        else:
+            keyword.append((name, role))
+        filled.add(role)
+    missing = [role for role in CHECK_REQUIRED_ROLES if role not in filled]
+    if missing:
+        raise CheckSignatureError(
+            "check() declares no parameter for " + ", ".join(missing)
+        )
+    return positional, keyword
+
+
+def build_check_caller(module: ModuleType) -> Callable[[str, dict, str], Any]:
+    """Return `(command, tier_cfg, project_dir) -> check(...)` for this module.
+
+    The call shape is derived from the module's own `inspect.signature`, so a
+    baseline several minor versions old replays with the arguments *it* declares
+    instead of the arguments today's floor declares. Raises `CheckSignatureError`
+    when no binding exists; the caller aborts the run rather than letting every
+    command read as blocked.
+    """
+    check = getattr(module, "check", None)
+    if not callable(check):
+        raise CheckSignatureError(f"{module.__name__} has no callable check()")
+    try:
+        signature = inspect.signature(check)
+    except (TypeError, ValueError) as error:  # pragma: no cover - exotic callable
+        raise CheckSignatureError(
+            f"{module.__name__}: check() signature is not introspectable: {error}"
+        ) from error
+    positional, keyword = plan_check_call(signature)
+
+    def call(command: str, tier_cfg: dict, project_dir: str) -> Any:
+        values = {
+            "command": command,
+            "tier_cfg": tier_cfg,
+            "project_dir": project_dir,
+            "command_cwd": project_dir,
+            "remote_resolver": stub_resolver,
+        }
+        return check(
+            *(values[role] for role in positional),
+            **{name: values[role] for name, role in keyword},
+        )
+
+    # Prove the plan binds before an hour of replay depends on it. A signature
+    # that survives `plan_check_call` but not `bind` would otherwise raise once
+    # per command and be counted as a block.
+    try:
+        signature.bind(
+            *(f"<{role}>" for role in positional),
+            **{name: f"<{role}>" for name, role in keyword},
+        )
+    except TypeError as error:
+        raise CheckSignatureError(
+            f"{module.__name__}: check() cannot be bound by the replay: {error}"
+        ) from error
+    call.replay_bound_parameters = [  # type: ignore[attr-defined]
+        *positional,
+        *(f"{name}={role}" for name, role in keyword),
+    ]
+    return call
+
+
+_CHECK_CALLERS: dict[Any, Callable[[str, dict, str], Any]] = {}
+
+
+def check_caller(module: ModuleType) -> Callable[[str, dict, str], Any]:
+    """Memoised `build_check_caller`; `inspect.signature` is not free per call."""
+    check = getattr(module, "check", None)
+    try:
+        cached = _CHECK_CALLERS.get(check)
+    except TypeError:  # pragma: no cover - unhashable callable
+        return build_check_caller(module)
+    if cached is None:
+        cached = build_check_caller(module)
+        _CHECK_CALLERS[check] = cached
+    return cached
+
+
+def describe_check_signature(module: ModuleType) -> list[str]:
+    """The argument roles this replay binds on a module, for the JSON record."""
+    return list(getattr(check_caller(module), "replay_bound_parameters", []))
+
+
 # Incremented by `stub_command_runner`; reported so the run can prove how many
 # subprocesses it did NOT spawn. Per-process under `spawn`, so it is returned
 # with each chunk rather than read from the parent.
@@ -655,7 +890,7 @@ class OfflineSubprocess:
 
     def __getattr__(self, name: str) -> Any:
         if name in OfflineSubprocess._BLOCKED:
-            raise RuntimeError(
+            raise ReplayHarnessError(
                 f"corpus replay is offline but dispatch called subprocess.{name}"
             )
         return getattr(self._real, name)
@@ -771,15 +1006,30 @@ def decide(
     as `tier.json` would declare it. A fresh dict is handed to every call so a
     floor version that normalises its config in place cannot leak state from one
     command into the next.
+
+    Three outcomes, kept apart on purpose:
+
+    * a decision the floor returned -> that decision;
+    * an exception out of `check()` -> `error`, i.e. *the floor crashed*. It
+      still counts as blocked (`EXIT_ERRORS_PRESENT` aborts the run so the
+      corrupted deltas are never quoted);
+    * a `ReplayHarnessError` -> `toolfail`, i.e. *this script* failed. It is in
+      no rate and in no allow-edge bucket, because a broken instrument reading
+      as a strict floor is exactly the artifact issue #39 mistook for policy.
+
+    The call itself is shaped from the module's own signature, so a baseline
+    predating `command_cwd` / `remote_resolver` is invoked with the arguments it
+    declares rather than raising `TypeError` on every single command.
     """
+    caller = check_caller(module)
     try:
-        decision, reason = module.check(
+        decision, reason = caller(
             command,
             {"tier": tier, "flags": dict(flags or {})},
             project_dir,
-            project_dir,
-            remote_resolver=stub_resolver,
         )
+    except ReplayHarnessError as error:
+        return TOOLFAIL, f"{type(error).__name__}: {error}".strip()
     except Exception as error:  # noqa: BLE001 - a crash is a result, not a stop
         return "error", f"{type(error).__name__}: {error}".strip()
     if decision not in DECISIONS:
@@ -806,6 +1056,11 @@ def _worker_init(
     clear_host_git_env((baseline, candidate))
     make_module_offline(baseline)
     make_module_offline(candidate)
+    # Fail here, once, rather than once per command: an unbindable `check()`
+    # raised per command would be caught by `decide()` and counted, and the run
+    # would print a plausible-looking 100% block rate for the unusable version.
+    check_caller(baseline)
+    check_caller(candidate)
     _WORKER["baseline"] = baseline
     _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
@@ -887,7 +1142,31 @@ def replay(
             done += len(chunk)
             if progress:
                 report_progress(done, total)
+    assert_every_command_replayed(baseline_out, candidate_out)
     return baseline_out, candidate_out, offline_reads
+
+
+def assert_every_command_replayed(
+    baseline_out: Sequence[Any], candidate_out: Sequence[Any]
+) -> None:
+    """Refuse to report on a replay that did not cover every command.
+
+    A chunk that never came back — a worker killed by the OOM killer, a pool
+    that lost a result — leaves `None` in these lists, and the run would then
+    die deep inside `summarize_tier` with a message about unpacking a
+    non-iterable. Worse, a future refactor that defaulted the gap to a verdict
+    would report a partial replay as a measurement.
+    """
+    unfilled = sum(
+        1
+        for base, cand in zip(baseline_out, candidate_out)
+        if base is None or cand is None
+    )
+    if unfilled:
+        raise ReplayHarnessError(
+            f"{unfilled} of {len(baseline_out)} commands came back with no "
+            "verdict; the replay is incomplete and its numbers are not usable"
+        )
 
 
 def report_progress(done: int, total: int) -> None:
@@ -977,12 +1256,18 @@ def summarize_tier(
     by_runtime: Counter[str] = Counter()
     reasons: Counter[str] = Counter()
     reason_invocations: Counter[str] = Counter()
+    toolfail_reasons: Counter[str] = Counter()
     for position, command in enumerate(commands):
         decision, reason = verdicts[position][tier_index]
         counts = corpus[command]
         weight = invocations(counts)
         decisions[decision] += 1
         decision_invocations[decision] += weight
+        if decision == TOOLFAIL:
+            # The instrument failed: no verdict exists, so this command belongs
+            # in no rate and in no block class. Its own ledger, its own banner.
+            toolfail_reasons[normalize_reason(reason, command)] += 1
+            continue
         if decision != "allow":
             grouped = normalize_reason(reason, command)
             reasons[grouped] += 1
@@ -991,21 +1276,34 @@ def summarize_tier(
                 if counts.get(runtime):
                     by_runtime[runtime] += 1
     total = len(commands)
-    blocked = total - decisions["allow"]
+    # Every rate below is over the commands that actually got a verdict. A
+    # harness failure inflating a block rate is the artifact this instrument
+    # exists to detect, so it must not be able to produce one.
+    measured = total - decisions[TOOLFAIL]
+    blocked = measured - decisions["allow"]
     refused = blocked - decisions["ask"]
-    total_invocations = sum(decision_invocations.values())
+    total_invocations = sum(decision_invocations.values()) - (
+        decision_invocations[TOOLFAIL]
+    )
     blocked_invocations = total_invocations - decision_invocations["allow"]
     refused_invocations = blocked_invocations - decision_invocations["ask"]
     return {
         "unique_commands": total,
+        "unique_measured": measured,
+        "unique_toolfail": decisions[TOOLFAIL],
+        "invocations_toolfail": decision_invocations[TOOLFAIL],
+        "toolfail_reasons": [
+            {"reason": reason, "unique": count}
+            for reason, count in toolfail_reasons.most_common()
+        ],
         # "blocked" is Codex semantics: respond() converts `ask` to `deny` for
         # Codex, so every non-allow is a refusal there. For Claude an `ask` is a
         # prompt the human answers, so "refused" (deny + error) is the honest
         # Claude number and is reported alongside rather than folded in.
         "unique_blocked": blocked,
-        "unique_block_rate": (blocked / total) if total else 0.0,
+        "unique_block_rate": (blocked / measured) if measured else 0.0,
         "unique_refused": refused,
-        "unique_refuse_rate": (refused / total) if total else 0.0,
+        "unique_refuse_rate": (refused / measured) if measured else 0.0,
         "unique_ask": decisions["ask"],
         "invocations": total_invocations,
         "invocations_blocked": blocked_invocations,
@@ -1047,6 +1345,10 @@ def compare_tier(
     Bucketing only the two allow-edges, as this did, left `deny -> ask` and
     `ask -> deny` in no reported bucket at all.
 
+    A `toolfail` on either side pre-empts all of them: the harness, not the
+    floor, failed on that command, so there is no transition. It goes to
+    `tool_failed` and the run exits `EXIT_TOOL_FAILURE`.
+
     `reclassified` is a different axis — same decision, different rule — and
     matters when reading the block-class tables side by side: a rule whose count
     grows in the candidate has not necessarily started blocking anything new, it
@@ -1066,10 +1368,28 @@ def compare_tier(
     ask_gained: list[dict[str, Any]] = []
     ask_lost: list[dict[str, Any]] = []
     crash_moved: list[dict[str, Any]] = []
+    tool_failed: list[dict[str, Any]] = []
     for position, command in enumerate(commands):
         base_decision, base_reason = baseline[position][tier_index]
         cand_decision, cand_reason = candidate[position][tier_index]
         matrix[f"{base_decision}->{cand_decision}"] += 1
+        if TOOLFAIL in (base_decision, cand_decision):
+            # One side has no verdict, so there is no transition to classify.
+            # Routing it anywhere else would report a harness malfunction as a
+            # policy change: `toolfail -> allow` would read as a relaxation and
+            # `allow -> toolfail` as a new false positive.
+            tool_failed.append(
+                {
+                    "command": command,
+                    "invocations": invocations(corpus[command]),
+                    "was": base_decision,
+                    "decision": cand_decision,
+                    "reason": (
+                        cand_reason if cand_decision == TOOLFAIL else base_reason
+                    ),
+                }
+            )
+            continue
         if base_decision == cand_decision:
             if base_decision != "allow" and base_reason != cand_reason:
                 reclassified[
@@ -1100,6 +1420,7 @@ def compare_tier(
         "ask_gained": ask_gained,
         "ask_lost": ask_lost,
         "crash_moved": crash_moved,
+        "tool_failed": tool_failed,
     }
     result: dict[str, Any] = {
         "transitions": dict(matrix),
@@ -1179,8 +1500,14 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     print("=" * 78)
     print("deny-floor corpus replay")
     print("=" * 78)
-    print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
-    print(f"candidate : floor {candidate['version']}  {candidate['path']}")
+    print(
+        f"baseline  : floor {baseline['version']}  {baseline['path']}\n"
+        f"            check({', '.join(baseline.get('check_parameters') or [])})"
+    )
+    print(
+        f"candidate : floor {candidate['version']}  {candidate['path']}\n"
+        f"            check({', '.join(candidate.get('check_parameters') or [])})"
+    )
     print(f"project   : {result['project_dir']}")
     print(
         "overlays  : "
@@ -1275,6 +1602,14 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
             f"{delta['ask_gained_unique']:>7}{delta['ask_lost_unique']:>7}"
             f"{errors:>10}"
         )
+    toolfails = count_toolfails(result)
+    if sum(toolfails.values()):
+        print(
+            "  NOTE: the replay itself failed on some commands (baseline "
+            f"{toolfails['baseline']} / candidate {toolfails['candidate']}).\n"
+            "  Those are in no rate and in no delta bucket above; see the "
+            "TOOL FAILURE banner."
+        )
     asked = any(
         result["tiers"][tier_key][label]["unique_ask"]
         for tier_key in result["tier_order"]
@@ -1295,7 +1630,8 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"  {label:<10} deny={decisions.get('deny', 0)} "
                 f"ask={decisions.get('ask', 0)} "
                 f"error={decisions.get('error', 0)} "
-                f"allow={decisions.get('allow', 0)}  "
+                f"allow={decisions.get('allow', 0)} "
+                f"toolfail={summary.get('unique_toolfail', 0)}  "
                 f"blocked invocations={summary['invocations_blocked']}"
                 f" / {summary['invocations']}"
                 f" ({summary['invocation_block_rate'] * 100:.2f}%)"
@@ -1376,6 +1712,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 "CRASH MOVED (deny <-> error: a rule-evaluation exception "
                 "changed side)",
             ),
+            (
+                "tool_failed",
+                "TOOL FAILED (the replay could not obtain a verdict: NOT a "
+                "policy result, counted in no rate)",
+            ),
         ):
             if not delta[f"{label}_unique"]:
                 continue
@@ -1421,6 +1762,50 @@ def count_errors(result: dict[str, Any]) -> dict[str, int]:
         )
         for version in ("baseline", "candidate")
     }
+
+
+def count_toolfails(result: dict[str, Any]) -> dict[str, int]:
+    """Per-version total of commands the *harness* failed to get a verdict for."""
+    return {
+        version: sum(
+            int(result["tiers"][tier][version].get("unique_toolfail", 0))
+            for tier in result["tier_order"]
+        )
+        for version in ("baseline", "candidate")
+    }
+
+
+def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> None:
+    """A malfunctioning instrument is never a measurement. Say so on both streams.
+
+    Unlike the `check() RAISED` banner this one has no opt-out: `--allow-errors`
+    exists to census *floor* crashes, and there is nothing to census when the
+    script itself could not run the floor.
+    """
+    reasons: Counter[str] = Counter()
+    for tier in result["tier_order"]:
+        for version in ("baseline", "candidate"):
+            for row in result["tiers"][tier][version].get("toolfail_reasons", []):
+                reasons[row["reason"]] += int(row["unique"])
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            "!! REPLAY TOOL FAILURE: baseline "
+            f"{toolfails['baseline']} / candidate {toolfails['candidate']} "
+            "commands got no verdict.",
+            file=stream,
+        )
+        print(
+            "!! These are the SCRIPT failing, not the floor deciding. They are "
+            "excluded from\n"
+            "!! every rate and every delta bucket, so the numbers above "
+            "understate coverage\n"
+            f"!! rather than misreport policy. Exiting {EXIT_TOOL_FAILURE}.",
+            file=stream,
+        )
+        for reason, count in reasons.most_common(10):
+            print(f"!!   {count:>6}  {reason}", file=stream)
+        print("!" * 78, file=stream)
 
 
 def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
@@ -1619,6 +2004,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
     baseline_version = module_version(baseline_module)
     candidate_version = module_version(candidate_module)
+    # Prove both versions are callable before replaying anything. Each side is
+    # bound to its own declared signature, so a baseline predating
+    # `command_cwd` / `remote_resolver` measures correctly instead of raising
+    # `TypeError` per command and reading as a 100% block rate (issue #39).
+    try:
+        baseline_parameters = describe_check_signature(baseline_module)
+        candidate_parameters = describe_check_signature(candidate_module)
+    except CheckSignatureError as error:
+        sys.stderr.write(f"cannot replay: {error}\n")
+        return EXIT_TOOL_FAILURE
 
     injected = clear_host_git_env((baseline_module, candidate_module))
     if injected and progress:
@@ -1638,6 +2033,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress,
             flags,
         )
+    except ReplayHarnessError as error:
+        # A whole-run harness failure: never fall through to a report, because
+        # a partial replay printed as a table is indistinguishable from a real
+        # measurement.
+        sys.stderr.write(f"replay aborted: {error}\n")
+        return EXIT_TOOL_FAILURE
     finally:
         os.environ.update(injected)
 
@@ -1646,11 +2047,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "path": str(args.baseline),
             "version": baseline_version,
             "sha256": file_sha256(args.baseline),
+            "check_parameters": baseline_parameters,
         },
         "candidate": {
             "path": str(args.candidate),
             "version": candidate_version,
             "sha256": file_sha256(args.candidate),
+            "check_parameters": candidate_parameters,
         },
         "project_dir": str(args.project_dir),
         "tier_order": tiers,
@@ -1706,7 +2109,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         }
     errors = count_errors(result)
+    toolfails = count_toolfails(result)
     result["run"]["errors"] = errors
+    result["run"]["toolfails"] = toolfails
     result["run"]["allow_errors"] = bool(args.allow_errors)
 
     print_report(result, args.top, args.sample_width)
@@ -1718,6 +2123,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if sum(errors.values()) and not args.allow_errors:
         print_error_banner(result, errors)
+    if sum(toolfails.values()):
+        # Reported after the floor-crash banner and wins the exit code: a broken
+        # instrument is the more fundamental failure of the two.
+        print_toolfail_banner(result, toolfails)
+        return EXIT_TOOL_FAILURE
+    if sum(errors.values()) and not args.allow_errors:
         return EXIT_ERRORS_PRESENT
     return 0
 
