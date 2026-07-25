@@ -1773,6 +1773,54 @@ def tier_label(tier: Any, overlays: Sequence[str]) -> str:
     return f"T{tier}" + ("".join(f"+{name}" for name in overlays))
 
 
+def print_premise_mismatch(mismatch: Sequence[str]) -> None:
+    """Warn that the two sides ran under different premises, and say which one.
+
+    Not fatal: replaying two different signatures is the instrument's purpose
+    (issue #39). But a delta row produced by the difference in premise is not a
+    policy change, and a reviewer has to be told which difference it was.
+
+    The remote-privacy paragraph is specific to `remote_resolver` and is printed
+    only when that role is the one bound on a single side. A `command_cwd`-only
+    transition — a three-argument floor against one that added cwd tracking —
+    used to print it too, telling the reader that deltas "may be stubbing
+    artifacts" when neither side declares the parameter at all. Cwd-aware
+    verdict changes are real policy, and a warning that invites a reviewer to
+    discount them is worse than no warning.
+    """
+    if not mismatch:
+        return
+    print(
+        "PREMISE MISMATCH: the two versions bind different check() "
+        "arguments (" + ", ".join(mismatch) + ").\n"
+        "            Each side ran under the premise its own signature "
+        "declares, so a delta row\n"
+        "            caused by that difference is not a policy change."
+    )
+    if "remote_resolver" in mismatch:
+        print(
+            "            Only a version declaring remote_resolver gets the "
+            "private-remote stub; the\n"
+            "            other resolves internally through the offline "
+            "command_output stub and can\n"
+            "            report the remote unresolved instead. Under "
+            "sensitive_data that is an\n"
+            "            allow on one side and a deny on the other for the "
+            "same push, so remote-\n"
+            "            privacy rows in the deltas below may be stubbing "
+            "artifacts, not policy."
+        )
+    if "command_cwd" in mismatch:
+        print(
+            "            Only a version declaring command_cwd is told where "
+            "the command ran; the\n"
+            "            other judges every path against --project-dir alone. "
+            "Rows keyed on\n"
+            "            inside/outside the project are a real modelling "
+            "difference, not a stub."
+        )
+
+
 def print_report(result: dict[str, Any], top: int, width: int) -> None:
     corpus = result["corpus"]
     baseline = result["baseline"]
@@ -1789,25 +1837,7 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         f"candidate : floor {candidate['version']}  {candidate['path']}\n"
         f"            check({', '.join(candidate.get('check_parameters') or [])})"
     )
-    mismatch = list(result["run"].get("check_parameter_delta") or [])
-    if mismatch:
-        # Not fatal: replaying two different signatures is the instrument's
-        # purpose. But the two sides then ran under different premises, and a
-        # delta row produced by that is not a policy change.
-        print(
-            "PREMISE MISMATCH: the two versions bind different check() "
-            "arguments (" + ", ".join(mismatch) + ").\n"
-            "            Only a version declaring remote_resolver gets the "
-            "private-remote stub; the\n"
-            "            other resolves internally through the offline "
-            "command_output stub and can\n"
-            "            report the remote unresolved instead. Under "
-            "sensitive_data that is an\n"
-            "            allow on one side and a deny on the other for the "
-            "same push, so remote-\n"
-            "            privacy rows in the deltas below may be stubbing "
-            "artifacts, not policy."
-        )
+    print_premise_mismatch(list(result["run"].get("check_parameter_delta") or []))
     print(f"project   : {result['project_dir']}")
     print(
         "overlays  : "

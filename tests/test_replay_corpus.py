@@ -1197,6 +1197,52 @@ class PremiseMismatchTests(EndToEndTestCase):
         self.assertEqual(run["check_parameter_delta"], [])
 
 
+class PremiseMismatchWordingTests(unittest.TestCase):
+    """The warning must name the difference that actually happened.
+
+    A reviewer who is told "these deltas may be stubbing artifacts" discounts
+    them. Saying it about a mismatch that does not involve `remote_resolver`
+    discounts the exact rows the run was made to measure.
+    """
+
+    def banner(self, *mismatch):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            replay.print_premise_mismatch(list(mismatch))
+        return out.getvalue()
+
+    def test_no_mismatch_prints_nothing(self):
+        self.assertEqual(self.banner(), "")
+
+    def test_a_cwd_only_transition_does_not_blame_the_remote_stub(self):
+        # Three-argument floor vs one that added cwd tracking: neither side
+        # declares remote_resolver, so nothing here is a stubbing artifact.
+        text = self.banner("command_cwd")
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("command_cwd", text)
+        self.assertNotIn("remote_resolver", text)
+        self.assertNotIn("private-remote stub", text)
+        self.assertIn("real modelling difference", text)
+
+    def test_a_resolver_transition_keeps_the_remote_privacy_explanation(self):
+        text = self.banner("remote_resolver")
+        self.assertIn("private-remote stub", text)
+        self.assertIn("stubbing", text)
+        self.assertNotIn("Only a version declaring command_cwd", text)
+
+    def test_both_roles_get_both_paragraphs(self):
+        # The real 1.2.0-vs-HEAD shape.
+        text = self.banner("command_cwd", "remote_resolver")
+        self.assertIn("private-remote stub", text)
+        self.assertIn("Only a version declaring command_cwd", text)
+
+    def test_an_unknown_role_still_gets_the_generic_warning(self):
+        text = self.banner("tier_cfg")
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("not a policy change", text)
+        self.assertNotIn("private-remote stub", text)
+
+
 class SignatureDispatchTests(EndToEndTestCase):
     """Issue #39: a baseline several versions old must replay, not read 100%."""
 
