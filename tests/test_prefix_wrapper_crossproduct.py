@@ -72,6 +72,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -188,6 +189,20 @@ def _scrubbed_environment_names() -> list[str]:
 
 def setUpModule() -> None:
     global _PROJECT_DIR
+    if SAMPLE_SIZE is not None:
+        # A stale exported knob in a developer shell otherwise produces a run that looks
+        # exactly like a full one while testing a slice of each corpus — and case-level
+        # baselines outside the slice are then neither verified nor reported as fixed.
+        # Loud on stderr, every run, so a green result is never silently partial.
+        print(
+            "\n"
+            + "!" * 78
+            + f"\n!! FLOOR_CROSSPRODUCT_SAMPLE={SAMPLE_SIZE}: this run tests at most "
+            f"{SAMPLE_SIZE} payloads per\n!! shape, NOT the whole corpus. A pass here is "
+            "not the CI result. Recorded\n!! baselines outside the sample are neither "
+            "verified nor reported as fixed.\n" + "!" * 78,
+            file=sys.stderr,
+        )
     for name in _scrubbed_environment_names():
         _SAVED_ENVIRONMENT[name] = os.environ.pop(name)
     # Mirror smoke_test.run_case: the project root is a fresh directory directly under
@@ -590,9 +605,21 @@ DENY_CORPUS = [
 
 #: Tokens that make a smoke allow-case unusable as a cross-product payload: composing a
 #: multi-segment or already-redirected command with a prefix or wrapper produces a
-#: DIFFERENT command whose correct verdict is no longer "allow", and an embedded quote
-#: collides with the wrapper's own quoting. Excluding them keeps a false-positive report
-#: meaningful — every survivor is a command whose verdict the shape genuinely changed.
+#: DIFFERENT command whose correct verdict is no longer "allow". Excluding them keeps a
+#: false-positive report meaningful — every survivor is a command whose verdict the shape
+#: genuinely changed.
+#:
+#: QUOTES ARE DELIBERATELY NOT IN THIS LIST. They were, and that was the single worst hole
+#: in the false-positive direction: SPECS §6 names "commit/PR bodies containing
+#: dangerous-looking text inside quotes" as the FLAGSHIP must-allow class, and excluding
+#: every quoted payload meant `git commit -m "block rm -rf in hook"` and
+#: `gh pr create --title "fix" --body-file body.md` were never crossed with any shape at
+#: all — the class issue #36 already had to fix once was measured by nothing. The stated
+#: reason (an embedded quote collides with the wrapper's own quoting) is a per-SHAPE
+#: problem and is solved per shape: `_posix_embeddable`/`_powershell_embeddable` decline
+#: the payload, and a template whose marker sits inside its own quoted span declares
+#: `outer_quote`. A plain `nohup <CMD>` or `> out.txt <CMD>` carries a quoted payload
+#: perfectly, and admitting them added 42 smoke allow-cases with zero new failures.
 _NON_COMPOSABLE = (
     ";",
     "&&",
@@ -608,13 +635,18 @@ _NON_COMPOSABLE = (
     "}",
     "(",
     ")",
-    "'",
-    '"',
 )
 
 
 def _composable(command: str) -> bool:
-    return not any(token in command for token in _NON_COMPOSABLE)
+    if any(token in command for token in _NON_COMPOSABLE):
+        return False
+    # Same reason as the deny side: a Windows path whose closing quote is preceded by
+    # backslashes parses differently under POSIX quoting rules, so composing it changes
+    # the payload itself and its verdict stops meaning anything.
+    if _ESCAPED_TRAILING_QUOTE.search(command):
+        return False
+    return True
 
 
 #: Real agent command shapes, added to the smoke allow-expectations so the
@@ -640,11 +672,18 @@ AGENT_BENIGN_COMMANDS = [
     "gh pr view 63 --json title",
 ]
 
-BENIGN_CORPUS = [
+#: Kept separate from the hand-written commands so the over-filtering guard can measure
+#: SMOKE RETENTION specifically. Folded together, a future filter that gutted the smoke
+#: matrix could be masked simply by adding more entries to AGENT_BENIGN_COMMANDS.
+SMOKE_BENIGN_CORPUS = [
     (command, tier, flags or {})
     for command, tier, flags, expected in smoke.CASES
     if expected == "allow" and _composable(command)
-] + [(command, 1, {}) for command in AGENT_BENIGN_COMMANDS]
+]
+
+BENIGN_CORPUS = SMOKE_BENIGN_CORPUS + [
+    (command, 1, {}) for command in AGENT_BENIGN_COMMANDS
+]
 
 
 def _sample(corpus, shape_name: str):
@@ -1441,9 +1480,22 @@ class ShapeRosterTests(CrossProductBase):
             self.assertTrue(entry["note"], f"{payload!r}: needs a note")
             for name in entry["shapes"]:
                 self.assertIn(name, enforced, f"{payload!r}: {name} is not enforced")
+                shape = SHAPES_BY_NAME[name]
                 self.assertTrue(
-                    SHAPES_BY_NAME[name].accepts(payload),
+                    shape.accepts(payload),
                     f"{payload!r}: {name} does not accept this payload",
+                )
+                # accepts() is not enough. DenyDirectionTests SKIPS a pair whose apply()
+                # returns None, so an entry whose payload stops embedding becomes a
+                # zombie: never visited, never reported as a bypass, never reported as
+                # UNEXPECTEDLY FIXED, and still passing this test. The #69 group is
+                # entirely single-quoted payloads under the quoted `cmd /c <QCMD>`
+                # template, i.e. one added `"`/`$`/backtick/backslash away from exactly
+                # that.
+                self.assertIsNotNone(
+                    shape.apply(payload),
+                    f"{payload!r}: {name} can no longer embed this payload, so the "
+                    "recorded bypass is never actually exercised",
                 )
 
     def test_baseline_probe_ids_are_known(self):
@@ -1471,14 +1523,22 @@ class ShapeRosterTests(CrossProductBase):
             self.assertEqual(decide(command), "allow", f"probe {probe} must allow bare")
 
     def test_corpus_filters_keep_most_of_the_smoke_matrix(self):
-        """The composability filters must trim the corpus, not gut it."""
+        """The composability filters must trim the corpus, not gut it.
+
+        Measured against SMOKE_BENIGN_CORPUS, never BENIGN_CORPUS: the guard exists to
+        catch a filter that stops retaining smoke cases, and counting the hand-written
+        AGENT_BENIGN_COMMANDS toward the floor would let someone satisfy it by adding
+        more hand-written commands while smoke retention silently collapsed.
+        """
         raw_deny = sum(1 for *_x, expected in smoke.CASES if expected == "deny")
         raw_allow = sum(1 for *_x, expected in smoke.CASES if expected == "allow")
         self.assertGreater(
             len(DENY_CORPUS), 0.75 * raw_deny, "deny corpus over-filtered"
         )
         self.assertGreater(
-            len(BENIGN_CORPUS), 0.60 * raw_allow, "benign corpus over-filtered"
+            len(SMOKE_BENIGN_CORPUS),
+            0.60 * raw_allow,
+            "benign corpus over-filtered (smoke retention, agent commands excluded)",
         )
 
     def test_every_benign_case_is_allowed_bare(self):
