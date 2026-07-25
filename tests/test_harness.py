@@ -5096,7 +5096,52 @@ class RealityCheckTests(unittest.TestCase):
         )
         self.assertIn("not main", self.details(result))
 
-    def test_deployed_global_drift_is_a_mismatch_without_the_template(self) -> None:
+    def test_deployed_global_drift_never_fails_a_repo_audit(self) -> None:
+        # `~/.claude/hooks` is the AUDITING MACHINE's state. A developer who
+        # has not run `sync-global --apply` must not turn a repo gate red, and
+        # the same repo must not silently pass on a runner with no ~/.claude.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["advisory"]
+        )
+        self.assertIn("machine-state observation", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_real_drift_still_fails_when_the_machine_is_behind(self) -> None:
+        # The loosening above must not swallow genuine repo drift: vendored
+        # bytes that differ from the canonical template still fail, even while
+        # the deployed global copy on this machine is itself stale.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.5.0 (2026-06-01)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+        )
+        self.assertFalse(result["ok"])
+
+    def test_deployed_drift_without_a_provable_template_stays_unproven(self) -> None:
         repo = self.make_repo()
         self.write_floor(repo / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)")
         self.write_floor(
@@ -5107,9 +5152,10 @@ class RealityCheckTests(unittest.TestCase):
         )
         result = self.audit(repo, runner)
         self.assertEqual(
-            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
         )
         self.assertIn("deployed global copy", self.details(result))
+        self.assertTrue(result["ok"])
 
     def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
         repo = self.make_repo()

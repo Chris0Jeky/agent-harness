@@ -34,9 +34,12 @@ pull request and push to `main`; workflow actions are pinned to immutable commit
 
 `audit` also measures declarations against reality instead of against other documents:
 a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
-`hooks/dispatch.py` and `hooks/smoke_test.py` bytes against the canonical template and the
-deployed global copy (reporting `FLOOR_VERSION` alongside the hashes), and a declared
-`human_todo` against a file that exists. Each reports `MISMATCH` (a hard failure, exit 1),
+`dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
+template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
+`human_todo` against a file that exists. A repo that vendors nothing says so rather than
+emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
+failure: it is the auditing machine's state, so making it a repo verdict would let the same
+repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
 `UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run

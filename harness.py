@@ -1524,13 +1524,26 @@ def vendored_floor_findings(
                     "not compared with the canonical template: "
                     + (reference_detail if not reference_ok else f"{template} absent")
                 )
-            if deployed_digest:
-                if deployed_digest != repo_digest:
-                    status = REALITY_MISMATCH
-                    notes.append("vendored bytes differ from the deployed global copy")
-            elif status != REALITY_MISMATCH:
-                status = REALITY_UNPROVEN
-                notes.append(f"no deployed global copy at {deployed}")
+            # The deployed global copy is a fact about the AUDITING MACHINE,
+            # not about this repo. Promoting that difference to MISMATCH made
+            # `audit` non-hermetic: an operator who had not run
+            # `sync-global --apply` since the last FLOOR_VERSION bump failed a
+            # repo gate from their home directory, while the same repo passed
+            # on a CI runner with no `~/.claude` at all. `doctor` owns machine
+            # state (`shared dispatcher`, `floor version`); `audit` records it.
+            if not deployed_digest:
+                notes.append(
+                    f"no deployed global copy at {deployed} on this machine, so "
+                    "the deployed comparison was skipped"
+                )
+            elif deployed_digest != repo_digest:
+                if status == REALITY_OK:
+                    status = REALITY_ADVISORY
+                notes.append(
+                    "vendored bytes differ from the deployed global copy on this "
+                    "machine — a machine-state observation, not a repo defect; "
+                    "reconcile with `harness.py doctor` and `sync-global --apply`"
+                )
         detail = "; ".join(parts)
         if notes:
             detail = f"{detail} — {'; '.join(notes)}"
