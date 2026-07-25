@@ -5328,8 +5328,8 @@ class RealityCheckTests(unittest.TestCase):
                     "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
                     "upstream\thttps://github.com/upstream/widgets.git (fetch)",
                 ),
-                "gh repo view upstream/widgets": (True, "PUBLIC"),
-                "gh repo view acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/upstream/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
             }
         )
         result = self.audit(repo, runner)
@@ -5945,6 +5945,32 @@ class RealityCheckTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("published main tip could not be read", detail)
         self.assertIn("cannot be proven current", detail)
+
+    def test_a_hidden_index_flag_disqualifies_the_reference(self) -> None:
+        # `skip-worktree` (S) and `assume-unchanged` (lowercase) both make
+        # `git status` omit a file's local edits, so a modified template read
+        # as clean and was then hashed from the working tree — a vendored copy
+        # matching that hidden edit would report `ok` while published HEAD
+        # holds different canonical bytes.
+        for flags in (
+            "S templates/hooks/dispatch.py",
+            "h templates/hooks/smoke_test.py",
+            "H templates/hooks/dispatch.py\nS templates/hooks/smoke_test.py",
+        ):
+            with self.subTest(flags=flags):
+                runner = self.canonical_reference_runner(**{"ls-files": (True, flags)})
+                ok, detail = harness.harness_reference_status(
+                    self.harness_root, runner, deadline=None
+                )
+                self.assertFalse(ok)
+                self.assertIn("skip-worktree/assume-unchanged", detail)
+        # An unresolvable index is unproven too, never assumed clean.
+        runner = self.canonical_reference_runner(**{"ls-files": (False, "")})
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("index flags", detail)
 
     def test_a_stale_tracking_ref_is_not_the_reference(self) -> None:
         # `rev-list origin/main...HEAD` returns 0 0 against an unfetched

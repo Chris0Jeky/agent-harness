@@ -1768,6 +1768,34 @@ def harness_reference_status(
             f"harness checkout {harness_root} has uncommitted templates/hooks "
             "changes, so its working tree is not the canonical reference",
         )
+    # "Clean" is only as trustworthy as the index. `skip-worktree` (S) and
+    # `assume-unchanged` (lowercase tag) both make `git status` omit a file's
+    # local edits, so a modified template would report clean and then be hashed
+    # from the working tree — the vendored copy matching that hidden edit would
+    # read `ok` while published HEAD holds different canonical bytes.
+    resolved, index_flags = output_before_deadline(
+        command_runner,
+        ["git", "ls-files", "-v", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the index flags of harness checkout {harness_root} are unresolvable",
+        )
+    hidden = sorted(
+        line.split(" ", 1)[1]
+        for line in index_flags.splitlines()
+        if line[:1] and (line[0].islower() or line[0] == "S") and " " in line
+    )
+    if hidden:
+        return (
+            False,
+            f"harness checkout {harness_root} marks {', '.join(hidden)} "
+            "skip-worktree/assume-unchanged, so `git status` cannot see local "
+            "edits there and this working tree is not the canonical reference",
+        )
     # Clean on a local `main` is not the same as agreeing with the published
     # one: unpushed commits to templates/hooks, or a main that is behind, would
     # otherwise be called canonical. This first query reads refs only, so it
