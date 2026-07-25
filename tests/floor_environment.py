@@ -90,13 +90,16 @@ _FAMILY_CONSTANT = re.compile(r"^_GIT_[A-Z0-9_]*_ENVIRONMENT$")
 
 
 def environment_family_constants(dispatch) -> frozenset:
-    """Every `_GIT_*_ENVIRONMENT` name-set constant dispatch defines."""
-    return frozenset(
-        name
-        for name in dir(dispatch)
-        if _FAMILY_CONSTANT.match(name)
-        and isinstance(getattr(dispatch, name), (set, frozenset))
-    )
+    """Every `_GIT_*_ENVIRONMENT` constant dispatch defines.
+
+    Deliberately NOT filtered by type. Filtering to `set`/`frozenset` used to
+    look like a harmless narrowing, but it made the classification alarm skip
+    exactly the family it should shout about: a new family spelled as a tuple,
+    a list, or a dict would have vanished from the comparison instead of
+    failing it. `test_every_family_constant_is_a_name_set` asserts the type
+    separately, so an odd shape fails loudly rather than disappearing.
+    """
+    return frozenset(name for name in dir(dispatch) if _FAMILY_CONSTANT.match(name))
 
 
 def isolated_environment_names(dispatch) -> frozenset:

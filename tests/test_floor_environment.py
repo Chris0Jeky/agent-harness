@@ -161,6 +161,27 @@ class DerivedIsolationSetTests(unittest.TestCase):
             set(),
         )
 
+    def test_every_family_constant_is_a_name_set(self):
+        """A family with an unexpected shape must fail, not disappear.
+
+        `environment_family_constants` used to filter on `isinstance(..., (set,
+        frozenset))`, so a family added as a tuple, list or dict would drop out
+        of the classification comparison above and be silently unisolated —
+        the alarm would stay green precisely when it had something to say.
+        Type is asserted here instead of being used to select.
+        """
+        for constant in sorted(
+            floor_environment.environment_family_constants(dispatch)
+        ):
+            with self.subTest(constant=constant):
+                self.assertIsInstance(
+                    getattr(dispatch, constant),
+                    (set, frozenset),
+                    f"{constant} is not a name set; the helper derives its "
+                    "isolation set by unioning these, so a different shape "
+                    "needs a deliberate decision here",
+                )
+
     def test_every_named_constant_is_covered(self):
         for constant in sorted(
             floor_environment.environment_family_constants(dispatch)
