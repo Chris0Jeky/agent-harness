@@ -65,7 +65,8 @@ refresh/re-trust sequencing after a dispatcher change). A separate `Codex adapte
 names every candidate handler and platform command that declares no marker, declares a stale one,
 or never passes `--event pre --runtime codex`; a vendored dispatcher or wrapper flag delegation is
 reported as inventory rather than a failure. Because Codex runs hook commands from the session
-cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root.
+cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root,
+and recorded as a cwd-dependency note in the audits where it does resolve.
 That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only

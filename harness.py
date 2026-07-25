@@ -3045,13 +3045,14 @@ def doctor(args: argparse.Namespace) -> int:
                 len(repo_codex_floor_candidates(text, source_kind=source_kind))
                 for _hooks, text, source_kind in repo_hook_sources
             )
-            unresolvable_wrapper_sources = [
-                f"{hooks} ({source_kind}): "
-                f"{lenient - strict} handler(s) bind a session-cwd-relative "
-                "wrapper path"
+            # Binding a repo-relative wrapper is a property of the adapter TEXT,
+            # not of this audit's cwd. Detect it for every source so the
+            # dependency is reported even from the one cwd where it happens to
+            # resolve; only the cwd that actually breaks it fails the floor.
+            cwd_relative_wrapper_sources = [
+                (hooks, source_kind, lenient - strict)
                 for hooks, text, source_kind in repo_hook_sources
-                if wrapper_is_cwd_relative_here(hooks)
-                and (
+                if (
                     lenient := len(
                         repo_codex_floor_groups(text, source_kind=source_kind)
                     )
@@ -3065,6 +3066,19 @@ def doctor(args: argparse.Namespace) -> int:
                         )
                     )
                 )
+            ]
+            unresolvable_wrapper_sources = [
+                f"{hooks} ({source_kind}): "
+                f"{count} handler(s) bind a session-cwd-relative wrapper path"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if wrapper_is_cwd_relative_here(hooks)
+            ]
+            cwd_dependent_wrapper_notes = [
+                f"{hooks} ({source_kind}): {count} handler(s) bind a "
+                "session-cwd-relative wrapper path, so this adapter certifies "
+                f"only for sessions started in {hooks.parent.parent}"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if not wrapper_is_cwd_relative_here(hooks)
             ]
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
@@ -3094,6 +3108,7 @@ def doctor(args: argparse.Namespace) -> int:
                 adapter_gaps.extend(source_gaps)
                 adapter_inventory.extend(source_inventory)
                 adapter_handler_count += source_handlers
+            adapter_inventory.extend(cwd_dependent_wrapper_notes)
             adapter_ok = not adapter_gaps
             # With no adapter handler anywhere there is nothing to certify, and
             # claiming a current marker would assert a fact about a file that

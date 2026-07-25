@@ -192,7 +192,9 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   variable, and use a matcher that positively includes Bash. Because Codex runs a hook command
   from the SESSION cwd rather than the hook source root, a repo-relative wrapper path certifies
   only when those directories are the same; from a subdirectory cwd or a linked worktree, `doctor`
-  fails that adapter closed and names it. The canonical `commandWindows` field and its
+  fails that adapter closed and names it. From the source root itself the same adapter certifies,
+  but the cwd dependency is still reported as an adapter-contract note, because it is a property
+  of the adapter text rather than of the audit's cwd. The canonical `commandWindows` field and its
   official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
   uses the Git-root layer walk
   only when all inspectable top-level `project_root_markers` declarations in system, base-user, and

@@ -2461,7 +2461,12 @@ allow_local_binding = true
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] project Codex floor", output)
-        self.assertNotIn("session-cwd-relative wrapper path", output)
+        # The cwd dependency is a property of the adapter text, so it is
+        # reported even from the cwd where it happens to resolve.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("session-cwd-relative wrapper path", output)
+        self.assertIn(f"only for sessions started in {repo}", output)
+        self.assertNotIn("contract gap", output)
 
     def test_doctor_reports_a_relative_wrapper_from_a_subdirectory_cwd(self) -> None:
         repo = self.make_repo()
