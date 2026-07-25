@@ -584,9 +584,14 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
                 index += 2
             else:
                 index += 1
+            # Reads RESTORED text. The tokenizer masks parentheses that came out
+            # of a quoted span so the process-substitution balance walk stops
+            # counting data as syntax; a fail-CLOSED opacity guard must not
+            # inherit that as a silent relaxation, exactly as
+            # `has_dynamic_shell_token` refuses to lose a quote-masked backtick.
             if (
                 not attached
-                or attached.startswith(("@", "("))
+                or restore_quoted_literal_punctuation(attached).startswith(("@", "("))
                 or has_dynamic_shell_token(attached)
             ):
                 return None, f"Start-Process -{name} has an opaque value."
@@ -1034,7 +1039,15 @@ def is_powershell_foreach_loop_statement(head: str, toks: list[str]) -> bool:
     never rejoined across a segment split — the body is ordinary code that the
     normal segment walk already inspects.
     """
-    if head != "foreach" or len(toks) < 2 or not toks[1].startswith("("):
+    # Restored text: a quote-masked `(` still opens the statement's header as
+    # WRITTEN, and failing to recognize it here demotes the statement to the
+    # ForEach-Object member-invocation rule, which denies. Same reasoning as the
+    # opacity guard above, in the over-blocking direction.
+    if (
+        head != "foreach"
+        or len(toks) < 2
+        or not restore_quoted_literal_punctuation(toks[1]).startswith("(")
+    ):
         return False
     return bool(re.search(r"\bin\b", " ".join(toks[1:]), re.IGNORECASE))
 
@@ -1355,7 +1368,7 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
         # A `(...)`/`@(...)` subexpression (e.g. [scriptblock]::Create(...))
         # builds a scriptblock at runtime whose body the floor never sees. This
         # stays live in an expression tail: `-join (iex '...')` still executes.
-        if token.startswith(("(", "@(")):
+        if restore_quoted_literal_punctuation(token).startswith(("(", "@(")):
             return "A dynamic pipeline scriptblock cannot be inspected safely."
         if expression_tail:
             # An operator's operand is a value, not a scriptblock source: `-join
