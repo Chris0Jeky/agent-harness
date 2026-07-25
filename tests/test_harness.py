@@ -5125,6 +5125,23 @@ class RealityCheckTests(unittest.TestCase):
         result = self.audit(repo, FakeCommandRunner())
         self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
 
+    def test_drive_absolute_human_todo_is_a_mismatch(self) -> None:
+        # The guard exists to catch a declaration that is not repo-relative;
+        # a drive-absolute value is exactly that, and PurePosixPath calls it
+        # relative because it carries no leading slash.
+        for declared in (
+            "C:\\Users\\jekyt\\HUMAN_TODO.md",
+            "C:/Users/jekyt/HUMAN_TODO.md",
+            "C:HUMAN_TODO.md",
+            "\\\\server\\share\\HUMAN_TODO.md",
+        ):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(human_todo=declared)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+                self.assertIn("not a repo-relative path", self.details(result))
+                self.assertFalse(result["ok"])
+
     def test_null_human_todo_above_t1_is_advisory_only(self) -> None:
         repo = self.make_repo(tier=3, human_todo=None)
         result = self.audit(repo, FakeCommandRunner())

@@ -1420,7 +1420,18 @@ def human_todo_findings(
             )
         ]
     relative = PurePosixPath(declared.replace("\\", "/"))
-    if relative.is_absolute() or ".." in relative.parts:
+    # `PurePosixPath("C:/Users/...").is_absolute()` is False - no leading slash -
+    # so a drive-absolute declaration slipped past the POSIX test and was then
+    # JOINED to the repo path, where the drive silently won. Reject any value
+    # that carries a Windows drive or root as well.
+    windows_view = PureWindowsPath(declared)
+    if (
+        relative.is_absolute()
+        or windows_view.is_absolute()
+        or windows_view.drive
+        or windows_view.root
+        or ".." in relative.parts
+    ):
         return [
             reality_finding(
                 check,
