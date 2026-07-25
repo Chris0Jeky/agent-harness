@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.3 (2026-07-24)"
+FLOOR_VERSION = "1.6.4 (2026-07-25)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3224,18 +3224,23 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
         ):
             return "A custom Git merge strategy can execute outside floor inspection."
     diff_args = None
-    if subcommand in {
-        "diff",
-        # The diff plumbing takes the same --ext-diff option as porcelain diff
-        # and is admitted by _GIT_READ_ONLY_PLUMBING, so it needs the same guard.
-        "diff-files",
-        "diff-index",
-        "diff-tree",
-        "format-patch",
-        "log",
-        "show",
-        "whatchanged",
-    }:
+    if (
+        subcommand
+        in {
+            "diff",
+            "format-patch",
+            "log",
+            "show",
+            "whatchanged",
+        }
+        # Every admitted read-only plumbing subcommand gets the same guard. The
+        # diff plumbing (diff-files/diff-index/diff-tree) takes --ext-diff just
+        # like porcelain diff, and naming the family rather than listing members
+        # means admitting a new subcommand to _GIT_READ_ONLY_PLUMBING cannot
+        # silently leave it unguarded -- which is exactly how `rev-list
+        # --output=` slipped through.
+        or subcommand in _GIT_READ_ONLY_PLUMBING
+    ):
         diff_args = args
     elif subcommand == "stash" and args and args[0].lower() == "show":
         diff_args = args[1:]
@@ -7106,7 +7111,15 @@ def check(
                         "deny",
                         "Git patch application under an opaque or secret-looking directory root is floor-blocked.",
                     )
-            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS:
+            # The admitted read-only plumbing is guarded here too. `--output` is a
+            # revision-walking option, not a diff-only one: `git rev-list
+            # --output=<file>` opens the file with "w" during option parsing and
+            # TRUNCATES it before writing any revisions, so it destroys a secret
+            # just as `git diff --output=` would. Verified against real git: a
+            # 35-byte file became 0 bytes with rc=0. Guarding a subcommand that
+            # does not accept --output costs nothing, so the set is deliberately
+            # wider than the options each subcommand documents.
+            if sub in _GIT_EXTERNAL_DIFF_SUBCOMMANDS or sub in _GIT_READ_ONLY_PLUMBING:
                 diff_outputs = git_option_values(args, "--output")
                 if sub == "format-patch":
                     diff_outputs = diff_outputs + git_option_values(
