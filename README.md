@@ -71,7 +71,9 @@ That floor must be the canonical root
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
 requirements, managed hook-feature requirements, persisted canonical/legacy hook feature
 disables, and a disabled canonical handler state, plus the unsupported stored legacy `profile`
-selector. Valid feature values inside the
+selector. A managed requirements pin of the hook feature *on* does not clear a persisted disable:
+Codex's merge order for that contest is not statically provable, so `doctor` names both
+declarations, calls the outcome UNPROVEN, and fails closed. Valid feature values inside the
 inactive legacy profile map do not affect activation; malformed hook feature values still fail the
 typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
 runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,

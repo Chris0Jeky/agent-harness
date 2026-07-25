@@ -725,10 +725,11 @@ def codex_project_hook_activation_status(
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
     required_hook_feature = requirements_hook_feature_declaration(requirements_path)
     hook_feature_pin: bool | None = None
+    pin_location = ""
     if required_hook_feature is not None:
-        location, hook_feature_pin = required_hook_feature
+        pin_location, hook_feature_pin = required_hook_feature
         if not hook_feature_pin:
-            blockers.append(f"{location}=false")
+            blockers.append(f"{pin_location}=false")
 
     stored_feature_paths = [
         system_config,
@@ -755,15 +756,16 @@ def codex_project_hook_activation_status(
             )
             if not enabled
         )
-    # A managed requirements pin outranks every config layer: pinning the hook
-    # feature true is exactly how an administrator enforces hooks over a user or
-    # project opt-out, so treating the losing declaration as a blocker reported
-    # a dead floor for a correctly managed environment.
-    overridden_disables: list[str] = []
-    if hook_feature_pin is True:
-        overridden_disables = feature_disables
-    else:
-        blockers.extend(feature_disables)
+    # A managed requirements pin of the hook feature TRUE and a lower-layer
+    # disable contest each other, and which one Codex applies is not statically
+    # provable from anything inspectable here: the shipped binary documents the
+    # requirements schema but states no merge order for `[features]`, and the
+    # one merge rule it does state out loud ("Codex merges these rules with
+    # other config and uses the most restrictive result") is about prefix rules.
+    # `doctor` certifies floors, so an unprovable conflict fails closed and
+    # names both declarations rather than assuming the administrator wins.
+    contested_disables = feature_disables if hook_feature_pin is True else []
+    blockers.extend(feature_disables)
 
     user_paths = [codex_home / "config.toml", *profile_paths]
     for config_path in dict.fromkeys(user_paths):
@@ -777,11 +779,12 @@ def codex_project_hook_activation_status(
         "CLI/session/managed-cloud feature, policy, and state overrides remain "
         "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
     )
-    if overridden_disables:
+    if contested_disables:
         boundary = (
-            f"managed requirements pin overrides {len(overridden_disables)} "
-            f"lower-precedence hook-feature disable(s): "
-            f"{'; '.join(overridden_disables)}; {boundary}"
+            f"{pin_location}=true contests {len(contested_disables)} "
+            "hook-feature disable(s), but Codex's merge order for managed "
+            "requirements against stored config features is UNPROVEN here, so "
+            f"the conflict fails closed; {boundary}"
         )
     if blockers:
         return (

@@ -1220,7 +1220,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
 
-    def test_doctor_lets_requirements_pin_outrank_feature_disables(self) -> None:
+    def test_doctor_fails_closed_when_a_pin_contests_feature_disables(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
             Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -1237,12 +1237,15 @@ class HarnessTests(unittest.TestCase):
             profile_configs={"custom.config.toml": "[features]\ncodex_hooks = false\n"},
         )
 
-        self.assertEqual(result, 0, output)
-        self.assertIn("[ok] Codex project hook activation", output)
-        self.assertIn("[ok] project Codex floor", output)
-        # The overridden declarations stay visible; they are reported as
-        # outranked rather than silently dropped.
-        self.assertIn("managed requirements pin overrides 3 ", output)
+        # Codex's merge order for a managed requirements pin against stored
+        # config features is not statically provable, so the contest fails
+        # closed and names both sides instead of certifying a floor that a
+        # project-local opt-out may have already killed.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("contests 3 hook-feature disable(s)", output)
+        self.assertIn("UNPROVEN", output)
         self.assertIn("features.hooks", output)
         self.assertIn("features.codex_hooks", output)
 
@@ -1262,7 +1265,8 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("inspectable activation blocker(s)", output)
-        self.assertNotIn("managed requirements pin overrides", output)
+        # A pin of false agrees with the disable; there is nothing to contest.
+        self.assertNotIn("contests", output)
 
     def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
         repo = self.make_repo()
@@ -1284,8 +1288,9 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("enabled=false", output)
-        # The pin outranks the feature toggle, never the per-handler state.
-        self.assertIn("managed requirements pin overrides 1 ", output)
+        # The per-handler state blocker is independent of the feature contest:
+        # both are reported, and neither is cleared by the managed pin.
+        self.assertIn("contests 1 hook-feature disable(s)", output)
 
     def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
         requirements = Path(self.temp.name) / "requirements.toml"

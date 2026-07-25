@@ -209,7 +209,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
   but no hooks are valid. The project floor also fails when inspectable system requirements allow
   only managed hooks or pin the hook feature off, an active persisted canonical/legacy feature
-  setting disables hooks, or the exact canonical handler state is disabled. Stored legacy
+  setting disables hooks, or the exact canonical handler state is disabled. A managed requirements
+  pin of the hook feature ON does not clear such a disable: Codex publishes no merge order for
+  `[features]` across managed requirements and stored config, so that contest is UNPROVEN and
+  fails closed with both declarations named. Stored legacy
   `profile` selectors are rejected;
   feature values in their inactive legacy profile maps are schema-checked but never applied.
   Project-local `profile` and `profiles` values are ignored with Codex's denylist. Commented or
