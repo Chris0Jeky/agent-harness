@@ -1294,6 +1294,27 @@ CASES = [
     ("git diff-files --ext-diff", 1, {}, "deny"),
     ("git diff-tree --output=.env -r HEAD", 1, {}, "deny"),
     ("git diff-tree --output=$OUT -r HEAD", 1, {}, "deny"),
+    # `--output` is a revision-walking option, not a diff-only one, so every
+    # admitted read-only plumbing subcommand can truncate a secret with it.
+    # Verified against real git: `git rev-list --output=victim HEAD` took a
+    # 35-byte file to 0 bytes with rc=0, because git opens the path with "w"
+    # while parsing options. Floor 1.6.3 admitted rev-list as read-only without
+    # extending this guard and newly ALLOWED these at every tier including T4;
+    # neither the smoke matrix nor an 80k-command corpus replay caught it,
+    # because replay measures what has been run, not what is reachable.
+    ("git rev-list --output=.env HEAD", 1, {}, "deny"),
+    ("git rev-list --output=.env HEAD", 4, {}, "deny"),
+    ("git rev-list --output=id_rsa HEAD", 1, {}, "deny"),
+    ("git rev-list --output=../../../.env HEAD", 1, {}, "deny"),
+    ("git rev-list --output=$OUT HEAD", 1, {}, "deny"),
+    ("git merge-base --output=.env a b", 1, {}, "deny"),
+    ("git check-ignore --output=.env x", 1, {}, "deny"),
+    ("git hash-object --output=.env f", 1, {}, "deny"),
+    # The read-only admission itself must survive the guard.
+    ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
+    ("git rev-list HEAD --count", 1, {}, "allow"),
+    ("git check-ignore -v .worktrees", 1, {}, "allow"),
+    ("git merge-base --is-ancestor a b", 1, {}, "allow"),
     # --- git argv write/exec destinations ---
     ("git clone --config=core.sshCommand=payload ssh://host/repo", 1, {}, "deny"),
     ("git clone -c core.sshCommand=payload ssh://host/repo", 1, {}, "deny"),
