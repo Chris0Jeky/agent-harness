@@ -1175,15 +1175,24 @@ PRIVACY_CLAIM_PATTERN = re.compile(
 # "local-only" printed `ok` without measuring who can read it.
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[.~]|/(?!/)|\\(?!\\))")
 UNC_REMOTE_PATTERN = re.compile(r"^(?://|\\\\)[^/\\]")
-# `file:////server/share/repo.git` is the file-URL spelling of a UNC path, so
-# the share test has to see the path INSIDE the URL; matching `file://` first
-# would call a network share local before the UNC rule ever ran.
-_FILE_URL_PREFIX = re.compile(r"(?i)^file://(?:localhost)?")
+# A `file://` URL hides a host in two different places, and the share test has
+# to see both before `LOCAL_REMOTE_PATTERN`'s `file://` alternative claims the
+# URL: `file://server/share/x` puts the host in the AUTHORITY, while
+# `file:////server/share/x` has an empty authority and the UNC path in the path
+# component. Stripping a fixed prefix caught only the second.
+_FILE_URL = re.compile(r"(?i)^file://([^/]*)(/.*)?$")
 
 
-def remote_path_for_share_test(url: str) -> str:
-    """The filesystem path a remote names, with any `file://` wrapper removed."""
-    return _FILE_URL_PREFIX.sub("", url.strip(), count=1)
+def remote_names_a_network_share(url: str) -> bool:
+    """Whether this remote names a HOST rather than a path on this machine."""
+    candidate = url.strip()
+    match = _FILE_URL.match(candidate)
+    if match:
+        authority = match.group(1)
+        if authority and authority.lower() != "localhost":
+            return True
+        candidate = match.group(2) or ""
+    return bool(UNC_REMOTE_PATTERN.match(candidate))
 
 
 # The remote work is actually published to. A public remote under any other
@@ -1335,6 +1344,11 @@ def local_only_command_output(
     return bounded_command_output(argv, cwd, timeout)
 
 
+# The runners that accept a `timeout`, and so can be clamped to what is left of
+# the aggregate budget. A test's fake runner is deliberately not one of them.
+CLAMPABLE_COMMAND_RUNNERS = (bounded_command_output, local_only_command_output)
+
+
 def output_before_deadline(
     command_runner: Any,
     argv: list[str],
@@ -1356,7 +1370,12 @@ def output_before_deadline(
     remaining = deadline - monotonic()
     if remaining <= 0:
         return False, ""
-    if command_runner is bounded_command_output:
+    # Every production runner takes the clamp, not just the network one:
+    # `--offline` still shells out to local git, and a `status`/`ls-files`/
+    # `rev-list` on a network-mounted checkout can be slow enough to overrun
+    # the advertised aggregate budget with its own 3s default. A test's fake
+    # runner takes no timeout, so it is called with the plain signature.
+    if command_runner in CLAMPABLE_COMMAND_RUNNERS:
         return command_runner(
             argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
         )
@@ -1418,6 +1437,46 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+def configured_push_remote(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> str:
+    """The remote an ordinary `git push` targets from the current branch.
+
+    `origin` is only git's LAST fallback. `branch.<name>.pushRemote`,
+    `remote.pushDefault` and `branch.<name>.remote` each override it, in that
+    order, so a repo with a private `origin` and
+    `remote.pushDefault = public-mirror` publishes to the public one — while an
+    origin-only rule downgraded that PUBLIC result to an exit-0 advisory.
+
+    Every query is `git config`, which reads local files and stays available
+    under `--offline`. An unanswered query falls through to the next candidate,
+    ending at `origin`, so a silent git degrades to the previous behaviour
+    rather than to no publishing remote at all.
+    """
+
+    def configured(key: str) -> str:
+        resolved, value = output_before_deadline(
+            command_runner, ["git", "config", "--get", key], repo, deadline
+        )
+        return value.strip() if resolved else ""
+
+    resolved, branch = output_before_deadline(
+        command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
+    )
+    branch = branch.strip() if resolved else ""
+    candidates = []
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.pushRemote")
+    candidates.append("remote.pushDefault")
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.remote")
+    for key in candidates:
+        configured_name = configured(key)
+        if configured_name:
+            return configured_name
+    return PUBLISHING_REMOTE
+
+
 def configured_remote_urls(
     repo: Path, command_runner: Any, deadline: float | None
 ) -> tuple[bool, list[tuple[str, str, str]]]:
@@ -1449,6 +1508,7 @@ def configured_remote_urls(
 
 def publishing_remote_endpoints(
     rows: list[tuple[str, str, str]],
+    publishing_remote: str = PUBLISHING_REMOTE,
 ) -> list[tuple[str, str, bool, str]]:
     """Fold `git remote -v` rows into (name, url, publishes, note) entries.
 
@@ -1458,13 +1518,17 @@ def publishing_remote_endpoints(
 
     * a URL that is a PUSH endpoint — a public `url` behind a private
       `pushurl` is a fetch mirror, not a place anything is published;
-    * of `origin`, or of ANY remote when no `origin` is configured. The
-      origin-only rule presumed a private `origin` exists; with no origin at
-      all, calling the one remote that carries the work "not the publishing
-      remote" turned a real exposure into an exit-0 advisory.
+    * of ``publishing_remote`` — which is `origin` only as git's LAST fallback;
+      `configured_push_remote` resolves `branch.<name>.pushRemote` and
+      `remote.pushDefault` first, because a repo with a private `origin` and
+      `remote.pushDefault = public-mirror` publishes to the public one;
+    * or of ANY remote when the resolved publishing remote is not configured at
+      all. The origin-only rule presumed a private `origin` exists; with none,
+      calling the one remote that carries the work "not the publishing remote"
+      turned a real exposure into an exit-0 advisory.
 
     `note` is the clause that explains a non-publishing verdict, so the finding
-    says which of the two reasons applied.
+    says which of the reasons applied.
     """
     by_name: dict[str, dict[str, list[str]]] = {}
     for name, url, direction in rows:
@@ -1472,30 +1536,35 @@ def publishing_remote_endpoints(
         bucket = endpoints["push" if direction == "push" else "fetch"]
         if url not in bucket:
             bucket.append(url)
-    has_origin = PUBLISHING_REMOTE in by_name
+    has_publishing_remote = publishing_remote in by_name
     entries: list[tuple[str, str, bool, str]] = []
     for name, endpoints in by_name.items():
         # git prints both rows; a fetch-only listing means the same endpoint.
         push_urls = endpoints["push"] or endpoints["fetch"]
-        publishing_remote = name == PUBLISHING_REMOTE or not has_origin
+        publishes_here = name == publishing_remote or not has_publishing_remote
         for url in dict.fromkeys(endpoints["fetch"] + endpoints["push"]):
-            if not publishing_remote:
+            if not publishes_here:
                 note = (
-                    f"{name} is not the publishing remote ({PUBLISHING_REMOTE}), "
+                    f"{name} is not the publishing remote ({publishing_remote}), "
                     "so never push this repo there"
                 )
             elif url not in push_urls:
                 note = f"{name} only FETCHES from this URL; it pushes to " + ", ".join(
                     redact_remote_url(each) for each in push_urls
                 )
-            elif has_origin:
-                note = ""
+            elif has_publishing_remote:
+                note = (
+                    ""
+                    if publishing_remote == PUBLISHING_REMOTE
+                    else f"git is configured to push to {publishing_remote}, "
+                    f"not {PUBLISHING_REMOTE}"
+                )
             else:
                 note = (
-                    f"no remote named {PUBLISHING_REMOTE!r} is configured, so "
+                    f"no remote named {publishing_remote!r} is configured, so "
                     f"{name} is treated as a publishing remote"
                 )
-            entries.append((name, url, publishing_remote and url in push_urls, note))
+            entries.append((name, url, publishes_here and url in push_urls, note))
     # Spend the shared probe budget on the endpoints that can produce a
     # MISMATCH first. The caller walks this list under one aggregate deadline,
     # so with git's alphabetical remote order a handful of slow advisory
@@ -1591,9 +1660,12 @@ def sensitive_data_findings(
             )
         ]
     findings: list[dict[str, str]] = []
-    for name, url, publishes, note in publishing_remote_endpoints(remotes):
+    publishing_remote = configured_push_remote(repo, command_runner, deadline)
+    for name, url, publishes, note in publishing_remote_endpoints(
+        remotes, publishing_remote
+    ):
         shown = redact_remote_url(url)
-        if UNC_REMOTE_PATTERN.match(remote_path_for_share_test(url)):
+        if remote_names_a_network_share(url):
             findings.append(
                 reality_finding(
                     check,
@@ -1718,6 +1790,21 @@ def human_todo_findings(
             f"human_todo declares {declared!r} but no such file exists in {repo}",
         )
     ]
+
+
+def symlink_target(path: Path) -> str:
+    """The link this path IS, or "" for an ordinary file or an unreadable link.
+
+    Deliberately `lstat`-based: every other probe here follows links, which is
+    right for reading content and wrong for deciding whether a repo vendors
+    bytes of its own.
+    """
+    try:
+        if not path.is_symlink():
+            return ""
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return ""
 
 
 def file_presence(path: Path) -> tuple[bool, str]:
@@ -1912,6 +1999,18 @@ def vendored_floor_findings(
             label = f"{directory}/{name}"
             path = repo / directory / name
             present, access_error = file_presence(path)
+            if not access_error and present:
+                # `stat()` follows links, so a `hooks/dispatch.py` symlinked to
+                # the harness template hashed the TARGET and reported the repo
+                # as matching canonical bytes — while the repo vendors none,
+                # and the link may resolve elsewhere, or nowhere, on the next
+                # machine. That is a fact about this filesystem, not the repo.
+                target = symlink_target(path)
+                if target:
+                    access_error = (
+                        f"{path} is a symlink to {target}; the bytes it resolves "
+                        "to are this machine's, not this repo's vendored floor"
+                    )
             if access_error:
                 inaccessible.append((label, access_error))
             elif present:

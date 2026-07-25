@@ -267,6 +267,15 @@ triage, formatting, classification) to cheap models at low effort. Effort is the
 — turn it before swapping models. When unsure, route up: the cost of over-routing is money;
 the cost of under-routing is confident wrong work that passes every mechanical gate.
 
+> **SUPERSEDED (2026-07-25) — do not route from this paragraph.** Lumping *triage* and
+> *classification* in with rotation and formatting was the error: deciding what matters is
+> judgment wearing mechanical clothes, and that one misfiling is what kept the Gardener pinned
+> to a cheap model through three separate prose bans. The live rule is BLUEPRINT §5 / SPECS §8 —
+> triage and classification go to the **default** tier at low effort; only genuinely simple,
+> well-specified, hard-to-get-wrong work goes to the **cheap** tier, and there at medium/high
+> effort. The paragraph above is kept as the reasoning of the time, not as an instruction.
+> This book is rationale only; when it and the blueprint disagree, the blueprint wins.
+
 The rails matter more than the routing: a weak model never merges, never edits canon, never
 touches the deny floor, never approves its own tier's gates. Where rails can be structural
 (model pins in agent definitions, PR-only output), make them structural; where they can't,

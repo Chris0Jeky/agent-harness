@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -5769,6 +5770,84 @@ class RealityCheckTests(unittest.TestCase):
                     self.statuses(local_result, "remote visibility"), ["ok"]
                 )
 
+    def test_a_file_url_authority_is_a_network_share(self) -> None:
+        # `file://server/share/x` puts the host in the AUTHORITY, where the
+        # earlier fix's fixed-prefix strip could not see it: the remainder had
+        # no `//`, so the UNC rule missed it and `file://` claimed it as local.
+        for url in (
+            "file://fileserver/share/repo.git",
+            "file:////fileserver/share/repo.git",
+            "//fileserver/share/repo.git",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(harness.remote_names_a_network_share(url), url)
+        for url in (
+            "file:///srv/git/widgets.git",
+            "file://localhost/srv/git/widgets.git",
+            "/srv/git/widgets.git",
+            "C:/git/widgets.git",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(harness.remote_names_a_network_share(url), url)
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tfile://fileserver/share/secrets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+
+    def test_a_configured_push_remote_beats_origin(self) -> None:
+        # `branch.<name>.pushRemote` and `remote.pushDefault` decide where an
+        # ordinary `git push` publishes. A private origin plus a public
+        # pushDefault is a real exposure that the origin-only rule downgraded
+        # to an exit-0 advisory.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets-private.git (push)\n"
+                    "mirror\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "mirror\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "config --get remote.pushDefault": (True, "mirror"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+        self.assertIn("git is configured to push to mirror", self.details(result))
+
+    def test_a_branch_push_remote_beats_push_default(self) -> None:
+        self.assertEqual(
+            harness.configured_push_remote(
+                Path("."),
+                FakeCommandRunner(
+                    {
+                        "rev-parse --abbrev-ref HEAD": (True, "work"),
+                        "config --get branch.work.pushRemote": (True, "fork"),
+                        "config --get remote.pushDefault": (True, "mirror"),
+                    }
+                ),
+                None,
+            ),
+            "fork",
+        )
+        # Nothing configured, or a silent git, still means `origin`.
+        self.assertEqual(
+            harness.configured_push_remote(Path("."), FakeCommandRunner(), None),
+            "origin",
+        )
+
     def test_the_visibility_probe_is_pinned_to_github_dot_com(self) -> None:
         # `gh repo view OWNER/REPO` resolves against GH_HOST or the default
         # authenticated host, so on a machine pointed at GitHub Enterprise the
@@ -6271,6 +6350,59 @@ class RealityCheckTests(unittest.TestCase):
         self.assertNotIn("no vendored floor copy", self.details(result))
         # Unprovable is not a repo defect, so it does not fail the audit.
         self.assertTrue(result["ok"], result["issues"])
+
+    @unittest.skipUnless(
+        hasattr(os, "symlink"), "platform cannot create symbolic links"
+    )
+    def test_a_symlinked_vendored_floor_is_unproven_not_matching(self) -> None:
+        # `stat()` follows links, so a `hooks/dispatch.py` symlinked to the
+        # harness template hashed the TARGET and reported the repo as matching
+        # canonical bytes — while the repo vendors none and the link may
+        # resolve elsewhere, or nowhere, on the next machine.
+        repo = self.make_repo()
+        template = self.harness_root / "templates" / "hooks" / "dispatch.py"
+        self.write_floor(template, "1.6.5 (2026-07-25)")
+        link = repo / "hooks" / "dispatch.py"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(template, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create a symlink here: {exc}")
+        result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_linked_vendored_floor_is_unproven_on_every_platform(self) -> None:
+        # The real-symlink test above needs a privilege Windows withholds, so
+        # this one drives the same branch through the seam and runs everywhere.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        linked = repo / "hooks" / "dispatch.py"
+
+        def fake_symlink_target(path: Path) -> str:
+            return "/elsewhere/dispatch.py" if path == linked else ""
+
+        with mock.patch.object(
+            harness, "symlink_target", side_effect=fake_symlink_target
+        ):
+            result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to /elsewhere/dispatch.py", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+        # Without the link the identical bytes still compare as `ok`, so the
+        # new branch is what changed the verdict.
+        plain = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(self.statuses(plain, "vendored hooks/dispatch.py"), ["ok"])
 
     def test_an_absent_vendored_path_is_still_a_clean_ok(self) -> None:
         # The guarded stat must not turn ordinary absence into an unproven.
