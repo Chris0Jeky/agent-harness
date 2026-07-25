@@ -2506,7 +2506,10 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
 
 
 def windows_operator_segments(
-    command: str, *, single_quotes_are_inert: bool = True
+    command: str,
+    *,
+    single_quotes_are_inert: bool = True,
+    aggregate_redirects: bool = True,
 ) -> list[tuple[str, str]]:
     """Split Windows command operators without splitting quoted inert text."""
     result: list[tuple[str, str]] = []
@@ -2526,7 +2529,11 @@ def windows_operator_segments(
             current.append(char)
         elif char == "&" and (
             (current and current[-1] in "<>")
-            or (index + 1 < len(command) and command[index + 1] == ">")
+            or (
+                aggregate_redirects
+                and index + 1 < len(command)
+                and command[index + 1] == ">"
+            )
         ):
             # ``2>&1``, ``<&0`` and aggregate ``&>``/``&>>`` are
             # redirections, not command separators.  Splitting here discards
@@ -2737,7 +2744,9 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
             child_segments = windows_operator_segments(
-                child, single_quotes_are_inert=cmd_wrapper is None
+                child,
+                single_quotes_are_inert=cmd_wrapper is None,
+                aggregate_redirects=cmd_wrapper is None,
             )
             candidates.extend(segment for segment, _operator in child_segments)
 

@@ -130,5 +130,17 @@ class AggregateConfigRedirectTests(unittest.TestCase):
                 self.assertIn("push-config-unverifiable", reason)
 
 
+class CmdAggregateSeparatorTests(unittest.TestCase):
+    def test_cmd_aggregate_spelling_exposes_the_following_delete(self):
+        for operator in ("&>", "&>>"):
+            command = (
+                rf"""cmd /c "echo harmless {operator}nul rd /s /q """
+                r'''C:\critical\outside path\"'''
+            )
+            with self.subTest(operator=operator):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
