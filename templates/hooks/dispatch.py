@@ -3960,6 +3960,26 @@ def command_prefix_redirection_token(
     return None
 
 
+def process_substitution_end(toks: list[str], index: int) -> int | None:
+    """Return the index after a ``<(...)``/``>(...)`` operand, or ``None``.
+
+    ``punctuation_chars`` makes shlex split a multi-word producer across several
+    tokens (``<(git show HEAD:f)`` becomes ``['<', '(git', 'show', 'HEAD:f)']``),
+    so consuming a fixed token count lands the head INSIDE the substitution and
+    resolves an attacker-influenced word as the executable.  Scan to the
+    balancing ``)`` instead; the walk is bounded by the token count, and an
+    unterminated substitution returns ``None`` so the caller keeps the operator
+    as the head rather than skipping past text it cannot delimit.
+    """
+    depth = 0
+    while index < len(toks):
+        depth += toks[index].count("(") - toks[index].count(")")
+        index += 1
+        if depth <= 0:
+            return index
+    return None
+
+
 def leading_redirection_end(toks: list[str], index: int) -> int | None:
     """Return the argv index after one command-leading redirection.
 
@@ -4001,7 +4021,7 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
             and target_index + 1 < len(toks)
             and toks[target_index + 1].lstrip().startswith("(")
         ):
-            return target_index + 2
+            return process_substitution_end(toks, target_index + 1)
         return target_index + 1
     operator_index = index
     has_descriptor = False
@@ -4023,14 +4043,15 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
         and toks[target_index].lstrip().startswith("(")
     ):
         return None
-    # ``< <(producer) command`` redirects from a process substitution.  Its
-    # operand is two shlex tokens and both belong to the redirection prefix.
+    # ``< <(producer) command`` redirects from a process substitution.  The
+    # operand is the whole parenthesized producer, however many tokens shlex
+    # split it into, and all of it belongs to the redirection prefix.
     if (
         toks[target_index] in {"<", ">"}
         and target_index + 1 < len(toks)
         and toks[target_index + 1].lstrip().startswith("(")
     ):
-        return target_index + 2
+        return process_substitution_end(toks, target_index + 1)
     return target_index + 1
 
 

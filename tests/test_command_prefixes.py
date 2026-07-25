@@ -78,6 +78,24 @@ class CommandHeadPrefixTests(unittest.TestCase):
     def test_a_leading_process_substitution_is_not_a_redirect_prefix(self):
         self.assertEqual(dispatch.command_head(["<", "(printf", "x)", "tail"])[0], "<")
 
+    def test_process_substitution_operand_is_consumed_whole(self):
+        # shlex splits a multi-word producer across tokens; consuming a fixed
+        # count lands the head inside the substitution.
+        cases = (
+            (["<", "<", "(git", "show", "HEAD:file)", "diff", "-"], "diff"),
+            (["<", "<", "(printf", "x)", "tail"], "tail"),
+            (["<", "<", "(cat", "(nested", "a)", "b)", "sort"], "sort"),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(dispatch.command_head(argv)[0], expected)
+
+    def test_unterminated_process_substitution_does_not_skip_ahead(self):
+        # No balancing `)`: keep the operator as the head rather than guessing
+        # where the operand ended.
+        self.assertIsNone(dispatch.process_substitution_end(["(git", "show"], 0))
+        self.assertEqual(dispatch.command_head(["<", "<", "(git", "show"])[0], "<")
+
 
 class PrefixCrossProductTests(unittest.TestCase):
     PREFIXES = (
