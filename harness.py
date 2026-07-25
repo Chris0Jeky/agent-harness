@@ -2131,8 +2131,15 @@ _FLOOR_VALUE_PATTERNS = tuple(
     )
 )
 
+# Every recognized wrapper shape is a repo-relative path (see the wrapper entry
+# above), so dropping it is the whole rule when the session cwd is not the hook
+# source root: nothing that remains can be mistaken for a resolvable wrapper.
+_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = _FLOOR_VALUE_PATTERNS[:-1]
 
-def value_binds_anchored_floor_path(value: str) -> bool:
+
+def value_binds_anchored_floor_path(
+    value: str, *, reject_relative_wrapper: bool = False
+) -> bool:
     """Return whether an assignment value resolves to a genuine floor path.
 
     Uses a strict whitelist of the exact known-good value shapes rather than
@@ -2141,13 +2148,25 @@ def value_binds_anchored_floor_path(value: str) -> bool:
     variable's runtime value can never diverge from the pinned floor via a
     rebind, a glued prefix (``x.claude/...`` / ``evil'.claude/...'``), or
     concatenation past the marker.
+
+    ``reject_relative_wrapper`` additionally drops the wrapper shape, which is
+    only meaningful when the session cwd is the hook source root.
     """
     normalized = value.lower().replace("\\", "/")
-    return any(pattern.fullmatch(normalized) for pattern in _FLOOR_VALUE_PATTERNS)
+    patterns = (
+        _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS
+        if reject_relative_wrapper
+        else _FLOOR_VALUE_PATTERNS
+    )
+    return any(pattern.fullmatch(normalized) for pattern in patterns)
 
 
 def is_inert_floor_setup_segment(
-    segment: str, allowed_variables: set[str], *, windows: bool
+    segment: str,
+    allowed_variables: set[str],
+    *,
+    windows: bool,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     assignment = inert_floor_assignment(segment, windows=windows)
     if assignment is None:
@@ -2157,7 +2176,9 @@ def is_inert_floor_setup_segment(
         # A floor variable may only be (re)bound to the anchored floor path; any
         # other value — an attacker rebind or concatenation past the marker —
         # is rejected so the executed path cannot diverge from the pinned one.
-        return value_binds_anchored_floor_path(value)
+        return value_binds_anchored_floor_path(
+            value, reject_relative_wrapper=reject_relative_wrapper
+        )
     literal = value.strip()
     if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
         literal = literal[1:-1]
@@ -2313,7 +2334,14 @@ _WRAPPER_PATH_TOKEN = re.compile(
 )
 
 
-def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
+def token_is_wrapper(
+    token: str, wrapper_variables: set[str], *, reject_relative: bool = False
+) -> bool:
+    if reject_relative:
+        # Every recognized wrapper form is repo-relative, and a variable-bound
+        # wrapper only reaches here once `value_binds_anchored_floor_path`
+        # accepted an equally relative value.
+        return False
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
     # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
@@ -2324,17 +2352,19 @@ def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
 
 
 def shell_script_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str], wrapper_variables: set[str], *, reject_relative: bool = False
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
     if index < len(tokens) and tokens[index] == "--":
         index += 1
-    return index < len(tokens) and token_is_wrapper(tokens[index], wrapper_variables)
+    return index < len(tokens) and token_is_wrapper(
+        tokens[index], wrapper_variables, reject_relative=reject_relative
+    )
 
 
 def powershell_file_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str], wrapper_variables: set[str], *, reject_relative: bool = False
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -2344,14 +2374,24 @@ def powershell_file_operand_is_wrapper(
         return False
     if len(tokens) < 3:
         return False
-    return token_is_wrapper(tokens[2], wrapper_variables)
+    return token_is_wrapper(
+        tokens[2], wrapper_variables, reject_relative=reject_relative
+    )
 
 
-def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
+def segment_invokes_wrapper(
+    segment: str, wrapper_variables: set[str], *, reject_relative: bool = False
+) -> bool:
     """Recognize conservative project-wrapper execution shapes.
 
     The wrapper must be the EXECUTED script operand — a `-c` command string or a
     trailing argument that merely mentions the wrapper path does not qualify.
+
+    ``reject_relative`` fails closed on a session-cwd-relative wrapper path.
+    Codex runs hook commands from the session cwd, so when that directory is not
+    the hook source root the relative path resolves somewhere else entirely —
+    every recognized wrapper shape is repo-relative, so such an adapter cannot
+    be certified from a subdirectory or a linked worktree.
     """
     stripped = segment.strip()
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
@@ -2368,7 +2408,7 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
         return False
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
-    if token_is_wrapper(head, wrapper_variables):
+    if token_is_wrapper(head, wrapper_variables, reject_relative=reject_relative):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
     # The shell/PowerShell interpreter that runs the wrapper must be a bare
@@ -2382,9 +2422,13 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     head_base = normalized_head.lower().rsplit("/", 1)[-1]
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
-        return shell_script_operand_is_wrapper(tokens, wrapper_variables)
+        return shell_script_operand_is_wrapper(
+            tokens, wrapper_variables, reject_relative=reject_relative
+        )
     if head_base in {"powershell", "pwsh"}:
-        return powershell_file_operand_is_wrapper(tokens, wrapper_variables)
+        return powershell_file_operand_is_wrapper(
+            tokens, wrapper_variables, reject_relative=reject_relative
+        )
     return False
 
 
@@ -2406,7 +2450,11 @@ def matcher_targets_bash(matcher: Any) -> bool:
 
 
 def platform_project_floor_command(
-    command: str, expected_pin: str | None, *, windows: bool = False
+    command: str,
+    expected_pin: str | None,
+    *,
+    windows: bool = False,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
@@ -2431,7 +2479,11 @@ def platform_project_floor_command(
             segment_invokes_direct_floor(
                 segment, dispatcher_variables, interpreter_variables
             )
-            or segment_invokes_wrapper(segment, wrapper_variables)
+            or segment_invokes_wrapper(
+                segment,
+                wrapper_variables,
+                reject_relative=reject_relative_wrapper,
+            )
         )
     ]
     if len(invocation_indexes) != 1:
@@ -2442,7 +2494,12 @@ def platform_project_floor_command(
     setup_segments = segments[:invocation_index]
     allowed_variables = dispatcher_variables | wrapper_variables | interpreter_variables
     if not all(
-        is_inert_floor_setup_segment(segment, allowed_variables, windows=windows)
+        is_inert_floor_setup_segment(
+            segment,
+            allowed_variables,
+            windows=windows,
+            reject_relative_wrapper=reject_relative_wrapper,
+        )
         for segment in setup_segments
     ):
         return False
@@ -2493,6 +2550,7 @@ def repo_codex_floor_entries(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[tuple[int, int, Any]]:
     """Return positions and groups for platform-complete project floor handlers."""
     _current_data, _hooks, groups = parse_hooks_document(
@@ -2514,9 +2572,14 @@ def repo_codex_floor_entries(
         command = handler.get("command", "")
         windows_command = decode_windows_hook_command(windows_hook_command(handler))
         if platform_project_floor_command(
-            command, expected_pin
+            command,
+            expected_pin,
+            reject_relative_wrapper=reject_relative_wrapper,
         ) and platform_project_floor_command(
-            windows_command, expected_pin, windows=True
+            windows_command,
+            expected_pin,
+            windows=True,
+            reject_relative_wrapper=reject_relative_wrapper,
         ):
             result.append((group_index, 0, group))
     return result
@@ -2527,12 +2590,16 @@ def repo_codex_floor_groups(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[Any]:
     """Return one group entry per platform-complete project floor handler."""
     return [
         group
         for _group_index, _handler_index, group in repo_codex_floor_entries(
-            current, expected_pin, source_kind=source_kind
+            current,
+            expected_pin,
+            source_kind=source_kind,
+            reject_relative_wrapper=reject_relative_wrapper,
         )
     ]
 
@@ -2804,38 +2871,83 @@ def doctor(args: argparse.Namespace) -> int:
                 for hooks in repo_hook_paths
                 if (text := read_optional_text(hooks)) is not None
             ]
-            json_hook_texts = [text for _hooks, text in json_hook_documents]
-            inline_hook_texts = [
-                document
+            inline_hook_documents = [
+                (hooks, document)
                 for hooks in repo_hook_paths
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
-            repo_hook_sources = [(text, "json") for text in json_hook_texts] + [
-                (text, "config") for text in inline_hook_texts
-            ]
+
+            # Codex runs a hook command from the SESSION cwd, not from the
+            # directory that owns the hook source. Wherever those differ — a
+            # `--repo <subdir>` audit, or a linked worktree sourcing hooks from
+            # the root checkout — a repo-relative wrapper path resolves
+            # somewhere other than the hook source root, so it cannot be
+            # certified.
+            def wrapper_is_cwd_relative_here(hooks: Path) -> bool:
+                return hooks.parent.parent.resolve() != requested_path
+
+            repo_hook_sources = [
+                (hooks, text, "json") for hooks, text in json_hook_documents
+            ] + [(hooks, text, "config") for hooks, text in inline_hook_documents]
             project_floor_count = sum(
-                len(repo_codex_floor_groups(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                len(
+                    repo_codex_floor_groups(
+                        text,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
+                )
+                for hooks, text, source_kind in repo_hook_sources
             )
             candidate_floor_count = sum(
                 len(repo_codex_floor_candidates(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                for _hooks, text, source_kind in repo_hook_sources
             )
+            unresolvable_wrapper_sources = [
+                f"{hooks} ({source_kind}): "
+                f"{lenient - strict} handler(s) bind a session-cwd-relative "
+                "wrapper path"
+                for hooks, text, source_kind in repo_hook_sources
+                if wrapper_is_cwd_relative_here(hooks)
+                and (
+                    lenient := len(
+                        repo_codex_floor_groups(text, source_kind=source_kind)
+                    )
+                )
+                != (
+                    strict := len(
+                        repo_codex_floor_groups(
+                            text,
+                            source_kind=source_kind,
+                            reject_relative_wrapper=True,
+                        )
+                    )
+                )
+            ]
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
             current_floor_count = sum(
                 len(
-                    repo_codex_floor_groups(text, expected_pin, source_kind=source_kind)
+                    repo_codex_floor_groups(
+                        text,
+                        expected_pin,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
                 )
-                for text, source_kind in repo_hook_sources
+                for hooks, text, source_kind in repo_hook_sources
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [
                 entry
                 for hooks, hooks_text in json_hook_documents
                 if hooks == canonical_hooks
-                for entry in repo_codex_floor_entries(hooks_text, expected_pin)
+                for entry in repo_codex_floor_entries(
+                    hooks_text,
+                    expected_pin,
+                    reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                )
             ]
             canonical_root_floor_count = len(canonical_root_floor_entries)
             # Hook IDs use Codex's lexical source path. Preserve an explicit
@@ -2857,11 +2969,20 @@ def doctor(args: argparse.Namespace) -> int:
             except (HarnessError, OSError, UnicodeError) as exc:
                 activation_ok = False
                 activation_detail = str(exc)
+            wrapper_detail = (
+                "session cwd "
+                f"{requested_path} is not the hook source root, so "
+                f"{'; '.join(unresolvable_wrapper_sources)}"
+                " that Codex would resolve under the session cwd instead; "
+                if unresolvable_wrapper_sources
+                else ""
+            )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
                 f"{current_floor_count} current pinned handler(s); "
                 f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
+                f"{wrapper_detail}"
                 f"{source_detail}; trust is checked manually in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:

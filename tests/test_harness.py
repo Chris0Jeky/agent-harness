@@ -1933,6 +1933,198 @@ allow_local_binding = true
             "intermediate skill\n",
         )
 
+    @staticmethod
+    def wrapper_adapter_text(pin: str, posix_wrapper: str, windows_wrapper: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        f"/bin/sh {posix_wrapper}"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        f"& {windows_wrapper}"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    def test_repo_floor_rejects_session_cwd_relative_wrapper_paths(self) -> None:
+        pin = "a" * 64
+        cases = (
+            (".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"),
+            ("tools/invoke_deny_floor.sh", "tools/invoke_deny_floor.ps1"),
+            ("$w/invoke_deny_floor.sh", "$w/invoke_deny_floor.ps1"),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                # Codex resolves the wrapper from the session cwd, so a relative
+                # path only certifies when that is the hook source root.
+                self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+                self.assertEqual(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=True
+                    ),
+                    [],
+                )
+
+    def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=.codex/invoke_deny_floor.sh; /bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        "$w='.codex/invoke_deny_floor.ps1'; & $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+        # Indirection through a variable does not make the path resolvable.
+        self.assertEqual(
+            harness.repo_codex_floor_groups(text, pin, reject_relative_wrapper=True),
+            [],
+        )
+
+    def test_direct_adapters_survive_a_foreign_session_cwd(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; python3 "
+                                        '"$HOME/.claude/hooks/dispatch.py" '
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; py -3 "
+                                        "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject_relative_wrapper in (False, True):
+            with self.subTest(reject_relative_wrapper=reject_relative_wrapper):
+                self.assertEqual(
+                    len(
+                        harness.repo_codex_floor_groups(
+                            text,
+                            pin,
+                            reject_relative_wrapper=reject_relative_wrapper,
+                        )
+                    ),
+                    1,
+                )
+
+    def test_doctor_certifies_a_relative_wrapper_from_the_source_root(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("session-cwd-relative wrapper path", output)
+
+    def test_doctor_reports_a_relative_wrapper_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("session cwd", output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
+        self.assertIn("0 project floor handler(s)", output)
+        self.assertIn("0 current pinned handler(s)", output)
+
+    def test_doctor_certifies_a_direct_adapter_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("session-cwd-relative wrapper path", output)
+
     def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
         direct = {
             "matcher": "^Bash$",
