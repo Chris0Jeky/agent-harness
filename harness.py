@@ -3240,7 +3240,7 @@ def token_is_wrapper(
     *,
     reject_relative: bool = False,
     windows: bool = False,
-    single_quoted: bool = False,
+    anchor_is_literal: bool = False,
 ) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
@@ -3249,10 +3249,11 @@ def token_is_wrapper(
     if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
         # Under ``reject_relative`` only the HOME-anchored spelling survives:
         # every other recognized literal form resolves against the session cwd.
-        # A single-quoted anchor is not an anchor — the shell passes `$HOME`
-        # through literally — so it fails closed with the relative shapes.
+        # A quoted or escaped anchor is not an anchor — the shell passes
+        # `$HOME`/`~` through literally — so it fails closed with the
+        # relative shapes.
         return not reject_relative or (
-            not single_quoted
+            not anchor_is_literal
             and bool(_HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped))
         )
     # A variable-bound wrapper is admitted here on name alone; the anchoring of
@@ -3268,7 +3269,7 @@ def shell_script_operand_is_wrapper(
     *,
     reject_relative: bool = False,
     windows: bool = False,
-    single_quoted: Any = None,
+    anchor_is_literal: Any = None,
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
@@ -3279,7 +3280,7 @@ def shell_script_operand_is_wrapper(
         wrapper_variables,
         reject_relative=reject_relative,
         windows=windows,
-        single_quoted=bool(single_quoted and single_quoted(tokens[index])),
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[index])),
     )
 
 
@@ -3289,7 +3290,7 @@ def powershell_file_operand_is_wrapper(
     *,
     reject_relative: bool = False,
     windows: bool = False,
-    single_quoted: Any = None,
+    anchor_is_literal: Any = None,
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -3304,7 +3305,7 @@ def powershell_file_operand_is_wrapper(
         wrapper_variables,
         reject_relative=reject_relative,
         windows=windows,
-        single_quoted=bool(single_quoted and single_quoted(tokens[2])),
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[2])),
     )
 
 
@@ -3341,15 +3342,31 @@ def segment_invokes_wrapper(
     if not tokens:
         return False
 
-    def single_quoted(token: str) -> bool:
-        """Whether this token appeared inside single quotes in the raw segment.
+    def anchor_is_literal(token: str) -> bool:
+        """Whether the shell passes this token's anchor through UNEXPANDED.
 
-        `shlex` has already removed the quotes, but a single-quoted `$HOME` is
-        never expanded by either shell, so the anchoring claim depends on it.
-        The character immediately before the token text is the opening quote.
+        `shlex` has already removed quotes and escapes, so the token alone
+        cannot tell `$HOME/x` from `'$HOME/x'`, `\\$HOME/x` or `"~/x"` — all of
+        which the shell hands over literally, leaving a session-cwd-relative
+        path. The raw segment is consulted for the character that introduced
+        the token:
+
+        * a backslash escapes either anchor kind;
+        * `~` expands only when wholly unquoted (sh keeps `"~/x"` literal);
+        * a variable expands inside double quotes but not single ones.
+
+        A token that is not present verbatim in the raw segment lost an escape
+        or quote INSIDE itself, which is unrecognizable, so it fails closed.
         """
         index = stripped.find(token)
-        return index > 0 and stripped[index - 1] == "'"
+        if index < 0:
+            return True
+        preceding = stripped[index - 1] if index else ""
+        if preceding == "\\":
+            return True
+        if token.startswith("~"):
+            return preceding in {"'", '"'}
+        return preceding == "'"
 
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
@@ -3358,7 +3375,7 @@ def segment_invokes_wrapper(
         wrapper_variables,
         reject_relative=reject_relative,
         windows=windows,
-        single_quoted=single_quoted(head),
+        anchor_is_literal=anchor_is_literal(head),
     ):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
@@ -3378,7 +3395,7 @@ def segment_invokes_wrapper(
             wrapper_variables,
             reject_relative=reject_relative,
             windows=windows,
-            single_quoted=single_quoted,
+            anchor_is_literal=anchor_is_literal,
         )
     if head_base in {"powershell", "pwsh"}:
         return powershell_file_operand_is_wrapper(
@@ -3386,7 +3403,7 @@ def segment_invokes_wrapper(
             wrapper_variables,
             reject_relative=reject_relative,
             windows=windows,
-            single_quoted=single_quoted,
+            anchor_is_literal=anchor_is_literal,
         )
     return False
 

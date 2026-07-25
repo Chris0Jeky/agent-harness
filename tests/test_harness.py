@@ -2657,23 +2657,38 @@ allow_local_binding = true
             )
         )
 
-    def test_a_single_quoted_wrapper_operand_is_not_certified(self) -> None:
-        # The same rule at the invocation site: `shlex` removes the quotes, so
-        # the raw segment is consulted for the character before the token.
-        self.assertFalse(
-            harness.segment_invokes_wrapper(
-                "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
-                set(),
-                reject_relative=True,
-            )
-        )
-        self.assertTrue(
-            harness.segment_invokes_wrapper(
-                "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
-                set(),
-                reject_relative=True,
-            )
-        )
+    def test_a_quoted_or_escaped_wrapper_anchor_is_not_certified(self) -> None:
+        # The same rule at the invocation site: `shlex` removes the quote or
+        # escape, so the raw segment is consulted for the character that
+        # introduced the token. Every one of these leaves the shell with a
+        # literal, session-cwd-relative path.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh '~/work/repo/invoke_deny_floor.sh'",
+            '/bin/sh "~/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh \\~/work/repo/invoke_deny_floor.sh",
+            "/bin/sh \\$HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertFalse(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
+        # The spellings the shell really does expand still certify.
+        for segment in (
+            "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+            '/bin/sh "$HOME/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh ~/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
         # Both still parse as a wrapper invocation when relativity is allowed.
         for segment in (
             "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
