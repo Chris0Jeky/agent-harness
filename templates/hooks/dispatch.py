@@ -2651,16 +2651,27 @@ def windows_recovery_segments(
     cmd command that follows the redirect.  Return the union of both readings
     and let the caller inspect every candidate; extra candidates can only add
     scrutiny, whereas a missing one is a bypass.
+
+    The membership test is a SET, not a list scan.  The two grammars usually
+    agree, so the second pass re-offers every entry the first already emitted;
+    an ``in merged`` list scan therefore costs O(n^2) and a 4,000-segment
+    command spent longer inside this one function than the 5-second Codex hook
+    timeout allows.  A floor that answers after the timeout has failed open.
+    ``merged`` still carries the order, because a caller that inspects
+    candidates in a different order can reach a different first deny reason.
     """
     merged: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for aggregate_redirects in (True, False):
         for entry in windows_operator_segments(
             command,
             single_quotes_are_inert=single_quotes_are_inert,
             aggregate_redirects=aggregate_redirects,
         ):
-            if entry not in merged:
-                merged.append(entry)
+            if entry in seen:
+                continue
+            seen.add(entry)
+            merged.append(entry)
     return merged
 
 

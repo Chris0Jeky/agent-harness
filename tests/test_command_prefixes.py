@@ -401,5 +401,73 @@ class WindowsGrammarSegmentationTests(unittest.TestCase):
                 )
 
 
+class _CountingSegment(tuple):
+    """A recovery entry that records how often it is compared for equality."""
+
+    comparisons = 0
+
+    def __eq__(self, other):
+        type(self).comparisons += 1
+        return tuple.__eq__(self, other)
+
+    def __hash__(self):
+        return tuple.__hash__(self)
+
+
+class RecoverySegmentScaleTests(unittest.TestCase):
+    """The dual-grammar union must merge in LINEAR time.
+
+    Both grammars usually read a long command identically, so the second pass
+    re-offers every entry the first emitted.  Deduplicating with `in merged`
+    made that quadratic: a 4,000-segment command took ~4s end to end here
+    against a 5-second Codex hook timeout, and 6,000 segments took ~8s -- past
+    the timeout, which means no deny is returned at all.  Asserting on equality
+    COUNTS rather than wall-clock keeps this deterministic on a loaded machine.
+    """
+
+    SEGMENT_COUNT = 400
+
+    def test_merging_the_two_grammars_stays_linear(self):
+        entries = [
+            _CountingSegment((f"echo seg{index}", "&"))
+            for index in range(self.SEGMENT_COUNT)
+        ]
+        _CountingSegment.comparisons = 0
+        with patch.object(
+            dispatch, "windows_operator_segments", side_effect=lambda *a, **k: entries
+        ):
+            merged = dispatch.windows_recovery_segments("unused")
+        self.assertEqual(len(merged), self.SEGMENT_COUNT)
+        # Linear merging compares each entry a bounded number of times; the list
+        # scan this replaced needed ~n^2/2 for the first pass alone.
+        self.assertLess(
+            _CountingSegment.comparisons,
+            4 * self.SEGMENT_COUNT,
+            _CountingSegment.comparisons,
+        )
+
+    def test_order_and_uniqueness_survive_the_set(self):
+        entries = [
+            ("echo a", "&"),
+            ("echo b", "&"),
+            ("echo a", "&"),
+            ("echo c", ""),
+        ]
+        with patch.object(
+            dispatch, "windows_operator_segments", side_effect=lambda *a, **k: entries
+        ):
+            merged = dispatch.windows_recovery_segments("unused")
+        self.assertEqual(merged, [("echo a", "&"), ("echo b", "&"), ("echo c", "")])
+
+    def test_a_long_generated_command_still_denies(self):
+        # The real path, not a patched one: a malformed-quote recursive delete
+        # behind thousands of benign segments is exactly the shape that timed
+        # out.  Correctness only -- the timing claim lives in the counting test.
+        segments = [f"echo seg{index}" for index in range(2000)]
+        segments.append(r'rd /s /q "C:\critical\outside path\"')
+        decision, reason = decide(" & ".join(segments))
+        self.assertEqual(decision, "deny", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
