@@ -724,9 +724,10 @@ def codex_project_hook_activation_status(
         if managed_only:
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
     required_hook_feature = requirements_hook_feature_declaration(requirements_path)
+    hook_feature_pin: bool | None = None
     if required_hook_feature is not None:
-        location, enabled = required_hook_feature
-        if not enabled:
+        location, hook_feature_pin = required_hook_feature
+        if not hook_feature_pin:
             blockers.append(f"{location}=false")
 
     stored_feature_paths = [
@@ -735,8 +736,11 @@ def codex_project_hook_activation_status(
         *profile_paths,
         codex_managed_config_path(codex_home),
     ]
+    # Every layer is still parsed and schema-checked, because a malformed
+    # feature value fails the typed load no matter which layer wins.
+    feature_disables: list[str] = []
     for config_path in dict.fromkeys(stored_feature_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, reject_legacy_profile=True
@@ -744,13 +748,22 @@ def codex_project_hook_activation_status(
             if not enabled
         )
     for config_path in dict.fromkeys(project_config_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, project_local=True
             )
             if not enabled
         )
+    # A managed requirements pin outranks every config layer: pinning the hook
+    # feature true is exactly how an administrator enforces hooks over a user or
+    # project opt-out, so treating the losing declaration as a blocker reported
+    # a dead floor for a correctly managed environment.
+    overridden_disables: list[str] = []
+    if hook_feature_pin is True:
+        overridden_disables = feature_disables
+    else:
+        blockers.extend(feature_disables)
 
     user_paths = [codex_home / "config.toml", *profile_paths]
     for config_path in dict.fromkeys(user_paths):
@@ -764,6 +777,12 @@ def codex_project_hook_activation_status(
         "CLI/session/managed-cloud feature, policy, and state overrides remain "
         "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
     )
+    if overridden_disables:
+        boundary = (
+            f"managed requirements pin overrides {len(overridden_disables)} "
+            f"lower-precedence hook-feature disable(s): "
+            f"{'; '.join(overridden_disables)}; {boundary}"
+        )
     if blockers:
         return (
             False,

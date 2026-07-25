@@ -1148,6 +1148,73 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
 
+    def test_doctor_lets_requirements_pin_outrank_feature_disables(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[features]\nhooks = false\n", encoding="utf-8"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config="[features]\nhooks = false\n",
+            profile_configs={"custom.config.toml": "[features]\ncodex_hooks = false\n"},
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex project hook activation", output)
+        self.assertIn("[ok] project Codex floor", output)
+        # The overridden declarations stay visible; they are reported as
+        # outranked rather than silently dropped.
+        self.assertIn("managed requirements pin overrides 3 ", output)
+        self.assertIn("features.hooks", output)
+        self.assertIn("features.codex_hooks", output)
+
+    def test_doctor_still_rejects_feature_disables_when_the_pin_is_false(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = false\n",
+            user_config="[features]\nhooks = false\n",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("inspectable activation blocker(s)", output)
+        self.assertNotIn("managed requirements pin overrides", output)
+
+    def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        hooks_path = self.write_hooks(repo, valid_adapter).resolve()
+        key = f"{hooks_path}:pre_tool_use:0:0"
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config=(
+                f"[features]\nhooks = false\n\n"
+                f"[hooks.state.{json.dumps(key)}]\nenabled = false\n"
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("enabled=false", output)
+        # The pin outranks the feature toggle, never the per-handler state.
+        self.assertIn("managed requirements pin overrides 1 ", output)
+
     def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
         requirements = Path(self.temp.name) / "requirements.toml"
         invalid_documents = (
