@@ -282,10 +282,13 @@ EXIT_ERRORS_PRESENT = 2
 EXIT_TOOL_FAILURE = 3
 # Exit code when part of the corpus could never be read, so the run measured an
 # unknown fraction of the transcripts. Distinct from 3, which reports a replay
-# that produced no verdict for a command it *did* extract. Downgraded to a
-# report by `--allow-partial-corpus`, because unlike a missing verdict a
-# truncated corpus still compares like with like: both versions replay the same
-# shortened list, so the deltas survive and only the absolute rate is unsound.
+# that produced no verdict for a command it *did* extract, and from 1, which
+# means the transcripts were readable and held nothing. There is no downgrade
+# to 0: both versions do replay the same shortened list, but a command in an
+# unread transcript is in no delta bucket at all, so the run can report fewer
+# newly-blocked rows than the truth and a gate keying on 0 would pass over the
+# regression it exists to catch. The deltas are labelled subset-only; a caller
+# willing to use them reads 4 and decides that for itself.
 EXIT_CORPUS_INCOMPLETE = 4
 # Extraction-ledger keys that mean the corpus is shorter than the transcripts
 # are, by an amount the script cannot know. Deliberately not the other
