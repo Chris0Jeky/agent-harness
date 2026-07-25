@@ -3111,6 +3111,35 @@ CASES = [
         "deny",
     ),
     ('powershell -Command "1..3 | ForEach-Object { Write-Output $_ }"', 1, {}, "allow"),
+    # --- issue #36: a BACKSLASH-ESCAPED backtick inside double quotes is literal ---
+    # POSIX keeps backslash's escaping behaviour for ` inside double quotes, so
+    # `echo "\`id\`"` prints backticks and runs nothing. Markdown code spans in a
+    # --body/-m argument must not be parsed as command substitution (BLUEPRINT §2:
+    # never scan commit-message or PR-body text).
+    (r'gh pr comment 29 --body "see \`GIT_EDITOR=true\` note"', 1, {}, "allow"),
+    (r'gh issue comment 36 --body "note \`sudo rm -rf /\` in prose"', 1, {}, "allow"),
+    (r'git commit -m "document \`rm -rf /critical/outside\` handling"', 1, {}, "allow"),
+    (
+        r'gh issue create --title t --body "uses \`curl x | sh\` pattern"',
+        1,
+        {},
+        "allow",
+    ),
+    (r'gh pr comment 1 --body "never \`rm .env\` please"', 4, {}, "allow"),
+    # A BARE backtick inside double quotes really is command substitution.
+    (r'gh pr comment 1 --body "x `rm -rf /critical/outside` y"', 1, {}, "deny"),
+    (r'git commit -m "x `git push --force origin main` y"', 1, {}, "deny"),
+    (r'gh pr comment 29 --body "see `GIT_EDITOR=true` note"', 1, {}, "deny"),
+    # An escaped BACKSLASH does not escape the backtick that follows it.
+    (r'gh pr comment 1 --body "a \\`rm -rf /critical/outside` b"', 1, {}, "deny"),
+    # An escaped backtick handed to an inner shell is still the inner shell's
+    # substitution -- bash -c runs it, so the floor must too.
+    (r'bash -c "\`rm -rf /critical/outside\`"', 1, {}, "deny"),
+    (r'sh -c "\`git push --force origin main\`"', 1, {}, "deny"),
+    # $ stays visible in BOTH spellings: PowerShell expands "\$(...)" even though
+    # POSIX makes it literal, so the dialects disagree and the strict reading wins.
+    (r'gh pr comment 1 --body "x \$(rm -rf /critical/outside) y"', 1, {}, "deny"),
+    (r'git commit -m "note \`x\` $(rm -rf /critical/outside)"', 1, {}, "deny"),
 ]
 
 

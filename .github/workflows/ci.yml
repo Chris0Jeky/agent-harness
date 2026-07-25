@@ -49,8 +49,9 @@ jobs:
         run: >-
           python -m ruff check
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_git_editor_terminal_flows.py tests/test_git_readonly_plumbing.py
-          tests/test_push_config_force.py tests/test_replay_corpus.py
+          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          tests/test_git_readonly_plumbing.py tests/test_push_config_force.py
+          tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -59,8 +60,9 @@ jobs:
         run: >-
           python -m black --check
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_git_editor_terminal_flows.py tests/test_git_readonly_plumbing.py
-          tests/test_push_config_force.py tests/test_replay_corpus.py
+          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          tests/test_git_readonly_plumbing.py tests/test_push_config_force.py
+          tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -69,8 +71,9 @@ jobs:
         run: >-
           python -m py_compile
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
-          tests/test_git_editor_terminal_flows.py tests/test_git_readonly_plumbing.py
-          tests/test_push_config_force.py tests/test_replay_corpus.py
+          tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
+          tests/test_git_readonly_plumbing.py tests/test_push_config_force.py
+          tests/test_replay_corpus.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py

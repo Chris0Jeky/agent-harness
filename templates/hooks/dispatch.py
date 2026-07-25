@@ -52,6 +52,11 @@ _LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
+# POSIX: inside double quotes a backslash keeps its escaping behaviour for
+# exactly these characters and is otherwise a literal backslash. Consuming the
+# pair matters for correctness, not just for backticks: in "a\\`b`" the first
+# backslash escapes the SECOND backslash, so the backtick after it is bare.
+_POSIX_DOUBLE_QUOTE_ESCAPES = frozenset({"$", "`", '"', "\\", "\n"})
 
 
 def restore_quoted_literal_markers(value: str) -> str:
@@ -64,8 +69,38 @@ def restore_quoted_literal_markers(value: str) -> str:
 
 
 def has_shell_expansion_marker(value: str) -> bool:
-    """Keep $ and backtick visible because escaping differs across runtimes."""
-    return any(char in {"$", "`"} for char in value)
+    """Return whether a DOUBLE-QUOTED body can still expand at runtime.
+
+    ``$`` always counts. POSIX makes ``\\$`` literal, but PowerShell treats the
+    backslash as an ordinary character and still expands ``$(...)``/``$var``,
+    so the dialects disagree and the conservative reading wins.
+
+    A backslash-escaped backtick is inert in EVERY runtime the floor parses:
+    POSIX specifies that inside double quotes a backslash escapes ``` ` ```
+    (`echo "\\`id\\`"` prints the backticks and runs nothing), PowerShell has no
+    backtick command substitution at all, and cmd.exe gives the character no
+    meaning. Treating it as a substitution made markdown code spans in a
+    ``--body``/``-m`` argument deny on whatever the prose happened to quote
+    (issue #36), which is exactly the commit-message/PR-body scanning
+    BLUEPRINT §2 forbids. A BARE backtick still counts -- inside double quotes
+    that really is command substitution.
+    """
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char == "\\" and index + 1 < length:
+            escaped = value[index + 1]
+            if escaped == "$":
+                # POSIX-literal but PowerShell-live: stay visible.
+                return True
+            if escaped in _POSIX_DOUBLE_QUOTE_ESCAPES:
+                index += 2
+                continue
+        elif char in {"$", "`"}:
+            return True
+        index += 1
+    return False
 
 
 def has_cmd_expansion_marker(value: str) -> bool:
