@@ -1198,6 +1198,9 @@ def remote_names_a_network_share(url: str) -> bool:
 # The remote work is actually published to. A public remote under any other
 # name (a fork's upstream, a mirror) is a topology note, not an exposure.
 PUBLISHING_REMOTE = "origin"
+# git's "dot repository": pushing to `.` targets THIS repository, never a
+# remote (see git-config, branch.<name>.remote).
+LOCAL_PUSH_REMOTE = "."
 VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
 # Both shapes a repo can carry its own floor bytes in. `.claude/hooks/` is the
 # one `doctor` already recognizes as "a repo-local dispatcher copy rather than
@@ -1439,8 +1442,8 @@ def github_repo_slug(remote: str) -> str:
 
 def configured_push_remote(
     repo: Path, command_runner: Any, deadline: float | None
-) -> str:
-    """The remote an ordinary `git push` targets from the current branch.
+) -> tuple[str, bool]:
+    """(remote `git push` targets, whether that selection was measured).
 
     `origin` is only git's LAST fallback. `branch.<name>.pushRemote`,
     `remote.pushDefault` and `branch.<name>.remote` each override it, in that
@@ -1449,10 +1452,16 @@ def configured_push_remote(
     origin-only rule downgraded that PUBLIC result to an exit-0 advisory.
 
     Every query is `git config`, which reads local files and stays available
-    under `--offline`. An unanswered query falls through to the next candidate,
-    ending at `origin`, so a silent git degrades to the previous behaviour
-    rather than to no publishing remote at all.
+    under `--offline`. `git config --get` also exits non-zero for an UNSET key,
+    so a failed probe cannot be told from an absent one — which is fine while
+    the budget holds and a lie once it does not. An exhausted budget therefore
+    returns `False` for the second element rather than guessing `origin`: the
+    caller reports the whole check UNPROVEN instead of downgrading a public
+    push endpoint to an advisory it never measured.
     """
+
+    def exhausted() -> bool:
+        return deadline is not None and deadline - monotonic() <= 0
 
     def configured(key: str) -> str:
         resolved, value = output_before_deadline(
@@ -1460,6 +1469,8 @@ def configured_push_remote(
         )
         return value.strip() if resolved else ""
 
+    if exhausted():
+        return PUBLISHING_REMOTE, False
     resolved, branch = output_before_deadline(
         command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
     )
@@ -1471,10 +1482,12 @@ def configured_push_remote(
     if branch and branch != "HEAD":
         candidates.append(f"branch.{branch}.remote")
     for key in candidates:
+        if exhausted():
+            return PUBLISHING_REMOTE, False
         configured_name = configured(key)
         if configured_name:
-            return configured_name
-    return PUBLISHING_REMOTE
+            return configured_name, True
+    return PUBLISHING_REMOTE, not exhausted()
 
 
 def configured_remote_urls(
@@ -1536,14 +1549,27 @@ def publishing_remote_endpoints(
         bucket = endpoints["push" if direction == "push" else "fetch"]
         if url not in bucket:
             bucket.append(url)
+    # git's "dot repository": `remote.pushDefault = .` pushes into THIS
+    # repository, so no configured remote is a publishing endpoint. Passing the
+    # literal `.` through would match no remote and then trip the "no
+    # publishing remote is configured, so treat them all as publishing" rule —
+    # a hard MISMATCH for a public origin an ordinary push never reaches.
+    pushes_locally = publishing_remote == LOCAL_PUSH_REMOTE
     has_publishing_remote = publishing_remote in by_name
     entries: list[tuple[str, str, bool, str]] = []
     for name, endpoints in by_name.items():
         # git prints both rows; a fetch-only listing means the same endpoint.
         push_urls = endpoints["push"] or endpoints["fetch"]
-        publishes_here = name == publishing_remote or not has_publishing_remote
+        publishes_here = not pushes_locally and (
+            name == publishing_remote or not has_publishing_remote
+        )
         for url in dict.fromkeys(endpoints["fetch"] + endpoints["push"]):
-            if not publishes_here:
+            if pushes_locally:
+                note = (
+                    f"git pushes to the local repository ({LOCAL_PUSH_REMOTE}), so "
+                    f"nothing is published to {name}"
+                )
+            elif not publishes_here:
                 note = (
                     f"{name} is not the publishing remote ({publishing_remote}), "
                     "so never push this repo there"
@@ -1660,7 +1686,20 @@ def sensitive_data_findings(
             )
         ]
     findings: list[dict[str, str]] = []
-    publishing_remote = configured_push_remote(repo, command_runner, deadline)
+    publishing_remote, selection_proven = configured_push_remote(
+        repo, command_runner, deadline
+    )
+    if not selection_proven:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "the probe budget expired before git's push-remote configuration "
+                "could be read, so which remote publishes this repo is unmeasured; "
+                "assuming `origin` here could downgrade a public push endpoint to "
+                "an advisory",
+            )
+        ]
     for name, url, publishes, note in publishing_remote_endpoints(
         remotes, publishing_remote
     ):
@@ -1766,6 +1805,10 @@ def human_todo_findings(
         or windows_view.drive
         or windows_view.root
         or ".." in relative.parts
+        # A NUL cannot appear in any path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as `ValueError` -> UNPROVEN -> exit 0.
+        or "\x00" in declared
     ):
         return [
             reality_finding(
@@ -1998,19 +2041,21 @@ def vendored_floor_findings(
         for name in VENDORED_FLOOR_FILES:
             label = f"{directory}/{name}"
             path = repo / directory / name
-            present, access_error = file_presence(path)
-            if not access_error and present:
-                # `stat()` follows links, so a `hooks/dispatch.py` symlinked to
-                # the harness template hashed the TARGET and reported the repo
-                # as matching canonical bytes — while the repo vendors none,
-                # and the link may resolve elsewhere, or nowhere, on the next
-                # machine. That is a fact about this filesystem, not the repo.
-                target = symlink_target(path)
-                if target:
-                    access_error = (
-                        f"{path} is a symlink to {target}; the bytes it resolves "
-                        "to are this machine's, not this repo's vendored floor"
-                    )
+            # The link is inspected BEFORE anything follows it. `stat()` follows
+            # links, so a `hooks/dispatch.py` symlinked to the harness template
+            # hashed the TARGET and reported the repo as matching canonical
+            # bytes — while the repo vendors none, and the link may resolve
+            # elsewhere, or nowhere, on the next machine. A DANGLING link is
+            # the same claim with the follow already failed: guarding this on
+            # `present` let `[ok] no vendored floor copy` through for it.
+            target = symlink_target(path)
+            if target:
+                present, access_error = False, (
+                    f"{path} is a symlink to {target}; the bytes it resolves "
+                    "to are this machine's, not this repo's vendored floor"
+                )
+            else:
+                present, access_error = file_presence(path)
             if access_error:
                 inaccessible.append((label, access_error))
             elif present:
@@ -4209,10 +4254,13 @@ def doctor(args: argparse.Namespace) -> int:
     # `harness_reference_status` reaches the remote for the published main tip,
     # so this probe answers to `--offline` exactly like the repo reality checks
     # below; otherwise a supposedly offline run still waits out `git ls-remote`.
+    # ONE budget for every probe this command makes. The floor-version check
+    # and the `--repo` reality checks both call `harness_reference_status`, so
+    # a separate deadline each let an unreachable harness origin be waited out
+    # twice — and let the two legs report different reference states.
+    probe_deadline = monotonic() + REALITY_BUDGET_SECONDS
     reference_ok, reference_detail = harness_reference_status(
-        harness_root,
-        offline_aware_command_runner(args),
-        monotonic() + REALITY_BUDGET_SECONDS,
+        harness_root, offline_aware_command_runner(args), probe_deadline
     )
     template_version = floor_version(
         harness_root / "templates" / "hooks" / "dispatch.py"
@@ -4498,6 +4546,7 @@ def doctor(args: argparse.Namespace) -> int:
                 # network waits out the whole probe budget on `gh` and remote
                 # ref lookups before every one of them degrades to UNPROVEN.
                 command_runner=offline_aware_command_runner(args),
+                deadline=probe_deadline,
             )
             statuses = {finding["status"] for finding in findings}
             reality_ok: bool | str = True

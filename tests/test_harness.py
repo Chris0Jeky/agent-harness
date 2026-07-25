@@ -5840,13 +5840,63 @@ class RealityCheckTests(unittest.TestCase):
                 ),
                 None,
             ),
-            "fork",
+            ("fork", True),
         )
-        # Nothing configured, or a silent git, still means `origin`.
+        # Nothing configured, or a silent git, still means `origin` — and that
+        # is a MEASURED answer, because `git config --get` exits non-zero for
+        # an unset key.
         self.assertEqual(
             harness.configured_push_remote(Path("."), FakeCommandRunner(), None),
-            "origin",
+            ("origin", True),
         )
+
+    def test_an_unmeasured_push_remote_is_unproven_not_origin(self) -> None:
+        # An exhausted budget cannot tell "unset" from "never ran", and
+        # guessing `origin` would downgrade a public push endpoint under
+        # `remote.pushDefault` to an exit-0 advisory.
+        runner = FakeCommandRunner()
+        self.assertEqual(
+            harness.configured_push_remote(Path("."), runner, harness.monotonic() - 1),
+            ("origin", False),
+        )
+        self.assertEqual(runner.calls, [])
+        repo = self.make_repo(sensitive_data=True)
+
+        class BudgetBurningRunner(FakeCommandRunner):
+            """`git remote --verbose` answers, then the budget is gone."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                clock["now"] += 9.0
+                return answer
+
+        clock = {"now": 0.0}
+        burning = BudgetBurningRunner(
+            {"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)}
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
+            result = self.audit(repo, burning, deadline=8.0)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("push-remote configuration", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_dot_push_remote_publishes_to_no_remote(self) -> None:
+        # `remote.pushDefault = .` targets THIS repository. Passing the literal
+        # `.` through matched no remote and then tripped the "no publishing
+        # remote configured, treat them all as publishing" rule — a hard
+        # MISMATCH for a public origin an ordinary push never reaches.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "config --get remote.pushDefault": (True, "."),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["advisory"])
+        self.assertIn("pushes to the local repository", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
 
     def test_the_visibility_probe_is_pinned_to_github_dot_com(self) -> None:
         # `gh repo view OWNER/REPO` resolves against GH_HOST or the default
@@ -6054,6 +6104,16 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "human_todo"), ["UNPROVEN"])
         self.assertIn("could not be inspected", self.details(result))
         self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_malformed_human_todo_is_a_mismatch_not_unproven(self) -> None:
+        # A NUL cannot appear in a path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as ValueError -> UNPROVEN -> exit 0.
+        repo = self.make_repo(human_todo="HUMAN\x00TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertIn("not a repo-relative path", self.details(result))
+        self.assertFalse(result["ok"])
 
     def test_a_missing_human_todo_is_still_a_mismatch(self) -> None:
         # The guarded stat must not turn ordinary absence into an unproven.
@@ -6412,6 +6472,28 @@ class RealityCheckTests(unittest.TestCase):
         # new branch is what changed the verdict.
         plain = self.audit(repo, self.canonical_reference_runner())
         self.assertEqual(self.statuses(plain, "vendored hooks/dispatch.py"), ["ok"])
+
+    def test_a_dangling_vendored_symlink_is_unproven_not_absent(self) -> None:
+        # `file_presence` FOLLOWS the link, so a broken one answered (False,
+        # "") and the symlink branch — guarded on `present` — never ran:
+        # `[ok] no vendored floor copy` for a repo that plainly declares one.
+        repo = self.make_repo()
+        dangling = repo / "hooks" / "dispatch.py"
+
+        def fake_symlink_target(path: Path) -> str:
+            same = os.path.realpath(path) == os.path.realpath(dangling)
+            return "/gone/dispatch.py" if same else ""
+
+        with mock.patch.object(
+            harness, "symlink_target", side_effect=fake_symlink_target
+        ):
+            result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to /gone/dispatch.py", self.details(result))
+        self.assertNotIn("no vendored floor copy", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
 
     def test_an_absent_vendored_path_is_still_a_clean_ok(self) -> None:
         # The guarded stat must not turn ordinary absence into an unproven.
