@@ -4891,11 +4891,14 @@ _GIT_EXTERNAL_DIFF_SUBCOMMANDS = {
 #                     editor or pager it can name
 #   verify-pack       validates a packfile; reads only
 #
-# `symbolic-ref` is admitted separately because it is arity-dependent (see
-# git_symbolic_ref_is_read_only).  Deliberately NOT admitted, though they look
-# adjacent: update-index / checkout-index / write-tree / sparse-checkout (they
-# write the index or the working tree), credential and credential-* (a secret
-# surface), and everything already excluded by name elsewhere in this block.
+# `symbolic-ref`, `update-index` and `sparse-checkout` are admitted separately,
+# by ARITY rather than by name, because each is a read/write-mixed verb: only
+# the read spellings pass (see git_symbolic_ref_is_read_only,
+# git_update_index_is_read_only, git_sparse_checkout_is_read_only, and the
+# guards that call them in check()).  Deliberately NOT admitted at all, though
+# they look adjacent: checkout-index / write-tree (they write the index or the
+# working tree), credential and credential-* (a secret surface), and everything
+# already excluded by name elsewhere in this block.
 _GIT_READ_ONLY_PLUMBING = {
     "check-attr",
     "check-ignore",
