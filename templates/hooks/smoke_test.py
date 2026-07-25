@@ -392,6 +392,28 @@ CASES = [
     ("git push --force-with-lease origin HEAD", 2, {}, "deny"),
     ("git push --force-with-lease --all origin", 2, {}, "deny"),
     ("git push --force-with-lease origin feat", 4, {}, "deny"),
+    # A redirection is consumed by the SHELL; git never sees it in argv. It used
+    # to survive into the lease destination list, so `2>&1` counted as a second
+    # destination and the safe verb refused the shape agents actually type
+    # (issue #44). Both tokenizers are covered: the quote-aware pass splits
+    # `2>&1` into `['2', '>&', '1']`, the sanitized pass keeps it glued.
+    ("git push --force-with-lease origin fix/x 2>&1", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>&1 | tail -4", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x > out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >>push.log", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>/dev/null", 2, {}, "allow"),
+    ("git push --force-with-lease origin feat 1>out.txt 2>&1", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>&1", 4, {}, "deny"),
+    # The destination the guard exists for, and a redirect used to hide one.
+    ("git push --force-with-lease origin main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin master > out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin HEAD:main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin 2>&1 main", 2, {}, "deny"),
+    ("git push --force-with-lease origin 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease 2>&1", 2, {}, "deny"),
+    ("git push --force origin fix/x 2>&1", 2, {}, "deny"),
+    ("git push -f origin fix/x 2>&1", 2, {}, "deny"),
     # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
@@ -1985,6 +2007,30 @@ CASES = [
     ("git sparse-checkout set src", 1, {}, "deny"),
     ("git credential fill", 1, {}, "deny"),
     ("git credential-manager get", 1, {}, "deny"),
+    # update-index and sparse-checkout are read/write MIXED, so they are
+    # admitted by arity rather than by name (issue #45): the refresh forms only
+    # re-stat files whose content already matches the index, and `list` only
+    # prints the sparse patterns. Every writing spelling above still denies, and
+    # so does an operand, an unknown option, or a missing refresh request.
+    ("git update-index --refresh", 1, {}, "allow"),
+    ("git update-index --refresh", 4, {}, "allow"),
+    ("git update-index -q --refresh", 1, {}, "allow"),
+    ("git update-index --really-refresh", 1, {}, "allow"),
+    ("git sparse-checkout list", 1, {}, "allow"),
+    ("git sparse-checkout list", 4, {}, "allow"),
+    ("git update-index --add README.md", 1, {}, "deny"),
+    ("git update-index --force-remove README.md", 1, {}, "deny"),
+    ("git update-index --assume-unchanged config.json", 1, {}, "deny"),
+    ("git update-index --refresh README.md", 1, {}, "deny"),
+    ("git update-index --refresh -- README.md", 1, {}, "deny"),
+    ("git update-index --refresh --not-a-known-option", 1, {}, "deny"),
+    ("git update-index", 1, {}, "deny"),
+    ("git sparse-checkout init", 1, {}, "deny"),
+    ("git sparse-checkout reapply", 1, {}, "deny"),
+    ("git sparse-checkout disable", 1, {}, "deny"),
+    ("git sparse-checkout list --stdin", 1, {}, "deny"),
+    ("git -c core.pager=payload update-index --refresh", 1, {}, "deny"),
+    ("git -c core.sshCommand=payload sparse-checkout list", 1, {}, "deny"),
     # global-option hiding in front of admitted plumbing must still deny
     ("git -c alias.mb=merge-base mb main HEAD", 1, {}, "deny"),
     ("git -c core.pager=payload merge-base main HEAD", 1, {}, "deny"),
@@ -1997,22 +2043,38 @@ CASES = [
     ("git diff-files --ext-diff", 1, {}, "deny"),
     ("git diff-tree --output=.env -r HEAD", 1, {}, "deny"),
     ("git diff-tree --output=$OUT -r HEAD", 1, {}, "deny"),
-    # `--output` is a revision-walking option, not a diff-only one, so every
-    # admitted read-only plumbing subcommand can truncate a secret with it.
-    # Verified against real git: `git rev-list --output=victim HEAD` took a
-    # 35-byte file to 0 bytes with rc=0, because git opens the path with "w"
-    # while parsing options. Floor 1.6.3 admitted rev-list as read-only without
-    # extending this guard and newly ALLOWED these at every tier including T4;
-    # neither the smoke matrix nor an 80k-command corpus replay caught it,
-    # because replay measures what has been run, not what is reachable.
+    # `--output` is a revision-walking option, not a diff-only one, so the
+    # admitted plumbing that Git routes through setup_revisions() can truncate a
+    # secret with it. Verified against real git: `git rev-list --output=victim
+    # HEAD` took a 35-byte file to 0 bytes with rc=0, because git opens the path
+    # with "w" while parsing options. Floor 1.6.3 admitted rev-list as read-only
+    # without extending this guard and newly ALLOWED these at every tier
+    # including T4; neither the smoke matrix nor an 80k-command corpus replay
+    # caught it, because replay measures what has been run, not what is
+    # reachable.
     ("git rev-list --output=.env HEAD", 1, {}, "deny"),
     ("git rev-list --output=.env HEAD", 4, {}, "deny"),
     ("git rev-list --output=id_rsa HEAD", 1, {}, "deny"),
     ("git rev-list --output=../../../.env HEAD", 1, {}, "deny"),
     ("git rev-list --output=$OUT HEAD", 1, {}, "deny"),
-    ("git merge-base --output=.env a b", 1, {}, "deny"),
-    ("git check-ignore --output=.env x", 1, {}, "deny"),
-    ("git hash-object --output=.env f", 1, {}, "deny"),
+    # The plumbing that does NOT parse revision/diff options is a different
+    # case, and 1.6.5 guarded it on the theory that "guarding a subcommand that
+    # does not accept --output costs nothing". It costs a false positive: for
+    # `git hash-object --path --output .env` the token is `--path`'s VALUE and
+    # `.env` is the file being read, so the blanket scan denied a read-only hash
+    # (issue #55). Re-measured on git 2.45.1 against a 35-byte sink: merge-base,
+    # check-ignore, hash-object, check-attr, count-objects, merge-tree, var and
+    # verify-pack all exit 129 with `unknown option` and leave the file at 35
+    # bytes, while rev-list and diff-tree take it to 0. Nothing was protected
+    # here, so these three now allow -- and the deny rows above are the ones
+    # that carry the guard.
+    ("git merge-base --output=.env a b", 1, {}, "allow"),
+    ("git check-ignore --output=.env x", 1, {}, "allow"),
+    ("git hash-object --output=.env f", 1, {}, "allow"),
+    ("git hash-object --path --output .env", 1, {}, "allow"),
+    ("git hash-object -- --ext-diff", 1, {}, "allow"),
+    ("git diff -- --ext-diff", 1, {}, "allow"),
+    ("git diff --ext-diff -- file", 1, {}, "deny"),
     # The read-only admission itself must survive the guard.
     ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
     ("git rev-list HEAD --count", 1, {}, "allow"),
