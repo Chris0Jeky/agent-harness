@@ -2535,6 +2535,106 @@ def repo_codex_floor_candidates(
     return result
 
 
+# Any `name=<64 hex>` assignment, i.e. the audit marker an adapter declares.
+# Deliberately looser than `command_binds_pin`, so a marker that is present but
+# STALE reads as a stale marker instead of as no marker at all.
+_AUDIT_MARKER = re.compile(
+    r"(?i)(?:^|[\s{(;&|])\$?[a-z_][a-z0-9_]*\s*=\s*[\"']?([0-9a-f]{64})[\"']?"
+    r"(?=$|[\s;}})])"
+)
+
+
+def codex_adapter_command_notes(
+    command: str, label: str, expected_pin: str
+) -> tuple[list[str], list[str]]:
+    """Describe one platform command's deviations from the adapter contract.
+
+    Returns (gaps, inventory). A gap is a deviation nothing else can supply; an
+    inventory note records a legitimate but non-default choice — a vendored
+    dispatcher or a repo wrapper that carries the flags out of static view.
+    """
+    inspected = strip_shell_comments(command)
+    normalized = inspected.lower().replace("\\", "/")
+    delegates_to_wrapper = "invoke_deny_floor" in normalized
+    gaps: list[str] = []
+    inventory: list[str] = []
+    for flag, value in (("event", "pre"), ("runtime", "codex")):
+        if command_has_flag_value(inspected, flag, value):
+            continue
+        if delegates_to_wrapper:
+            inventory.append(
+                f"{label} leaves --{flag} {value} to a repo wrapper; follow the "
+                "launcher to confirm it"
+            )
+        else:
+            gaps.append(f"{label} never passes --{flag} {value}")
+    markers = {match.group(1).lower() for match in _AUDIT_MARKER.finditer(inspected)}
+    if not markers:
+        gaps.append(f"{label} declares no expected=<sha256> audit marker")
+    elif expected_pin not in markers:
+        gaps.append(
+            f"{label} declares a stale audit marker "
+            f"{sorted(markers)[0][:12]}... (installed dispatcher "
+            f"{expected_pin[:12]}...)"
+        )
+    if not re.search(rf"{_HOME_VAR}[^\s;]*\.claude/hooks/dispatch\.py", normalized):
+        if ".claude/hooks/dispatch.py" in normalized:
+            inventory.append(
+                f"{label} names a repo-local dispatcher copy rather than the "
+                "shared home-anchored one"
+            )
+        elif delegates_to_wrapper:
+            inventory.append(
+                f"{label} reaches a dispatcher only through a repo wrapper"
+            )
+        else:
+            inventory.append(f"{label} names no shared dispatcher")
+    return gaps, inventory
+
+
+def codex_adapter_contract_notes(
+    current: str, source_label: str, expected_pin: str, *, source_kind: str = "json"
+) -> tuple[list[str], list[str]]:
+    """Inventory every candidate adapter handler in one hook source.
+
+    `doctor` already fails a repo whose canonical adapter is unpinned or stale,
+    but it reported only a count, which cannot distinguish "no marker" from
+    "stale marker" from "no --runtime codex". Estate audits need the reason.
+    """
+    _current_data, _hooks, groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
+    gaps: list[str] = []
+    inventory: list[str] = []
+    for group_index, group in enumerate(groups):
+        for handler_index, handler in enumerate(group.get("hooks", [])):
+            if handler.get("type") != "command":
+                continue
+            commands = {
+                "command": handler.get("command", ""),
+                "commandWindows": decode_windows_hook_command(
+                    windows_hook_command(handler)
+                ),
+            }
+            if not any(
+                ".claude/hooks/dispatch.py" in text.lower().replace("\\", "/")
+                or "invoke_deny_floor" in text.lower()
+                for text in commands.values()
+            ):
+                continue
+            for field, text in commands.items():
+                label = (
+                    f"{source_label}:pre_tool_use:{group_index}:{handler_index}"
+                    f".{field}"
+                )
+                command_gaps, command_inventory = codex_adapter_command_notes(
+                    text, label, expected_pin
+                )
+                gaps.extend(command_gaps)
+                inventory.extend(command_inventory)
+    return gaps, inventory
+
+
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
     """Reject handler shapes Codex would not run as a blocking PreToolUse gate.
 
@@ -2938,6 +3038,22 @@ def doctor(args: argparse.Namespace) -> int:
                 )
                 for hooks, text, source_kind in repo_hook_sources
             )
+            adapter_gaps: list[str] = []
+            adapter_inventory: list[str] = []
+            for hooks, text, source_kind in repo_hook_sources:
+                source_gaps, source_inventory = codex_adapter_contract_notes(
+                    text, str(hooks), expected_pin, source_kind=source_kind
+                )
+                adapter_gaps.extend(source_gaps)
+                adapter_inventory.extend(source_inventory)
+            adapter_ok = not adapter_gaps
+            adapter_detail = "; ".join(
+                [f"contract gap: {gap}" for gap in adapter_gaps]
+                + [f"note: {note}" for note in adapter_inventory]
+            ) or (
+                f"{len(repo_hook_sources)} inspected hook source(s) declare a "
+                "current audit marker and pass --event pre --runtime codex"
+            )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [
                 entry
@@ -2993,7 +3109,10 @@ def doctor(args: argparse.Namespace) -> int:
             source_ok = False
             source_detail = str(exc)
             project_detail = str(exc)
+            adapter_ok = False
+            adapter_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
+        checks.append(("Codex adapter contract", adapter_ok, adapter_detail))
         checks.append(
             ("Codex project hook activation", activation_ok, activation_detail)
         )

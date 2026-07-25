@@ -2036,6 +2036,143 @@ allow_local_binding = true
             }
         )
 
+    @staticmethod
+    def direct_adapter_text(posix_command: str, windows_command: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": posix_command,
+                                    "commandWindows": windows_command,
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    def test_doctor_names_an_unpinned_adapter(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                'python3 "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex',
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("declares no expected=<sha256> audit marker", output)
+        self.assertIn(".command", output)
+        self.assertIn(".commandWindows", output)
+
+    def test_doctor_names_a_stale_adapter_marker(self) -> None:
+        repo = self.make_repo()
+        stale = "b" * 64
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={stale}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre --runtime codex",
+                f"$expected='{stale}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn(f"declares a stale audit marker {stale[:12]}...", output)
+        self.assertNotIn("declares no expected=<sha256> audit marker", output)
+
+    def test_doctor_names_a_missing_runtime_flag(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={pin}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre",
+                f"$expected='{pin}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("never passes --runtime codex", output)
+
+    def test_doctor_inventories_a_vendored_dispatcher(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f"expected={pin}; python3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; py -3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        # A vendored dispatcher is an ESTATE-recorded choice, so it reads as
+        # inventory rather than a contract gap.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("names a repo-local dispatcher copy", output)
+        self.assertNotIn("contract gap", output)
+        # It is still not a certifiable floor: the shape check rejects it.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_inventories_wrapper_flag_delegation(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("leaves --runtime codex to a repo wrapper", output)
+        self.assertNotIn("contract gap", output)
+
     def test_repo_floor_rejects_session_cwd_relative_wrapper_paths(self) -> None:
         pin = "a" * 64
         cases = (
