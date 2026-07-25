@@ -22,6 +22,7 @@ import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -1120,7 +1121,437 @@ def stale_path_issues(repo: Path) -> list[str]:
     return issues
 
 
-def audit_repo(path: Path) -> dict[str, Any]:
+# --- reality checks: declarations measured against the world, not each other ---
+#
+# Every check below answers "is the declared thing actually true?" and reports
+# one of three states. `MISMATCH` means two things that must agree do not, and
+# is a hard failure. `UNPROVEN` means the check could not run (offline, no
+# `gh`, an unresolvable host, an exhausted budget) and must never render as a
+# pass. `advisory` is a real observation that is not by itself a defect.
+# Subprocess use follows the deny floor's discipline (`dispatch.py`
+# `command_output_before_deadline`): every resolver is read-only, bounded by a
+# per-command timeout AND a shared aggregate deadline, and injectable so tests
+# never spawn a process or touch the network. An offline run degrades to
+# `UNPROVEN` and exits 0 rather than failing CI.
+REALITY_BUDGET_SECONDS = 8.0
+REALITY_COMMAND_TIMEOUT_SECONDS = 3.0
+REALITY_OK = "ok"
+REALITY_MISMATCH = "MISMATCH"
+REALITY_UNPROVEN = "UNPROVEN"
+REALITY_ADVISORY = "advisory"
+PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
+PRIVACY_CLAIM_PATTERN = re.compile(
+    r"private\s+(?:repo\b|repository\b|remote\b)", re.IGNORECASE
+)
+LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
+VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
+
+
+def bounded_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Run one read-only resolver under a hard timeout; never raise."""
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    return proc.returncode == 0, proc.stdout.strip()
+
+
+def output_before_deadline(
+    command_runner: Any,
+    argv: list[str],
+    cwd: Path | None,
+    deadline: float | None,
+) -> tuple[bool, str]:
+    """Run a resolver without overrunning the audit's aggregate budget."""
+    if deadline is None:
+        return command_runner(argv, cwd)
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return False, ""
+    if command_runner is bounded_command_output:
+        result = command_runner(
+            argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
+        )
+    else:
+        result = command_runner(argv, cwd)
+    return result if monotonic() <= deadline else (False, "")
+
+
+def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
+    return {"check": check, "status": status, "detail": detail}
+
+
+def github_repo_slug(remote: str) -> str:
+    """Return owner/repo for a github.com remote, without any credentials."""
+    patterns = (
+        r"^(?:https?|git)://(?:[^/@]+@)?github\.com/([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?github\.com[:/]([^/?#]+/[^/?#]+)",
+        r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, remote.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).removesuffix(".git")
+    return ""
+
+
+def configured_remote_urls(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, list[str]]:
+    """Enumerate every configured remote URL; False when git could not answer."""
+    resolved, output = output_before_deadline(
+        command_runner, ["git", "remote", "--verbose"], repo, deadline
+    )
+    if not resolved:
+        return False, []
+    urls = [parts[1] for line in output.splitlines() if len(parts := line.split()) >= 2]
+    return True, list(dict.fromkeys(urls))
+
+
+def github_visibility(
+    slug: str, repo: Path, command_runner: Any, deadline: float | None
+) -> str:
+    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked."""
+    resolved, output = output_before_deadline(
+        command_runner,
+        ["gh", "repo", "view", slug, "--json", "visibility", "--jq", ".visibility"],
+        repo,
+        deadline,
+    )
+    return output.strip().upper() if resolved else ""
+
+
+def privacy_claim_findings(repo: Path) -> list[dict[str, str]]:
+    """Sibling docs asserting privacy while the overlay is absent: a split."""
+    check = "documented privacy vs the sensitive_data overlay"
+    claims: list[str] = []
+    for name in PRIVACY_CLAIM_DOCS:
+        path = repo / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        match = PRIVACY_CLAIM_PATTERN.search(text)
+        if match:
+            claims.append(f"{name} says {match.group(0)!r}")
+    if not claims:
+        return []
+    return [
+        reality_finding(
+            check,
+            REALITY_ADVISORY,
+            f"{'; '.join(claims)}, but flags.sensitive_data is not declared true — "
+            "the docs and the tier declaration disagree",
+        )
+    ]
+
+
+def sensitive_data_findings(
+    repo: Path,
+    tier_data: dict[str, Any],
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Measure a declared `sensitive_data` overlay against remote visibility."""
+    flags = tier_data.get("flags")
+    declared = bool(flags.get("sensitive_data")) if isinstance(flags, dict) else False
+    if not declared:
+        return privacy_claim_findings(repo)
+    check = "sensitive_data vs actual remote visibility"
+    resolved, urls = configured_remote_urls(repo, command_runner, deadline)
+    if not resolved:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "`git remote --verbose` did not answer, so no remote visibility "
+                "was measured",
+            )
+        ]
+    if not urls:
+        return [
+            reality_finding(
+                check, REALITY_OK, "no remote is configured; nothing is published"
+            )
+        ]
+    findings: list[dict[str, str]] = []
+    for url in urls:
+        if LOCAL_REMOTE_PATTERN.match(url):
+            findings.append(
+                reality_finding(check, REALITY_OK, f"{url} is a local-only remote")
+            )
+            continue
+        slug = github_repo_slug(url)
+        if not slug:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{url} is not a github.com remote; its visibility is not "
+                    "machine-checkable here",
+                )
+            )
+            continue
+        visibility = github_visibility(slug, repo, command_runner, deadline)
+        if visibility == "PUBLIC":
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_MISMATCH,
+                    f"flags.sensitive_data is declared true but remote {url} "
+                    f"resolves to the PUBLIC repository {slug} — evidence: "
+                    f"`gh repo view {slug} --json visibility` -> PUBLIC",
+                )
+            )
+        elif visibility in {"PRIVATE", "INTERNAL"}:
+            findings.append(
+                reality_finding(check, REALITY_OK, f"{slug} is {visibility}")
+            )
+        else:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{slug}: `gh repo view` returned "
+                    f"{visibility or '<no output>'}; visibility is unmeasured "
+                    "(offline, unauthenticated, or gh is absent)",
+                )
+            )
+    return findings
+
+
+def human_todo_findings(
+    repo: Path, tier: int, tier_data: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Measure a declared human-action file against the filesystem."""
+    check = "human_todo vs the file on disk"
+    declared = tier_data.get("human_todo")
+    if declared is None:
+        if tier >= 2:
+            return [
+                reality_finding(
+                    check,
+                    REALITY_ADVISORY,
+                    f"T{tier} declares no human_todo "
+                    f"({'null' if 'human_todo' in tier_data else 'absent'}), so law "
+                    "5 has no file to surface in summaries",
+                )
+            ]
+        return []
+    if not isinstance(declared, str) or not declared.strip():
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo must be a repo-relative path or null, not {declared!r}",
+            )
+        ]
+    relative = PurePosixPath(declared.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts:
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo {declared!r} is not a repo-relative path",
+            )
+        ]
+    if (repo / relative).is_file():
+        return [reality_finding(check, REALITY_OK, f"{declared} exists")]
+    return [
+        reality_finding(
+            check,
+            REALITY_MISMATCH,
+            f"human_todo declares {declared!r} but no such file exists in {repo}",
+        )
+    ]
+
+
+def floor_version(path: Path) -> str:
+    """The FLOOR_VERSION string a dispatcher copy declares, or ""."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = re.search(r'^FLOOR_VERSION\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def floor_identity(path: Path) -> tuple[str, str]:
+    """(normalized sha256, FLOOR_VERSION) for a floor copy; ("", "") if absent."""
+    if not path.is_file():
+        return "", ""
+    try:
+        return normalized_text_sha256(path), floor_version(path)
+    except (OSError, UnicodeDecodeError, UnicodeError):
+        return "", ""
+
+
+def describe_floor(label: str, digest: str, version: str) -> str:
+    if not digest:
+        return f"{label} absent/unreadable"
+    return f"{label} {version or '<no FLOOR_VERSION>'} sha {digest[:12]}"
+
+
+def harness_reference_status(
+    harness_root: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, str]:
+    """Whether this harness checkout may serve as the canonical byte reference.
+
+    The pin/compare primitives read the WORKING TREE, so a floor branch or a
+    dirty tree would make unmerged bytes the reference. Refuse, and say so.
+    """
+    resolved, branch = output_before_deadline(
+        command_runner,
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return False, f"the branch of harness checkout {harness_root} is unresolvable"
+    if branch.strip() != "main":
+        return (
+            False,
+            f"harness checkout {harness_root} is on {branch.strip() or '<unknown>'!r}, "
+            "not main, so its working tree is not the canonical reference",
+        )
+    resolved, dirty = output_before_deadline(
+        command_runner,
+        ["git", "status", "--porcelain", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the working-tree state of harness checkout {harness_root} is "
+            "unresolvable",
+        )
+    if dirty.strip():
+        return (
+            False,
+            f"harness checkout {harness_root} has uncommitted templates/hooks "
+            "changes, so its working tree is not the canonical reference",
+        )
+    return True, f"harness checkout {harness_root} is clean on main"
+
+
+def vendored_floor_findings(
+    repo: Path,
+    harness_root: Path,
+    claude_home: Path,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Compare a repo's vendored floor bytes with template and deployed copies."""
+    vendored = [
+        (name, repo / "hooks" / name)
+        for name in VENDORED_FLOOR_FILES
+        if (repo / "hooks" / name).is_file()
+    ]
+    if not vendored:
+        return []
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, command_runner, deadline
+    )
+    findings: list[dict[str, str]] = []
+    for name, path in vendored:
+        check = f"vendored hooks/{name} vs canonical bytes"
+        repo_digest, repo_version = floor_identity(path)
+        template = harness_root / "templates" / "hooks" / name
+        deployed = claude_home / "hooks" / name
+        template_digest, template_version = floor_identity(template)
+        deployed_digest, deployed_version = floor_identity(deployed)
+        parts = [
+            describe_floor("vendored", repo_digest, repo_version),
+            describe_floor("canonical template", template_digest, template_version),
+            describe_floor("deployed global", deployed_digest, deployed_version),
+        ]
+        notes: list[str] = []
+        status = REALITY_OK
+        if not repo_digest:
+            status = REALITY_UNPROVEN
+            notes.append(f"{path} could not be hashed")
+        else:
+            if reference_ok and template_digest:
+                if template_digest != repo_digest:
+                    status = REALITY_MISMATCH
+                    notes.append("vendored bytes differ from the canonical template")
+            else:
+                status = REALITY_UNPROVEN
+                notes.append(
+                    "not compared with the canonical template: "
+                    + (reference_detail if not reference_ok else f"{template} absent")
+                )
+            if deployed_digest:
+                if deployed_digest != repo_digest:
+                    status = REALITY_MISMATCH
+                    notes.append("vendored bytes differ from the deployed global copy")
+            elif status != REALITY_MISMATCH:
+                status = REALITY_UNPROVEN
+                notes.append(f"no deployed global copy at {deployed}")
+        detail = "; ".join(parts)
+        if notes:
+            detail = f"{detail} — {'; '.join(notes)}"
+        findings.append(reality_finding(check, status, detail))
+    return findings
+
+
+def reality_findings(
+    repo: Path,
+    tier: int,
+    tier_data: dict[str, Any],
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> list[dict[str, str]]:
+    """Every declaration this repo makes that is cheaply checkable for real."""
+    if harness_root is None:
+        harness_root = Path(__file__).resolve().parent
+    if claude_home is None:
+        claude_home = Path.home() / ".claude"
+    if deadline is None:
+        deadline = monotonic() + REALITY_BUDGET_SECONDS
+    findings = sensitive_data_findings(
+        repo, tier_data, command_runner=command_runner, deadline=deadline
+    )
+    findings.extend(
+        vendored_floor_findings(
+            repo,
+            harness_root,
+            claude_home,
+            command_runner=command_runner,
+            deadline=deadline,
+        )
+    )
+    findings.extend(human_todo_findings(repo, tier, tier_data))
+    return findings
+
+
+def audit_repo(
+    path: Path,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> dict[str, Any]:
     repo = git_root(path)
     config_path, tier_data = load_tier(repo)
     issues: list[str] = []
@@ -1136,6 +1567,16 @@ def audit_repo(path: Path) -> dict[str, Any]:
         issues.append("missing root AGENTS.md")
     issues.extend(budget_issues(repo, tier))
     issues.extend(stale_path_issues(repo))
+    findings = reality_findings(
+        repo,
+        tier,
+        tier_data,
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
+        deadline=deadline,
+    )
+    mismatches = [f for f in findings if f["status"] == REALITY_MISMATCH]
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
@@ -1143,7 +1584,8 @@ def audit_repo(path: Path) -> dict[str, Any]:
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
-        "ok": not issues,
+        "reality": findings,
+        "ok": not issues and not mismatches,
     }
 
 
@@ -2937,6 +3379,23 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, bounded_command_output, monotonic() + REALITY_BUDGET_SECONDS
+    )
+    template_version = floor_version(
+        harness_root / "templates" / "hooks" / "dispatch.py"
+    )
+    deployed_version = floor_version(claude_home / "hooks" / "dispatch.py")
+    checks.append(
+        (
+            "floor version",
+            bool(template_version) and template_version == deployed_version,
+            f"canonical template {template_version or '<unreadable>'}; deployed "
+            f"global {deployed_version or '<unreadable>'}; reference integrity: "
+            f"{reference_detail}"
+            + ("" if reference_ok else " (canonical comparisons are UNPROVEN here)"),
+        )
+    )
     if args.repo:
         try:
             marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
@@ -3147,6 +3606,35 @@ def doctor(args: argparse.Namespace) -> int:
                 project_detail,
             )
         )
+        try:
+            reality_repo = git_root(Path(args.repo))
+            _reality_config, reality_tier_data = load_tier(reality_repo)
+            reality_tier = (
+                reality_tier_data.get("tier")
+                if reality_tier_data.get("tier") in TIER_NAMES
+                else 1
+            )
+            findings = reality_findings(
+                reality_repo,
+                reality_tier,
+                reality_tier_data,
+                harness_root=harness_root,
+                claude_home=claude_home,
+            )
+            reality_ok = not any(
+                finding["status"] == REALITY_MISMATCH for finding in findings
+            )
+            reality_detail = (
+                "; ".join(
+                    f"[{finding['status']}] {finding['check']}: {finding['detail']}"
+                    for finding in findings
+                )
+                or "this repo declares nothing that is checkable against reality"
+            )
+        except (HarnessError, OSError, UnicodeError) as exc:
+            reality_ok = False
+            reality_detail = str(exc)
+        checks.append(("declared vs real", reality_ok, reality_detail))
     for label, ok, detail in checks:
         print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1
@@ -3160,10 +3648,11 @@ def audit_command(args: argparse.Namespace) -> int:
         print(f"repo: {result['repo']}")
         print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
         print(result["git"])
-        if result["issues"]:
-            for issue in result["issues"]:
-                print(f"[FAIL] {issue}")
-        else:
+        for issue in result["issues"]:
+            print(f"[FAIL] {issue}")
+        for finding in result["reality"]:
+            print(f"[{finding['status']}] {finding['check']}: {finding['detail']}")
+        if result["ok"]:
             print("[ok] harness audit")
     return 0 if result["ok"] else 1
 

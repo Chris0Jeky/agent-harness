@@ -32,6 +32,18 @@ Install the pinned development tools with `py -3 -m pip install -r requirements-
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every
 pull request and push to `main`; workflow actions are pinned to immutable commit SHAs.
 
+`audit` also measures declarations against reality instead of against other documents:
+a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
+`hooks/dispatch.py` and `hooks/smoke_test.py` bytes against the canonical template and the
+deployed global copy (reporting `FLOOR_VERSION` alongside the hashes), and a declared
+`human_todo` against a file that exists. Each reports `MISMATCH` (a hard failure, exit 1),
+`UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
+Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
+skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
+degrades to `UNPROVEN` and exits 0. Because the byte comparison reads the harness working
+tree, a non-`main` or dirty harness checkout is refused as the canonical reference and said
+so. `doctor` surfaces the same findings for `--repo`, plus a global `floor version` check.
+
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated

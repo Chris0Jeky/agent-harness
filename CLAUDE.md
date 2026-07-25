@@ -47,7 +47,12 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
 
 **`harness.py`** — single-file CLI with four subcommands:
 - `audit` — validates a repo's tier declaration, doc line budgets (CLAUDE.md is capped per
-  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths
+  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths.
+  It also runs the **reality checks** (`reality_findings`): declared `sensitive_data` vs each
+  remote's real host visibility, vendored floor bytes vs template vs deployed global, and
+  declared `human_todo` vs a file that exists. `MISMATCH` fails; `UNPROVEN` is printed loudly
+  and never renders as a pass; probes are read-only, deadline-bounded, and injectable
+  (`command_runner`) so tests never spawn a process or hit the network
 - `seed` — writes a write-once `.agent-harness/tier.json`; refuses to overwrite
 - `sync-global` — diffs (default) or installs (`--apply`) shared global guidance, managed
   skills, and the dispatcher bytes into `~/.claude/hooks`, backing up anything it replaces

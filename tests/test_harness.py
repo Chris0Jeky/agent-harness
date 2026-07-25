@@ -4600,6 +4600,360 @@ allow_local_binding = true
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)
 
+    def test_doctor_reports_floor_version_and_reference_integrity(self) -> None:
+        repo = self.make_repo()
+        result, output = self.run_doctor_with_fixture_globals(repo)
+        self.assertIn("floor version: canonical template ", output)
+        self.assertIn("reference integrity: ", output)
+        self.assertIn("declared vs real: ", output)
+        self.assertIsInstance(result, int)
+
+
+class FakeCommandRunner:
+    """A stand-in resolver: records argv, never spawns a process."""
+
+    def __init__(
+        self,
+        responses: dict[str, tuple[bool, str]] | None = None,
+        default: tuple[bool, str] = (False, ""),
+    ) -> None:
+        self.responses = responses or {}
+        self.default = default
+        self.calls: list[list[str]] = []
+
+    def __call__(
+        self, argv: list[str], cwd: Path | None = None, **kwargs: object
+    ) -> tuple[bool, str]:
+        self.calls.append(list(argv))
+        joined = " ".join(argv)
+        for needle, response in self.responses.items():
+            if needle in joined:
+                return response
+        return self.default
+
+
+GITHUB_REMOTE_OUTPUT = (
+    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+    "origin\thttps://github.com/acme/widgets.git (push)"
+)
+
+
+class RealityCheckTests(unittest.TestCase):
+    """Declarations measured against the world, never against other documents."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.harness_root = self.root / "harness"
+        self.claude_home = self.root / "claude-home"
+        (self.harness_root / "templates" / "hooks").mkdir(parents=True)
+        (self.claude_home / "hooks").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def make_repo(
+        self,
+        *,
+        tier: int = 2,
+        sensitive_data: bool = False,
+        human_todo: object = "unset",
+        agents_text: str = "# Agent guidance\n",
+    ) -> Path:
+        repo = self.root / f"repo-{len(list(self.root.glob('repo-*')))}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "AGENTS.md").write_text(agents_text, encoding="utf-8")
+        declaration: dict[str, object] = {
+            "tier": tier,
+            "name": harness.TIER_NAMES[tier],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {"sensitive_data": sensitive_data},
+        }
+        if human_todo != "unset":
+            declaration["human_todo"] = human_todo
+        (repo / ".agent-harness").mkdir()
+        (repo / ".agent-harness" / "tier.json").write_text(
+            json.dumps(declaration), encoding="utf-8"
+        )
+        return repo
+
+    def audit(
+        self, repo: Path, runner: FakeCommandRunner, deadline: float | None = None
+    ) -> dict[str, object]:
+        return harness.audit_repo(
+            repo,
+            harness_root=self.harness_root,
+            claude_home=self.claude_home,
+            command_runner=runner,
+            deadline=deadline,
+        )
+
+    def statuses(self, result: dict[str, object], needle: str) -> list[str]:
+        return [
+            finding["status"]
+            for finding in result["reality"]
+            if needle in finding["check"]
+        ]
+
+    def details(self, result: dict[str, object]) -> str:
+        return " | ".join(finding["detail"] for finding in result["reality"])
+
+    def write_floor(self, path: Path, version: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f'"""floor fixture."""\n\nFLOOR_VERSION = "{version}"\n', encoding="utf-8"
+        )
+
+    # --- sensitive_data versus real remote visibility -------------------------
+
+    def test_declared_sensitive_data_on_public_remote_is_a_mismatch(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+        detail = self.details(result)
+        self.assertIn("acme/widgets", detail)
+        self.assertIn("https://github.com/acme/widgets.git", detail)
+        self.assertIn("PUBLIC", detail)
+
+    def test_declared_sensitive_data_on_private_remote_passes(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_unresolvable_visibility_is_unproven_and_never_a_pass(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)}, default=(False, "")
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("unmeasured", self.details(result))
+        # Offline is not a defect: it must not fail the audit either.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_non_github_remote_is_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://gitlab.example/acme/widgets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
+
+    def test_local_only_remote_is_a_pass(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {"remote --verbose": (True, f"origin\t{self.root} (fetch)")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+
+    def test_remote_enumeration_failure_is_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(default=(False, ""))
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertTrue(result["ok"])
+
+    def test_absent_remote_is_a_pass_not_an_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner({"remote --verbose": (True, "")})
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertIn("nothing is published", self.details(result))
+
+    def test_exhausted_deadline_spawns_nothing_and_reports_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner, deadline=harness.monotonic() - 1)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertTrue(result["ok"])
+
+    def test_repo_without_the_overlay_never_touches_the_network(self) -> None:
+        repo = self.make_repo(sensitive_data=False)
+        runner = FakeCommandRunner()
+        result = self.audit(repo, runner)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.statuses(result, "remote visibility"), [])
+
+    def test_documented_privacy_without_the_overlay_is_an_advisory_split(self) -> None:
+        repo = self.make_repo(
+            sensitive_data=False,
+            agents_text="This private repository versions the user's config.\n",
+        )
+        runner = FakeCommandRunner()
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "documented privacy"), ["advisory"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    # --- human_todo versus a file that exists ---------------------------------
+
+    def test_human_todo_naming_a_missing_file_is_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_human_todo_pointing_at_a_real_file_passes(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        (repo / "HUMAN_TODO.md").write_text("- [ ] item\n", encoding="utf-8")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_human_todo_escaping_the_repo_is_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="../HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+
+    def test_null_human_todo_above_t1_is_advisory_only(self) -> None:
+        repo = self.make_repo(tier=3, human_todo=None)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["advisory"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    # --- vendored floor bytes versus template versus deployed global ----------
+
+    def test_vendored_floor_drift_from_the_template_is_a_mismatch(self) -> None:
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)"
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+        )
+        detail = self.details(result)
+        self.assertIn("1.6.0 (2026-07-01)", detail)
+        self.assertIn("1.6.5 (2026-07-25)", detail)
+        self.assertFalse(result["ok"])
+
+    def test_matching_floor_copies_pass(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "vendored hooks/dispatch.py"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_dirty_harness_checkout_is_not_treated_as_the_reference(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, " M x")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("uncommitted templates/hooks changes", self.details(result))
+        self.assertTrue(result["ok"])
+
+    def test_floor_branch_checkout_is_not_treated_as_the_reference(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("not main", self.details(result))
+
+    def test_deployed_global_drift_is_a_mismatch_without_the_template(self) -> None:
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)")
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)"
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+        )
+        self.assertIn("deployed global copy", self.details(result))
+
+    def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
+        repo = self.make_repo()
+        runner = FakeCommandRunner()
+        self.audit(repo, runner)
+        self.assertEqual(runner.calls, [])
+
+    # --- reporting ------------------------------------------------------------
+
+    def test_audit_command_prints_findings_and_fails_on_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.audit_command(SimpleNamespace(path=str(repo), json=False))
+        text = output.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", text)
+        self.assertNotIn("[ok] harness audit", text)
+
+    def test_audit_json_output_carries_every_finding(self) -> None:
+        repo = self.make_repo(tier=3, human_todo=None)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.audit_command(SimpleNamespace(path=str(repo), json=True))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [finding["status"] for finding in payload["reality"]], ["advisory"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
