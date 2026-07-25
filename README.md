@@ -58,7 +58,15 @@ that qualified default topology, it walks every active `.codex` layer from the c
 through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
 because Codex loads both forms. Across those sources it
 requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
-execution shape, and one current normalized dispatcher pin. That floor must be the canonical root
+execution shape, and one current normalized dispatcher marker. That marker is **audit-only**: it
+is never passed to or verified by `dispatch.py` at runtime, so it proves the trusted hook
+definition was written against those bytes and nothing more (see SPECS §5 for the mandatory
+refresh/re-trust sequencing after a dispatcher change). A separate `Codex adapter contract` check
+names every candidate handler and platform command that declares no marker, declares a stale one,
+or never passes `--event pre --runtime codex`; a vendored dispatcher or wrapper flag delegation is
+reported as inventory rather than a failure. Because Codex runs hook commands from the session
+cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root.
+That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
 requirements, managed hook-feature requirements, persisted canonical/legacy hook feature

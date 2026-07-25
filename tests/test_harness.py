@@ -2058,6 +2058,32 @@ allow_local_binding = true
             }
         )
 
+    def test_doctor_states_the_marker_is_audit_only(self) -> None:
+        # Issue #18: the adapter's expected=<sha256> value is a static audit
+        # marker, not runtime byte enforcement. Nothing may report it as the
+        # latter, in code or in docs.
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn(
+            "the expected=<sha256> value is an audit-only marker, never "
+            "verified at runtime",
+            output,
+        )
+
+    def test_shipped_docs_call_the_marker_audit_only(self) -> None:
+        root = Path(harness.__file__).resolve().parent
+        for name in ("README.md", "SPECS.md", "BLUEPRINT.md"):
+            with self.subTest(document=name):
+                text = (root / name).read_text(encoding="utf-8").lower()
+                self.assertIn("audit-only", text)
+
     def test_doctor_names_an_unpinned_adapter(self) -> None:
         repo = self.make_repo()
         self.write_hooks(
@@ -2317,7 +2343,7 @@ allow_local_binding = true
         self.assertIn("session cwd", output)
         self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
         self.assertIn("0 project floor handler(s)", output)
-        self.assertIn("0 current pinned handler(s)", output)
+        self.assertIn("0 current audit-marker handler(s)", output)
 
     def test_doctor_certifies_a_direct_adapter_from_a_subdirectory_cwd(self) -> None:
         repo = self.make_repo()

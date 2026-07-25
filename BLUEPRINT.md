@@ -164,8 +164,10 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
 at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE. Claude wires the
-shared dispatcher globally; each active Codex repo owns one pinned project adapter. Never stack a
-global and project Codex floor:
+shared dispatcher globally; each active Codex repo owns one project adapter carrying an
+**audit-only** normalized dispatcher marker — a declaration the runtime never verifies, so a
+dispatcher change obliges refreshing every consumer marker and re-trusting each adapter in a
+fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor:
 
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`

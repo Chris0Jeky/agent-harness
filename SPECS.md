@@ -176,10 +176,23 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   Managed-cloud and MDM requirements/config, session flags, and plugin hooks remain an explicit
   runtime boundary for exact-session `/hooks`; the static check never represents those sources as
   inspected.
+- **The adapter's `expected=<sha256>` value is an AUDIT-ONLY marker, not runtime enforcement.**
+  Nothing exports it to the dispatcher and `dispatch.py` takes no expected-hash argument, so it
+  proves only that the trusted hook *definition* was written against those dispatcher bytes.
+  Consequences, which are mandatory, not advisory: changing `templates/hooks/dispatch.py` obliges
+  bumping `FLOOR_VERSION`, refreshing the marker in **every** consumer `.codex/hooks.json`, and a
+  fresh-session `/hooks` re-trust per repo in its exact CWD; a rollout PR must enumerate and
+  sequence those consumers rather than let their markers go stale silently. `doctor` reports
+  marker currency; runtime byte integrity and definition-hash trust are separate evidence, proved
+  only by `/hooks` plus a live safe/deny canary. No doc, PR, or commit may describe the marker as
+  runtime pin enforcement.
 - Codex project adapters must pass `--event pre --runtime codex` directly, or invoke a repo-owned
   wrapper that binds both values. The POSIX and Windows commands must independently invoke the
-  shared dispatcher or that wrapper, bind the normalized dispatcher hash pin to a named variable,
-  and use a matcher that positively includes Bash. The canonical `commandWindows` field and its
+  shared dispatcher or that wrapper, declare the normalized dispatcher hash marker in a named
+  variable, and use a matcher that positively includes Bash. Because Codex runs a hook command
+  from the SESSION cwd rather than the hook source root, a repo-relative wrapper path certifies
+  only when those directories are the same; from a subdirectory cwd or a linked worktree, `doctor`
+  fails that adapter closed and names it. The canonical `commandWindows` field and its
   official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
   uses the Git-root layer walk
   only when all inspectable top-level `project_root_markers` declarations in system, base-user, and
@@ -189,7 +202,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   qualified topology, `doctor` audits every active `.codex` layer from the checkout root through
   the requested directory and both declaration forms Codex loads: `hooks.json` and inline
   `[hooks]` in `config.toml`. Across all active sources it requires exactly one candidate, one
-  conservatively recognized execution shape, and one current pin. The recognized current floor
+  conservatively recognized execution shape, and one current audit marker. It also reports, per
+  candidate handler and platform command, whether the adapter declares no marker, declares a stale
+  marker, or never passes `--event pre --runtime codex`; a vendored dispatcher and wrapper flag
+  delegation are recorded as inventory notes, not failures. The recognized current floor
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
   but no hooks are valid. The project floor also fails when inspectable system requirements allow
   only managed hooks or pin the hook feature off, an active persisted canonical/legacy feature

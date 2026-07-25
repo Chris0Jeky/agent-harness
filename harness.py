@@ -2433,6 +2433,16 @@ def segment_invokes_wrapper(
 
 
 def command_binds_pin(command: str, expected_pin: str | None) -> bool:
+    """Return whether the command declares this audit marker.
+
+    AUDIT-ONLY (issue #18). The `expected=<sha256>` value is a declaration
+    inside the Codex hook definition, not a runtime integrity control: nothing
+    exports it to the dispatcher, and `dispatch.py` takes no expected-hash
+    argument. It proves only that the trusted hook DEFINITION was written
+    against these dispatcher bytes, which is why a dispatcher change obliges an
+    estate-wide marker refresh plus a fresh-session `/hooks` re-trust. Runtime
+    byte integrity is separate evidence and is deliberately not claimed here.
+    """
     if expected_pin is None:
         return True
     return bool(
@@ -2705,6 +2715,12 @@ def repo_codex_floor_groups(
 
 
 def normalized_text_sha256(path: Path) -> str:
+    """Hash a file's LF-normalized text; the value adapters declare as a marker.
+
+    Line endings are normalized so the same checkout hashes identically on
+    Windows and POSIX. See `command_binds_pin` for what the declared value does
+    and does not prove.
+    """
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -3096,10 +3112,12 @@ def doctor(args: argparse.Namespace) -> int:
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
-                f"{current_floor_count} current pinned handler(s); "
+                f"{current_floor_count} current audit-marker handler(s); "
                 f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
                 f"{wrapper_detail}"
-                f"{source_detail}; trust is checked manually in /hooks"
+                f"{source_detail}; the expected=<sha256> value is an audit-only "
+                "marker, never verified at runtime; trust is checked manually "
+                "in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
