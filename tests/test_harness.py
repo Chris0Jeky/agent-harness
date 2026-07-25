@@ -4997,6 +4997,30 @@ allow_local_binding = true
             self.run_doctor_with_fixture_globals(repo, offline=True)
         self.assertIs(captured["runner"], harness.local_only_command_output)
 
+    def test_doctor_offline_also_routes_the_floor_reference_probe(self) -> None:
+        # `harness_reference_status` reaches the remote for the published main
+        # tip. It shipped hard-wired to the network runner while only the
+        # reality checks honoured `--offline`, so the offline run still waited
+        # out `git ls-remote`.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: list[object] = []
+
+        def record(
+            _root: Path, command_runner: object, _deadline: object
+        ) -> tuple[bool, str]:
+            captured.append(command_runner)
+            return False, "fixture reason"
+
+        with mock.patch.object(harness, "harness_reference_status", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo, offline=True)
+        self.assertEqual(captured, [harness.local_only_command_output])
+
     def test_doctor_repo_uses_the_network_resolver_by_default(self) -> None:
         repo = self.make_repo()
         self.write_hooks(

@@ -1236,6 +1236,19 @@ def command_reaches_the_network(argv: list[str]) -> bool:
     )
 
 
+def offline_aware_command_runner(args: argparse.Namespace) -> Any:
+    """The resolver an `--offline`-capable subcommand must use.
+
+    One selector for every probe a subcommand makes: `doctor --repo --offline`
+    shipped with the reality checks routed through it and the floor-reference
+    probe still hard-wired to the network runner, so the "offline" run reached
+    the remote anyway.
+    """
+    if getattr(args, "offline", False):
+        return local_only_command_output
+    return bounded_command_output
+
+
 def local_only_command_output(
     argv: list[str],
     cwd: Path | None = None,
@@ -3790,8 +3803,13 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
+    # `harness_reference_status` reaches the remote for the published main tip,
+    # so this probe answers to `--offline` exactly like the repo reality checks
+    # below; otherwise a supposedly offline run still waits out `git ls-remote`.
     reference_ok, reference_detail = harness_reference_status(
-        harness_root, bounded_command_output, monotonic() + REALITY_BUDGET_SECONDS
+        harness_root,
+        offline_aware_command_runner(args),
+        monotonic() + REALITY_BUDGET_SECONDS,
     )
     template_version = floor_version(
         harness_root / "templates" / "hooks" / "dispatch.py"
@@ -4076,11 +4094,7 @@ def doctor(args: argparse.Namespace) -> int:
                 # it needs the same escape hatch: without it an operator off
                 # network waits out the whole probe budget on `gh` and remote
                 # ref lookups before every one of them degrades to UNPROVEN.
-                command_runner=(
-                    local_only_command_output
-                    if getattr(args, "offline", False)
-                    else bounded_command_output
-                ),
+                command_runner=offline_aware_command_runner(args),
             )
             statuses = {finding["status"] for finding in findings}
             reality_ok: bool | str = True
@@ -4128,11 +4142,7 @@ def audit_command(
     auditing-machine dependence these checks exist to remove.
     """
     if command_runner is None:
-        command_runner = (
-            local_only_command_output
-            if getattr(args, "offline", False)
-            else bounded_command_output
-        )
+        command_runner = offline_aware_command_runner(args)
     result = audit_repo(
         Path(args.path),
         harness_root=harness_root,
