@@ -1148,7 +1148,7 @@ PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
 # matched "private" immediately followed by one of three singular nouns, which
 # misses "this repository is private", "private repos" and "kept private" - the
 # most natural spellings - so the advertised converse check almost never fired.
-_PRIVACY_NOUNS = r"(?:repo|repository|remote|fork|mirror)s?"
+_PRIVACY_NOUNS = r"(?:repo|repository|remote)s?"
 PRIVACY_CLAIM_PATTERN = re.compile(
     rf"private\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
     rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+is\s+private\b"
