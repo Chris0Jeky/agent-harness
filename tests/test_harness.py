@@ -5078,14 +5078,27 @@ class RealityCheckTests(unittest.TestCase):
         the one finding this check exists to make into an UNPROVEN.
         """
         repo = self.make_repo(sensitive_data=True)
-        runner = FakeCommandRunner(
+        clock = {"now": 0.0}
+
+        class OverrunningRunner(FakeCommandRunner):
+            """The visibility probe itself consumes the rest of the budget."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    clock["now"] += 10.0
+                return answer
+
+        runner = OverrunningRunner(
             {
                 "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
                 "gh repo view": (True, "PUBLIC"),
             }
         )
-        with mock.patch.object(harness, "monotonic", side_effect=[0.0, 0.0]):
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
             result = self.audit(repo, runner, deadline=8.0)
+        # The budget really expired mid-probe, and the answer still counted.
+        self.assertGreater(clock["now"], 8.0)
         self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
 
     def test_repo_without_the_overlay_never_touches_the_network(self) -> None:
