@@ -21,14 +21,12 @@ a `}` inside a `#` comment close a block.
 """
 
 import importlib.util
-import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
-SMOKE_PATH = ROOT / "templates" / "hooks" / "smoke_test.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 
 def load_module(name: str, path: Path):
@@ -39,8 +37,7 @@ def load_module(name: str, path: Path):
 
 
 dispatch = load_module("dispatch_block_scan", DISPATCH_PATH)
-smoke = load_module("smoke_block_scan", SMOKE_PATH)
-GIT_HELPER_ENVIRONMENT = smoke.GIT_HELPER_ENVIRONMENT
+floor_environment = load_module("floor_environment_block_scan", FLOOR_ENVIRONMENT_PATH)
 
 
 def stub_resolver(
@@ -53,46 +50,17 @@ def stub_resolver(
 def check(command: str, tier: int = 1, flags=None):
     """Decide `command` without inherited Git launch configuration.
 
-    `check()` reads the live environment, and an ambient `GIT_CONFIG_COUNT` /
-    `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` family makes it deny with "Git
-    config environment injection is opaque to floor inspection" — which has
-    nothing to do with the parser behaviour these tests assert. Git's pager,
-    editor and launch helpers also change whether a command would launch an
-    external process. Clear the same helper environment as the smoke suite so
-    parser expectations do not depend on the host.
+    The isolation itself lives in `tests/floor_environment.py`, derived from
+    dispatch's own constants — see its docstring for exactly which ambient
+    reads are neutralized and which are not.
     """
-    tier_cfg = {"tier": tier, "flags": flags or {}}
-    project_dir = str(ROOT)
-    injected = {
-        name: value
-        for name, value in os.environ.items()
-        if name.startswith("GIT_CONFIG") or name in GIT_HELPER_ENVIRONMENT
-    }
-    for name in injected:
-        del os.environ[name]
-    try:
-        return dispatch.check(
-            command, tier_cfg, project_dir, project_dir, remote_resolver=stub_resolver
-        )
-    finally:
-        os.environ.update(injected)
-
-
-class CheckEnvironmentIsolationTests(unittest.TestCase):
-    def test_inherited_git_helpers_do_not_change_parser_verdicts(self):
-        cases = (
-            ({"GIT_PAGER": "helper", "PAGER": "helper"}, "git log"),
-            ({"EDITOR": "helper", "GIT_EDITOR": "helper"}, "git commit"),
-            (
-                {"GIT_SSH_COMMAND": "helper", "GIT_PROXY_COMMAND": "helper"},
-                "git fetch origin",
-            ),
-            ({"GIT_EXEC_PATH": "helper"}, "git status"),
-        )
-        for environment, command in cases:
-            with self.subTest(environment=environment, command=command):
-                with patch.dict(os.environ, environment):
-                    self.assertEqual(check(command)[0], "allow")
+    return floor_environment.hermetic_check(
+        dispatch,
+        command,
+        {"tier": tier, "flags": flags or {}},
+        str(ROOT),
+        remote_resolver=stub_resolver,
+    )
 
 
 class PowershellBlockDepthTests(unittest.TestCase):

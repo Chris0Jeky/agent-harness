@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 
 def load_module(name: str, path: Path):
@@ -46,6 +47,9 @@ class PushConfigForceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.dispatch = load_module("push_force_dispatch", DISPATCH_PATH)
+        cls.floor_environment = load_module(
+            "floor_environment_push_force", FLOOR_ENVIRONMENT_PATH
+        )
 
     def _repo(
         self,
@@ -74,7 +78,14 @@ class PushConfigForceTests(unittest.TestCase):
         return repo
 
     def _decide(self, repo: str, command: str, tier: int = 1):
-        return self.dispatch.check(
+        """Decide `command` without inherited Git launch configuration.
+
+        `tests/floor_environment.py` owns that isolation for every suite; here
+        it also keeps an ambient `GIT_DIR` / `GIT_WORK_TREE` from pointing the
+        bare-push config resolution at a repository other than the fixture.
+        """
+        return self.floor_environment.hermetic_check(
+            self.dispatch,
             command,
             {"tier": tier, "flags": {}},
             repo,
