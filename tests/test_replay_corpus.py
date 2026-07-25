@@ -1634,6 +1634,71 @@ class ToolFailureBucketTests(EndToEndTestCase):
         self.assertEqual(
             replay.count_toolfails(result), {"baseline": 7, "candidate": 1}
         )
+        # ...and the unit it is in, which the banner must not mislabel.
+        self.assertEqual(
+            replay.toolfail_headline(result, replay.count_toolfails(result)),
+            ({"baseline": 7, "candidate": 1}, "tier x command replays"),
+        )
+
+    def test_the_distinct_command_count_ignores_how_many_tiers_failed(self):
+        # One command failing at four tiers is one command, not four.
+        verdicts = [
+            [(replay.TOOLFAIL, "harness")] * 4,
+            [("allow", "")] * 4,
+            [("allow", ""), (replay.TOOLFAIL, "harness"), ("deny", "x"), ("allow", "")],
+        ]
+        self.assertEqual(replay.count_toolfail_commands(verdicts), 2)
+        self.assertEqual(replay.count_toolfail_commands([[("allow", "")]]), 0)
+
+    def test_the_headline_prefers_the_recorded_command_count(self):
+        result = {
+            "tier_order": [1, 2],
+            "run": {"toolfail_commands": {"baseline": 3, "candidate": 0}},
+            "tiers": {},
+        }
+        self.assertEqual(
+            replay.toolfail_headline(result, {"baseline": 6, "candidate": 0}),
+            ({"baseline": 3, "candidate": 0}, "commands"),
+        )
+
+    def test_the_banner_counts_commands_not_tier_pairs(self):
+        # The whole point of this instrument is that a printed number means
+        # what it says; "1 command" was reported as "4 commands" because
+        # unique_toolfail is per tier and the four default tiers were summed.
+        corpus = self.write_corpus("git push", "git status")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        json_path = self.dir / "toolfail.json"
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        result = json.loads(json_path.read_text(encoding="utf-8"))
+        run = result["run"]
+        # Four default tiers, one failing command: the inflation factor.
+        self.assertEqual(len(result["tier_order"]), 4)
+        self.assertEqual(run["toolfails"], {"baseline": 4, "candidate": 4})
+        self.assertEqual(run["toolfail_commands"], {"baseline": 1, "candidate": 1})
+        for stream in (text, err):
+            self.assertIn("baseline 1 / candidate 1 commands got no verdict", stream)
+            # The per-tier total is still shown, labelled, so the reason rows
+            # below it (which are per tier) still add up to something stated.
+            self.assertIn("(4 / 4 tier x command replays over 4 tier(s).)", stream)
+            self.assertIn("by reason (tier x command replays):", stream)
+        self.assertIn(
+            "(baseline 1 / candidate 1 commands)",
+            text,
+        )
 
 
 class CorpusIntegrityExitTests(EndToEndTestCase):

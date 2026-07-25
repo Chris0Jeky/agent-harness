@@ -1827,9 +1827,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         )
     toolfails = count_toolfails(result)
     if sum(toolfails.values()):
+        headline, unit = toolfail_headline(result, toolfails)
         print(
             "  NOTE: the replay itself failed on some commands (baseline "
-            f"{toolfails['baseline']} / candidate {toolfails['candidate']}).\n"
+            f"{headline['baseline']} / candidate {headline['candidate']} "
+            f"{unit}).\n"
             "  Those are in no rate and in no delta bucket above; see the "
             "TOOL FAILURE banner."
         )
@@ -1988,7 +1990,14 @@ def count_errors(result: dict[str, Any]) -> dict[str, int]:
 
 
 def count_toolfails(result: dict[str, Any]) -> dict[str, int]:
-    """Per-version total of commands the *harness* failed to get a verdict for."""
+    """Per-version tier x command replays the *harness* got no verdict for.
+
+    `unique_toolfail` is per tier, so summing it counts one command once per
+    tier: with the default four tiers a single failing command totals 4. That is
+    the right number for "how many replays failed" and the wrong one for "how
+    many commands failed" — see `toolfail_headline`, which is what the banner
+    prints. Any non-zero value here is fatal either way.
+    """
     return {
         version: sum(
             int(result["tiers"][tier][version].get("unique_toolfail", 0))
@@ -1996,6 +2005,38 @@ def count_toolfails(result: dict[str, Any]) -> dict[str, int]:
         )
         for version in ("baseline", "candidate")
     }
+
+
+def count_toolfail_commands(verdicts: Sequence[Any]) -> int:
+    """Distinct commands that lost their verdict at one or more tiers.
+
+    Derived from the verdict lists rather than the per-tier summaries, because
+    the summaries hold counts and not command identity: a command that fails at
+    every tier is indistinguishable there from one failing command per tier.
+    """
+    return sum(
+        1
+        for row in verdicts
+        if row is not None and any(decision == TOOLFAIL for decision, _ in row)
+    )
+
+
+def toolfail_headline(
+    result: dict[str, Any], toolfails: dict[str, int]
+) -> tuple[dict[str, int], str]:
+    """The counts to print for "got no verdict", and the unit they are in.
+
+    This tool's entire purpose is that a printed number means what it says, and
+    "N commands" summed over tiers does not: it inflates by the tier count.
+    `main()` records the distinct-command figure, so prefer it and say
+    "commands". A result assembled without it (a unit test's synthetic dict)
+    falls back to the tier x command total and is labelled as such rather than
+    being relabelled into a lie.
+    """
+    commands = result.get("run", {}).get("toolfail_commands")
+    if commands is None:
+        return toolfails, "tier x command replays"
+    return commands, "commands"
 
 
 def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> None:
@@ -2010,14 +2051,23 @@ def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> 
         for version in ("baseline", "candidate"):
             for row in result["tiers"][tier][version].get("toolfail_reasons", []):
                 reasons[row["reason"]] += int(row["unique"])
+    headline, unit = toolfail_headline(result, toolfails)
     for stream in (sys.stdout, sys.stderr):
         print("!" * 78, file=stream)
         print(
             "!! REPLAY TOOL FAILURE: baseline "
-            f"{toolfails['baseline']} / candidate {toolfails['candidate']} "
-            "commands got no verdict.",
+            f"{headline['baseline']} / candidate {headline['candidate']} "
+            f"{unit} got no verdict.",
             file=stream,
         )
+        if unit == "commands":
+            # Both numbers, so neither can be misread: the reason rows below
+            # are keyed per tier and would not otherwise add up to the headline.
+            print(
+                f"!! ({toolfails['baseline']} / {toolfails['candidate']} tier x "
+                f"command replays over {len(result['tier_order'])} tier(s).)",
+                file=stream,
+            )
         print(
             "!! These are the SCRIPT failing, not the floor deciding. They are "
             "excluded from\n"
@@ -2026,6 +2076,8 @@ def print_toolfail_banner(result: dict[str, Any], toolfails: dict[str, int]) -> 
             f"!! rather than misreport policy. Exiting {EXIT_TOOL_FAILURE}.",
             file=stream,
         )
+        if reasons:
+            print("!! by reason (tier x command replays):", file=stream)
         for reason, count in reasons.most_common(10):
             print(f"!!   {count:>6}  {reason}", file=stream)
         print("!" * 78, file=stream)
@@ -2406,6 +2458,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     corpus_failures = count_corpus_integrity_failures(result)
     result["run"]["errors"] = errors
     result["run"]["toolfails"] = toolfails
+    # `toolfails` is tier x command; this is the distinct-command count the
+    # banner and the mid-table NOTE quote, and only the verdict lists can
+    # supply it.
+    result["run"]["toolfail_commands"] = {
+        "baseline": count_toolfail_commands(baseline_verdicts),
+        "candidate": count_toolfail_commands(candidate_verdicts),
+    }
     result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
     result["run"]["allow_partial_corpus"] = bool(args.allow_partial_corpus)
