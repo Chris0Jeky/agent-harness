@@ -483,9 +483,20 @@ class HarnessTests(unittest.TestCase):
             + "]}]}}"
         )
         try:
-            harness.remove_managed_codex_floor(current, dispatcher)
-        except harness.HarnessError:
-            pass
+            rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        except harness.HarnessError as error:
+            # Normalized, and normalized at one of the two depth boundaries -
+            # not swallowed by some unrelated rejection.
+            self.assertRegex(
+                str(error),
+                r"invalid existing hooks\.json|"
+                r"refusing to rewrite hooks\.json with an ignored value",
+            )
+        else:
+            # A Python that survives the depth must still rewrite correctly:
+            # the managed floor is gone and the ignored subtree is intact.
+            self.assertNotIn("dispatch.py", rewritten)
+            self.assertEqual(rewritten.count('"nested"'), 10000)
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -991,6 +1002,33 @@ class HarnessTests(unittest.TestCase):
                 json.dumps(document), source_kind="requirements"
             )
 
+    def test_requirements_unc_managed_dirs_are_never_stat_probed(self) -> None:
+        # An SMB stat blocks for tens of seconds off-VPN and then answers about
+        # reachability, so existence stays unproven for a UNC managed dir. Both
+        # spellings are recognized on both platforms.
+        for value in ("//fileserver/codex/hooks", "\\\\fileserver\\codex\\hooks"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        for value in ("C:/managed/hooks", "/managed/hooks"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        with mock.patch.object(
+            harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
+        ):
+            harness.validate_requirements_hook_paths(
+                {
+                    "managed_dir": "//fileserver/codex/hooks",
+                    "windows_managed_dir": "\\\\fileserver\\codex\\hooks",
+                }
+            )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
     def test_requirements_hook_paths_reject_managed_file(self) -> None:
         not_a_directory = Path(self.temp.name) / "managed-hooks-file"
         not_a_directory.write_text("", encoding="utf-8")
@@ -1089,9 +1127,20 @@ class HarnessTests(unittest.TestCase):
         ):
             with self.subTest(convert=convert.__name__):
                 try:
-                    convert(config)
-                except harness.HarnessError:
-                    pass
+                    converted = convert(config)
+                except harness.HarnessError as error:
+                    self.assertRegex(
+                        str(error), r"unsupported inline hooks value in .*config\.toml"
+                    )
+                else:
+                    # A Python that survives the depth must carry the whole
+                    # inline document across, not a truncated prefix.
+                    document = (
+                        converted
+                        if isinstance(converted, str)
+                        else "".join(text for _location, text in converted)
+                    )
+                    self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
@@ -1258,7 +1307,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
 
-    def test_doctor_lets_requirements_pin_outrank_feature_disables(self) -> None:
+    def test_doctor_fails_closed_when_a_pin_contests_feature_disables(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
             Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
@@ -1275,12 +1324,15 @@ class HarnessTests(unittest.TestCase):
             profile_configs={"custom.config.toml": "[features]\ncodex_hooks = false\n"},
         )
 
-        self.assertEqual(result, 0, output)
-        self.assertIn("[ok] Codex project hook activation", output)
-        self.assertIn("[ok] project Codex floor", output)
-        # The overridden declarations stay visible; they are reported as
-        # outranked rather than silently dropped.
-        self.assertIn("managed requirements pin overrides 3 ", output)
+        # Codex's merge order for a managed requirements pin against stored
+        # config features is not statically provable, so the contest fails
+        # closed and names both sides instead of certifying a floor that a
+        # project-local opt-out may have already killed.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("contests 3 hook-feature disable(s)", output)
+        self.assertIn("UNPROVEN", output)
         self.assertIn("features.hooks", output)
         self.assertIn("features.codex_hooks", output)
 
@@ -1300,7 +1352,8 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("inspectable activation blocker(s)", output)
-        self.assertNotIn("managed requirements pin overrides", output)
+        # A pin of false agrees with the disable; there is nothing to contest.
+        self.assertNotIn("contests", output)
 
     def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
         repo = self.make_repo()
@@ -1322,8 +1375,9 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] Codex project hook activation", output)
         self.assertIn("enabled=false", output)
-        # The pin outranks the feature toggle, never the per-handler state.
-        self.assertIn("managed requirements pin overrides 1 ", output)
+        # The per-handler state blocker is independent of the feature contest:
+        # both are reported, and neither is cleared by the managed pin.
+        self.assertIn("contests 1 hook-feature disable(s)", output)
 
     def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
         requirements = Path(self.temp.name) / "requirements.toml"
@@ -2215,6 +2269,116 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
+        repo = self.make_repo()
+        # A hook source with a PreToolUse handler that is not a floor adapter at
+        # all: doctor must not report a current audit marker it never saw.
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 tools/lint_gate.py",
+                                        "commandWindows": "py -3 tools/lint_gate.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("declare no handler that reaches the shared floor", output)
+        self.assertNotIn("declare a current audit marker", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_reports_an_absent_platform_command_as_absent(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"expected={pin}; python3 "
+                                            '"$HOME/.claude/hooks/dispatch.py" '
+                                            "--event pre --runtime codex"
+                                        ),
+                                        "timeout": 5,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(".commandWindows declares no command for this platform", output)
+        # The absence is reported once, not as three separate deviations of a
+        # command that does not exist.
+        self.assertNotIn(".commandWindows never passes", output)
+        self.assertNotIn(".commandWindows declares no expected=<sha256>", output)
+
+    def test_doctor_ignores_a_commented_dispatcher_mention_in_a_sibling(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = json.loads(
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        # A second, unrelated PreToolUse handler that only MENTIONS the
+        # dispatcher inside a comment. The floor candidate count already
+        # strips comments, so the contract check must agree or a lint gate
+        # next door turns a valid adapter into a failure.
+        valid_adapter["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "^Bash$",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo hi # see ~/.claude/hooks/dispatch.py",
+                        "commandWindows": "echo hi # see ~/.claude/hooks/dispatch.py",
+                    }
+                ],
+            }
+        )
+        self.write_hooks(repo, json.dumps(valid_adapter))
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("contract gap", output)
+
     def test_doctor_inventories_wrapper_flag_delegation(self) -> None:
         repo = self.make_repo()
         pin = harness.normalized_text_sha256(
@@ -2384,7 +2548,12 @@ allow_local_binding = true
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] project Codex floor", output)
-        self.assertNotIn("session-cwd-relative wrapper path", output)
+        # The cwd dependency is a property of the adapter text, so it is
+        # reported even from the cwd where it happens to resolve.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("session-cwd-relative wrapper path", output)
+        self.assertIn(f"only for sessions started in {repo}", output)
+        self.assertNotIn("contract gap", output)
 
     def test_doctor_reports_a_relative_wrapper_from_a_subdirectory_cwd(self) -> None:
         repo = self.make_repo()

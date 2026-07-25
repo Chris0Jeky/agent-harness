@@ -726,10 +726,11 @@ def codex_project_hook_activation_status(
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
     required_hook_feature = requirements_hook_feature_declaration(requirements_path)
     hook_feature_pin: bool | None = None
+    pin_location = ""
     if required_hook_feature is not None:
-        location, hook_feature_pin = required_hook_feature
+        pin_location, hook_feature_pin = required_hook_feature
         if not hook_feature_pin:
-            blockers.append(f"{location}=false")
+            blockers.append(f"{pin_location}=false")
 
     stored_feature_paths = [
         system_config,
@@ -756,15 +757,16 @@ def codex_project_hook_activation_status(
             )
             if not enabled
         )
-    # A managed requirements pin outranks every config layer: pinning the hook
-    # feature true is exactly how an administrator enforces hooks over a user or
-    # project opt-out, so treating the losing declaration as a blocker reported
-    # a dead floor for a correctly managed environment.
-    overridden_disables: list[str] = []
-    if hook_feature_pin is True:
-        overridden_disables = feature_disables
-    else:
-        blockers.extend(feature_disables)
+    # A managed requirements pin of the hook feature TRUE and a lower-layer
+    # disable contest each other, and which one Codex applies is not statically
+    # provable from anything inspectable here: the shipped binary documents the
+    # requirements schema but states no merge order for `[features]`, and the
+    # one merge rule it does state out loud ("Codex merges these rules with
+    # other config and uses the most restrictive result") is about prefix rules.
+    # `doctor` certifies floors, so an unprovable conflict fails closed and
+    # names both declarations rather than assuming the administrator wins.
+    contested_disables = feature_disables if hook_feature_pin is True else []
+    blockers.extend(feature_disables)
 
     user_paths = [codex_home / "config.toml", *profile_paths]
     for config_path in dict.fromkeys(user_paths):
@@ -778,11 +780,12 @@ def codex_project_hook_activation_status(
         "CLI/session/managed-cloud feature, policy, and state overrides remain "
         "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
     )
-    if overridden_disables:
+    if contested_disables:
         boundary = (
-            f"managed requirements pin overrides {len(overridden_disables)} "
-            f"lower-precedence hook-feature disable(s): "
-            f"{'; '.join(overridden_disables)}; {boundary}"
+            f"{pin_location}=true contests {len(contested_disables)} "
+            "hook-feature disable(s), but Codex's merge order for managed "
+            "requirements against stored config features is UNPROVEN here, so "
+            f"the conflict fails closed; {boundary}"
         )
     if blockers:
         return (
@@ -2100,6 +2103,20 @@ def requirements_hook_path_resolves_here(value: str) -> bool:
     return PurePosixPath(value).is_absolute()
 
 
+def requirements_hook_path_is_locally_probeable(value: str) -> bool:
+    """Return whether existence can be probed without reaching a network host.
+
+    A UNC value (`\\\\server\\share\\...`, or its `//server/share` spelling)
+    turns `is_dir()` into an SMB round trip: off-VPN or with the host down it
+    blocks on name resolution for tens of seconds and then answers about
+    reachability rather than about the directory. Existence therefore stays
+    UNPROVEN for those paths; absoluteness is still asserted. POSIX network
+    mounts are indistinguishable from local paths, so this narrowing can only
+    recognize the UNC spelling.
+    """
+    return not PureWindowsPath(value).drive.startswith(("\\\\", "//"))
+
+
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
     """Validate ManagedHooksRequirementsToml's optional path fields.
 
@@ -2123,6 +2140,8 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
                 f"{value!r}"
             )
         if not requirements_hook_path_resolves_here(value):
+            continue
+        if not requirements_hook_path_is_locally_probeable(value):
             continue
         try:
             resolvable = Path(value).is_dir()
@@ -3012,6 +3031,12 @@ def codex_adapter_command_notes(
     inventory note records a legitimate but non-default choice — a vendored
     dispatcher or a repo wrapper that carries the flags out of static view.
     """
+    if not command.strip():
+        # An undeclared platform command has no flags, no marker and no
+        # dispatcher by definition. Reporting each of those absences as its own
+        # violation sent readers hunting for a malformed command instead of a
+        # missing one.
+        return [f"{label} declares no command for this platform"], []
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
     delegates_to_wrapper = "invoke_deny_floor" in normalized
@@ -3053,18 +3078,22 @@ def codex_adapter_command_notes(
 
 def codex_adapter_contract_notes(
     current: str, source_label: str, expected_pin: str, *, source_kind: str = "json"
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], int]:
     """Inventory every candidate adapter handler in one hook source.
 
     `doctor` already fails a repo whose canonical adapter is unpinned or stale,
     but it reported only a count, which cannot distinguish "no marker" from
     "stale marker" from "no --runtime codex". Estate audits need the reason.
+
+    Returns (gaps, inventory, inspected_handlers). The count exists so a caller
+    can tell "checked and clean" apart from "there was nothing to check".
     """
     _current_data, _hooks, groups = parse_hooks_document(
         current, source_kind=source_kind
     )
     gaps: list[str] = []
     inventory: list[str] = []
+    inspected_handlers = 0
     for group_index, group in enumerate(groups):
         for handler_index, handler in enumerate(group.get("hooks", [])):
             if handler.get("type") != "command":
@@ -3075,12 +3104,20 @@ def codex_adapter_contract_notes(
                     windows_hook_command(handler)
                 ),
             }
+            # Candidacy must agree with `repo_codex_floor_candidates`, which
+            # decides on comment-stripped text. A commented-out mention of the
+            # dispatcher is not an adapter handler; treating it as one reported
+            # contract gaps against a handler every floor check ignores, which
+            # turned an unrelated commented command into a false red.
             if not any(
-                ".claude/hooks/dispatch.py" in text.lower().replace("\\", "/")
-                or "invoke_deny_floor" in text.lower()
-                for text in commands.values()
+                ".claude/hooks/dispatch.py" in stripped.lower().replace("\\", "/")
+                or "invoke_deny_floor" in stripped.lower()
+                for stripped in (
+                    strip_shell_comments(text) for text in commands.values()
+                )
             ):
                 continue
+            inspected_handlers += 1
             for field, text in commands.items():
                 label = (
                     f"{source_label}:pre_tool_use:{group_index}:{handler_index}"
@@ -3091,7 +3128,7 @@ def codex_adapter_contract_notes(
                 )
                 gaps.extend(command_gaps)
                 inventory.extend(command_inventory)
-    return gaps, inventory
+    return gaps, inventory, inspected_handlers
 
 
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
@@ -3485,13 +3522,14 @@ def doctor(args: argparse.Namespace) -> int:
                 len(repo_codex_floor_candidates(text, source_kind=source_kind))
                 for _hooks, text, source_kind in repo_hook_sources
             )
-            unresolvable_wrapper_sources = [
-                f"{hooks} ({source_kind}): "
-                f"{lenient - strict} handler(s) bind a session-cwd-relative "
-                "wrapper path"
+            # Binding a repo-relative wrapper is a property of the adapter TEXT,
+            # not of this audit's cwd. Detect it for every source so the
+            # dependency is reported even from the one cwd where it happens to
+            # resolve; only the cwd that actually breaks it fails the floor.
+            cwd_relative_wrapper_sources = [
+                (hooks, source_kind, lenient - strict)
                 for hooks, text, source_kind in repo_hook_sources
-                if wrapper_is_cwd_relative_here(hooks)
-                and (
+                if (
                     lenient := len(
                         repo_codex_floor_groups(text, source_kind=source_kind)
                     )
@@ -3505,6 +3543,19 @@ def doctor(args: argparse.Namespace) -> int:
                         )
                     )
                 )
+            ]
+            unresolvable_wrapper_sources = [
+                f"{hooks} ({source_kind}): "
+                f"{count} handler(s) bind a session-cwd-relative wrapper path"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if wrapper_is_cwd_relative_here(hooks)
+            ]
+            cwd_dependent_wrapper_notes = [
+                f"{hooks} ({source_kind}): {count} handler(s) bind a "
+                "session-cwd-relative wrapper path, so this adapter certifies "
+                f"only for sessions started in {hooks.parent.parent}"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if not wrapper_is_cwd_relative_here(hooks)
             ]
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
@@ -3522,19 +3573,34 @@ def doctor(args: argparse.Namespace) -> int:
             )
             adapter_gaps: list[str] = []
             adapter_inventory: list[str] = []
+            adapter_handler_count = 0
             for hooks, text, source_kind in repo_hook_sources:
-                source_gaps, source_inventory = codex_adapter_contract_notes(
+                (
+                    source_gaps,
+                    source_inventory,
+                    source_handlers,
+                ) = codex_adapter_contract_notes(
                     text, str(hooks), expected_pin, source_kind=source_kind
                 )
                 adapter_gaps.extend(source_gaps)
                 adapter_inventory.extend(source_inventory)
+                adapter_handler_count += source_handlers
+            adapter_inventory.extend(cwd_dependent_wrapper_notes)
             adapter_ok = not adapter_gaps
+            # With no adapter handler anywhere there is nothing to certify, and
+            # claiming a current marker would assert a fact about a file that
+            # declares none. Say which of the two clean states this is.
             adapter_detail = "; ".join(
                 [f"contract gap: {gap}" for gap in adapter_gaps]
                 + [f"note: {note}" for note in adapter_inventory]
             ) or (
+                f"{adapter_handler_count} adapter handler(s) across "
                 f"{len(repo_hook_sources)} inspected hook source(s) declare a "
                 "current audit marker and pass --event pre --runtime codex"
+                if adapter_handler_count
+                else f"{len(repo_hook_sources)} inspected hook source(s) declare no "
+                "handler that reaches the shared floor: nothing to check here, and "
+                "the project floor check owns that verdict"
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [

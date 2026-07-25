@@ -172,7 +172,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   duplicate known fields, non-standard constants, invalid known strings, and invalid wrapper
   fields while traversing ignored unknown values iteratively; every supported event and handler is
   schema-valid; inline config hook state and managed requirements hook paths have their
-  source-specific shapes. Python's stdlib decoder imposes an explicit fail-closed boundary at
+  source-specific shapes. A managed hook directory must be absolute, and its existence is
+  probed — the only filesystem access in the parse path — for a value the running platform
+  resolves. A UNC value is exempt from that probe, so an audit never blocks on an unreachable
+  network share and that directory's existence stays unproven. Python's stdlib decoder imposes an explicit fail-closed boundary at
   pathological JSON nesting depths before ignored-value inspection. One malformed hook sibling
   invalidates the layer instead of leaving a countable `PreToolUse` floor. The harness does not
   fully schema-validate unrelated ConfigToml or requirements fields; exact Codex startup and
@@ -196,7 +199,9 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   variable, and use a matcher that positively includes Bash. Because Codex runs a hook command
   from the SESSION cwd rather than the hook source root, a repo-relative wrapper path certifies
   only when those directories are the same; from a subdirectory cwd or a linked worktree, `doctor`
-  fails that adapter closed and names it. The canonical `commandWindows` field and its
+  fails that adapter closed and names it. From the source root itself the same adapter certifies,
+  but the cwd dependency is still reported as an adapter-contract note, because it is a property
+  of the adapter text rather than of the audit's cwd. The canonical `commandWindows` field and its
   official `command_windows` alias are equivalent; declaring both fails closed. `doctor --repo`
   uses the Git-root layer walk
   only when all inspectable top-level `project_root_markers` declarations in system, base-user, and
@@ -213,7 +218,10 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   must reside in the canonical root `.codex/hooks.json`; nested layers that contain configuration
   but no hooks are valid. The project floor also fails when inspectable system requirements allow
   only managed hooks or pin the hook feature off, an active persisted canonical/legacy feature
-  setting disables hooks, or the exact canonical handler state is disabled. Stored legacy
+  setting disables hooks, or the exact canonical handler state is disabled. A managed requirements
+  pin of the hook feature ON does not clear such a disable: Codex publishes no merge order for
+  `[features]` across managed requirements and stored config, so that contest is UNPROVEN and
+  fails closed with both declarations named. Stored legacy
   `profile` selectors are rejected;
   feature values in their inactive legacy profile maps are schema-checked but never applied.
   Project-local `profile` and `profiles` values are ignored with Codex's denylist. Commented or
