@@ -445,9 +445,20 @@ class HarnessTests(unittest.TestCase):
             + "]}]}}"
         )
         try:
-            harness.remove_managed_codex_floor(current, dispatcher)
-        except harness.HarnessError:
-            pass
+            rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        except harness.HarnessError as error:
+            # Normalized, and normalized at one of the two depth boundaries -
+            # not swallowed by some unrelated rejection.
+            self.assertRegex(
+                str(error),
+                r"invalid existing hooks\.json|"
+                r"refusing to rewrite hooks\.json with an ignored value",
+            )
+        else:
+            # A Python that survives the depth must still rewrite correctly:
+            # the managed floor is gone and the ignored subtree is intact.
+            self.assertNotIn("dispatch.py", rewritten)
+            self.assertEqual(rewritten.count('"nested"'), 10000)
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -1078,9 +1089,20 @@ class HarnessTests(unittest.TestCase):
         ):
             with self.subTest(convert=convert.__name__):
                 try:
-                    convert(config)
-                except harness.HarnessError:
-                    pass
+                    converted = convert(config)
+                except harness.HarnessError as error:
+                    self.assertRegex(
+                        str(error), r"unsupported inline hooks value in .*config\.toml"
+                    )
+                else:
+                    # A Python that survives the depth must carry the whole
+                    # inline document across, not a truncated prefix.
+                    document = (
+                        converted
+                        if isinstance(converted, str)
+                        else "".join(text for _location, text in converted)
+                    )
+                    self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
