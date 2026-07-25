@@ -1625,7 +1625,7 @@ class MultiprocessReplayTests(unittest.TestCase):
         path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
         return path
 
-    def run_script(self, floor, jobs):
+    def run_script(self, floor, jobs, candidate=None):
         try:
             return subprocess.run(
                 [
@@ -1636,7 +1636,7 @@ class MultiprocessReplayTests(unittest.TestCase):
                     "--baseline",
                     str(floor),
                     "--candidate",
-                    str(floor),
+                    str(candidate or floor),
                     "--tier",
                     "2",
                     "--project-dir",
@@ -1690,6 +1690,64 @@ class MultiprocessReplayTests(unittest.TestCase):
         result = self.run_script(floor, 2)
         self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE)
         self.assertIn("command_runner", result.stderr)
+        # It never reached a worker: the parent preflight is what refused it.
+        self.assertIn("cannot replay:", result.stderr)
+
+    def test_a_worker_only_failure_comes_back_as_a_task_error(self):
+        """The `_worker_init` stash/re-raise backstop, actually exercised.
+
+        Every other failure in this file is caught by the parent preflight, so
+        the documented multiprocess safety net had never run: `_worker_init`
+        stashing instead of raising was only ever proven by calling it directly,
+        in-process, with no pool. That leaves the claim it exists for — that a
+        raising `Pool` initializer would be respawned forever and hang the run —
+        untested end to end.
+
+        This floor imports cleanly exactly once. The parent preflight consumes
+        that import, so every spawned worker fails, which is the only shape that
+        reaches the backstop: init stashes, `_worker_run` re-raises, the task
+        exception propagates out of `imap_unordered` into `main()`, and the run
+        ends with exit 3 instead of spinning up replacement workers forever.
+        """
+        floor = self.write_floor(
+            "once",
+            """
+            import pathlib
+
+            FLOOR_VERSION = "9.9.9"
+
+            _MARKER = pathlib.Path(__file__).with_name("once.imported")
+            if _MARKER.exists():
+                raise RuntimeError("this floor imports exactly once")
+            _MARKER.write_text("x", encoding="utf-8")
+
+
+            def command_output(argv, cwd="", timeout=None):
+                return ""
+
+
+            def reads_git_config(project_dir, command_runner=command_output):
+                return command_runner(["git", "config"], project_dir)
+
+
+            def check(command, tier_cfg, project_dir):
+                return "allow", ""
+            """,
+        )
+        healthy = self.write_floor(
+            "healthy_candidate",
+            STUB_DISPATCH.format(version="1.0.0", decide='    return "allow", ""'),
+        )
+        result = self.run_script(floor, 2, candidate=healthy)
+        self.assertEqual(result.returncode, replay.EXIT_TOOL_FAILURE, result.stderr)
+        # The parent preflight passed — this is the worker path, not the
+        # preflight path, which is the whole point of the case.
+        self.assertNotIn("cannot replay:", result.stderr)
+        self.assertIn("replay aborted:", result.stderr)
+        self.assertIn("replay worker could not start", result.stderr)
+        self.assertIn("this floor imports exactly once", result.stderr)
+        # No table: a run that lost its workers must never print numbers.
+        self.assertNotIn("block rate by tier", result.stdout)
 
 
 class ToolFailureBucketTests(EndToEndTestCase):
