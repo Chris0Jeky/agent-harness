@@ -136,6 +136,9 @@ class PrefixCrossProductTests(unittest.TestCase):
         "&>agent-harness-prefix.out ",
         ">&1 ",
         "HARNESS_PREFIX=1 ",
+        # Bash's APPEND assignment is a command-scoped prefix too, and `_ASSIGN`
+        # used to match only `=`, so this spelling stood as the head.
+        "HARNESS_PREFIX+=1 ",
         "--% ",
     )
 

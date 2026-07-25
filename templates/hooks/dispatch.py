@@ -3304,7 +3304,11 @@ _WRAPPERS = {
     "stdbuf",
     "xargs",
 }
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# `+=` is Bash's APPEND assignment and is accepted in the same command-scoped
+# prefix position as `=`: `FOO+=x git push --force origin main` sets FOO and
+# still execs git. Reading only `=` left `FOO+=x` standing as the head, and the
+# force-push behind it went unevaluated.
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
 _OPAQUE_WRAPPER = "__harness_opaque_wrapper__"
 # Head returned when a command-leading process substitution has no balancing `)`
@@ -4530,6 +4534,10 @@ def git_environment_name(token: str) -> str:
     candidate = token.strip("'\"")
     if "=" in candidate:
         candidate = candidate.split("=", 1)[0]
+        # Bash's append form: the name in `GIT_EDITOR+=x` is GIT_EDITOR, so the
+        # `+` has to come off or every name-keyed Git-environment guard misses
+        # the spelling that `_ASSIGN` now admits.
+        candidate = candidate.removesuffix("+")
     lowered = candidate.lower()
     for prefix in ("$env:", "${env:", "env:", "environment::"):
         if lowered.startswith(prefix):

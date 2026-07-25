@@ -2135,6 +2135,12 @@ CASES = [
     ("git grep --open-files-in-pager needle", 1, {}, "deny"),
     ("git grep --open-files-in-pag=sh needle", 1, {}, "deny"),
     ("GIT_EDITOR=helper git branch --edit-description", 1, {}, "deny"),
+    # Bash's append assignment is the same command-scoped prefix, and the name
+    # it establishes is GIT_EDITOR, not `GIT_EDITOR+`.
+    ("GIT_EDITOR+=helper git branch --edit-description", 1, {}, "deny"),
+    ("FOO+=x git push --force origin main", 1, {}, "deny"),
+    ("FOO+=x rm -rf /critical/outside", 1, {}, "deny"),
+    ("FOO+=x git status", 1, {}, "allow"),
     ("git rebase -x 'git push --force origin main' HEAD~1", 1, {}, "deny"),
     ("git bisect run helper", 1, {}, "deny"),
     ("git submodule foreach helper", 1, {}, "deny"),
