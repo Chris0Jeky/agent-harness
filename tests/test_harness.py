@@ -5044,6 +5044,20 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
 
+    def test_undecodable_resolver_output_never_aborts_the_audit(self) -> None:
+        # Under a UTF-8 locale, `subprocess.run(text=True)` raises
+        # UnicodeDecodeError while building its result (and leaves stdout None
+        # on the Windows reader-thread path). `main()` catches only
+        # HarnessError, so the audit died with a traceback where the contract
+        # says the check is UNPROVEN. Decoding is explicit and tolerant now.
+        script = "import sys; sys.stdout.buffer.write(b'origin\\thttps://h/\\xff/r')"
+        resolved, output = harness.bounded_command_output(
+            [sys.executable, "-c", script]
+        )
+        self.assertTrue(resolved)
+        self.assertIn("origin", output)
+        self.assertIn("�", output)
+
     def test_embedded_credentials_never_reach_a_finding(self) -> None:
         # `git remote --verbose` keeps URL userinfo, so an audit that echoes
         # the raw URL leaks a PAT into the terminal, --json and CI logs.

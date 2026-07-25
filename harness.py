@@ -1172,19 +1172,30 @@ def bounded_command_output(
     cwd: Path | None = None,
     timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Run one read-only resolver under a hard timeout; never raise."""
+    """Run one read-only resolver under a hard timeout; never raise.
+
+    Decoding is explicit and tolerant. Under `text=True` alone, a resolver that
+    emits bytes the platform locale cannot decode — a non-UTF-8 configured
+    remote, a branch name in another encoding — raises `UnicodeDecodeError`
+    while `subprocess.run` builds its result. Neither this handler nor `main()`
+    catches that, so an audit died with a traceback where the contract says the
+    check is simply UNPROVEN. `errors="replace"` keeps whatever is decodable
+    and leaves the rest as replacement characters; `UnicodeError` is still
+    caught, because a caller may pass its own runner.
+    """
     try:
         proc = subprocess.run(
             argv,
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return False, ""
-    return proc.returncode == 0, proc.stdout.strip()
+    return proc.returncode == 0, (proc.stdout or "").strip()
 
 
 def local_only_command_output(
