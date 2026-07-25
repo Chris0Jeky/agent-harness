@@ -83,6 +83,24 @@ class HarnessTests(unittest.TestCase):
         return hooks
 
     @staticmethod
+    def requirements_hook_paths(existing_dir: Path) -> dict[str, str]:
+        """Point this platform's managed hook field at a real directory.
+
+        The other platform's field keeps a path that is absolute in its own
+        flavour but not in this one, which is exactly the value the harness
+        must accept without probing the filesystem.
+        """
+        if sys.platform == "win32":
+            return {
+                "managed_dir": "/managed/hooks",
+                "windows_managed_dir": str(existing_dir),
+            }
+        return {
+            "managed_dir": str(existing_dir),
+            "windows_managed_dir": "C:/managed/hooks",
+        }
+
+    @staticmethod
     def inline_floor_config_text() -> str:
         pin = harness.normalized_text_sha256(
             Path(harness.__file__).resolve().parent
@@ -840,11 +858,10 @@ class HarnessTests(unittest.TestCase):
             }
         }
         harness.parse_hooks_document(json.dumps(valid_config), source_kind="config")
+        managed_dir = Path(self.temp.name) / "managed-hooks"
+        managed_dir.mkdir()
         valid_requirements = {
-            "hooks": {
-                "managed_dir": "/managed/hooks",
-                "windows_managed_dir": "C:/managed/hooks",
-            }
+            "hooks": self.requirements_hook_paths(managed_dir),
         }
         harness.parse_hooks_document(
             json.dumps(valid_requirements), source_kind="requirements"
@@ -871,6 +888,57 @@ class HarnessTests(unittest.TestCase):
                     harness.parse_hooks_document(
                         json.dumps(document), source_kind="requirements"
                     )
+
+    def test_requirements_hook_paths_reject_relative_managed_dirs(self) -> None:
+        for field in ("managed_dir", "windows_managed_dir"):
+            for value in ("relative", "hooks/managed", "./managed", ""):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        rf"requirements hooks\.{field} must be an absolute path",
+                    ):
+                        harness.parse_hooks_document(
+                            json.dumps({"hooks": {field: value}}),
+                            source_kind="requirements",
+                        )
+
+    def test_requirements_hook_paths_reject_missing_managed_dir(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        document = {"hooks": self.requirements_hook_paths(missing)}
+        field = "windows_managed_dir" if sys.platform == "win32" else "managed_dir"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            rf"requirements hooks\.{field} is not an existing directory",
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_requirements_hook_paths_reject_managed_file(self) -> None:
+        not_a_directory = Path(self.temp.name) / "managed-hooks-file"
+        not_a_directory.write_text("", encoding="utf-8")
+        document = {"hooks": self.requirements_hook_paths(not_a_directory)}
+        with self.assertRaisesRegex(
+            harness.HarnessError, r"is not an existing directory"
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_doctor_rejects_relative_requirements_managed_dir(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements='[hooks]\nmanaged_dir = "relative"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.managed_dir must be an absolute path", output)
 
     def test_toml_config_rejects_out_of_range_integers(self) -> None:
         config = Path(self.temp.name) / "config.toml"

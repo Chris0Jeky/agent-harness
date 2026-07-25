@@ -21,7 +21,7 @@ import sys
 import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -1622,12 +1622,55 @@ def validate_config_hook_state(hooks: dict[str, Any]) -> None:
             )
 
 
+def requirements_hook_path_resolves_here(value: str) -> bool:
+    """Return whether the running platform can resolve this managed hook path.
+
+    The two fields carry different path flavours, and which one Codex consumes
+    depends on the host. Absoluteness is therefore accepted under either
+    flavour, but existence is only asserted for a value that is unambiguously
+    absolute under THIS platform's rules — a Windows path audited on Linux (or
+    a POSIX path audited on Windows) is a different machine's fact, so probing
+    it would produce a portability-dependent verdict rather than a check.
+    """
+    if os.name == "nt":
+        return PureWindowsPath(value).is_absolute()
+    return PurePosixPath(value).is_absolute()
+
+
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
-    """Validate ManagedHooksRequirementsToml's optional path fields."""
+    """Validate ManagedHooksRequirementsToml's optional path fields.
+
+    Codex documents both fields as absolute paths and refuses to load managed
+    hooks from a relative or missing directory, so a `str` type check alone
+    false-greens a managed hook source Codex would reject. Fail closed instead.
+    """
     for field in ("managed_dir", "windows_managed_dir"):
-        if field in hooks and not isinstance(hooks[field], str):
+        if field not in hooks:
+            continue
+        value = hooks[field]
+        if not isinstance(value, str):
             raise HarnessError(
                 f"existing requirements hooks.{field} must be a path string"
+            )
+        if not (
+            PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+        ):
+            raise HarnessError(
+                f"existing requirements hooks.{field} must be an absolute path: "
+                f"{value!r}"
+            )
+        if not requirements_hook_path_resolves_here(value):
+            continue
+        try:
+            resolvable = Path(value).is_dir()
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect requirements hooks.{field} {value!r}: {exc}"
+            ) from exc
+        if not resolvable:
+            raise HarnessError(
+                f"existing requirements hooks.{field} is not an existing directory: "
+                f"{value!r}"
             )
 
 
