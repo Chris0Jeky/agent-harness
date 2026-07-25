@@ -369,7 +369,9 @@ class PlumbingOptionProfileTests(unittest.TestCase):
         self.assertIsNone(launcher("stash", ["show", "--", "--ext-diff"]))
         # ... but only a PROVEN terminator: --output eats the `--`
         self.assertIsNotNone(launcher("diff", ["--output", "--", "--ext-diff"]))
-        self.assertIsNotNone(launcher("stash", ["show", "--output", "--", "--ext-diff"]))
+        self.assertIsNotNone(
+            launcher("stash", ["show", "--output", "--", "--ext-diff"])
+        )
 
 
 class SwallowedOptionTerminatorTests(unittest.TestCase):
