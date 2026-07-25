@@ -5809,10 +5809,14 @@ class RealityCheckTests(unittest.TestCase):
         # `[ok] no vendored floor copy` for a repo that may well vendor one.
         repo = self.make_repo()
         denied = repo / "hooks" / "dispatch.py"
+        # `audit_repo` walks the GIT ROOT, which on macOS resolves
+        # /var/folders/... to /private/var/folders/..., so the refusal has to
+        # recognize both spellings of the same file.
+        refused = {denied, repo.resolve() / "hooks" / "dispatch.py"}
         real_stat = Path.stat
 
         def refuse(self: Path, *args: object, **kwargs: object) -> object:
-            if self == denied:
+            if self in refused:
                 raise PermissionError(13, "Permission denied")
             return real_stat(self, *args, **kwargs)
 
