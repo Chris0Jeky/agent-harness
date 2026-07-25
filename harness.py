@@ -1224,14 +1224,24 @@ def tree_digest(root: Path) -> str | None:
 
     for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
         payload = b""
+        executable = b"-"
         if file_path is not None:
             if path_is_alias(file_path):
                 raise HarnessError(f"unsafe skill tree alias: {file_path}")
             try:
-                if not stat.S_ISREG(file_path.lstat().st_mode):
+                entry_mode = file_path.lstat().st_mode
+                if not stat.S_ISREG(entry_mode):
                     raise HarnessError(
                         f"skill tree changed during inspection: {file_path}"
                     )
+                # A helper script whose bytes match but whose executable bit has
+                # drifted (source 0755, installed 0644) is NOT the same tree: the
+                # installed skill cannot run it, and same_tree would otherwise make
+                # `sync-global --apply` skip the copy that would restore the mode.
+                # Only the executable bit is digested — the rest of the mode is
+                # umask/filesystem noise and Windows reports no meaningful bits.
+                if entry_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                    executable = b"X"
                 payload = file_path.read_bytes()
             except FileNotFoundError as exc:
                 raise HarnessError(
@@ -1242,6 +1252,7 @@ def tree_digest(root: Path) -> str | None:
                     f"cannot inspect skill tree {file_path}: {exc}"
                 ) from exc
         digest.update(kind)
+        digest.update(executable)
         digest.update(len(relative).to_bytes(8, byteorder="big"))
         digest.update(relative)
         digest.update(len(payload).to_bytes(8, byteorder="big"))
