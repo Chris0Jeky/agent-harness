@@ -55,6 +55,37 @@ def stub_resolver(
     return False, "unit-test-stub-private"
 
 
+class StubPushConfig:
+    """No host `git config` during unit tests, for the same reason as above.
+
+    Once the helper clears GIT_DIR, a refspec-less `git push` falls through to
+    `configured_bare_push_is_dangerous`, which runs
+    `git config --get-regexp ^remote\\..*\\.(push|mirror|receivepack)$` with the
+    DEFAULT command_runner — `remote_resolver` does not intercept it. That
+    subprocess reads the caller's own checkout and, because the helper also
+    clears GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM, ~/.gitconfig and the system
+    config too. A contributor with a global `remote.*.receivepack` or
+    `remote.*.mirror` would then watch this suite deny for reasons that have
+    nothing to do with environment isolation — the very host dependency issue
+    #54 exists to remove.
+
+    Stubbing it hides nothing these tests assert: when GIT_DIR IS inherited,
+    check() returns [push-config-unverifiable] well before this call, so the
+    deny direction is unaffected. `calls` proves the stub is load-bearing
+    rather than decorative. What the stub does drop from THIS file — the
+    resolver's own force/delete/mirror/receivepack behaviour, and check()'s
+    [push-config-force] deny — is covered against real fixture repositories by
+    tests/test_push_config_force.py, which is where it belongs.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return False
+
+
 # Each entry is an inherited environment that dispatch.check reads directly,
 # paired with a command whose verdict it flips. Every one was observed to deny
 # without the helper (see test_each_family_really_flips_the_verdict), so these
@@ -251,6 +282,25 @@ class AmbientReadInventoryTests(unittest.TestCase):
 
 
 class HermeticCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.push_config = StubPushConfig()
+        patcher = patch.object(
+            dispatch, "configured_bare_push_is_dangerous", self.push_config
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_bare_push_case_really_reaches_the_host_git_config(self):
+        """Without the stub this suite would shell out to the caller's config."""
+        self.assertEqual(hermetic("git push")[0], "allow")
+        self.assertGreaterEqual(
+            self.push_config.calls,
+            1,
+            "the refspec-less push no longer reaches "
+            "configured_bare_push_is_dangerous; if check() stopped calling it, "
+            "drop StubPushConfig rather than keep a stub for a dead path",
+        )
+
     def test_hostile_environments_do_not_change_the_verdict(self):
         for family, environment, command in HOSTILE_ENVIRONMENTS:
             with self.subTest(family=family, command=command):
