@@ -66,8 +66,10 @@ would not have caught it) and, in a temp project dir that is not a repo, that re
 through to the host's GLOBAL gitconfig — a developer whose `~/.gitconfig` sets
 `remote.<n>.push`/`mirror`/`receivepack` would otherwise see ~77 bogus false-positive
 failures pointing at the floor instead of at their config; and the environment the floor
-reads from `os.environ` is scrubbed. `test_the_sweep_spawns_no_subprocess` proves the
-first two by making a subprocess attempt an error, so this paragraph cannot rot.
+reads from `os.environ` is scrubbed. `setUpModule` makes any `subprocess` attempt an
+error for the WHOLE module run — both corpora, every composed shape — so a payload that
+reaches the host through some path nobody has stubbed fails the sweep that carries it,
+and this paragraph cannot rot.
 
 The scrub covers every `GIT_*` name (the trace/index/process families at
 dispatch.py:4528-4550 and 5099-5106 all change verdicts, not just `GIT_CONFIG*`), the
@@ -171,6 +173,26 @@ def _stub_configured_bare_push(
 dispatch.configured_bare_push_is_dangerous = _stub_configured_bare_push
 
 
+class _NoSubprocess:
+    """Turns any host reach through `subprocess` into a loud failure.
+
+    Bound onto THIS module's private copy of the floor for the whole module run, so it
+    covers both corpus sweeps and every composed shape rather than a hand-picked probe
+    list. `check()` has no swallowing `try/except` — the fail-closed handler lives in
+    `main()`, which the sweeps never call — so the AssertionError propagates out of the
+    check and fails the test that provoked it, naming the payload.
+    """
+
+    def __getattr__(self, name):
+        raise AssertionError(
+            "the cross-product sweep spawned a subprocess "
+            f"(subprocess.{name}); stub the seam instead"
+        )
+
+
+_REAL_SUBPROCESS = dispatch.subprocess
+
+
 _PROJECT_DIR: str | None = None
 _SAVED_ENVIRONMENT: dict[str, str] = {}
 
@@ -226,6 +248,12 @@ def setUpModule() -> None:
             "verified nor reported as fixed.\n" + "!" * 78,
             file=sys.stderr,
         )
+    # Installed for the WHOLE module, not around a probe list: the docstring's claim is
+    # about the sweep, so the guard has to be live while the sweep runs. A future smoke
+    # case that reaches the host through a path other than `push_remotes` /
+    # `configured_bare_push_is_dangerous` now fails the sweep that carries it instead of
+    # silently spawning processes past a green hermeticity test.
+    dispatch.subprocess = _NoSubprocess()
     for name in _scrubbed_environment_names():
         _SAVED_ENVIRONMENT[name] = os.environ.pop(name)
     # Mirror smoke_test.run_case: the project root is a fresh directory directly under
@@ -236,6 +264,7 @@ def setUpModule() -> None:
 
 def tearDownModule() -> None:
     global _PROJECT_DIR
+    dispatch.subprocess = _REAL_SUBPROCESS
     os.environ.update(_SAVED_ENVIRONMENT)
     _SAVED_ENVIRONMENT.clear()
     if _PROJECT_DIR is not None:
@@ -1723,18 +1752,28 @@ class HermeticityTests(CrossProductBase):
     def test_the_sweep_spawns_no_subprocess(self):
         """No corpus payload may reach the host through `subprocess`.
 
-        `dispatch.subprocess` is rebound on THIS module's private copy of the floor, so
-        nothing outside the test is affected. Refspec-less pushes are included on
-        purpose: they are the payloads that used to shell out to `git config`.
+        The guard is not this test's to install and uninstall — `setUpModule` binds it
+        for the whole module, so EVERY sweep in this file runs under it, which is what
+        the docstring claims. This test asserts the two things scoping alone cannot: that
+        the guard is still bound when the sweeps run, and that it is lethal rather than
+        decorative. Refspec-less pushes are re-checked here on purpose: they are the
+        payloads that used to shell out to `git config`.
+
+        Before this, the guard covered six hardcoded probes and neither corpus, so a
+        future payload reaching the host through a third path would have spawned
+        processes with this test still green — exactly the rot it exists to prevent.
         """
-
-        class _NoSubprocess:
-            def __getattr__(self, name):
-                raise AssertionError(
-                    "the cross-product sweep spawned a subprocess "
-                    f"(subprocess.{name}); stub the seam instead"
-                )
-
+        self.assertIsInstance(
+            dispatch.subprocess,
+            _NoSubprocess,
+            "the no-subprocess guard is not bound while the sweeps run",
+        )
+        # Asserted on the floor's OWN host-reaching helper, not on the stub: this is the
+        # function every remaining `subprocess` path in dispatch.py goes through, and it
+        # resolves the module global at call time, which is what makes the rebinding
+        # effective at all.
+        with self.assertRaises(AssertionError):
+            dispatch.command_output(["git", "--version"], _PROJECT_DIR)
         probes = [
             "git push origin",
             "git push",
@@ -1743,14 +1782,9 @@ class HermeticityTests(CrossProductBase):
             "echo secret123 > '.env'",
             "git status",
         ]
-        real = dispatch.subprocess
-        dispatch.subprocess = _NoSubprocess()
-        try:
-            for command in probes:
-                for tier in (1, 2, 3, 4):
-                    decide(command, tier)
-        finally:
-            dispatch.subprocess = real
+        for command in probes:
+            for tier in (1, 2, 3, 4):
+                decide(command, tier)
 
     def test_verdict_changing_host_variables_are_scrubbed(self):
         """Nothing the floor reads from `os.environ` survives into the sweep."""
