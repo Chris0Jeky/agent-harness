@@ -9072,20 +9072,14 @@ def check(
                 # they are server-side push-option data, not selectors, and the push
                 # is still refspec-less. `git push -o --all origin` used to skip the
                 # bare-push guard entirely (PR #23 review).
-                # The shell eats redirections before git is executed, so the
-                # operand walk has to run over the argv git really receives.
-                # Leaving `2>&1` in made it a second lease destination (and, in
-                # the other direction, made a refspec-LESS push look explicit
-                # enough to skip the configured-force resolution). Issue #44.
-                push_argv = strip_shell_redirections(args)
                 positionals = []
                 explicit_selector = False
                 repository_via_option = False
                 index = 0
-                while index < len(push_argv):
-                    token = push_argv[index]
+                while index < len(args):
+                    token = args[index]
                     if token == "--":
-                        positionals.extend(push_argv[index + 1 :])
+                        positionals.extend(args[index + 1 :])
                         break
                     if token == "--repo":
                         repository_via_option = True
@@ -9193,9 +9187,24 @@ def check(
                     )
                     if opaque:
                         return opaque
+                # The SHELL consumes redirections; git never sees them in argv.
+                # Leaving them in the destination list made `git push
+                # --force-with-lease origin fix/x 2>&1` a push to the two
+                # destinations `fix/x` and `2>&1`, so the guard refused the one
+                # spelling agents type while plain `--force` was unaffected --
+                # steering toward the MORE dangerous verb (issue #44).
+                #
+                # Deliberately scoped to the lease destinations. `positionals`
+                # also decides `has_explicit_refspec`, and stripping there is a
+                # tightening: a corpus replay measured 135 unique commands
+                # (`cd <repo> && git push 2>&1 | tail -3`) moving allow ->
+                # [push-config-unverifiable]. That bypass is real and tracked in
+                # issue #65; closing it belongs with the work on that rule's
+                # own false-positive rate, not in this fix.
+                lease_destinations = strip_shell_redirections(positionals)
                 if lease_requested and (
                     explicit_selector
-                    or not force_with_lease_targets_are_features(positionals[1:])
+                    or not force_with_lease_targets_are_features(lease_destinations[1:])
                     or (
                         lease_selectors
                         and not force_with_lease_targets_are_features(lease_selectors)

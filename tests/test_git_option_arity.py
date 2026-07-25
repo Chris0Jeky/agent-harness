@@ -354,23 +354,32 @@ class PushRedirectionTests(unittest.TestCase):
                     decision, _reason = decide(command, tier)
                     self.assertNotEqual(decision, "allow", command)
 
-    def test_a_redirect_no_longer_hides_a_refspec_less_push(self):
-        """The same parser bug loosened the bare-push guard, so pin that too.
+    def test_the_fix_is_scoped_to_the_lease_destinations(self):
+        """Nothing but the lease path may change verdict.
 
-        `git push origin` is refspec-less and consults remote config; adding
-        `2>&1` used to make it look like it carried an explicit refspec, which
-        skipped that resolution entirely. Both spellings must now agree.
+        The same parser bug also loosens the refspec-LESS guard (a redirect
+        makes `git push origin 2>&1` look like it carries an explicit refspec),
+        but stripping there is a TIGHTENING: a corpus replay measured 135 unique
+        `cd <repo> && git push 2>&1 | tail -3` commands moving allow ->
+        [push-config-unverifiable]. That bypass is tracked as issue #65, so this
+        slice must leave those verdicts exactly where it found them.
         """
         for tier in TIERS:
+            for command in (
+                "git push origin 2>&1",
+                "git push origin 2>&1 | tail -4",
+                "git push origin main 2>&1",
+            ):
+                with self.subTest(tier=tier, command=command):
+                    self.assertEqual(decide(command, tier)[0], "allow")
+        # `git push 2>&1` is the one shape the two tokenizers already disagreed
+        # about before this change (the sanitized pass keeps `2>&1` as a single
+        # token, so it counts one positional and the T4 opacity rule fires).
+        # Unchanged here, and pinned so a later slice notices when it moves.
+        for tier in (1, 2, 3):
             with self.subTest(tier=tier):
-                self.assertEqual(
-                    decide("git push origin 2>&1", tier),
-                    decide("git push origin", tier),
-                )
-                self.assertEqual(
-                    decide("git push origin 2>&1 | tail -4", tier),
-                    decide("git push origin", tier),
-                )
+                self.assertEqual(decide("git push 2>&1", tier)[0], "allow")
+        self.assertEqual(decide("git push 2>&1", 4)[0], "deny")
 
     def test_strip_shell_redirections_helper(self):
         strip = dispatch.strip_shell_redirections
