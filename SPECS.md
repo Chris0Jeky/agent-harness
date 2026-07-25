@@ -49,7 +49,7 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   "authority": { "push": "free", "merge": "gated" },
   "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
              "relaxed_work_loss_guards": false },
-  "model_routing": { "harness_and_review": "top", "slices": "mid", "maintenance": "cheap" },
+  "model_routing": { "harness_and_review": "top", "slices": "default", "maintenance": "default" },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
   "last_reviewed": "2026-07-06"
@@ -62,6 +62,11 @@ zero-skip twins in NavSentinel/Options/extract-api, close-keyword and stacked-PR
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
+- `model_routing.*`: routing-tier names ONLY — `top` | `default` | `cheap`, the §8 vocabulary.
+  Never write a named model here; that is the `model-effort-routing` skill's job, and a model
+  name in a per-repo config file is a copy that will go stale silently. NOTE: `harness.py seed`
+  currently emits `sol` / `terra` / `luna` for these three keys, which matches neither this schema
+  nor §8 and is read by nothing — tracked in issue #47.
 - Read by: dispatcher hook, Gardener, bootstrapper, CI templates. The dispatcher also reads
   legacy `.claude/tier.json` files so existing estates can migrate without a flag day.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
