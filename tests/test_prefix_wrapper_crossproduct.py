@@ -38,6 +38,16 @@ shape roster is a roster of spellings the author thought of; it does not prove t
 of a shape nobody wrote down. And the floor remains a tripwire that parses argv, so a
 payload fed to an interpreter over stdin is out of scope by construction.
 
+The deny-direction check count is also softer than it looks, and the number is not left
+to speak for itself. Nine enforced shapes (systemd-run, chroot, unshare, nsenter,
+runuser, su-c, xargs, find-exec, for-block-iex) deny essentially any payload, so roughly
+8,600 of those checks pass tautologically; and across all 52 enforced shapes, between 2
+and 19 of each charter probe's denies come from a blanket opacity or privilege rule
+rather than from the rule the probe is named for. `CHARTER_RULE_DENY_FLOOR` and
+`DenyReasonTests` record and guard the part that is real, by comparing each deny's reason
+against the reason the BARE command produces — the floor carries no rule IDs yet (#26),
+so the bare reason is the closest available identity for a rule.
+
 Hermetic by construction, and asserted rather than asserted-in-prose. `check()` reaches
 the host in three ways and all three are closed here: remote resolution is stubbed;
 `configured_bare_push_is_dangerous` is stubbed, because it shells out to `git config
@@ -220,18 +230,30 @@ def tearDownModule() -> None:
         _PROJECT_DIR = None
 
 
-def decide(command: str, tier: int = 1, flags: dict | None = None) -> str:
-    """Return the floor's decision for `command`, in process and without side effects."""
+def decide_with_reason(
+    command: str, tier: int = 1, flags: dict | None = None
+) -> tuple[str, str]:
+    """The floor's decision AND its reason, in process and without side effects.
+
+    The sweeps only need the decision, but throwing the reason away made a rule firing
+    indistinguishable from an unrelated opacity deny — so a change that replaced a
+    specific charter rule with a blanket "cannot inspect this wrapper" deny would have
+    counted as coverage. `CHARTER_RULE_DENY_FLOOR` uses this to tell the two apart.
+    """
     if _PROJECT_DIR is None:  # pragma: no cover - guards misuse outside the module
         raise RuntimeError("module fixture not initialised")
-    decision, _reason = dispatch.check(
+    return dispatch.check(
         command,
         {"tier": tier, "flags": flags or {}},
         _PROJECT_DIR,
         _PROJECT_DIR,
         remote_resolver=_stub_remote_resolver,
     )
-    return decision
+
+
+def decide(command: str, tier: int = 1, flags: dict | None = None) -> str:
+    """Return the floor's decision for `command`, in process and without side effects."""
+    return decide_with_reason(command, tier, flags)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +787,30 @@ QUOTED_BENIGN_REDIRECTS = [
     'git commit -m "echo secret > .env must deny"',
 ]
 
+#: How many ENFORCED shapes deny each charter probe FOR THE PROBE'S OWN RULE — the
+#: reason the bare command produces — rather than for an unrelated blanket reason
+#: ("cannot safely inspect wrapper options", "privilege elevation", "dynamic executable
+#: name"). Out of 52 enforced shapes every probe denies under all 52, but between 2 and
+#: 19 of those denies are opacity, not the charter rule: `sudo apt-get install thing`
+#: under `xargs -I{}` denies because xargs is opaque, and would keep denying if the sudo
+#: rule were deleted outright. Nine enforced shapes (systemd-run, chroot, unshare,
+#: nsenter, runuser, su-c, xargs, find-exec, for-block-iex) deny essentially everything,
+#: so ~8,600 of the advertised deny-direction checks are tautological.
+#:
+#: These floors are the measured counts. Asserted with `>=`, so adding a shape cannot
+#: break them, but converting a real rule into a blanket deny drops the count and fails.
+CHARTER_RULE_DENY_FLOOR = {
+    "rm-rf-outside": 42,
+    "force-push": 43,
+    "sudo": 44,
+    "pipe-to-shell": 33,
+    "secret-write": 49,
+    "secret-delete": 42,
+    "secret-write-quoted": 49,
+    "secret-redirect-leading-quoted": 50,
+    "secret-redirect-leading-quoted-double": 50,
+}
+
 #: Benign representatives. Every one is allowed bare (asserted below).
 BENIGN_PROBES = [
     ("git-status", "git status"),
@@ -793,6 +839,15 @@ DOCUMENTED_OVER_BLOCKS: dict[str, dict] = {}
 
 
 def _bypass(names, issue: str, note: str, bypassed) -> None:
+    # A shape-level entry deletes ALL 955 of that shape's corpus checks, so it has to
+    # record what it is buying. An empty list would be a one-line way to silence corpus
+    # failures nobody could fix while asserting only that six probes still deny; the
+    # payload-granular DOCUMENTED_CASE_BYPASSES is the tool for a narrower hole.
+    if not bypassed:
+        raise ValueError(
+            f"{sorted(names)}: a shape-level bypass entry must record which charter "
+            "probes it lets through; use _case_bypass for a payload-level hole"
+        )
     for name in names:
         DOCUMENTED_BYPASSES[name] = {
             "issue": issue,
@@ -802,6 +857,15 @@ def _bypass(names, issue: str, note: str, bypassed) -> None:
 
 
 def _over_block(names, issue: str, note: str, blocked) -> None:
+    # Same contract in the false-positive direction, and it is the one that was being
+    # abused: sixteen shapes carried `blocked=[]`, which exempted them from the entire
+    # benign sweep while recording nothing and making the UNEXPECTEDLY-FIXED branch
+    # unreachable. Use _case_over_block for anything narrower than "denies every payload".
+    if not blocked:
+        raise ValueError(
+            f"{sorted(names)}: a shape-level over-block entry must record which benign "
+            "probes it denies; use _case_over_block for a payload-level over-block"
+        )
     for name in names:
         DOCUMENTED_OVER_BLOCKS[name] = {
             "issue": issue,
@@ -958,35 +1022,307 @@ _over_block(
     BENIGN_PROBE_IDS,
 )
 
-# --- over-blocks: evaluator opacity on a benign payload ------------------------------
-# `iex 'git status'` is allowed, but a benign payload the parser cannot fully model
-# inside an evaluator is denied. Recorded at probe granularity: today every benign probe
-# survives these shapes, so the entry exists to catch the direction turning worse.
-_over_block(
+# --- over-blocks: recorded PER PAYLOAD, not by exempting the shape -------------------
+# These sixteen shapes used to carry a shape-level entry with an EMPTY `blocked` list.
+# That bought each of them total exemption from the benign sweep — TRANSPARENT_SHAPES
+# excludes anything in DOCUMENTED_OVER_BLOCKS — while recording no evidence at all: with
+# `blocked` empty, `recorded_block = probe in []` is always False, so the
+# UNEXPECTEDLY-FIXED branch was unreachable and the entry could never be retired. The
+# false-positive direction, which #21 measures at 12% and which this module's docstring
+# calls at least as important as the bypass direction, therefore had ZERO corpus-level
+# coverage on exactly the shapes where over-blocking was known to exist.
+#
+# They are all back in TRANSPARENT_SHAPES now, swept against the whole benign corpus, and
+# what they over-block TODAY is recorded payload by payload below — the same contract
+# DOCUMENTED_CASE_BYPASSES gives the deny side. `brace-group` was dropped entirely: it
+# over-blocks nothing, so its exemption was buying nothing but hiding coverage.
+#
+# The measured structure is nested, so the groups compose rather than repeat:
+#   do-block-iex  ⊃  try-block-iex  ⊃  (evaluator-opacity ∪ force-with-lease)
+
+#: Benign payloads an evaluator body denies on opacity (#21). Every one is a
+#: download/output-option command the parser will not model inside `iex`.
+_EVALUATOR_OPACITY_OVER_BLOCKS = [
+    'curl --disable https://example.invalid/.env',
+    'curl -q -- https://example.invalid/report.txt --trace=.env',
+    'curl -q --alt-svc .env --alt-svc cache.txt https://example.invalid/report.txt',
+    'curl -q --alt-svc cache.txt https://example.invalid/report.txt',
+    'curl -q --alt-svc= -O https://example.invalid/report.txt',
+    'curl -q --cookie-jar .env --cookie-jar cookies.txt https://example.invalid/report.txt',
+    'curl -q --cookie-jar cookies.txt https://example.invalid/file',
+    'curl -q --dump-header .env --dump-header - https://example.invalid/report.txt',
+    'curl -q --dump-header headers.txt https://example.invalid/file',
+    'curl -q --etag-save .env --etag-save etag.txt https://example.invalid/report.txt',
+    'curl -q --expand-alt-svc cache.txt https://example.invalid/report.txt',
+    'curl -q --expand-output report.txt https://example.invalid/data',
+    'curl -q --expand-output-dir out -O https://example.invalid/report.txt',
+    'curl -q --expand-url https://example.invalid/.env',
+    'curl -q --hsts .env --hsts cache.txt https://example.invalid/report.txt',
+    'curl -q --libcurl .env --libcurl - https://example.invalid/report.txt',
+    'curl -q --no-out-null -O https://example.invalid/.env',
+    'curl -q --no-out-null -O https://host/report.txt',
+    'curl -q --output-dir .env --output-dir out -O https://example.invalid/report.txt',
+    'curl -q --output-dir .env https://example.invalid/report.txt',
+    'curl -q --referer https://example.invalid/.env -O https://example.invalid/report.txt',
+    'curl -q --remote-name-all --no-remote-name https://example.invalid/.env',
+    'curl -q --remote-name-all --no-remote-name-all https://example.invalid/.env',
+    'curl -q --remote-name-all -o - https://example.invalid/.env',
+    'curl -q --remote-name-all https://example.invalid/report.txt',
+    'curl -q --ssl-sessions .env --ssl-sessions sessions.txt https://example.invalid/report.txt',
+    'curl -q --stderr .env --stderr - https://example.invalid/report.txt',
+    'curl -q --trace .env --next --trace - https://example.invalid/report.txt',
+    'curl -q --trace .env --trace - https://example.invalid/report.txt',
+    'curl -q --user-agent=-O https://example.invalid/.env',
+    'curl -q -J -o report.txt https://example.invalid/report.txt',
+    "curl -q -O 'https://example.invalid/report.txt#/.env'",
+    "curl -q -O 'https://example.invalid/report.txt?next=/.env'",
+    'curl -q -O https://example.invalid/report.txt',
+    'curl -q -O https://example.invalid/report.txt -o - https://example.invalid/.env',
+    'curl -q -c.env -ccookies.txt https://example.invalid/report.txt',
+    'curl -q -g -O https://example.invalid/.[a-z]nv',
+    'curl -q https://api.example.com/data -o data.json',
+    'curl -q https://example.invalid/.env',
+    'curl -qAfoo.env https://example.invalid/file',
+    'curl -qoreport.txt https://example.invalid/file',
+    'curl -qs https://example.invalid/.env',
+    'curl -qsoreport.txt https://example.invalid/file',
+    'iwr https://example.invalid/file -OutVariable response',
+    'wget --append-output=download.log https://example.invalid/report.txt',
+    'wget --directory-prefix downloads https://example.invalid/report.txt',
+    'wget --directory-prefix=downloads https://example.invalid/report.txt',
+    'wget --execute=output_document=report.txt https://example.invalid/file',
+    'wget --no-trust-server-names https://host/file',
+    'wget --save-cookies cookies.txt https://example.invalid/report.txt',
+    'wget --save-cookies=cookies.txt https://example.invalid/report.txt',
+    'wget --trust-server-names -O out.html https://host/file',
+    'wget --warc-file archive https://example.invalid/report.txt',
+    'wget --warc-file=archive https://example.invalid/report.txt',
+    'wget -O out.html https://host/x',
+    'wget -Oreport.txt https://example.invalid/.env',
+    'wget -Oreport.txt https://example.invalid/file',
+    'wget -P downloads https://example.invalid/report.txt',
+    'wget -Pdownloads https://example.invalid/report.txt',
+    'wget -Ueoutput_document=.env https://example.invalid/report.txt',
+    'wget -Ufoo.env https://example.invalid/file',
+    'wget -e dir_prefix=downloads https://example.invalid/report.txt',
+    'wget -e logfile=download.log https://example.invalid/report.txt',
+    'wget -e output_document=report.txt https://example.invalid/.env',
+    'wget -e robots=off https://example.invalid/report.txt',
+    'wget -e save_cookies=cookies.txt https://example.invalid/report.txt',
+    'wget -e warc_file=archive https://example.invalid/report.txt',
+    'wget -eoutput_document=- https://example.invalid/.env',
+    'wget -qOreport.txt https://example.invalid/file',
+    'wget -qeoutput_document=report.txt https://example.invalid/file',
+    'wget -r -O site.html https://host/',
+    'wget https://host/file',
+]
+
+#: Benign payloads a subshell/block composition denies although they are allowed
+#: bare -- overwhelmingly `git push --force-with-lease`, the safe force-push.
+_LEASE_OVER_BLOCKS = [
+    'git --exec-path',
+    'git -C . push --force-with-lease origin feat',
+    'git config push.default',
+    'git lfs status',
+    'git lfs status --json',
+    'git push --force-with-lease origin HEAD:feature/topic',
+    'git push --force-with-lease origin HEAD:fix/issue-7',
+    'git push --force-with-lease origin HEAD:renovate/deps',
+    'git push --force-with-lease origin feat',
+    'git push --force-with-lease= origin feature',
+    'git push --force-with-lease=feature origin feature',
+    'git push --force-with-lease=feature/topic:abc123 origin feature/topic',
+    'git symbolic-ref --short refs/remotes/origin/HEAD',
+    'git symbolic-ref -q HEAD',
+    'git symbolic-ref refs/remotes/origin/HEAD',
+]
+
+#: What `try { iex ... } catch { }` denies beyond the two classes above.
+_TRY_BLOCK_EXTRA_OVER_BLOCKS = [
+    'coproc cat log.txt',
+]
+
+#: What `do { iex ... } while ($false)` denies beyond try-block-iex.
+_DO_BLOCK_EXTRA_OVER_BLOCKS = [
+    '/usr/lib/git-core/git-push origin main',
+    'Copy-Item -EA Stop Env:C Env:HARMLESS',
+    'Copy-Item Env:C -EA Stop Env:HARMLESS',
+    'Copy-Item Env:C Env:GIT_CONFIG_NOSYSTEM',
+    'Copy-Item Env:C Env:HARMLESS',
+    'Copy-Item report.txt GIT_CONFIG_COUNT',
+    'Export-Csv -Path data.csv',
+    'Export-Csv -Path report.csv',
+    'Remove-Item "notes,.env"',
+    'Rename-Item Env:C HARMLESS',
+    'Rename-Item notes.txt -NewName report.txt',
+    'Rename-Item report.txt GIT_CONFIG_COUNT',
+    'Start-Process -FilePath:notepad.exe',
+    'Start-Process notepad',
+    'Start-Process notepad -Wait',
+    'cp --target-directory=build file',
+    'cp a grid_dsa',
+    'cp file dest/',
+    "git 'pu''sh' origin main",
+    'git --git-dir "C:/Path With Space/repo/.git" push origin main',
+    'git -C "C:/Path With Space/repo" push origin main',
+    'git checkout -- .',
+    'git checkout -- src/app.py',
+    'git checkout -- src/app.ts',
+    'git checkout -b .env',
+    'git checkout -f main',
+    'git checkout -q main',
+    'git checkout credentials-refactor',
+    'git checkout feature/x',
+    'git checkout fix/credential-rotation',
+    'git checkout main',
+    'git clean -f src',
+    'git clean -fd',
+    'git clean -i build/',
+    'git clone --depth 1 https://example.invalid/repo',
+    'git clone -b main https://example.invalid/repo workdir',
+    'git clone -c core.autocrlf=false https://example.invalid/repo',
+    'git clone https://example.invalid/repo target-dir',
+    'git init myrepo',
+    'git mv report.txt archive.txt',
+    "git p'u'sh origin main",
+    'git push',
+    'git push --all origin',
+    'git push --push-option harmless origin main',
+    'git push --recurse-submodules check origin main',
+    'git push --repo origin --all',
+    'git push --repo origin main',
+    'git push --repo=origin main',
+    'git push --tags origin',
+    'git push -od origin main',
+    'git push -u origin feature',
+    'git push -vo harmless origin main',
+    'git push origin',
+    "git push origin 'refs/heads/*:refs/heads/*'",
+    'git push origin main',
+    'git restore --source=.env report.txt',
+    'git restore .',
+    'git restore report.txt',
+    'git rm report.txt',
+    'git stash push -- src/app.py',
+    'git stash push src/app.py',
+    'git stash show --stat',
+    'git worktree add --force ../safe-worktree',
+    'git worktree add -b feature/x ../wt origin/main',
+    'git worktree move old-wt ../renamed-wt',
+    'install -m 644 server.pem /etc/ssl/certs/',
+    'install -m 755 app /usr/local/bin/app',
+    'ln -s a b',
+    'mkdir build',
+    'ren notes.txt -NewN report.txt',
+    'rm --force notes.txt',
+    'rm -rf ./dist build/out',
+    'rm -rf node_modules',
+    'rsync -a src/ backup/',
+    'rsync -a src/ backup/ --exclude .git',
+    'rsync -avzP src/ host:dest/',
+    'saps notepad',
+    "sed -i '/credentials/d' file.txt",
+    "sed -i 's/pw/secret.value/g' config.ini",
+    'sed -i s/a/b/ notes.txt',
+]
+
+#: The narrower launcher tier (#68) also over-blocks these.
+_LAUNCHER_TIER_OVER_BLOCKS = [
+    "git 'pu''sh' origin main",
+    "git p'u'sh origin main",
+]
+
+#: `1 | % { <CMD> }`.
+_FOREACH_BLOCK_OVER_BLOCKS = [
+    'Remove-Item "notes,.env"',
+    "git push origin 'refs/heads/*:refs/heads/*'",
+]
+
+#: `cmd /c <QCMD>`.
+_CMD_C_OVER_BLOCKS = [
+    "git push origin 'refs/heads/*:refs/heads/*'",
+]
+
+#: `time <CMD>`.
+_TIME_BUILTIN_OVER_BLOCKS = [
+    'curl -q --no-out-null -O https://example.invalid/.env',
+    "curl -q -O 'https://example.invalid/report.txt#/.env'",
+    "curl -q -O 'https://example.invalid/report.txt?next=/.env'",
+    'curl -q -g -O https://example.invalid/.[a-z]nv',
+]
+
+#: Over-blocks narrower than a whole shape: keyed by benign payload, valued by the shapes
+#: that deny it today. Mirrors DOCUMENTED_CASE_BYPASSES, including the UNEXPECTEDLY-FIXED
+#: report — a pair recorded here that starts allowing must be removed so the improvement
+#: is guarded rather than silently absorbed.
+DOCUMENTED_CASE_OVER_BLOCKS: dict[str, dict] = {}
+
+
+def _case_over_block(payloads, shapes, issue: str, note: str) -> None:
+    for payload in payloads:
+        entry = DOCUMENTED_CASE_OVER_BLOCKS.setdefault(
+            payload, {"issue": issue, "note": note, "shapes": set()}
+        )
+        entry["shapes"].update(shapes)
+
+
+def case_over_block_shapes(payload: str) -> set:
+    entry = DOCUMENTED_CASE_OVER_BLOCKS.get(payload)
+    return entry["shapes"] if entry else set()
+
+
+_case_over_block(
+    _EVALUATOR_OPACITY_OVER_BLOCKS,
     ["iex", "invoke-expression", "foreach-iex", "foreach-second-statement"],
     "#21",
-    "evaluator opacity denies benign payloads the parser cannot model",
-    [],
+    "evaluator opacity denies a benign download the parser cannot model",
 )
-_over_block(
-    ["try-block-iex", "do-block-iex", "subshell", "brace-group", "foreach-block"],
+_case_over_block(
+    _LEASE_OVER_BLOCKS,
+    ["subshell"],
     "#21",
-    "block/subshell composition denies benign payloads that are allowed bare",
-    [],
+    "subshell composition denies a benign payload that is allowed bare",
 )
-_over_block(
-    [
-        "taskset",
-        "flock",
-        "watch",
-        "time-builtin",
-        "wsl",
-        "wsl-exec",
-        "cmd-c",
-    ],
+_case_over_block(
+    list(_EVALUATOR_OPACITY_OVER_BLOCKS)
+    + list(_LEASE_OVER_BLOCKS)
+    + list(_TRY_BLOCK_EXTRA_OVER_BLOCKS),
+    ["try-block-iex"],
     "#21",
-    "launcher composition denies benign payloads that are allowed bare",
-    [],
+    "try-block evaluator composition denies benign payloads allowed bare",
+)
+_case_over_block(
+    list(_EVALUATOR_OPACITY_OVER_BLOCKS)
+    + list(_LEASE_OVER_BLOCKS)
+    + list(_TRY_BLOCK_EXTRA_OVER_BLOCKS)
+    + list(_DO_BLOCK_EXTRA_OVER_BLOCKS),
+    ["do-block-iex"],
+    "#21",
+    "do-block evaluator composition denies benign payloads allowed bare",
+)
+_case_over_block(
+    _LAUNCHER_TIER_OVER_BLOCKS,
+    ["taskset", "flock", "watch", "wsl", "wsl-exec"],
+    "#68",
+    "the narrower launcher tier denies a benign payload that is allowed bare",
+)
+_case_over_block(
+    _FOREACH_BLOCK_OVER_BLOCKS,
+    ["foreach-block"],
+    "#21",
+    "ForEach-Object block composition denies a benign payload allowed bare",
+)
+_case_over_block(
+    _CMD_C_OVER_BLOCKS,
+    ["cmd-c"],
+    "#69",
+    "cmd /c reads a benign single-quoted refspec as program text",
+)
+_case_over_block(
+    _TIME_BUILTIN_OVER_BLOCKS,
+    ["time-builtin"],
+    "#68",
+    "the time builtin denies a benign download that is allowed bare",
 )
 
 #: Holes that are narrower than a whole shape: the shape unwraps correctly for almost the
@@ -1360,15 +1696,81 @@ class DenyDirectionTests(CrossProductBase):
         self.report(failures, "bypass-direction")
 
 
+class DenyReasonTests(CrossProductBase):
+    """A deny has to come from the rule it is credited to."""
+
+    def test_charter_rules_still_fire_rather_than_blanket_opacity(self):
+        """Guard against a charter rule being replaced by an unrelated opacity deny.
+
+        `decide()` returns only the decision, so "still denies" counted a blanket
+        "cannot safely inspect wrapper options" exactly like the rule under test. A
+        change that deleted, say, the sudo rule would leave `sudo apt-get install thing`
+        denying under `xargs -I{}`, `su -c` and every privilege-boundary launcher, and
+        the sweep would report full coverage. Comparing against the BARE reason
+        separates the two without needing rule IDs the floor does not carry yet.
+        """
+        shortfalls = []
+        for probe, command in CHARTER_PROBES:
+            _bare_decision, bare_reason = decide_with_reason(command)
+            fired = 0
+            for shape in ENFORCED_SHAPES:
+                if not shape.accepts(command):
+                    continue
+                composed = shape.apply(command)
+                if composed is None:
+                    continue
+                decision, reason = decide_with_reason(composed)
+                if decision == "deny" and reason == bare_reason:
+                    fired += 1
+            floor = CHARTER_RULE_DENY_FLOOR[probe]
+            if fired < floor:
+                shortfalls.append((probe, fired, floor))
+        self.assertEqual(
+            shortfalls,
+            [],
+            "a charter rule stopped firing under shapes where it used to fire; the "
+            "shapes may still deny for an unrelated opacity reason, which is not the "
+            "same coverage (probe, fired, recorded floor)",
+        )
+
+    def test_every_charter_probe_has_a_recorded_reason_floor(self):
+        self.assertEqual(
+            sorted(CHARTER_RULE_DENY_FLOOR),
+            sorted(CHARTER_PROBE_IDS),
+            "every charter probe needs a rule-deny floor, or the number is unguarded",
+        )
+
+
 class FalsePositiveDirectionTests(CrossProductBase):
     """A benign command stays allowed under every transparent shape."""
 
     def test_benign_corpus_survives_every_transparent_shape(self):
         failures = []
+        fixed = []
         for shape in TRANSPARENT_SHAPES:
-            corpus = _sample(BENIGN_CORPUS, shape.name)
-            shape_failures, _skipped = self.sweep(shape, corpus, "allow")
-            failures.extend(shape_failures)
+            for command, tier, flags in _sample(BENIGN_CORPUS, shape.name):
+                if not shape.accepts(command):
+                    continue
+                composed = shape.apply(command)
+                if composed is None:
+                    continue
+                got = decide(composed, tier, flags)
+                recorded = shape.name in case_over_block_shapes(command)
+                if got != "allow" and not recorded:
+                    failures.append((shape.name, tier, flags, "allow", got, composed))
+                elif got == "allow" and recorded:
+                    fixed.append((shape.name, command, composed))
+        if fixed:
+            self.fail(
+                "UNEXPECTEDLY FIXED — these documented case-level over-blocks now "
+                "allow. Remove them from DOCUMENTED_CASE_OVER_BLOCKS so the fix is "
+                "guarded:\n"
+                + "\n".join(
+                    f"  shape={name} payload={payload!r}\n    {composed!r}"
+                    for name, payload, composed in fixed[:20]
+                )
+                + (f"\n  ... and {len(fixed) - 20} more" if len(fixed) > 20 else "")
+            )
         self.report(failures, "false-positive-direction")
 
 
@@ -1497,6 +1899,54 @@ class ShapeRosterTests(CrossProductBase):
                     f"{payload!r}: {name} can no longer embed this payload, so the "
                     "recorded bypass is never actually exercised",
                 )
+
+    def test_case_over_block_entries_are_live(self):
+        """Every case-level over-block names a real payload and a real swept shape."""
+        corpus = {command for command, _tier, _flags in BENIGN_CORPUS}
+        transparent = {shape.name for shape in TRANSPARENT_SHAPES}
+        for payload, entry in DOCUMENTED_CASE_OVER_BLOCKS.items():
+            self.assertIn(
+                payload,
+                corpus,
+                f"stale over-block baseline: {payload!r} is no longer a benign case",
+            )
+            self.assertTrue(entry["issue"], f"{payload!r}: needs an issue")
+            self.assertTrue(entry["note"], f"{payload!r}: needs a note")
+            for name in entry["shapes"]:
+                self.assertIn(
+                    name,
+                    transparent,
+                    f"{payload!r}: {name} is not swept, so this entry is dead weight",
+                )
+                shape = SHAPES_BY_NAME[name]
+                self.assertTrue(
+                    shape.accepts(payload),
+                    f"{payload!r}: {name} does not accept this payload",
+                )
+                self.assertIsNotNone(
+                    shape.apply(payload),
+                    f"{payload!r}: {name} can no longer embed this payload, so the "
+                    "recorded over-block is never actually exercised",
+                )
+
+    def test_no_shape_is_exempt_from_the_benign_sweep_without_evidence(self):
+        """A shape-level over-block must mean 'denies every payload', not 'unmeasured'.
+
+        This is the invariant the empty `blocked` lists violated: sixteen shapes were
+        exempt from all 391 benign payloads while recording nothing. `_over_block` now
+        refuses an empty list, and this asserts the resulting property directly rather
+        than trusting the constructor.
+        """
+        for name, entry in DOCUMENTED_OVER_BLOCKS.items():
+            self.assertTrue(
+                entry["blocked"],
+                f"{name}: exempt from the benign sweep with no recorded evidence",
+            )
+        for name, entry in DOCUMENTED_BYPASSES.items():
+            self.assertTrue(
+                entry["bypassed"],
+                f"{name}: exempt from the deny sweep with no recorded evidence",
+            )
 
     def test_baseline_probe_ids_are_known(self):
         for name, entry in DOCUMENTED_BYPASSES.items():
