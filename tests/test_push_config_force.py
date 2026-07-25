@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 
 def load_module(name: str, path: Path):
@@ -46,6 +47,9 @@ class PushConfigForceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.dispatch = load_module("push_force_dispatch", DISPATCH_PATH)
+        cls.floor_environment = load_module(
+            "floor_environment_push_force", FLOOR_ENVIRONMENT_PATH
+        )
 
     def _repo(
         self,
@@ -74,7 +78,14 @@ class PushConfigForceTests(unittest.TestCase):
         return repo
 
     def _decide(self, repo: str, command: str, tier: int = 1):
-        return self.dispatch.check(
+        """Decide `command` without inherited Git launch configuration.
+
+        `tests/floor_environment.py` owns that isolation for every suite; here
+        it also keeps an ambient `GIT_DIR` / `GIT_WORK_TREE` from pointing the
+        bare-push config resolution at a repository other than the fixture.
+        """
+        return self.floor_environment.hermetic_check(
+            self.dispatch,
             command,
             {"tier": tier, "flags": {}},
             repo,
@@ -170,6 +181,22 @@ class PushConfigForceTests(unittest.TestCase):
                 decision, reason = self._decide(repo, command)
                 self.assertEqual(decision, "deny", reason)
                 self.assertIn("push-config-unverifiable", reason)
+
+    def test_bare_push_denied_after_every_writing_redirect_spelling(self) -> None:
+        # `n<>file` opens for READ AND WRITE, so it rewrites the config exactly
+        # as `>` does while reading like an input operator -- and the vouched
+        # reader in front of it (`cat`) is what made the omission invisible.
+        # Every spelling in `_WRITING_REDIRECTION_OPERATORS` has to reach this
+        # rule or the two halves of "which operators write" disagree.
+        repo = self._repo(None)
+        for operator in sorted(self.dispatch._WRITING_REDIRECTION_OPERATORS):
+            for command in (
+                f"cat payload {operator} .git/config; git push origin",
+                f"1{operator}.git/config cat payload; git push origin",
+            ):
+                with self.subTest(command=command):
+                    decision, reason = self._decide(repo, command)
+                    self.assertEqual(decision, "deny", reason)
 
     def test_bare_push_allowed_under_unrelated_env_assignment(self) -> None:
         # A generic PowerShell env assignment (the common wave `$env:WT_PROJECT_DIR`

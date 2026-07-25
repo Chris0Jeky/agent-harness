@@ -32,6 +32,34 @@ Install the pinned development tools with `py -3 -m pip install -r requirements-
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every
 pull request and push to `main`; workflow actions are pinned to immutable commit SHAs.
 
+`audit` also measures declarations against reality instead of against other documents:
+a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
+`dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
+template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
+`human_todo` against a file that exists. A repo that vendors nothing says so rather than
+emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
+failure: it is the auditing machine's state, so making it a repo verdict would let the same
+repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
+`UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
+Only a PUBLIC endpoint work is actually PUSHED to is a `MISMATCH`: the push URL of `origin`,
+or of any remote when no `origin` is configured. A public `upstream` or mirror on a private
+fork, and a public fetch URL behind a private `pushurl`, are reported as an `advisory` naming
+the remote and the reason. Any credential embedded in a remote URL is redacted before it
+reaches a finding.
+Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
+skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
+degrades to `UNPROVEN` and exits 0. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
+tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
+diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
+is a local tracking ref, so currency is proven against the published tip with a bounded
+`git ls-remote`; a stale tracking ref, or a published tip that cannot be read (offline,
+unreachable), refuses the reference rather than assuming it. A detached-HEAD
+CI checkout (what `actions/checkout` produces) is never a reference, so the canonical-template
+leg is permanently `UNPROVEN` there and live only on a checkout sitting on a clean `main`. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
+that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
+`--repo`, plus a global `floor version` check; when the reference is refused that check prints
+`[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
+
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
 replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
@@ -42,7 +70,9 @@ system `hooks.json`, system `requirements.toml`, inline system/base and selectab
 hooks, and the legacy managed config file. On Windows it resolves the system layer through the
 ProgramData known folder, as Codex does. Before counting a floor, it validates the complete hook
 subtree and the hook-specific metadata it statically interprets: every supported event, the JSON
-object wrapper and parser constraints, config hook state, and managed requirements hook paths. It
+object wrapper and parser constraints, config hook state, and managed requirements hook paths — a
+managed hook directory must be absolute and, unless it is a UNC path no audit should block on,
+must exist on the platform that resolves it. It
 scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
 profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
 schema-validated. Ignored JSON values are traversed iteratively, but the stdlib JSON decoder still
@@ -58,12 +88,23 @@ that qualified default topology, it walks every active `.codex` layer from the c
 through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
 because Codex loads both forms. Across those sources it
 requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
-execution shape, and one current normalized dispatcher pin. That floor must be the canonical root
+execution shape, and one current normalized dispatcher marker. That marker is **audit-only**: it
+is never passed to or verified by `dispatch.py` at runtime, so it proves the trusted hook
+definition was written against those bytes and nothing more (see SPECS §5 for the mandatory
+refresh/re-trust sequencing after a dispatcher change). A separate `Codex adapter contract` check
+names every candidate handler and platform command that declares no marker, declares a stale one,
+or never passes `--event pre --runtime codex`; a vendored dispatcher or wrapper flag delegation is
+reported as inventory rather than a failure. Because Codex runs hook commands from the session
+cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root,
+and recorded as a cwd-dependency note in the audits where it does resolve.
+That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
 requirements, managed hook-feature requirements, persisted canonical/legacy hook feature
 disables, and a disabled canonical handler state, plus the unsupported stored legacy `profile`
-selector. Valid feature values inside the
+selector. A managed requirements pin of the hook feature *on* does not clear a persisted disable:
+Codex's merge order for that contest is not statically provable, so `doctor` names both
+declarations, calls the outcome UNPROVEN, and fails closed. Valid feature values inside the
 inactive legacy profile map do not affect activation; malformed hook feature values still fail the
 typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
 runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,

@@ -22,11 +22,94 @@ actually ran, replays each one through `dispatch.check()` offline, and reports:
 EXIT CODES
 ----------
 0 clean; 1 nothing to replay; 2 at least one command made `check()` raise in
-one of the two versions. 2 is not cosmetic: an exception becomes an `error`
+one of the two versions; 3 the replay *itself* failed; 4 part of the corpus
+could never be read. 2 is not cosmetic: an exception becomes an `error`
 decision, `error` counts as blocked, and the two allow-edge buckets then move in
 opposite unsafe directions — NEWLY ALLOWED is inflated and NEWLY BLOCKED is
 suppressed to zero. `--allow-errors` downgrades it to a report for a deliberate
 crash census.
+
+3 is the separate, more fundamental failure and has no opt-out: the instrument
+could not obtain a verdict, so there is nothing to census. Those commands get
+the `toolfail` pseudo-decision, which is in no rate and in no delta bucket.
+
+4 is the same principle applied to the input side. A transcript that could not
+be opened, that failed mid-read, a tree that could not be walked, or a root
+that is not there at all leaves the corpus short by an amount the script cannot
+know, so no absolute rate is quotable. There is no opt-out, and the first
+version of this said there was: both versions do replay the same shortened
+list, but a command sitting in an unread transcript is in no delta bucket at
+all, so dropping the file can drop the very `newly_blocked` row a gate exists
+to catch. The deltas are sound for the subset that was read and are labelled
+subset-only; a caller that wants them anyway reads exit 4 and decides for
+itself, because the script will not report success over an input it could not
+read. Precedence when several apply: 3, then 2, then 4. Every banner prints
+regardless of which code wins, and each names the code the run actually
+returns.
+
+Nothing extracted at all is 1 only when the scan was clean. Transcripts that
+all failed to open produce an empty corpus and a full integrity ledger, and
+that is 4: "the tree was empty" and "the tree was unreadable" must not be the
+same answer.
+
+TOOL-SIDE FAILURE MUST NEVER READ AS POLICY
+-------------------------------------------
+Issue #39 reported floor 1.2.0 "blocking 100% of the corpus". It blocked
+nothing: 1.2.0's `check()` is `(command, tier_cfg, project_dir)` and this script
+called the current five-argument form, so every command raised `TypeError`, and
+an exception counts as blocked. The verdict-shaped output of a broken tool was
+read as a policy measurement.
+
+The invocation is therefore derived from each loaded module's own
+`inspect.signature` (`build_check_caller`) and bound per version, so a baseline
+several minor versions old replays with the arguments it declares. If no binding
+exists the run aborts with exit 3 before replaying anything, rather than
+counting a per-command `TypeError`.
+
+That principle is only worth anything if it holds for *every* harness failure,
+not just the verdict-shaped ones, so every one of them raises a
+`ReplayHarnessError` subclass and nothing else. A plain `RuntimeError` escaping
+`main()` would end the run in a traceback with interpreter exit code 1 — the
+code documented right above as "nothing to replay" — and a gate keying on exit
+codes would read a broken instrument as an empty corpus.
+
+The rest of that audit, and what each failure is now counted as:
+
+* `check()` raised -> `error` decision (still blocked), `EXIT_ERRORS_PRESENT`.
+  Pre-existing; unchanged.
+* the offline guard fired (`OfflineModule`, a floor version spawning through a
+  route the stub does not cover) -> `toolfail`, exit 3. It used to be an
+  `error`, i.e. a block.
+* a floor that will not import, offers a `command_output` with no
+  `command_runner` default bound to it (`make_module_offline`), or has an
+  unbindable `check()` -> exit 3. A floor with no `command_output` at all is
+  not a failure: it has no spawn seam, so it is already offline and replays.
+  That is the shipped floor 1.2.0, i.e. the exact baseline issue #39 is about,
+  and refusing it kept that baseline unmeasurable. `main()` proves all three in
+  the parent before any worker starts, and `_worker_init` never raises: a
+  raising `multiprocessing.Pool` initializer is respawned forever, so a failure
+  there would hang the run instead of ending it. It stashes the failure and
+  `_worker_run` re-raises it as a task exception.
+* a chunk came back with no verdict -> the run aborts with exit 3 instead of
+  failing inside `summarize_tier` on a `None`. It is a bookkeeping backstop
+  (a skipped index, a short batch, a dropped result), NOT protection against a
+  killed worker: `Pool.imap_unordered` blocks forever on a result that never
+  arrives, so that shape hangs rather than returning short. See COVERAGE LIMITS.
+* an unreadable transcript file, a mid-file read error, a transcript tree that
+  cannot be walked, or a transcript root that does not exist -> counted under
+  `file-unreadable` / `file-read-error` / `transcript-tree-unwalkable` /
+  `codex-root-missing` / `claude-root-missing`, flagged in the extraction
+  ledger, and given its own banner and exit code (4) rather than being one row
+  among twenty followed by a block-rate table and exit 0. Pass `--codex-root
+  none` / `--claude-root none` to say a runtime is deliberately not scanned;
+  that is a stated premise, whereas a root that was asked for and was not there
+  is an unknown amount of missing corpus. It does NOT catch every way the
+  corpus can come up short — see the `iter_transcripts` docstring and COVERAGE
+  LIMITS for the subdirectory case pathlib still suppresses.
+* there is still no per-command watchdog, so a timeout cannot be counted as a
+  block — nothing times out. The floor's own `_remote_deadline` fail-opens to
+  `""` ("unresolved -> not dangerous"), and the replay stubs every reader it
+  guards anyway, so it cannot produce a deny either.
 
 PRIVACY
 -------
@@ -57,15 +140,40 @@ COVERAGE LIMITS (read before quoting a number)
   not the directory it originally ran in. Rules keyed on "inside/outside the
   project" therefore judge a synthetic cwd. Baseline and candidate see the same
   synthetic cwd, so the *deltas* are sound; the absolute rate is an approximation.
-* The replay spawns no subprocess and touches no network. `check()` accepts a
-  `remote_resolver` and it is stubbed to "private"; it has no comparable hook
-  for the `git config --get-regexp remote.*` read behind a refspec-less
-  `git push`, so the `command_runner` defaults inside the loaded module are
-  rebound to a stub that returns `""` (see `make_module_offline`). Without that,
-  every such push spawns two real `git.exe` processes per version, the verdict
-  depends on `--project-dir`'s actual git config, and a transient slow spawn on
-  one side of the comparison alone can manufacture a phantom delta row. The run
-  reports how many reads the stub answered.
+* The replay spawns no subprocess and touches no network. The remote-privacy
+  stub is **conditional**, and that is a premise, not a detail: `remote_resolver`
+  is supplied only to a version whose `check()` declares it (`build_check_caller`
+  binds by role). A floor predating that parameter keeps its own internal
+  resolver, which then resolves through the stubbed-empty `command_output` and
+  typically reports the remote *unresolved* rather than private. Under
+  `--flag sensitive_data` those are opposite verdicts for the same push: allow
+  on the side that got the stub, `could not verify push remote privacy` on the
+  side that did not, so every such push lands in NEWLY ALLOWED as if it were a
+  relaxation. A run whose two versions bind different `check()` roles therefore
+  prints a `PREMISE MISMATCH` block above the tables and records the roles in
+  the JSON `run.check_parameter_delta`. It is a warning, not an abort:
+  comparing two signatures is the whole point of the instrument (issue #39), so
+  the run must still happen — it just may not be read as a like-for-like delta
+  on any rule keyed on remote privacy.
+* There is no comparable hook for the `git config --get-regexp remote.*` read
+  behind a refspec-less `git push`, so the `command_runner` defaults inside the
+  loaded module are rebound to a stub that returns `""` (see
+  `make_module_offline`). Without that, every such push spawns two real
+  `git.exe` processes per version, the verdict depends on `--project-dir`'s
+  actual git config, and a transient slow spawn on one side of the comparison
+  alone can manufacture a phantom delta row. The run reports how many reads the
+  stub answered. A version that offers `command_output` but no such default to
+  rebind aborts the run (`OfflineBindingError`); a version with no
+  `command_output` at all has no spawn seam to stub and replays as-is. Every
+  spawn route in a loaded floor's *globals* (`subprocess`, `os`, `pty`,
+  `asyncio`) is neutralised either way, so an uncovered spawn site raises
+  instead of running. Routes are matched by object identity, not by the name
+  the floor bound them to, so `import subprocess as sp` and `from subprocess
+  import run` are covered as well — a name-keyed version of this guard reported
+  an aliased floor as offline while `sp.run` spawned a real `git.exe` and the
+  run still printed "0 subprocesses spawned". What is NOT covered is an import
+  inside a function body, which never reaches module globals. No floor version
+  has ever done that; it is a residual of this design, not a covered case.
 * The whole ambient `GIT_*` family plus `EDITOR` / `VISUAL` / `PAGER` /
   `SSH_ASKPASS` is cleared for the duration of the run, because `check()` reads
   all of them from `os.environ` and any one of them turns a verdict into a
@@ -86,6 +194,28 @@ COVERAGE LIMITS (read before quoting a number)
   no flags and deny under `wave_mode`. Pass `--flag` per overlay the gated repo
   declares; the active set is printed in the header, labels every tier row, and
   is recorded in the JSON `run` block.
+* The corpus can still be silently short. A transcript that fails to open,
+  fails mid-read, a tree whose walk raises, or a root that is not there is
+  counted and exits 4, but
+  CPython's pathlib suppresses per-directory errors *inside* `rglob`, so a
+  locked profile subtree or a stale junction yields fewer files and increments
+  nothing. There is no counter for it because there is nothing to count: the
+  walk never learns the directory existed. What follows is that a *rising*
+  `unique commands extracted` between two runs of the same corpus is
+  meaningful, an absolute one is a lower bound, and the deltas — computed over
+  whatever was read, identically for both versions — are the only numbers this
+  limitation does not touch.
+* `--corpus-cache` writes the integrity ledger of the scan that produced it as
+  the file's first row, and `--from-corpus` reads it back, so a partial scan
+  that exits 4 still exits 4 when replayed from its cache. A corpus file with
+  no such row — hand-written, or written by an older version — is not treated
+  as a failure: a corpus handed in directly is the caller's stated input rather
+  than a scan this script performed and can vouch for. The report says which of
+  the two it got (`run.cache_integrity_recorded`).
+* A runtime declared out of scope with `--codex-root none` / `--claude-root
+  none` is named in the report and in `run.unscanned_runtimes`. Without that a
+  deliberately halved corpus is indistinguishable from a scan of a real but
+  empty tree, and every rate quietly means "of the other runtime's commands".
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -95,7 +225,17 @@ COVERAGE LIMITS (read before quoting a number)
   `~/.codex/history.jsonl` and `~/.claude/history.jsonl` are user-prompt logs,
   not shell logs, and are not sources.
 * There is no per-command watchdog: a pathological command would stall the run
-  rather than being counted as a block. None has been observed.
+  rather than being counted as a block. None has been observed. This is the
+  deliberate direction — a stalled run is visible, a command counted as blocked
+  because it was slow is not.
+* There is no pool watchdog either. Under `--jobs > 1` a worker that dies
+  outright (OOM killer, segfault in a C extension) does not come back as a
+  missing result: `Pool.imap_unordered` blocks forever waiting for a task result
+  that will never arrive, so the run hangs. `assert_every_command_replayed`
+  does not and cannot catch that shape — it is a bookkeeping backstop, not a
+  liveness guard. Same deliberate direction as above: a hung run is visible and
+  produces no number, whereas a partial replay printed as a table is
+  indistinguishable from a measurement. `--jobs 1` has no such shape.
 * Commands longer than `--max-command-chars` are dropped before replay and are
   in no rate reported anywhere. Long commands skew blocked (nested
   scriptblocks, heredocs, dynamic tokens), so the exclusion biases the absolute
@@ -113,6 +253,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import multiprocessing
 import os
@@ -121,12 +262,18 @@ import sys
 from collections import Counter
 from pathlib import Path
 from types import FunctionType, ModuleType
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DISPATCH = REPO_ROOT / "templates" / "hooks" / "dispatch.py"
 DEFAULT_TIERS = (1, 2, 3, 4)
 DECISIONS = ("allow", "ask", "deny", "error")
+# Not a decision any floor can return: the replay harness itself failed to obtain
+# a verdict for this command (its offline guard fired, or the loaded module's
+# `check()` could not be invoked). Kept out of `DECISIONS` so a floor returning
+# the literal string is still rejected as unexpected, and kept out of every rate
+# so a broken instrument can never read as a strict policy.
+TOOLFAIL = "toolfail"
 RUNTIMES = ("codex", "claude")
 # Tier overlays a repo may declare in `tier.json` (SPECS §2). The floor branches
 # on these, so a row measured without them describes a repo none of the estate
@@ -142,6 +289,41 @@ OVERLAY_FLAGS = (
 # ("nothing to replay") so a caller can tell an unusable corpus from an
 # unusable comparison.
 EXIT_ERRORS_PRESENT = 2
+# Exit code when the *instrument* failed on at least one command: the offline
+# guard fired, or `check()` could not be invoked. Distinct from 2, which reports
+# a floor that crashed on its own terms. Not suppressible by `--allow-errors`:
+# `--allow-errors` exists to census floor crashes, and a malfunctioning harness
+# is not a census of anything.
+EXIT_TOOL_FAILURE = 3
+# Exit code when part of the corpus could never be read, so the run measured an
+# unknown fraction of the transcripts. Distinct from 3, which reports a replay
+# that produced no verdict for a command it *did* extract, and from 1, which
+# means the transcripts were readable and held nothing. There is no downgrade
+# to 0: both versions do replay the same shortened list, but a command in an
+# unread transcript is in no delta bucket at all, so the run can report fewer
+# newly-blocked rows than the truth and a gate keying on 0 would pass over the
+# regression it exists to catch. The deltas are labelled subset-only; a caller
+# willing to use them reads 4 and decides that for itself.
+EXIT_CORPUS_INCOMPLETE = 4
+# Extraction-ledger keys that mean the corpus is shorter than the transcripts
+# are, by an amount the script cannot know. Deliberately not the other
+# `unparsed-*` keys: a line that is not JSON, an argument that is not a literal
+# and an `exec` body that concatenates are records this corpus *decided* not to
+# model, are stable across runs, and do not vary with what happened to be
+# readable. These five do.
+#
+# The two missing-root keys belong here for the same reason as the rest, only
+# more so: a root that was asked for and is not there withholds an entire
+# runtime's transcripts, which is the largest silent shortfall this script can
+# suffer. `--codex-root none` / `--claude-root none` is how a machine that runs
+# only one of the two says so, and that is a premise rather than a failure.
+CORPUS_INTEGRITY_KEYS = (
+    "unparsed-file-unreadable",
+    "unparsed-file-read-error",
+    "unparsed-transcript-tree-unwalkable",
+    "unparsed-codex-root-missing",
+    "unparsed-claude-root-missing",
+)
 
 # `tools.shell_command({command: "..."})` embedded in the JS body of Codex's
 # `exec` custom tool. 19k+ of the corpus's shell invocations arrive this way.
@@ -380,6 +562,39 @@ def command_from_argv(argv: Sequence[Any]) -> str | None:
     return None
 
 
+def iter_transcripts(root: Path, stats: Counter[str]) -> list[Path]:
+    """List a transcript tree's `*.jsonl`, counting a walk that cannot complete.
+
+    Be precise about what this does and does not buy, because an earlier version
+    of this docstring overclaimed and a caveat a reader relies on has to be true.
+
+    It is NOT a fix for a lazily consumed walk: the call it replaced was already
+    `for path in sorted(root.rglob(...))`, and `sorted()` consumes the generator
+    eagerly, so an escaping `OSError` already aborted the run loudly. The only
+    change is the counted `except`.
+
+    Nor does the counter catch the cause it is named for. CPython's pathlib
+    suppresses per-directory errors *inside* the walk (3.11/3.12
+    `_RecursiveWildcardSelector._iterate_directories`, 3.13+ `pathlib._glob`), so
+    a locked profile subtree or a stale junction still yields fewer files and
+    increments nothing. Measured on 3.14: a missing root and a root that is a
+    plain file both return `[]` without raising. **A silently short corpus from
+    an unreadable subdirectory therefore remains a live limitation of this
+    instrument** — it is stated in COVERAGE LIMITS, not fixed here.
+
+    What is left is the residual: an error raised before the walk can suppress
+    anything, a non-pathlib root (the injected one in the tests), and any future
+    pathlib that stops suppressing. That is worth a backstop, and when it fires
+    it is loud (`CORPUS_INTEGRITY_KEYS` -> banner -> `EXIT_CORPUS_INCOMPLETE`)
+    rather than one row among twenty in the ledger.
+    """
+    try:
+        return sorted(root.rglob("*.jsonl"))
+    except OSError:
+        stats["unparsed-transcript-tree-unwalkable"] += 1
+        return []
+
+
 def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
     """Yield each JSON object in a transcript, counting what will not parse."""
     try:
@@ -388,7 +603,18 @@ def iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
         stats["unparsed-file-unreadable"] += 1
         return
     with handle:
-        for line in handle:
+        while True:
+            # `for line in handle` would let a mid-file read error escape as an
+            # uncaught OSError, killing a multi-hour run; and swallowing it
+            # without a count would silently shorten the corpus. Neither is a
+            # measurement, so the truncation is counted and reported.
+            try:
+                line = next(handle, None)
+            except (OSError, UnicodeError):
+                stats["unparsed-file-read-error"] += 1
+                return
+            if line is None:
+                return
             line = line.strip()
             if not line:
                 continue
@@ -418,7 +644,7 @@ def extract_codex_commands(
     every other `function_call` / `custom_tool_call` name is an MCP or planning
     tool, and no `js_repl` body contains a `tools.shell_command(` call.
     """
-    for path in sorted(root.rglob("*.jsonl")):
+    for path in iter_transcripts(root, stats):
         stats["extracted-codex-files"] += 1
         for record in iter_jsonl(path, stats):
             payload = record.get("payload")
@@ -468,7 +694,7 @@ def extract_codex_commands(
 
 def extract_claude_commands(root: Path, stats: Counter[str]) -> Iterator[str]:
     """Yield every command Claude's Bash/PowerShell tools were asked to run."""
-    for path in sorted(root.rglob("*.jsonl")):
+    for path in iter_transcripts(root, stats):
         stats["extracted-claude-files"] += 1
         for record in iter_jsonl(path, stats):
             message = record.get("message")
@@ -530,29 +756,69 @@ def build_corpus(
     return corpus, stats
 
 
-def save_corpus(path: Path, corpus: dict[str, dict[str, int]]) -> None:
-    """Write the corpus as JSONL. Contains raw commands: scratch dirs only."""
+# Header row of a written corpus cache. A row without a `command` key was
+# already skipped by `load_corpus`, so an older reader ignores it instead of
+# choking, and a cache written before this existed simply carries no record.
+CORPUS_CACHE_META_KEY = "replay_corpus_cache"
+
+
+def save_corpus(
+    path: Path,
+    corpus: dict[str, dict[str, int]],
+    integrity: dict[str, int] | None = None,
+) -> None:
+    """Write the corpus as JSONL, integrity ledger first.
+
+    Contains raw commands: scratch dirs only.
+
+    The ledger travels with the cache because the cache outlives the scan that
+    produced it. A partial scan exits 4 and then writes its shortened command
+    set; replaying that file with `--from-corpus` rebuilt `stats` from nothing
+    but a "loaded from file" count, found no integrity failures, and exited 0 —
+    the incompleteness laundered out of existence by a round trip through a
+    supported flag.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            json.dumps({CORPUS_CACHE_META_KEY: {"integrity": dict(integrity or {})}})
+            + "\n"
+        )
         for command, counts in corpus.items():
             row = {"command": command}
             row.update(counts)
             handle.write(json.dumps(row) + "\n")
 
 
-def load_corpus(path: Path) -> dict[str, dict[str, int]]:
+def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bool]:
+    """Return (corpus, integrity ledger, whether the file carried a ledger).
+
+    A file with no header row is a hand-written corpus or one written by an
+    older version of this script. That is not an integrity failure — a corpus
+    handed in directly is the caller's stated input, not a scan this script
+    performed and can vouch for — but it is not a clean bill of health either,
+    so the caller is told which of the two it got.
+    """
     corpus: dict[str, dict[str, int]] = {}
+    integrity: Counter[str] = Counter()
+    recorded = False
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
+            meta = row.get(CORPUS_CACHE_META_KEY)
+            if isinstance(meta, dict):
+                recorded = True
+                for key, value in (meta.get("integrity") or {}).items():
+                    integrity[str(key)] += int(value)
+                continue
             command = row.get("command")
             if not isinstance(command, str):
                 continue
             corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
-    return corpus
+    return corpus, integrity, recorded
 
 
 def select_commands(
@@ -586,12 +852,55 @@ def select_commands(
 # --------------------------------------------------------------------------- #
 
 
+class ReplayHarnessError(RuntimeError):
+    """The instrument failed, so this command has no verdict.
+
+    Never a policy result. Anything raised as one of these is bucketed as
+    `toolfail`, excluded from every rate, and aborts the run — as opposed to a
+    plain exception out of `check()`, which is the *floor* crashing and is
+    reported as an `error` decision (see `EXIT_ERRORS_PRESENT`).
+
+    Every harness-side failure raises one of these subclasses and nothing else.
+    A plain `RuntimeError` here would escape `main()`'s handler and end the run
+    in a traceback with interpreter exit code 1 — the code this script
+    documents as "nothing to replay", so a gate keying on exit codes would read
+    a broken instrument as an empty corpus.
+    """
+
+
+class DispatchLoadError(ReplayHarnessError):
+    """A dispatch.py could not be imported, so it has no verdicts to give."""
+
+
+class OfflineBindingError(ReplayHarnessError):
+    """A loaded floor cannot be proven offline, so its verdicts are not usable."""
+
+
+class CheckSignatureError(ReplayHarnessError):
+    """A loaded floor's `check()` cannot be invoked by this replay at all."""
+
+
 def load_dispatch(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load dispatch module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Import one dispatch.py; any failure is a harness failure, not a verdict.
+
+    Import-time failures are wrapped too, not just the missing-loader case: a
+    vendored old floor can fail on a `SyntaxError` under a newer interpreter, or
+    on a module-level import this environment does not have. Either way the
+    instrument has produced no measurement, and that must reach `main()` as
+    `EXIT_TOOL_FAILURE` rather than as a traceback.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise DispatchLoadError(f"cannot load dispatch module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except ReplayHarnessError:
+        raise
+    except Exception as error:  # noqa: BLE001 - any import failure is tool-side
+        raise DispatchLoadError(
+            f"cannot import {path}: {type(error).__name__}: {error}"
+        ) from error
     return module
 
 
@@ -604,6 +913,176 @@ def stub_resolver(
 ) -> tuple[bool, str]:
     """Keep the network out of the replay; treat every remote as private."""
     return False, "corpus-replay-stub-private"
+
+
+# Every argument the replay knows how to supply, and the parameter names a
+# floor version has used for it. Floors older than the `remote_resolver`
+# parameter take `(command, tier_cfg, project_dir)` and nothing else (issue
+# #39); the current one takes eleven parameters. Binding by *role* rather than
+# by a fixed arity is what lets one instrument measure both.
+CHECK_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "command": ("command", "command_line", "cmd"),
+    "tier_cfg": ("tier_cfg", "tier_config", "cfg", "config"),
+    "project_dir": ("project_dir", "project_root", "project"),
+    "command_cwd": ("command_cwd", "cwd"),
+    "remote_resolver": ("remote_resolver",),
+}
+CHECK_ROLE_BY_NAME = {
+    name: role for role, names in CHECK_ROLE_ALIASES.items() for name in names
+}
+# Without these three there is no meaningful replay subject; the rest are
+# supplied only when the loaded version declares them.
+CHECK_REQUIRED_ROLES = ("command", "tier_cfg", "project_dir")
+
+
+def plan_check_call(
+    signature: inspect.Signature,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Decide how to call one floor's `check()`; raise if it cannot be called.
+
+    Returns `(positional_roles, keyword_bindings)`. The rule is deliberately
+    conservative in the loud direction: a parameter the replay does not know how
+    to supply is left to its default, and if it *has* no default the plan is
+    refused outright rather than guessed at. A wrong guess would be recorded as
+    a per-command exception, and `decide()` turns an exception into a blocked
+    verdict — which is precisely how "floor 1.2.0 blocks 100%" was manufactured.
+    """
+    positional: list[str] = []
+    keyword: list[tuple[str, str]] = []
+    filled: set[str] = set()
+    # Set once a parameter is skipped: everything after it must be passed by
+    # keyword, and a positional-only parameter after it cannot be passed at all.
+    positional_closed = False
+    for name, param in signature.parameters.items():
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        role = CHECK_ROLE_BY_NAME.get(name)
+        if role is None or role in filled:
+            if param.default is param.empty:
+                raise CheckSignatureError(
+                    f"check() requires a parameter the replay cannot supply: {name!r}"
+                )
+            if param.kind is not param.KEYWORD_ONLY:
+                positional_closed = True
+            continue
+        if param.kind is param.POSITIONAL_ONLY:
+            if positional_closed:
+                raise CheckSignatureError(
+                    f"check() takes {name!r} positionally after a parameter the "
+                    "replay cannot supply, so it cannot be bound"
+                )
+            positional.append(role)
+        elif param.kind is param.POSITIONAL_OR_KEYWORD and not positional_closed:
+            positional.append(role)
+        else:
+            keyword.append((name, role))
+        filled.add(role)
+    missing = [role for role in CHECK_REQUIRED_ROLES if role not in filled]
+    if missing:
+        raise CheckSignatureError(
+            "check() declares no parameter for " + ", ".join(missing)
+        )
+    return positional, keyword
+
+
+def build_check_caller(module: ModuleType) -> Callable[[str, dict, str], Any]:
+    """Return `(command, tier_cfg, project_dir) -> check(...)` for this module.
+
+    The call shape is derived from the module's own `inspect.signature`, so a
+    baseline several minor versions old replays with the arguments *it* declares
+    instead of the arguments today's floor declares. Raises `CheckSignatureError`
+    when no binding exists; the caller aborts the run rather than letting every
+    command read as blocked.
+    """
+    check = getattr(module, "check", None)
+    if not callable(check):
+        raise CheckSignatureError(f"{module.__name__} has no callable check()")
+    try:
+        signature = inspect.signature(check)
+    except (TypeError, ValueError) as error:  # pragma: no cover - exotic callable
+        raise CheckSignatureError(
+            f"{module.__name__}: check() signature is not introspectable: {error}"
+        ) from error
+    positional, keyword = plan_check_call(signature)
+
+    def call(command: str, tier_cfg: dict, project_dir: str) -> Any:
+        values = {
+            "command": command,
+            "tier_cfg": tier_cfg,
+            "project_dir": project_dir,
+            "command_cwd": project_dir,
+            "remote_resolver": stub_resolver,
+        }
+        return check(
+            *(values[role] for role in positional),
+            **{name: values[role] for name, role in keyword},
+        )
+
+    # Prove the plan binds before an hour of replay depends on it. A signature
+    # that survives `plan_check_call` but not `bind` would otherwise raise once
+    # per command and be counted as a block.
+    try:
+        signature.bind(
+            *(f"<{role}>" for role in positional),
+            **{name: f"<{role}>" for name, role in keyword},
+        )
+    except TypeError as error:
+        raise CheckSignatureError(
+            f"{module.__name__}: check() cannot be bound by the replay: {error}"
+        ) from error
+    call.replay_bound_parameters = [  # type: ignore[attr-defined]
+        *positional,
+        *(f"{name}={role}" for name, role in keyword),
+    ]
+    return call
+
+
+_CHECK_CALLERS: dict[Any, Callable[[str, dict, str], Any]] = {}
+
+
+def check_caller(module: ModuleType) -> Callable[[str, dict, str], Any]:
+    """Memoised `build_check_caller`; `inspect.signature` is not free per call."""
+    check = getattr(module, "check", None)
+    try:
+        cached = _CHECK_CALLERS.get(check)
+    except TypeError:  # pragma: no cover - unhashable callable
+        return build_check_caller(module)
+    if cached is None:
+        cached = build_check_caller(module)
+        _CHECK_CALLERS[check] = cached
+    return cached
+
+
+def describe_check_signature(module: ModuleType) -> list[str]:
+    """The argument roles this replay binds on a module, for the JSON record."""
+    return list(getattr(check_caller(module), "replay_bound_parameters", []))
+
+
+def bound_roles(parameters: Sequence[str]) -> set[str]:
+    """The argument *roles* behind a `check_parameters` record.
+
+    An entry is either a bare role (bound positionally) or `name=role` (bound by
+    keyword). Only the role decides what premise the version ran under;
+    positional-versus-keyword is a calling detail and must not read as a
+    mismatch.
+    """
+    return {str(entry).split("=", 1)[-1] for entry in parameters}
+
+
+def check_parameter_delta(
+    baseline_parameters: Sequence[str], candidate_parameters: Sequence[str]
+) -> list[str]:
+    """Roles bound on exactly one side of the comparison.
+
+    Non-empty means the two versions did not replay under the same premise. The
+    load-bearing case is `remote_resolver`: the side that declares it gets
+    `stub_resolver` -> every remote private -> allow, while the side that does
+    not keeps its internal resolver, reads through the empty `command_output`
+    stub, and reports the remote unresolved -> deny under `sensitive_data`. The
+    difference is an artifact of asymmetric stubbing and would otherwise be
+    reported as a policy relaxation with nothing marking it.
+    """
+    return sorted(bound_roles(baseline_parameters) ^ bound_roles(candidate_parameters))
 
 
 # Incremented by `stub_command_runner`; reported so the run can prove how many
@@ -629,16 +1108,14 @@ def stub_command_runner(
     return ""
 
 
-class OfflineSubprocess:
-    """Proxy that lets a replayed dispatch module see `subprocess`, not use it.
-
-    Belt and braces behind `make_module_offline`: if a future floor version
-    grows a spawn site the default rebinding does not cover, this turns it into
-    a loud `error` verdict in the report instead of a silent, host-dependent,
-    non-deterministic result.
-    """
-
-    _BLOCKED = frozenset(
+# Module objects a loaded floor could start a process through, and the exact
+# attributes on each that do it. Anything found in a floor's own globals is
+# replaced by an `OfflineModule` proxy, so a spawn site the `command_runner`
+# rebinding does not cover becomes a loud `toolfail` instead of a silent,
+# host-dependent, non-deterministic verdict. Names are matched exactly, never by
+# prefix: `os.path`, `os.environ` and `os.sep` must keep working.
+SPAWN_ROUTES: dict[str, frozenset[str]] = {
+    "subprocess": frozenset(
         {
             "run",
             "Popen",
@@ -648,17 +1125,129 @@ class OfflineSubprocess:
             "getoutput",
             "getstatusoutput",
         }
-    )
+    ),
+    "os": frozenset(
+        {
+            "system",
+            "popen",
+            "startfile",
+            "fork",
+            "forkpty",
+            "posix_spawn",
+            "posix_spawnp",
+            "spawnl",
+            "spawnle",
+            "spawnlp",
+            "spawnlpe",
+            "spawnv",
+            "spawnve",
+            "spawnvp",
+            "spawnvpe",
+            "execl",
+            "execle",
+            "execlp",
+            "execlpe",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+        }
+    ),
+    "pty": frozenset({"spawn", "fork", "forkpty", "openpty"}),
+    "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
+}
+# Most of `os`'s spawn entry points are C builtins whose `__module__` is the
+# platform implementation module, not `os`: `os.system.__module__` is `nt` on
+# Windows and `posix` elsewhere. A `from os import system` global is therefore
+# only recognisable through the alias, and without it the identity check
+# silently skipped exactly the direct-import form it was added to catch.
+SPAWN_ROUTES["nt"] = SPAWN_ROUTES["posix"] = SPAWN_ROUTES["os"]
+# Reported under the name a floor author would recognise.
+SPAWN_ROUTE_LABELS = {"nt": "os", "posix": "os"}
 
-    def __init__(self, real: ModuleType) -> None:
+
+class OfflineModule:
+    """Proxy that lets a replayed dispatch module see a module, not spawn with it.
+
+    Belt and braces behind `make_module_offline`: if a floor version has a spawn
+    site the `command_runner` rebinding does not cover, this turns it into a
+    loud `toolfail` in the report rather than a real process.
+
+    It covers the module's *globals* only, matched by identity so an alias
+    (`import subprocess as sp`) and a direct import (`from subprocess import
+    run`) are caught too. A floor that did the import inside a function body
+    would still get the real module, and nothing here would see it — stated in
+    COVERAGE LIMITS rather than papered over.
+    """
+
+    def __init__(self, real: ModuleType, blocked: frozenset[str], label: str) -> None:
         self._real = real
+        self._blocked = blocked
+        self._label = label
 
     def __getattr__(self, name: str) -> Any:
-        if name in OfflineSubprocess._BLOCKED:
-            raise RuntimeError(
-                f"corpus replay is offline but dispatch called subprocess.{name}"
+        if name in self._blocked:
+            raise ReplayHarnessError(
+                f"corpus replay is offline but dispatch called {self._label}.{name}"
             )
         return getattr(self._real, name)
+
+
+def blocked_spawn_callable(label: str) -> Callable[..., Any]:
+    """Stand-in for a spawn function imported directly into a floor's globals."""
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ReplayHarnessError(
+            f"corpus replay is offline but dispatch called {label}"
+        )
+
+    return refuse
+
+
+def spawn_route_for(value: Any) -> tuple[str, frozenset[str]] | None:
+    """Identify a global as a guarded module or one of its spawn entry points.
+
+    Matched on the object's own identity — `__name__` for a module, `__module__`
+    for a function or class — and never on the name the floor happened to bind
+    it to. `import subprocess as sp` and `from subprocess import run` are the
+    same hazard as `import subprocess`, and a name-keyed lookup saw none of
+    them: an aliased floor was measured as offline while `sp.run` spawned a real
+    `git.exe`, and the run still reported "0 subprocesses spawned".
+    """
+    if isinstance(value, ModuleType):
+        origin = getattr(value, "__name__", "") or ""
+        blocked = SPAWN_ROUTES.get(origin)
+        return (SPAWN_ROUTE_LABELS.get(origin, origin), blocked) if blocked else None
+    origin = getattr(value, "__module__", None) or ""
+    blocked = SPAWN_ROUTES.get(origin)
+    if blocked and getattr(value, "__name__", None) in blocked:
+        label = SPAWN_ROUTE_LABELS.get(origin, origin)
+        return (f"{label}.{value.__name__}", blocked)
+    return None
+
+
+def neutralise_spawn_routes(module: ModuleType) -> list[str]:
+    """Neutralise every spawn route in `module`'s globals; name what was hit.
+
+    Returns the *global names* that were replaced, which under an alias is not
+    the module's own name — the caller wants to know what in this floor was
+    touched.
+
+    Idempotent: the replacements are neither modules nor functions belonging to
+    a guarded module, so a second call matches nothing.
+    """
+    wrapped = []
+    for name, value in list(vars(module).items()):
+        route = spawn_route_for(value)
+        if route is None:
+            continue
+        label, blocked = route
+        if isinstance(value, ModuleType):
+            setattr(module, name, OfflineModule(value, blocked, label))
+        else:
+            setattr(module, name, blocked_spawn_callable(label))
+        wrapped.append(name)
+    return wrapped
 
 
 def make_module_offline(module: ModuleType) -> int:
@@ -674,13 +1263,30 @@ def make_module_offline(module: ModuleType) -> int:
     smallest change that makes the offline claim true without touching
     `dispatch.py` (T4-class shared infrastructure) to add an injection point.
 
-    Raises when nothing was rebound: a floor version that no longer matches this
-    shape must fail loudly rather than quietly resume spawning `git config`.
+    **A floor with no `command_output` at all is already offline**, and returns
+    0 rather than raising. This used to be an unconditional abort, and the thing
+    it aborted on was the one baseline the instrument exists to measure: the
+    repository's own shipped floor 1.2.0 has the three-argument `check()` issue
+    #39 is about, imports only `json`/`os`/`re`/`sys`, and spawns nothing — so
+    the preflight rejected it with `EXIT_TOOL_FAILURE` and 1.2.0 stayed
+    unmeasurable. "No seam" is not "unproven", it is proof of a stronger claim
+    than the rebinding gives.
+
+    What still raises is a floor that *has* the seam but does not expose it the
+    way this replay binds it: `command_output` present with no `command_runner`
+    default bound to it means the shape moved, the rebinding is a no-op, and the
+    module would quietly resume spawning `git config`.
+
+    Either way `neutralise_spawn_routes` proxies every spawn-capable module in
+    the floor's globals, so a spawn route the rebinding never covered raises
+    `ReplayHarnessError` at the call rather than running. That is what makes the
+    seam-free case safe instead of merely unmeasured.
     """
     real = getattr(module, "command_output", None)
-    if real is None:
-        raise RuntimeError(f"{module.__name__} has no command_output to stub")
     patched = 0
+    if real is None:
+        neutralise_spawn_routes(module)
+        return patched
     for name in dir(module):
         function = getattr(module, name, None)
         if not isinstance(function, FunctionType):
@@ -704,14 +1310,13 @@ def make_module_offline(module: ModuleType) -> int:
             keyword_defaults["command_runner"] = stub_command_runner
             patched += 1
     if not patched:
-        raise RuntimeError(
-            f"{module.__name__}: no command_runner default bound to command_output; "
-            "the replay cannot prove it is offline"
+        raise OfflineBindingError(
+            f"{module.__name__}: command_output exists but no command_runner "
+            "default is bound to it; the replay cannot prove it is offline"
         )
     # Any direct call site, plus a hard stop on every other spawn route.
     module.command_output = stub_command_runner
-    if isinstance(getattr(module, "subprocess", None), ModuleType):
-        module.subprocess = OfflineSubprocess(module.subprocess)
+    neutralise_spawn_routes(module)
     return patched
 
 
@@ -771,15 +1376,30 @@ def decide(
     as `tier.json` would declare it. A fresh dict is handed to every call so a
     floor version that normalises its config in place cannot leak state from one
     command into the next.
+
+    Three outcomes, kept apart on purpose:
+
+    * a decision the floor returned -> that decision;
+    * an exception out of `check()` -> `error`, i.e. *the floor crashed*. It
+      still counts as blocked (`EXIT_ERRORS_PRESENT` aborts the run so the
+      corrupted deltas are never quoted);
+    * a `ReplayHarnessError` -> `toolfail`, i.e. *this script* failed. It is in
+      no rate and in no allow-edge bucket, because a broken instrument reading
+      as a strict floor is exactly the artifact issue #39 mistook for policy.
+
+    The call itself is shaped from the module's own signature, so a baseline
+    predating `command_cwd` / `remote_resolver` is invoked with the arguments it
+    declares rather than raising `TypeError` on every single command.
     """
+    caller = check_caller(module)
     try:
-        decision, reason = module.check(
+        decision, reason = caller(
             command,
             {"tier": tier, "flags": dict(flags or {})},
             project_dir,
-            project_dir,
-            remote_resolver=stub_resolver,
         )
+    except ReplayHarnessError as error:
+        return TOOLFAIL, f"{type(error).__name__}: {error}".strip()
     except Exception as error:  # noqa: BLE001 - a crash is a result, not a stop
         return "error", f"{type(error).__name__}: {error}".strip()
     if decision not in DECISIONS:
@@ -797,15 +1417,36 @@ def _worker_init(
     project_dir: str,
     flags: dict[str, bool] | None = None,
 ) -> None:
-    # Cleared before the modules load, then again with what they declare they
-    # read. Workers are forked/spawned copies, so the parent's clearing does not
-    # reach them under `spawn`; they never restore, they exit.
-    clear_host_git_env()
-    baseline = load_dispatch("replay_baseline", Path(baseline_path))
-    candidate = load_dispatch("replay_candidate", Path(candidate_path))
-    clear_host_git_env((baseline, candidate))
-    make_module_offline(baseline)
-    make_module_offline(candidate)
+    """Load and neutralise both floors in this process. NEVER raises.
+
+    Under `--jobs > 1` this is a `multiprocessing.Pool` initializer, and CPython
+    answers a raising initializer by killing the worker and starting another
+    one, forever: the run hangs instead of failing, which is strictly worse than
+    the traceback it replaced. Every failure is therefore stashed and re-raised
+    from `_worker_run`, where a task exception propagates to the parent, out of
+    `replay()`, and into `main()`'s `ReplayHarnessError` handler as
+    `EXIT_TOOL_FAILURE`. `main()` also proves all three steps in the parent
+    before the pool is created, so this is the backstop, not the only guard.
+    """
+    _WORKER.clear()
+    try:
+        # Cleared before the modules load, then again with what they declare
+        # they read. Workers are forked/spawned copies, so the parent's clearing
+        # does not reach them under `spawn`; they never restore, they exit.
+        clear_host_git_env()
+        baseline = load_dispatch("replay_baseline", Path(baseline_path))
+        candidate = load_dispatch("replay_candidate", Path(candidate_path))
+        clear_host_git_env((baseline, candidate))
+        make_module_offline(baseline)
+        make_module_offline(candidate)
+        # Fail here, once, rather than once per command: an unbindable `check()`
+        # raised per command would be caught by `decide()` and counted, and the
+        # run would print a plausible 100% block rate for the unusable version.
+        check_caller(baseline)
+        check_caller(candidate)
+    except Exception as error:  # noqa: BLE001 - re-raised from `_worker_run`
+        _WORKER["init_error"] = f"{type(error).__name__}: {error}".strip()
+        return
     _WORKER["baseline"] = baseline
     _WORKER["candidate"] = candidate
     _WORKER["tiers"] = tuple(tiers)
@@ -813,9 +1454,23 @@ def _worker_init(
     _WORKER["flags"] = dict(flags or {})
 
 
+def raise_if_worker_init_failed() -> None:
+    """Turn a stashed `_worker_init` failure back into a raised harness error.
+
+    Called from `_worker_run` (so a pool worker reports through a task result
+    instead of respawning forever) and directly by `replay()` in the
+    single-process path (so that path keeps failing before the first command
+    rather than on the first chunk, and fails even when there are no chunks).
+    """
+    stashed = _WORKER.get("init_error")
+    if stashed is not None:
+        raise ReplayHarnessError(f"replay worker could not start: {stashed}")
+
+
 def _worker_run(
     chunk: list[tuple[int, str]],
 ) -> tuple[list[tuple[int, list, list]], int]:
+    raise_if_worker_init_failed()
     tiers = _WORKER["tiers"]
     project_dir = _WORKER["project_dir"]
     flags = _WORKER["flags"]
@@ -878,6 +1533,7 @@ def replay(
         _worker_init(
             str(baseline_path), str(candidate_path), tiers, project_dir, overlay
         )
+        raise_if_worker_init_failed()
         for chunk in chunks:
             batch, reads = _worker_run(chunk)
             for index, base, cand in batch:
@@ -887,7 +1543,45 @@ def replay(
             done += len(chunk)
             if progress:
                 report_progress(done, total)
+    assert_every_command_replayed(baseline_out, candidate_out)
     return baseline_out, candidate_out, offline_reads
+
+
+def assert_every_command_replayed(
+    baseline_out: Sequence[Any], candidate_out: Sequence[Any]
+) -> None:
+    """Refuse to report on a replay that did not cover every command.
+
+    A gap leaves `None` in these lists; the run would then die deep inside
+    `summarize_tier` on a non-iterable, and a future refactor that defaulted the
+    gap to a verdict would report a partial replay as a measurement. Both are
+    the failure this branch exists to prevent, so the gap is named here instead.
+
+    Be accurate about what reaches it, because a caller who trusts the wrong
+    guarantee stops looking for the real failure. It is NOT protection against a
+    killed worker: `Pool.imap_unordered` does not surface one as a missing
+    result — the pool blocks forever on a task result that will never arrive, so
+    an OOM-killed worker hangs the run rather than shortening these lists. **A
+    `--jobs > 1` run has no watchdog and can still hang**; that is a live
+    limitation, stated in COVERAGE LIMITS, not something this function fixes.
+
+    What it does catch is every way the *bookkeeping* can come up short: a chunk
+    plan that skips an index, a `_worker_run` that returns a batch shorter than
+    the chunk it was given, a mapping that drops a result, and any future
+    refactor of either. Cheap, total, and it runs on the single-process path too
+    — which is why the test drives it through `replay()` rather than only
+    calling it with a hand-built `None`.
+    """
+    unfilled = sum(
+        1
+        for base, cand in zip(baseline_out, candidate_out)
+        if base is None or cand is None
+    )
+    if unfilled:
+        raise ReplayHarnessError(
+            f"{unfilled} of {len(baseline_out)} commands came back with no "
+            "verdict; the replay is incomplete and its numbers are not usable"
+        )
 
 
 def report_progress(done: int, total: int) -> None:
@@ -977,12 +1671,18 @@ def summarize_tier(
     by_runtime: Counter[str] = Counter()
     reasons: Counter[str] = Counter()
     reason_invocations: Counter[str] = Counter()
+    toolfail_reasons: Counter[str] = Counter()
     for position, command in enumerate(commands):
         decision, reason = verdicts[position][tier_index]
         counts = corpus[command]
         weight = invocations(counts)
         decisions[decision] += 1
         decision_invocations[decision] += weight
+        if decision == TOOLFAIL:
+            # The instrument failed: no verdict exists, so this command belongs
+            # in no rate and in no block class. Its own ledger, its own banner.
+            toolfail_reasons[normalize_reason(reason, command)] += 1
+            continue
         if decision != "allow":
             grouped = normalize_reason(reason, command)
             reasons[grouped] += 1
@@ -991,21 +1691,34 @@ def summarize_tier(
                 if counts.get(runtime):
                     by_runtime[runtime] += 1
     total = len(commands)
-    blocked = total - decisions["allow"]
+    # Every rate below is over the commands that actually got a verdict. A
+    # harness failure inflating a block rate is the artifact this instrument
+    # exists to detect, so it must not be able to produce one.
+    measured = total - decisions[TOOLFAIL]
+    blocked = measured - decisions["allow"]
     refused = blocked - decisions["ask"]
-    total_invocations = sum(decision_invocations.values())
+    total_invocations = sum(decision_invocations.values()) - (
+        decision_invocations[TOOLFAIL]
+    )
     blocked_invocations = total_invocations - decision_invocations["allow"]
     refused_invocations = blocked_invocations - decision_invocations["ask"]
     return {
         "unique_commands": total,
+        "unique_measured": measured,
+        "unique_toolfail": decisions[TOOLFAIL],
+        "invocations_toolfail": decision_invocations[TOOLFAIL],
+        "toolfail_reasons": [
+            {"reason": reason, "unique": count}
+            for reason, count in toolfail_reasons.most_common()
+        ],
         # "blocked" is Codex semantics: respond() converts `ask` to `deny` for
         # Codex, so every non-allow is a refusal there. For Claude an `ask` is a
         # prompt the human answers, so "refused" (deny + error) is the honest
         # Claude number and is reported alongside rather than folded in.
         "unique_blocked": blocked,
-        "unique_block_rate": (blocked / total) if total else 0.0,
+        "unique_block_rate": (blocked / measured) if measured else 0.0,
         "unique_refused": refused,
-        "unique_refuse_rate": (refused / total) if total else 0.0,
+        "unique_refuse_rate": (refused / measured) if measured else 0.0,
         "unique_ask": decisions["ask"],
         "invocations": total_invocations,
         "invocations_blocked": blocked_invocations,
@@ -1047,6 +1760,10 @@ def compare_tier(
     Bucketing only the two allow-edges, as this did, left `deny -> ask` and
     `ask -> deny` in no reported bucket at all.
 
+    A `toolfail` on either side pre-empts all of them: the harness, not the
+    floor, failed on that command, so there is no transition. It goes to
+    `tool_failed` and the run exits `EXIT_TOOL_FAILURE`.
+
     `reclassified` is a different axis — same decision, different rule — and
     matters when reading the block-class tables side by side: a rule whose count
     grows in the candidate has not necessarily started blocking anything new, it
@@ -1066,10 +1783,28 @@ def compare_tier(
     ask_gained: list[dict[str, Any]] = []
     ask_lost: list[dict[str, Any]] = []
     crash_moved: list[dict[str, Any]] = []
+    tool_failed: list[dict[str, Any]] = []
     for position, command in enumerate(commands):
         base_decision, base_reason = baseline[position][tier_index]
         cand_decision, cand_reason = candidate[position][tier_index]
         matrix[f"{base_decision}->{cand_decision}"] += 1
+        if TOOLFAIL in (base_decision, cand_decision):
+            # One side has no verdict, so there is no transition to classify.
+            # Routing it anywhere else would report a harness malfunction as a
+            # policy change: `toolfail -> allow` would read as a relaxation and
+            # `allow -> toolfail` as a new false positive.
+            tool_failed.append(
+                {
+                    "command": command,
+                    "invocations": invocations(corpus[command]),
+                    "was": base_decision,
+                    "decision": cand_decision,
+                    "reason": (
+                        cand_reason if cand_decision == TOOLFAIL else base_reason
+                    ),
+                }
+            )
+            continue
         if base_decision == cand_decision:
             if base_decision != "allow" and base_reason != cand_reason:
                 reclassified[
@@ -1100,6 +1835,7 @@ def compare_tier(
         "ask_gained": ask_gained,
         "ask_lost": ask_lost,
         "crash_moved": crash_moved,
+        "tool_failed": tool_failed,
     }
     result: dict[str, Any] = {
         "transitions": dict(matrix),
@@ -1171,6 +1907,54 @@ def tier_label(tier: Any, overlays: Sequence[str]) -> str:
     return f"T{tier}" + ("".join(f"+{name}" for name in overlays))
 
 
+def print_premise_mismatch(mismatch: Sequence[str]) -> None:
+    """Warn that the two sides ran under different premises, and say which one.
+
+    Not fatal: replaying two different signatures is the instrument's purpose
+    (issue #39). But a delta row produced by the difference in premise is not a
+    policy change, and a reviewer has to be told which difference it was.
+
+    The remote-privacy paragraph is specific to `remote_resolver` and is printed
+    only when that role is the one bound on a single side. A `command_cwd`-only
+    transition — a three-argument floor against one that added cwd tracking —
+    used to print it too, telling the reader that deltas "may be stubbing
+    artifacts" when neither side declares the parameter at all. Cwd-aware
+    verdict changes are real policy, and a warning that invites a reviewer to
+    discount them is worse than no warning.
+    """
+    if not mismatch:
+        return
+    print(
+        "PREMISE MISMATCH: the two versions bind different check() "
+        "arguments (" + ", ".join(mismatch) + ").\n"
+        "            Each side ran under the premise its own signature "
+        "declares, so a delta row\n"
+        "            caused by that difference is not a policy change."
+    )
+    if "remote_resolver" in mismatch:
+        print(
+            "            Only a version declaring remote_resolver gets the "
+            "private-remote stub; the\n"
+            "            other resolves internally through the offline "
+            "command_output stub and can\n"
+            "            report the remote unresolved instead. Under "
+            "sensitive_data that is an\n"
+            "            allow on one side and a deny on the other for the "
+            "same push, so remote-\n"
+            "            privacy rows in the deltas below may be stubbing "
+            "artifacts, not policy."
+        )
+    if "command_cwd" in mismatch:
+        print(
+            "            Only a version declaring command_cwd is told where "
+            "the command ran; the\n"
+            "            other judges every path against --project-dir alone. "
+            "Rows keyed on\n"
+            "            inside/outside the project are a real modelling "
+            "difference, not a stub."
+        )
+
+
 def print_report(result: dict[str, Any], top: int, width: int) -> None:
     corpus = result["corpus"]
     baseline = result["baseline"]
@@ -1179,8 +1963,15 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
     print("=" * 78)
     print("deny-floor corpus replay")
     print("=" * 78)
-    print(f"baseline  : floor {baseline['version']}  {baseline['path']}")
-    print(f"candidate : floor {candidate['version']}  {candidate['path']}")
+    print(
+        f"baseline  : floor {baseline['version']}  {baseline['path']}\n"
+        f"            check({', '.join(baseline.get('check_parameters') or [])})"
+    )
+    print(
+        f"candidate : floor {candidate['version']}  {candidate['path']}\n"
+        f"            check({', '.join(candidate.get('check_parameters') or [])})"
+    )
+    print_premise_mismatch(list(result["run"].get("check_parameter_delta") or []))
     print(f"project   : {result['project_dir']}")
     print(
         "overlays  : "
@@ -1206,12 +1997,23 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         f"  unique commands extracted : {corpus['unique_total']}"
         f"  ({corpus['invocations_total']} invocations)"
     )
+    unscanned = list(result["run"].get("unscanned_runtimes") or [])
     for runtime in RUNTIMES:
+        # A runtime declared out of scope reads as a zero row otherwise, which
+        # is exactly what a real but empty tree looks like. The premise has to
+        # travel with the number.
+        note = "  <== NOT SCANNED (declared none)" if runtime in unscanned else ""
         print(
             f"    {runtime:<7}: {corpus['unique_by_runtime'][runtime]:>7} unique"
-            f"  {corpus['invocations_by_runtime'][runtime]:>7} invocations"
+            f"  {corpus['invocations_by_runtime'][runtime]:>7} invocations{note}"
         )
     print(f"    shared : {corpus['unique_shared']:>7} unique (seen in both runtimes)")
+    if unscanned:
+        print(
+            "  NOT SCANNED               : "
+            + ", ".join(unscanned)
+            + " - every number here describes the remaining runtime(s) only"
+        )
     print(f"  replayed                  : {corpus['unique_replayed']}")
     if corpus["notes"]:
         for key, value in sorted(corpus["notes"].items()):
@@ -1233,7 +2035,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
             else "    (not measured: this run reused a cached corpus)"
         )
     for key, value in sorted(unparsed.items()):
-        print(f"    {key[len('unparsed-'):]}: {value}")
+        # The integrity keys mean the corpus is short by an unknown amount; the
+        # rest are records this corpus deliberately does not model. They must
+        # not read as the same kind of row.
+        marker = "   <== CORPUS INCOMPLETE" if key in CORPUS_INTEGRITY_KEYS else ""
+        print(f"    {key[len('unparsed-'):]}: {value}{marker}")
     print()
     print("block rate by tier (unique commands)")
     print("-" * 78)
@@ -1275,6 +2081,16 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
             f"{delta['ask_gained_unique']:>7}{delta['ask_lost_unique']:>7}"
             f"{errors:>10}"
         )
+    toolfails = count_toolfails(result)
+    if sum(toolfails.values()):
+        headline, unit = toolfail_headline(result, toolfails)
+        print(
+            "  NOTE: the replay itself failed on some commands (baseline "
+            f"{headline['baseline']} / candidate {headline['candidate']} "
+            f"{unit}).\n"
+            "  Those are in no rate and in no delta bucket above; see the "
+            "TOOL FAILURE banner."
+        )
     asked = any(
         result["tiers"][tier_key][label]["unique_ask"]
         for tier_key in result["tier_order"]
@@ -1295,7 +2111,8 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 f"  {label:<10} deny={decisions.get('deny', 0)} "
                 f"ask={decisions.get('ask', 0)} "
                 f"error={decisions.get('error', 0)} "
-                f"allow={decisions.get('allow', 0)}  "
+                f"allow={decisions.get('allow', 0)} "
+                f"toolfail={summary.get('unique_toolfail', 0)}  "
                 f"blocked invocations={summary['invocations_blocked']}"
                 f" / {summary['invocations']}"
                 f" ({summary['invocation_block_rate'] * 100:.2f}%)"
@@ -1376,6 +2193,11 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
                 "CRASH MOVED (deny <-> error: a rule-evaluation exception "
                 "changed side)",
             ),
+            (
+                "tool_failed",
+                "TOOL FAILED (the replay could not obtain a verdict: NOT a "
+                "policy result, counted in no rate)",
+            ),
         ):
             if not delta[f"{label}_unique"]:
                 continue
@@ -1423,7 +2245,175 @@ def count_errors(result: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
+def count_toolfails(result: dict[str, Any]) -> dict[str, int]:
+    """Per-version tier x command replays the *harness* got no verdict for.
+
+    `unique_toolfail` is per tier, so summing it counts one command once per
+    tier: with the default four tiers a single failing command totals 4. That is
+    the right number for "how many replays failed" and the wrong one for "how
+    many commands failed" — see `toolfail_headline`, which is what the banner
+    prints. Any non-zero value here is fatal either way.
+    """
+    return {
+        version: sum(
+            int(result["tiers"][tier][version].get("unique_toolfail", 0))
+            for tier in result["tier_order"]
+        )
+        for version in ("baseline", "candidate")
+    }
+
+
+def count_toolfail_commands(verdicts: Sequence[Any]) -> int:
+    """Distinct commands that lost their verdict at one or more tiers.
+
+    Derived from the verdict lists rather than the per-tier summaries, because
+    the summaries hold counts and not command identity: a command that fails at
+    every tier is indistinguishable there from one failing command per tier.
+    """
+    return sum(
+        1
+        for row in verdicts
+        if row is not None and any(decision == TOOLFAIL for decision, _ in row)
+    )
+
+
+def toolfail_headline(
+    result: dict[str, Any], toolfails: dict[str, int]
+) -> tuple[dict[str, int], str]:
+    """The counts to print for "got no verdict", and the unit they are in.
+
+    This tool's entire purpose is that a printed number means what it says, and
+    "N commands" summed over tiers does not: it inflates by the tier count.
+    `main()` records the distinct-command figure, so prefer it and say
+    "commands". A result assembled without it (a unit test's synthetic dict)
+    falls back to the tier x command total and is labelled as such rather than
+    being relabelled into a lie.
+    """
+    commands = result.get("run", {}).get("toolfail_commands")
+    if commands is None:
+        return toolfails, "tier x command replays"
+    return commands, "commands"
+
+
+def print_toolfail_banner(
+    result: dict[str, Any], toolfails: dict[str, int], exit_code: int
+) -> None:
+    """A malfunctioning instrument is never a measurement. Say so on both streams.
+
+    Unlike the `check() RAISED` banner this one has no opt-out: `--allow-errors`
+    exists to census *floor* crashes, and there is nothing to census when the
+    script itself could not run the floor.
+
+    `exit_code` is passed rather than assumed for the same reason the other two
+    banners take it: the caller owns the precedence, and a banner is only worth
+    reading if the code it names is the code the run returns. This one always
+    wins, so it is always `EXIT_TOOL_FAILURE` today — asserted by the caller,
+    not by a literal here that a future precedence change would silently
+    falsify.
+    """
+    reasons: Counter[str] = Counter()
+    for tier in result["tier_order"]:
+        for version in ("baseline", "candidate"):
+            for row in result["tiers"][tier][version].get("toolfail_reasons", []):
+                reasons[row["reason"]] += int(row["unique"])
+    headline, unit = toolfail_headline(result, toolfails)
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            "!! REPLAY TOOL FAILURE: baseline "
+            f"{headline['baseline']} / candidate {headline['candidate']} "
+            f"{unit} got no verdict.",
+            file=stream,
+        )
+        if unit == "commands":
+            # Both numbers, so neither can be misread: the reason rows below
+            # are keyed per tier and would not otherwise add up to the headline.
+            print(
+                f"!! ({toolfails['baseline']} / {toolfails['candidate']} tier x "
+                f"command replays over {len(result['tier_order'])} tier(s).)",
+                file=stream,
+            )
+        print(
+            "!! These are the SCRIPT failing, not the floor deciding. They are "
+            "excluded from\n"
+            "!! every rate and every delta bucket, so the numbers above "
+            "understate coverage\n"
+            f"!! rather than misreport policy. Exiting {exit_code}.",
+            file=stream,
+        )
+        if reasons:
+            print("!! by reason (tier x command replays):", file=stream)
+        for reason, count in reasons.most_common(10):
+            print(f"!!   {count:>6}  {reason}", file=stream)
+        print("!" * 78, file=stream)
+
+
+def integrity_failures(unparsed: dict[str, int] | Counter[str]) -> dict[str, int]:
+    """Ledger entries meaning part of the transcripts was never read at all."""
+    return {
+        key: int(unparsed[key]) for key in CORPUS_INTEGRITY_KEYS if unparsed.get(key)
+    }
+
+
+def count_corpus_integrity_failures(result: dict[str, Any]) -> dict[str, int]:
+    """`integrity_failures` against an assembled result's extraction ledger."""
+    return integrity_failures(result["corpus"]["unparsed"])
+
+
+def print_corpus_integrity_banner(
+    failures: dict[str, int], total: int, exit_code: int
+) -> None:
+    """The same treatment `toolfail` gets, for the input side of the instrument.
+
+    A tool-side failure must never be readable as a measurement, and a corpus
+    that stopped early is exactly that: `unparsed-file-read-error: 1` was
+    previously one row among ~20 in the extraction ledger, followed by a block
+    rate table and exit 0. A gate or a human quoting "11.91% of N unique
+    commands" had no signal that N was wrong.
+
+    It is not downgradable, and the first version of this banner was wrong to
+    say the deltas survive intact. Both versions did replay the same shortened
+    list, so the deltas are internally consistent — but a command that was in an
+    unread transcript is in no bucket at all, and if the two versions disagree
+    on it the run reports a `newly_blocked` / `newly_allowed` count lower than
+    the truth. Dropping the file can drop the regression, so a merge gate must
+    not see success. The deltas are sound **for the subset that was read**, and
+    that is all this banner will claim.
+
+    `exit_code` is what `main()` will actually return, not `EXIT_CORPUS_INCOMPLETE`:
+    a tool failure or a crashing floor outranks a short corpus, and a banner
+    that names an exit code the run does not produce sends the reader looking
+    for the wrong failure.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        print("!" * 78, file=stream)
+        print(
+            f"!! CORPUS INCOMPLETE: {sum(failures.values())} transcript source(s) "
+            "could not be read in full,",
+            file=stream,
+        )
+        print(
+            f"!! so the {total} unique commands replayed are an unknown fraction "
+            "of what was run.\n"
+            "!! Every ABSOLUTE rate and count is measured over a corpus of "
+            "unknown size.\n"
+            "!! The DELTAS are SUBSET-ONLY, not corpus-wide: both versions "
+            "replayed the same\n"
+            "!! shortened list, so the rows shown are consistent, but a command "
+            "in an unread\n"
+            "!! transcript is in no bucket — a regression it would have shown "
+            "is not reported.",
+            file=stream,
+        )
+        for key, count in sorted(failures.items()):
+            print(f"!!   {count:>6}  {key[len('unparsed-'):]}", file=stream)
+        print(f"!! Exiting {exit_code}.", file=stream)
+        print("!" * 78, file=stream)
+
+
+def print_error_banner(
+    result: dict[str, Any], errors: dict[str, int], exit_code: int
+) -> None:
     """Refuse to let a crashing version be read as a clean comparison.
 
     `decide()` turns an exception into an `error` decision and `summarize_tier`
@@ -1450,7 +2440,7 @@ def print_error_banner(result: dict[str, Any], errors: dict[str, int]) -> None:
             "texts are the\n"
             "!! `error` rows of the block-class tables. Fix the version, or "
             "pass --allow-errors\n"
-            f"!! to accept the numbers anyway. Exiting {EXIT_ERRORS_PRESENT}.",
+            f"!! to accept the numbers anyway. Exiting {exit_code}.",
             file=stream,
         )
         print("!" * 78, file=stream)
@@ -1464,6 +2454,18 @@ def default_codex_root() -> Path:
 
 def default_claude_root() -> Path:
     return Path.home() / ".claude" / "projects"
+
+
+def transcript_root(value: str) -> Path | None:
+    """`none` (or an empty value) means "this runtime is deliberately unscanned".
+
+    A root that is asked for and is not there counts as corpus incompleteness,
+    because an absent tree withholds every command a whole runtime ran. That is
+    right for a typo or an unmounted profile and wrong for a machine that simply
+    does not run Codex, so there has to be a way to state the intent — and
+    stating it is not the same as the script guessing it.
+    """
+    return None if value.strip().lower() in ("", "none") else Path(value)
 
 
 def module_version(module: ModuleType) -> str:
@@ -1538,8 +2540,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="worker processes (default 1; each loads both dispatch modules)",
     )
-    parser.add_argument("--codex-root", type=Path, default=default_codex_root())
-    parser.add_argument("--claude-root", type=Path, default=default_claude_root())
+    parser.add_argument(
+        "--codex-root",
+        type=transcript_root,
+        default=default_codex_root(),
+        help="Codex sessions tree, or 'none' to declare it deliberately unscanned",
+    )
+    parser.add_argument(
+        "--claude-root",
+        type=transcript_root,
+        default=default_claude_root(),
+        help="Claude projects tree, or 'none' to declare it deliberately unscanned",
+    )
     parser.add_argument(
         "--project-dir",
         type=Path,
@@ -1580,22 +2592,54 @@ def main(argv: Sequence[str] | None = None) -> int:
     flags = {name: True for name in overlays}
     progress = not args.quiet
 
+    # Runtimes the caller declared out of scope with `--<runtime>-root none`.
+    # Recorded and printed because the resulting run is otherwise identical to
+    # one that scanned a real but empty tree, and "this number covers Codex
+    # only" is a premise a reader has to be handed rather than infer.
+    unscanned = [
+        name
+        for name, root in (
+            ("codex", args.codex_root),
+            ("claude", args.claude_root),
+        )
+        if root is None
+    ]
+    cache_had_ledger = True
     if args.from_corpus:
-        corpus = load_corpus(args.from_corpus)
+        corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
         stats: Counter[str] = Counter(
             {"extracted-loaded-from-corpus-file": len(corpus)}
         )
+        # The scan that produced this cache may have been incomplete. Its
+        # ledger travels in the file so the incompleteness survives the round
+        # trip instead of being laundered into exit 0.
+        stats.update(cached_integrity)
+        unscanned = []
     else:
         if progress:
             sys.stderr.write("scanning transcripts...\n")
         corpus, stats = build_corpus(
             args.codex_root, args.claude_root, not args.no_embedded
         )
+    # Classified here, not after the replay, because the two ways a run can end
+    # up with nothing are not the same answer. Every transcript failing to open
+    # produces an empty corpus AND a full integrity ledger; returning 1 there
+    # ("nothing to replay") is indistinguishable to a caller from a genuinely
+    # empty transcript tree, which is the exact exit-code ambiguity exit 4
+    # exists to remove.
+    corpus_failures = integrity_failures(stats)
     if not corpus:
+        if corpus_failures:
+            sys.stderr.write(
+                "no commands extracted, and the transcripts could not be read; "
+                "this is a broken scan, not an empty corpus\n"
+            )
+            print_corpus_integrity_banner(corpus_failures, 0, EXIT_CORPUS_INCOMPLETE)
+            return EXIT_CORPUS_INCOMPLETE
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
     if args.corpus_cache:
-        save_corpus(args.corpus_cache, corpus)
+        save_corpus(args.corpus_cache, corpus, corpus_failures)
 
     unique_by_runtime = {name: 0 for name in RUNTIMES}
     invocations_by_runtime = {name: 0 for name in RUNTIMES}
@@ -1613,12 +2657,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands, notes = select_commands(corpus, args.limit, args.max_command_chars)
     if not commands:
         sys.stderr.write("every command was filtered out; nothing to replay\n")
+        if corpus_failures:
+            # Same reasoning as above: a scan that could not read its inputs
+            # must not exit with the code that means "the inputs were fine and
+            # empty", whichever branch discovers there is nothing to replay.
+            print_corpus_integrity_banner(corpus_failures, 0, EXIT_CORPUS_INCOMPLETE)
+            return EXIT_CORPUS_INCOMPLETE
         return 1
 
-    baseline_module = load_dispatch("replay_baseline_probe", args.baseline)
-    candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
-    baseline_version = module_version(baseline_module)
-    candidate_version = module_version(candidate_module)
+    # Prove the whole instrument works on both versions before replaying
+    # anything: the module imports, `check()` binds to its own declared
+    # signature (so a baseline predating `command_cwd` / `remote_resolver`
+    # measures correctly instead of raising `TypeError` per command and reading
+    # as a 100% block rate, issue #39), and the `command_runner` seam the
+    # offline claim depends on exists. Every one of those is a harness failure,
+    # so every one of them exits `EXIT_TOOL_FAILURE` here — in the parent,
+    # before a `Pool` whose initializer cannot safely raise is ever created.
+    try:
+        baseline_module = load_dispatch("replay_baseline_probe", args.baseline)
+        candidate_module = load_dispatch("replay_candidate_probe", args.candidate)
+        baseline_version = module_version(baseline_module)
+        candidate_version = module_version(candidate_module)
+        baseline_parameters = describe_check_signature(baseline_module)
+        candidate_parameters = describe_check_signature(candidate_module)
+        make_module_offline(baseline_module)
+        make_module_offline(candidate_module)
+    except ReplayHarnessError as error:
+        sys.stderr.write(f"cannot replay: {error}\n")
+        return EXIT_TOOL_FAILURE
 
     injected = clear_host_git_env((baseline_module, candidate_module))
     if injected and progress:
@@ -1638,6 +2704,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress,
             flags,
         )
+    except ReplayHarnessError as error:
+        # A whole-run harness failure: never fall through to a report, because
+        # a partial replay printed as a table is indistinguishable from a real
+        # measurement.
+        sys.stderr.write(f"replay aborted: {error}\n")
+        return EXIT_TOOL_FAILURE
     finally:
         os.environ.update(injected)
 
@@ -1646,11 +2718,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "path": str(args.baseline),
             "version": baseline_version,
             "sha256": file_sha256(args.baseline),
+            "check_parameters": baseline_parameters,
         },
         "candidate": {
             "path": str(args.candidate),
             "version": candidate_version,
             "sha256": file_sha256(args.candidate),
+            "check_parameters": candidate_parameters,
         },
         "project_dir": str(args.project_dir),
         "tier_order": tiers,
@@ -1663,10 +2737,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "embedded_codex_exec_included": not args.no_embedded,
             "offline_git_config_reads": offline_reads,
             "cleared_host_env": sorted(injected),
+            # Premises of this run, alongside the overlays and the cleared env:
+            # which runtimes were declared out of scope, and whether a loaded
+            # cache carried the integrity ledger of the scan that wrote it.
+            "unscanned_runtimes": unscanned,
+            "cache_integrity_recorded": bool(args.from_corpus) and cache_had_ledger,
+            "check_parameter_delta": check_parameter_delta(
+                baseline_parameters, candidate_parameters
+            ),
         },
         "corpus": {
             "source": (
                 f"cached-corpus {args.from_corpus}"
+                + ("" if cache_had_ledger else " (no integrity record)")
                 if args.from_corpus
                 else "transcript-scan"
             ),
@@ -1706,7 +2789,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         }
     errors = count_errors(result)
+    toolfails = count_toolfails(result)
+    # Recomputed from the assembled ledger so the reported set is the one the
+    # JSON carries; identical to the early classification above.
+    corpus_failures = count_corpus_integrity_failures(result)
     result["run"]["errors"] = errors
+    result["run"]["toolfails"] = toolfails
+    # `toolfails` is tier x command; this is the distinct-command count the
+    # banner and the mid-table NOTE quote, and only the verdict lists can
+    # supply it.
+    result["run"]["toolfail_commands"] = {
+        "baseline": count_toolfail_commands(baseline_verdicts),
+        "candidate": count_toolfail_commands(candidate_verdicts),
+    }
+    result["run"]["corpus_integrity"] = corpus_failures
     result["run"]["allow_errors"] = bool(args.allow_errors)
 
     print_report(result, args.top, args.sample_width)
@@ -1716,10 +2812,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(
             f"wrote {args.json_path} (contains untruncated command text)\n"
         )
-    if sum(errors.values()) and not args.allow_errors:
-        print_error_banner(result, errors)
-        return EXIT_ERRORS_PRESENT
-    return 0
+    # Decided before anything is printed. Several of these hold at once on a
+    # bad run, every banner prints regardless of which one wins, and each of
+    # them names the exit code — so the code has to be known first or a banner
+    # sends the reader after a failure that is not the one being reported.
+    # Precedence, most fundamental first: no verdict at all (3) beats a floor
+    # that crashed on its own terms (2), which beats a corpus that could not be
+    # read in full (4).
+    crashed = bool(sum(errors.values())) and not args.allow_errors
+    if sum(toolfails.values()):
+        exit_code = EXIT_TOOL_FAILURE
+    elif crashed:
+        exit_code = EXIT_ERRORS_PRESENT
+    elif corpus_failures:
+        exit_code = EXIT_CORPUS_INCOMPLETE
+    else:
+        exit_code = 0
+    if crashed:
+        print_error_banner(result, errors, exit_code)
+    if corpus_failures:
+        print_corpus_integrity_banner(corpus_failures, len(commands), exit_code)
+    if sum(toolfails.values()):
+        print_toolfail_banner(result, toolfails, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

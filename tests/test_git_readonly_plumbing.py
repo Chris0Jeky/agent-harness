@@ -27,10 +27,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 _spec = importlib.util.spec_from_file_location("dispatch_git_readonly", DISPATCH_PATH)
 dispatch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch)
+
+_env_spec = importlib.util.spec_from_file_location(
+    "floor_environment_git_readonly", FLOOR_ENVIRONMENT_PATH
+)
+floor_environment = importlib.util.module_from_spec(_env_spec)
+_env_spec.loader.exec_module(floor_environment)
 
 # Every tier, so a relaxation cannot quietly graduate a write shape at T1 while
 # looking correct at T4 (or the reverse).
@@ -45,12 +52,17 @@ def stub_resolver(
 
 
 def decide(command: str, tier: int) -> tuple[str, str]:
-    project_dir = str(ROOT)
-    return dispatch.check(
+    """Decide `command` without inherited Git launch configuration.
+
+    Most assertions here are "allow" for read-only plumbing, which an ambient
+    `GIT_EXTERNAL_DIFF` / `GIT_PAGER` / `GIT_EXEC_PATH` flips to deny.
+    `tests/floor_environment.py` owns that isolation for every suite.
+    """
+    return floor_environment.hermetic_check(
+        dispatch,
         command,
         {"tier": tier, "flags": {}},
-        project_dir,
-        project_dir,
+        str(ROOT),
         remote_resolver=stub_resolver,
     )
 

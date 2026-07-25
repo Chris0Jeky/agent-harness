@@ -15,13 +15,15 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
@@ -724,10 +726,12 @@ def codex_project_hook_activation_status(
         if managed_only:
             blockers.append(f"{requirements_path}:allow_managed_hooks_only=true")
     required_hook_feature = requirements_hook_feature_declaration(requirements_path)
+    hook_feature_pin: bool | None = None
+    pin_location = ""
     if required_hook_feature is not None:
-        location, enabled = required_hook_feature
-        if not enabled:
-            blockers.append(f"{location}=false")
+        pin_location, hook_feature_pin = required_hook_feature
+        if not hook_feature_pin:
+            blockers.append(f"{pin_location}=false")
 
     stored_feature_paths = [
         system_config,
@@ -735,8 +739,11 @@ def codex_project_hook_activation_status(
         *profile_paths,
         codex_managed_config_path(codex_home),
     ]
+    # Every layer is still parsed and schema-checked, because a malformed
+    # feature value fails the typed load no matter which layer wins.
+    feature_disables: list[str] = []
     for config_path in dict.fromkeys(stored_feature_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, reject_legacy_profile=True
@@ -744,13 +751,23 @@ def codex_project_hook_activation_status(
             if not enabled
         )
     for config_path in dict.fromkeys(project_config_paths):
-        blockers.extend(
+        feature_disables.extend(
             location
             for location, enabled in hook_feature_declarations(
                 config_path, project_local=True
             )
             if not enabled
         )
+    # A managed requirements pin of the hook feature TRUE and a lower-layer
+    # disable contest each other, and which one Codex applies is not statically
+    # provable from anything inspectable here: the shipped binary documents the
+    # requirements schema but states no merge order for `[features]`, and the
+    # one merge rule it does state out loud ("Codex merges these rules with
+    # other config and uses the most restrictive result") is about prefix rules.
+    # `doctor` certifies floors, so an unprovable conflict fails closed and
+    # names both declarations rather than assuming the administrator wins.
+    contested_disables = feature_disables if hook_feature_pin is True else []
+    blockers.extend(feature_disables)
 
     user_paths = [codex_home / "config.toml", *profile_paths]
     for config_path in dict.fromkeys(user_paths):
@@ -764,6 +781,13 @@ def codex_project_hook_activation_status(
         "CLI/session/managed-cloud feature, policy, and state overrides remain "
         "runtime-only; confirm enabled/trusted status in exact-CWD new-session /hooks"
     )
+    if contested_disables:
+        boundary = (
+            f"{pin_location}=true contests {len(contested_disables)} "
+            "hook-feature disable(s), but Codex's merge order for managed "
+            "requirements against stored config features is UNPROVEN here, so "
+            f"the conflict fails closed; {boundary}"
+        )
     if blockers:
         return (
             False,
@@ -1101,7 +1125,1063 @@ def stale_path_issues(repo: Path) -> list[str]:
     return issues
 
 
-def audit_repo(path: Path) -> dict[str, Any]:
+# --- reality checks: declarations measured against the world, not each other ---
+#
+# Every check below answers "is the declared thing actually true?" and reports
+# one of three states. `MISMATCH` means two things that must agree do not, and
+# is a hard failure. `UNPROVEN` means the check could not run (offline, no
+# `gh`, an unresolvable host, an exhausted budget) and must never render as a
+# pass. `advisory` is a real observation that is not by itself a defect.
+# Subprocess use follows the deny floor's discipline (`dispatch.py`
+# `command_output_before_deadline`): every resolver is read-only, bounded by a
+# per-command timeout AND a shared aggregate deadline, and injectable so tests
+# never spawn a process or touch the network. An offline run degrades to
+# `UNPROVEN` and exits 0 rather than failing CI.
+REALITY_BUDGET_SECONDS = 8.0
+REALITY_COMMAND_TIMEOUT_SECONDS = 3.0
+REALITY_OK = "ok"
+REALITY_MISMATCH = "MISMATCH"
+REALITY_UNPROVEN = "UNPROVEN"
+REALITY_ADVISORY = "advisory"
+PRIVACY_CLAIM_DOCS = ("AGENTS.md", "CLAUDE.md", "README.md")
+
+# The phrasings a doc actually uses to claim privacy. The first version only
+# matched "private" immediately followed by one of three singular nouns, which
+# misses "this repository is private", "private repos" and "kept private" - the
+# most natural spellings - so the advertised converse check almost never fired.
+#
+# EVERY alternative requires one of these nouns inside the match. A bare
+# `(?:kept|keep|stays?|remains?)\s+private` fires on ordinary secrets-hygiene
+# boilerplate - "Keep private keys out of version control", "Secrets remain
+# private to the operator" - and then reports a two-word fragment as if the doc
+# had made a claim about the REPOSITORY. Requiring the noun both removes that
+# false positive and makes the quoted fragment show what is being kept private.
+_PRIVACY_NOUNS = r"(?:repo|repository|remote)s?"
+_PRIVACY_STATES = r"(?:is|are|was|were|stays?|stayed|remains?|remained|kept|keeps?)"
+PRIVACY_CLAIM_PATTERN = re.compile(
+    # "a private repo", "private GitHub repository"
+    rf"private\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    # "this repository is private", "the repo stays private", "repos are kept private"
+    rf"|{_PRIVACY_NOUNS}\b(?:\s+\w+){{0,3}}\s+{_PRIVACY_STATES}\s+private\b"
+    # "keep the repo private"
+    rf"|(?:keeps?|kept|stays?|remains?)\s+(?:\w+\s+){{0,2}}{_PRIVACY_NOUNS}\b"
+    rf"(?:\s+\w+){{0,2}}\s+private\b",
+    re.IGNORECASE,
+)
+# A remote nothing is published THROUGH a host: a `file://` URL, a drive path,
+# or a relative/home/absolute local path. The leading `//` (or `\\`) authority
+# is excluded: `//server/share/repo.git` is a UNC network share whose reach is
+# exactly what a sensitive-data audit must not assert, and calling it
+# "local-only" printed `ok` without measuring who can read it.
+LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[.~]|/(?!/)|\\(?!\\))")
+UNC_REMOTE_PATTERN = re.compile(r"^(?://|\\\\)[^/\\]")
+# A `file://` URL hides a host in two different places, and the share test has
+# to see both before `LOCAL_REMOTE_PATTERN`'s `file://` alternative claims the
+# URL: `file://server/share/x` puts the host in the AUTHORITY, while
+# `file:////server/share/x` has an empty authority and the UNC path in the path
+# component. Stripping a fixed prefix caught only the second.
+_FILE_URL = re.compile(r"(?i)^file://([^/]*)(/.*)?$")
+
+
+def remote_names_a_network_share(url: str) -> bool:
+    """Whether this remote names a HOST rather than a path on this machine."""
+    candidate = url.strip()
+    match = _FILE_URL.match(candidate)
+    if match:
+        authority = match.group(1)
+        if authority and authority.lower() != "localhost":
+            return True
+        candidate = match.group(2) or ""
+    return bool(UNC_REMOTE_PATTERN.match(candidate))
+
+
+# The remote work is actually published to. A public remote under any other
+# name (a fork's upstream, a mirror) is a topology note, not an exposure.
+PUBLISHING_REMOTE = "origin"
+# git's "dot repository": pushing to `.` targets THIS repository, never a
+# remote (see git-config, branch.<name>.remote).
+LOCAL_PUSH_REMOTE = "."
+VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
+# Both shapes a repo can carry its own floor bytes in. `.claude/hooks/` is the
+# one `doctor` already recognizes as "a repo-local dispatcher copy rather than
+# the shared home-anchored one"; probing only `hooks/` made the drift check a
+# silent no-op for every repo that vendors the way this estate actually does.
+VENDORED_FLOOR_DIRS = (PurePosixPath("hooks"), PurePosixPath(".claude/hooks"))
+
+
+def bounded_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Run one read-only resolver under a hard timeout; never raise.
+
+    Decoding is explicit and tolerant. Under `text=True` alone, a resolver that
+    emits bytes the platform locale cannot decode — a non-UTF-8 configured
+    remote, a branch name in another encoding — raises `UnicodeDecodeError`
+    while `subprocess.run` builds its result. Neither this handler nor `main()`
+    catches that, so an audit died with a traceback where the contract says the
+    check is simply UNPROVEN. `errors="replace"` keeps whatever is decodable
+    and leaves the rest as replacement characters; `UnicodeError` is still
+    caught, because a caller may pass its own runner.
+
+    The timeout is a HARD bound on this function, not just on the direct child.
+    `subprocess.run` kills only the process it started, so `git ls-remote`'s ssh
+    helper — which inherits the captured pipes and carries its own much longer
+    network timeout — could keep the drain waiting long past the deadline the
+    aggregate budget is built on. The child is started in its own process group
+    (POSIX) and the whole tree is killed on timeout (`taskkill /T` on Windows);
+    the pipes are then closed without a second blocking read, so the bound
+    holds even if a descendant survives.
+    """
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            **popen_kwargs,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, ""
+    try:
+        stdout, _stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_tree(proc)
+        return False, ""
+    except (OSError, ValueError, UnicodeError):
+        terminate_process_tree(proc)
+        return False, ""
+    return proc.returncode == 0, (stdout or "").strip()
+
+
+def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill a timed-out resolver and every descendant, then stop reading it.
+
+    Nothing here may block: this runs because a deadline was already missed.
+    The pipes are closed rather than drained, so a descendant that survives
+    cannot hold this process open — the file objects are released to the GC.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except (OSError, ValueError):
+        pass
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except OSError:
+            pass
+
+
+# `git` is not by itself a local resolver: these subcommands contact the
+# remote, so `--offline` has to refuse them by name rather than trust the
+# binary. `remote --verbose` reads config and stays; `remote show/update`
+# does not.
+NETWORK_GIT_SUBCOMMANDS = frozenset(
+    {"clone", "fetch", "pull", "push", "ls-remote", "submodule", "archive"}
+)
+NETWORK_GIT_REMOTE_ACTIONS = frozenset({"show", "update", "prune"})
+
+
+def command_reaches_the_network(argv: list[str]) -> bool:
+    """Whether this resolver would contact a host; `--offline` refuses these."""
+    if argv[:1] != ["git"]:
+        return True
+    operands = [token for token in argv[1:] if not token.startswith("-")]
+    if not operands:
+        return False
+    if operands[0] in NETWORK_GIT_SUBCOMMANDS:
+        return True
+    return (
+        operands[0] == "remote"
+        and len(operands) > 1
+        and operands[1] in NETWORK_GIT_REMOTE_ACTIONS
+    )
+
+
+def offline_aware_command_runner(args: argparse.Namespace) -> Any:
+    """The resolver an `--offline`-capable subcommand must use.
+
+    One selector for every probe a subcommand makes: `doctor --repo --offline`
+    shipped with the reality checks routed through it and the floor-reference
+    probe still hard-wired to the network runner, so the "offline" run reached
+    the remote anyway.
+    """
+    if getattr(args, "offline", False):
+        return local_only_command_output
+    return bounded_command_output
+
+
+def local_only_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """`audit --offline`: answer local resolvers, refuse every network one.
+
+    A refused resolver returns "did not answer", which every caller already
+    reports as UNPROVEN — the audit stays honest about what it did not
+    measure instead of pretending an unmeasured remote is fine.
+    """
+    if command_reaches_the_network(argv):
+        return False, ""
+    return bounded_command_output(argv, cwd, timeout)
+
+
+# The runners that accept a `timeout`, and so can be clamped to what is left of
+# the aggregate budget. A test's fake runner is deliberately not one of them.
+CLAMPABLE_COMMAND_RUNNERS = (bounded_command_output, local_only_command_output)
+
+
+def output_before_deadline(
+    command_runner: Any,
+    argv: list[str],
+    cwd: Path | None,
+    deadline: float | None,
+) -> tuple[bool, str]:
+    """Run a resolver without overrunning the audit's aggregate budget.
+
+    The clock is read ONCE, before the call: an exhausted budget starts no new
+    process, and the per-command timeout is clamped to what is left, so the
+    whole sweep is bounded by the budget plus at most one in-flight command.
+    Unlike `dispatch.py`, a late answer is KEPT rather than discarded — a hook
+    must not delay a tool call, but an audit has no latency contract, and
+    throwing away a measurement that already proved a remote PUBLIC would turn
+    the exact finding this exists to make into an UNPROVEN.
+    """
+    if deadline is None:
+        return command_runner(argv, cwd)
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return False, ""
+    # Every production runner takes the clamp, not just the network one:
+    # `--offline` still shells out to local git, and a `status`/`ls-files`/
+    # `rev-list` on a network-mounted checkout can be slow enough to overrun
+    # the advertised aggregate budget with its own 3s default. A test's fake
+    # runner takes no timeout, so it is called with the plain signature.
+    if command_runner in CLAMPABLE_COMMAND_RUNNERS:
+        return command_runner(
+            argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
+        )
+    return command_runner(argv, cwd)
+
+
+def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
+    return {"check": check, "status": status, "detail": detail}
+
+
+# `git remote --verbose` preserves URL userinfo, so a remote configured as
+# `https://ci-user:PAT@host/acme/repo.git` carries a live credential. Every
+# finding this module renders reaches stdout, `--json` and the `doctor --repo`
+# detail, so the token is stripped before it is stored, never at the printer.
+_REMOTE_USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@]+@", re.IGNORECASE)
+
+
+def redact_remote_url(url: str) -> str:
+    """Return the remote URL with any embedded credential replaced.
+
+    Two places a credential rides in a remote URL, and both reach stdout,
+    `--json` and the `doctor --repo` detail:
+
+    * userinfo — `https://ci-user:PAT@host/acme/repo.git`. Only
+      scheme-qualified userinfo is redacted: `git@github.com:owner/repo` is scp
+      syntax whose `git` is a fixed account name, not a secret, and blanking it
+      would make the finding harder to act on for no gain.
+    * query/fragment — `https://gitlab.example/acme/repo.git?private_token=PAT`.
+      Nothing downstream needs it (`github_repo_slug` already stops at `?`), so
+      the whole tail is dropped rather than parsed for known parameter names,
+      which would keep failing open on the next host's spelling.
+    """
+    redacted = _REMOTE_USERINFO.sub(r"\1***@", url.strip())
+    parts = re.split(r"([?#])", redacted, maxsplit=1)
+    if len(parts) == 1:
+        return redacted
+    return f"{parts[0]}{parts[1]}<redacted>"
+
+
+def github_repo_slug(remote: str) -> str:
+    """Return owner/repo for a github.com remote, without any credentials.
+
+    An `ssh://` URL may carry a port (`ssh://git@github.com:22/owner/repo.git`,
+    which git resolves as `ssh -p 22 git@github.com` with path `/owner/repo`).
+    Without `(?::\\d+)?` the port was captured as the owner, so `gh` was asked
+    about `22/owner` and a genuinely public origin degraded to UNPROVEN instead
+    of raising the mismatch. `(?::\\d+)?` is optional and backtracks, so the
+    portless `ssh://git@github.com:owner/repo` spelling still parses.
+    """
+    patterns = (
+        r"^(?:https?|git)://(?:[^/@]+@)?github\.com(?::\d+)?/([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
+        r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, remote.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).removesuffix(".git")
+    return ""
+
+
+def configured_push_remote(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> tuple[str, bool]:
+    """(remote `git push` targets, whether that selection was measured).
+
+    `origin` is only git's LAST fallback. `branch.<name>.pushRemote`,
+    `remote.pushDefault` and `branch.<name>.remote` each override it, in that
+    order, so a repo with a private `origin` and
+    `remote.pushDefault = public-mirror` publishes to the public one — while an
+    origin-only rule downgraded that PUBLIC result to an exit-0 advisory.
+
+    Every query is `git config`, which reads local files and stays available
+    under `--offline`. `git config --get` also exits non-zero for an UNSET key,
+    so a failed probe cannot be told from an absent one — which is fine while
+    the budget holds and a lie once it does not. An exhausted budget therefore
+    returns `False` for the second element rather than guessing `origin`: the
+    caller reports the whole check UNPROVEN instead of downgrading a public
+    push endpoint to an advisory it never measured.
+    """
+
+    def exhausted() -> bool:
+        return deadline is not None and deadline - monotonic() <= 0
+
+    def configured(key: str) -> str:
+        resolved, value = output_before_deadline(
+            command_runner, ["git", "config", "--get", key], repo, deadline
+        )
+        return value.strip() if resolved else ""
+
+    if exhausted():
+        return PUBLISHING_REMOTE, False
+    resolved, branch = output_before_deadline(
+        command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
+    )
+    branch = branch.strip() if resolved else ""
+    candidates = []
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.pushRemote")
+    candidates.append("remote.pushDefault")
+    if branch and branch != "HEAD":
+        candidates.append(f"branch.{branch}.remote")
+    for key in candidates:
+        if exhausted():
+            return PUBLISHING_REMOTE, False
+        configured_name = configured(key)
+        if configured_name:
+            return configured_name, True
+    return PUBLISHING_REMOTE, not exhausted()
+
+
+def configured_remote_urls(
+    repo: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Enumerate (name, url, direction) rows; False when git was silent.
+
+    The NAME matters: publishing happens to `origin`, so a public `upstream`
+    on a private fork is a normal topology rather than an exposure. So does the
+    DIRECTION: `git remote --verbose` prints the fetch and push endpoints on
+    separate rows, and `remote.<name>.pushurl` may differ from
+    `remote.<name>.url`, so discarding the third field made a public fetch
+    endpoint look like the place work is published.
+    """
+    resolved, output = output_before_deadline(
+        command_runner, ["git", "remote", "--verbose"], repo, deadline
+    )
+    if not resolved:
+        return False, []
+    rows = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        direction = parts[2].strip("()").lower() if len(parts) > 2 else ""
+        # A row with no direction is git's own default: the same endpoint is
+        # both fetched from and pushed to.
+        rows.append((parts[0], parts[1], direction if direction else "push"))
+    return True, list(dict.fromkeys(rows))
+
+
+def publishing_remote_endpoints(
+    rows: list[tuple[str, str, str]],
+    publishing_remote: str = PUBLISHING_REMOTE,
+) -> list[tuple[str, str, bool, str]]:
+    """Fold `git remote -v` rows into (name, url, publishes, note) entries.
+
+    `publishes` is what decides MISMATCH vs advisory. It is true only for a URL
+    work can actually be pushed to under the remote this repo publishes
+    through:
+
+    * a URL that is a PUSH endpoint — a public `url` behind a private
+      `pushurl` is a fetch mirror, not a place anything is published;
+    * of ``publishing_remote`` — which is `origin` only as git's LAST fallback;
+      `configured_push_remote` resolves `branch.<name>.pushRemote` and
+      `remote.pushDefault` first, because a repo with a private `origin` and
+      `remote.pushDefault = public-mirror` publishes to the public one;
+    * or of ANY remote when the resolved publishing remote is not configured at
+      all. The origin-only rule presumed a private `origin` exists; with none,
+      calling the one remote that carries the work "not the publishing remote"
+      turned a real exposure into an exit-0 advisory.
+
+    `note` is the clause that explains a non-publishing verdict, so the finding
+    says which of the reasons applied.
+    """
+    by_name: dict[str, dict[str, list[str]]] = {}
+    for name, url, direction in rows:
+        endpoints = by_name.setdefault(name, {"fetch": [], "push": []})
+        bucket = endpoints["push" if direction == "push" else "fetch"]
+        if url not in bucket:
+            bucket.append(url)
+    # git's "dot repository": `remote.pushDefault = .` pushes into THIS
+    # repository, so no configured remote is a publishing endpoint. Passing the
+    # literal `.` through would match no remote and then trip the "no
+    # publishing remote is configured, so treat them all as publishing" rule —
+    # a hard MISMATCH for a public origin an ordinary push never reaches.
+    pushes_locally = publishing_remote == LOCAL_PUSH_REMOTE
+    has_publishing_remote = publishing_remote in by_name
+    entries: list[tuple[str, str, bool, str]] = []
+    for name, endpoints in by_name.items():
+        # git prints both rows; a fetch-only listing means the same endpoint.
+        push_urls = endpoints["push"] or endpoints["fetch"]
+        publishes_here = not pushes_locally and (
+            name == publishing_remote or not has_publishing_remote
+        )
+        for url in dict.fromkeys(endpoints["fetch"] + endpoints["push"]):
+            if pushes_locally:
+                note = (
+                    f"git pushes to the local repository ({LOCAL_PUSH_REMOTE}), so "
+                    f"nothing is published to {name}"
+                )
+            elif not publishes_here:
+                note = (
+                    f"{name} is not the publishing remote ({publishing_remote}), "
+                    "so never push this repo there"
+                )
+            elif url not in push_urls:
+                note = f"{name} only FETCHES from this URL; it pushes to " + ", ".join(
+                    redact_remote_url(each) for each in push_urls
+                )
+            elif has_publishing_remote:
+                note = (
+                    ""
+                    if publishing_remote == PUBLISHING_REMOTE
+                    else f"git is configured to push to {publishing_remote}, "
+                    f"not {PUBLISHING_REMOTE}"
+                )
+            else:
+                note = (
+                    f"no remote named {publishing_remote!r} is configured, so "
+                    f"{name} is treated as a publishing remote"
+                )
+            entries.append((name, url, publishes_here and url in push_urls, note))
+    # Spend the shared probe budget on the endpoints that can produce a
+    # MISMATCH first. The caller walks this list under one aggregate deadline,
+    # so with git's alphabetical remote order a handful of slow advisory
+    # remotes ahead of `origin` could exhaust it and leave the one exposure
+    # this check exists to catch reported as UNPROVEN — an exit-0 pass.
+    return sorted(entries, key=lambda entry: not entry[2])
+
+
+def github_visibility(
+    slug: str, repo: Path, command_runner: Any, deadline: float | None
+) -> str:
+    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked.
+
+    The slug is pinned to `github.com/`. `gh repo view` accepts
+    `[HOST/]OWNER/REPO` and resolves a bare `OWNER/REPO` against `GH_HOST` or
+    the default authenticated host, so on a machine pointed at a GitHub
+    Enterprise instance the probe could answer PRIVATE about an entirely
+    different repository that happens to share the slug — while the
+    github.com remote this finding is about is public.
+    """
+    resolved, output = output_before_deadline(
+        command_runner,
+        [
+            "gh",
+            "repo",
+            "view",
+            f"github.com/{slug}",
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility",
+        ],
+        repo,
+        deadline,
+    )
+    return output.strip().upper() if resolved else ""
+
+
+def privacy_claim_findings(repo: Path) -> list[dict[str, str]]:
+    """Sibling docs asserting privacy while the overlay is absent: a split."""
+    check = "documented privacy vs the sensitive_data overlay"
+    claims: list[str] = []
+    for name in PRIVACY_CLAIM_DOCS:
+        path = repo / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        match = PRIVACY_CLAIM_PATTERN.search(text)
+        if match:
+            claims.append(f"{name} says {match.group(0)!r}")
+    if not claims:
+        return []
+    return [
+        reality_finding(
+            check,
+            REALITY_ADVISORY,
+            f"{'; '.join(claims)}, but flags.sensitive_data is not declared true — "
+            "the docs and the tier declaration disagree",
+        )
+    ]
+
+
+def sensitive_data_findings(
+    repo: Path,
+    tier_data: dict[str, Any],
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Measure a declared `sensitive_data` overlay against remote visibility."""
+    flags = tier_data.get("flags")
+    declared = bool(flags.get("sensitive_data")) if isinstance(flags, dict) else False
+    if not declared:
+        return privacy_claim_findings(repo)
+    check = "sensitive_data vs actual remote visibility"
+    resolved, remotes = configured_remote_urls(repo, command_runner, deadline)
+    if not resolved:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "`git remote --verbose` did not answer, so no remote visibility "
+                "was measured",
+            )
+        ]
+    if not remotes:
+        return [
+            reality_finding(
+                check, REALITY_OK, "no remote is configured; nothing is published"
+            )
+        ]
+    findings: list[dict[str, str]] = []
+    publishing_remote, selection_proven = configured_push_remote(
+        repo, command_runner, deadline
+    )
+    if not selection_proven:
+        return [
+            reality_finding(
+                check,
+                REALITY_UNPROVEN,
+                "the probe budget expired before git's push-remote configuration "
+                "could be read, so which remote publishes this repo is unmeasured; "
+                "assuming `origin` here could downgrade a public push endpoint to "
+                "an advisory",
+            )
+        ]
+    for name, url, publishes, note in publishing_remote_endpoints(
+        remotes, publishing_remote
+    ):
+        shown = redact_remote_url(url)
+        if remote_names_a_network_share(url):
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {shown} is a network share; who can reach it is not "
+                    "machine-checkable here",
+                )
+            )
+            continue
+        if LOCAL_REMOTE_PATTERN.match(url):
+            findings.append(
+                reality_finding(
+                    check, REALITY_OK, f"{name} {shown} is a local-only remote"
+                )
+            )
+            continue
+        slug = github_repo_slug(url)
+        if not slug:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {shown} is not a github.com remote; its visibility is "
+                    "not machine-checkable here",
+                )
+            )
+            continue
+        visibility = github_visibility(slug, repo, command_runner, deadline)
+        if visibility == "PUBLIC":
+            # A public endpoint work is actually PUSHED to is the exposure this
+            # check exists to catch. Anything else — the upstream of a private
+            # fork, a read-only mirror, a public fetch URL behind a private
+            # pushurl — is a normal topology, and hard-failing it with no
+            # allowlist and no escape hatch made the only remedy deleting the
+            # remote.
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_MISMATCH if publishes else REALITY_ADVISORY,
+                    f"flags.sensitive_data is declared true but remote {name} "
+                    f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
+                    f"`gh repo view {slug} --json visibility` -> PUBLIC"
+                    + (f"; {note}" if note else ""),
+                )
+            )
+        elif visibility in {"PRIVATE", "INTERNAL"}:
+            findings.append(
+                reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")
+            )
+        else:
+            findings.append(
+                reality_finding(
+                    check,
+                    REALITY_UNPROVEN,
+                    f"{name} {slug}: `gh repo view` returned "
+                    f"{visibility or '<no output>'}; visibility is unmeasured "
+                    "(offline, unauthenticated, or gh is absent)",
+                )
+            )
+    return findings
+
+
+def human_todo_findings(
+    repo: Path, tier: int, tier_data: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Measure a declared human-action file against the filesystem."""
+    check = "human_todo vs the file on disk"
+    declared = tier_data.get("human_todo")
+    if declared is None:
+        if tier >= 2:
+            return [
+                reality_finding(
+                    check,
+                    REALITY_ADVISORY,
+                    f"T{tier} declares no human_todo "
+                    f"({'null' if 'human_todo' in tier_data else 'absent'}), so law "
+                    "5 has no file to surface in summaries",
+                )
+            ]
+        return []
+    if not isinstance(declared, str) or not declared.strip():
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo must be a repo-relative path or null, not {declared!r}",
+            )
+        ]
+    relative = PurePosixPath(declared.replace("\\", "/"))
+    # `PurePosixPath("C:/Users/...").is_absolute()` is False - no leading slash -
+    # so a drive-absolute declaration slipped past the POSIX test and was then
+    # JOINED to the repo path, where the drive silently won. Reject any value
+    # that carries a Windows drive or root as well.
+    windows_view = PureWindowsPath(declared)
+    if (
+        relative.is_absolute()
+        or windows_view.is_absolute()
+        or windows_view.drive
+        or windows_view.root
+        or ".." in relative.parts
+        # A NUL cannot appear in any path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as `ValueError` -> UNPROVEN -> exit 0.
+        or "\x00" in declared
+    ):
+        return [
+            reality_finding(
+                check,
+                REALITY_MISMATCH,
+                f"human_todo {declared!r} is not a repo-relative path",
+            )
+        ]
+    # `Path.is_file()` swallows the OS's refusal to answer, so a permissions
+    # failure or an unavailable mount read as "absent" and produced a hard
+    # MISMATCH claiming a file that may well exist does not. Same guarded stat
+    # as the vendored floor probe: an access failure is UNPROVEN, not a defect.
+    present, access_error = file_presence(repo / relative)
+    if access_error:
+        return [reality_finding(check, REALITY_UNPROVEN, access_error)]
+    if present:
+        return [reality_finding(check, REALITY_OK, f"{declared} exists")]
+    return [
+        reality_finding(
+            check,
+            REALITY_MISMATCH,
+            f"human_todo declares {declared!r} but no such file exists in {repo}",
+        )
+    ]
+
+
+def symlink_target(path: Path) -> str:
+    """The link this path IS, or "" for an ordinary file or an unreadable link.
+
+    Deliberately `lstat`-based: every other probe here follows links, which is
+    right for reading content and wrong for deciding whether a repo vendors
+    bytes of its own.
+    """
+    try:
+        if not path.is_symlink():
+            return ""
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return ""
+
+
+def file_presence(path: Path) -> tuple[bool, str]:
+    """(is a regular file, access error) for one path an audit asks about.
+
+    `Path.is_file()` answers False for BOTH "absent" and "the OS refused to
+    tell me" — a permissions failure or a transient filesystem error therefore
+    read as absence (`[ok] no vendored floor copy`, or a hard `MISMATCH` for a
+    declared `human_todo`), while a stricter Python/platform combination could
+    instead abort the audit. Neither is one of the three states, so the access
+    failure is preserved and reported as UNPROVEN by the caller.
+    """
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False, ""
+    except NotADirectoryError:
+        # A parent component is a file: the path cannot exist.
+        return False, ""
+    except (OSError, ValueError) as exc:
+        return False, f"{path} could not be inspected ({exc}); existence is unproven"
+    return stat.S_ISREG(mode), ""
+
+
+def floor_version(path: Path) -> str:
+    """The FLOOR_VERSION string a dispatcher copy declares, or ""."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = re.search(r'^FLOOR_VERSION\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def floor_identity(path: Path) -> tuple[str, str]:
+    """(normalized sha256, FLOOR_VERSION) for a floor copy; ("", "") if absent."""
+    if not path.is_file():
+        return "", ""
+    try:
+        return normalized_text_sha256(path), floor_version(path)
+    except (OSError, UnicodeDecodeError, UnicodeError):
+        return "", ""
+
+
+def describe_floor(label: str, digest: str, version: str) -> str:
+    if not digest:
+        return f"{label} absent/unreadable"
+    return f"{label} {version or '<no FLOOR_VERSION>'} sha {digest[:12]}"
+
+
+def harness_reference_status(
+    harness_root: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, str]:
+    """Whether this harness checkout may serve as the canonical byte reference.
+
+    The pin/compare primitives read the WORKING TREE, so a floor branch or a
+    dirty tree would make unmerged bytes the reference. Refuse, and say so.
+    """
+    resolved, branch = output_before_deadline(
+        command_runner,
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return False, f"the branch of harness checkout {harness_root} is unresolvable"
+    if branch.strip() != "main":
+        return (
+            False,
+            f"harness checkout {harness_root} is on {branch.strip() or '<unknown>'!r}, "
+            "not main, so its working tree is not the canonical reference",
+        )
+    resolved, dirty = output_before_deadline(
+        command_runner,
+        ["git", "status", "--porcelain", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the working-tree state of harness checkout {harness_root} is "
+            "unresolvable",
+        )
+    if dirty.strip():
+        return (
+            False,
+            f"harness checkout {harness_root} has uncommitted templates/hooks "
+            "changes, so its working tree is not the canonical reference",
+        )
+    # "Clean" is only as trustworthy as the index. `skip-worktree` (S) and
+    # `assume-unchanged` (lowercase tag) both make `git status` omit a file's
+    # local edits, so a modified template would report clean and then be hashed
+    # from the working tree — the vendored copy matching that hidden edit would
+    # read `ok` while published HEAD holds different canonical bytes.
+    resolved, index_flags = output_before_deadline(
+        command_runner,
+        ["git", "ls-files", "-v", "--", "templates/hooks"],
+        harness_root,
+        deadline,
+    )
+    if not resolved:
+        return (
+            False,
+            f"the index flags of harness checkout {harness_root} are unresolvable",
+        )
+    hidden = sorted(
+        line.split(" ", 1)[1]
+        for line in index_flags.splitlines()
+        if line[:1] and (line[0].islower() or line[0] == "S") and " " in line
+    )
+    if hidden:
+        return (
+            False,
+            f"harness checkout {harness_root} marks {', '.join(hidden)} "
+            "skip-worktree/assume-unchanged, so `git status` cannot see local "
+            "edits there and this working tree is not the canonical reference",
+        )
+    # Clean on a local `main` is not the same as agreeing with the published
+    # one: unpushed commits to templates/hooks, or a main that is behind, would
+    # otherwise be called canonical. This first query reads refs only, so it
+    # answers the common case cheaply and with a diagnosis.
+    resolved, divergence = output_before_deadline(
+        command_runner,
+        ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
+        harness_root,
+        deadline,
+    )
+    counts = divergence.split() if resolved else []
+    if len(counts) == 2 and all(count.isdigit() for count in counts):
+        behind, ahead = counts
+        if behind != "0" or ahead != "0":
+            return (
+                False,
+                f"harness checkout {harness_root} is {ahead} ahead of and "
+                f"{behind} behind origin/main, so its working tree is not the "
+                "canonical reference",
+            )
+    # `origin/main` is a LOCAL tracking ref. Unfetched, it can be arbitrarily
+    # far behind the published branch, and `rev-list` then reports `0 0` for a
+    # working tree that is stale — a vendored copy matching that obsolete
+    # template would report `ok` while it has drifted from the published floor.
+    # Prove currency against the remote, and when the remote cannot be asked
+    # (offline, unreachable) say the reference is unproven rather than assume
+    # it: `vendored_floor_findings` renders that as UNPROVEN, never as a pass.
+    resolved_head, head = output_before_deadline(
+        command_runner, ["git", "rev-parse", "HEAD"], harness_root, deadline
+    )
+    resolved_published, published = output_before_deadline(
+        command_runner,
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        harness_root,
+        deadline,
+    )
+    fields = published.split() if resolved_published else []
+    published_tip = fields[0] if fields else ""
+    if not resolved_head or not published_tip:
+        return (
+            False,
+            f"harness checkout {harness_root} is clean on main, but the published "
+            "main tip could not be read (offline, or origin is unreachable), so "
+            "this working tree cannot be proven current",
+        )
+    if head.strip() != published_tip:
+        return (
+            False,
+            f"harness checkout {harness_root} is clean on main at "
+            f"{head.strip()[:12]}, but published main is at {published_tip[:12]} — "
+            "the local origin/main is stale, so this working tree is not the "
+            "canonical reference",
+        )
+    return (
+        True,
+        f"harness checkout {harness_root} is clean on main and level with "
+        f"origin/main at the published tip {published_tip[:12]}",
+    )
+
+
+def vendored_floor_findings(
+    repo: Path,
+    harness_root: Path,
+    claude_home: Path,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict[str, str]]:
+    """Compare a repo's vendored floor bytes with template and deployed copies."""
+    vendored: list[tuple[str, Path]] = []
+    inaccessible: list[tuple[str, str]] = []
+    for directory in VENDORED_FLOOR_DIRS:
+        for name in VENDORED_FLOOR_FILES:
+            label = f"{directory}/{name}"
+            path = repo / directory / name
+            # The link is inspected BEFORE anything follows it. `stat()` follows
+            # links, so a `hooks/dispatch.py` symlinked to the harness template
+            # hashed the TARGET and reported the repo as matching canonical
+            # bytes — while the repo vendors none, and the link may resolve
+            # elsewhere, or nowhere, on the next machine. A DANGLING link is
+            # the same claim with the follow already failed: guarding this on
+            # `present` let `[ok] no vendored floor copy` through for it.
+            target = symlink_target(path)
+            if target:
+                present, access_error = False, (
+                    f"{path} is a symlink to {target}; the bytes it resolves "
+                    "to are this machine's, not this repo's vendored floor"
+                )
+            else:
+                present, access_error = file_presence(path)
+            if access_error:
+                inaccessible.append((label, access_error))
+            elif present:
+                vendored.append((label, path))
+    findings: list[dict[str, str]] = [
+        # A path that cannot be traversed or stat'ed is neither "no vendored
+        # copy" nor a compared one; the three-state contract calls it UNPROVEN.
+        reality_finding(
+            f"vendored {label} vs canonical bytes", REALITY_UNPROVEN, access_error
+        )
+        for label, access_error in inaccessible
+    ]
+    if not vendored:
+        if findings:
+            return findings
+        # Say it. A leg that emits nothing at all cannot be told apart from a
+        # leg that ran and found no drift.
+        return [
+            reality_finding(
+                "vendored floor bytes vs canonical bytes",
+                REALITY_OK,
+                "no vendored floor copy under "
+                + " or ".join(f"{directory}/" for directory in VENDORED_FLOOR_DIRS)
+                + f" in {repo}; nothing to drift from the shared dispatcher",
+            )
+        ]
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, command_runner, deadline
+    )
+    for label, path in vendored:
+        name = path.name
+        check = f"vendored {label} vs canonical bytes"
+        repo_digest, repo_version = floor_identity(path)
+        template = harness_root / "templates" / "hooks" / name
+        deployed = claude_home / "hooks" / name
+        template_digest, template_version = floor_identity(template)
+        deployed_digest, deployed_version = floor_identity(deployed)
+        parts = [
+            describe_floor("vendored", repo_digest, repo_version),
+            describe_floor("canonical template", template_digest, template_version),
+            describe_floor("deployed global", deployed_digest, deployed_version),
+        ]
+        notes: list[str] = []
+        status = REALITY_OK
+        if not repo_digest:
+            status = REALITY_UNPROVEN
+            notes.append(f"{path} could not be hashed")
+        else:
+            if reference_ok and template_digest:
+                if template_digest != repo_digest:
+                    status = REALITY_MISMATCH
+                    notes.append("vendored bytes differ from the canonical template")
+            else:
+                status = REALITY_UNPROVEN
+                notes.append(
+                    "not compared with the canonical template: "
+                    + (reference_detail if not reference_ok else f"{template} absent")
+                )
+            # The deployed global copy is a fact about the AUDITING MACHINE,
+            # not about this repo. Promoting that difference to MISMATCH made
+            # `audit` non-hermetic: an operator who had not run
+            # `sync-global --apply` since the last FLOOR_VERSION bump failed a
+            # repo gate from their home directory, while the same repo passed
+            # on a CI runner with no `~/.claude` at all. `doctor` owns machine
+            # state (`shared dispatcher`, `floor version`); `audit` records it.
+            if not deployed_digest:
+                notes.append(
+                    f"no deployed global copy at {deployed} on this machine, so "
+                    "the deployed comparison was skipped"
+                )
+            elif deployed_digest != repo_digest:
+                if status == REALITY_OK:
+                    status = REALITY_ADVISORY
+                notes.append(
+                    "vendored bytes differ from the deployed global copy on this "
+                    "machine — a machine-state observation, not a repo defect; "
+                    "reconcile with `harness.py doctor` and `sync-global --apply`"
+                )
+        detail = "; ".join(parts)
+        if notes:
+            detail = f"{detail} — {'; '.join(notes)}"
+        findings.append(reality_finding(check, status, detail))
+    return findings
+
+
+def reality_findings(
+    repo: Path,
+    tier: int,
+    tier_data: dict[str, Any],
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> list[dict[str, str]]:
+    """Every declaration this repo makes that is cheaply checkable for real."""
+    if harness_root is None:
+        harness_root = Path(__file__).resolve().parent
+    if claude_home is None:
+        claude_home = Path.home() / ".claude"
+    if deadline is None:
+        deadline = monotonic() + REALITY_BUDGET_SECONDS
+    findings = sensitive_data_findings(
+        repo, tier_data, command_runner=command_runner, deadline=deadline
+    )
+    findings.extend(
+        vendored_floor_findings(
+            repo,
+            harness_root,
+            claude_home,
+            command_runner=command_runner,
+            deadline=deadline,
+        )
+    )
+    findings.extend(human_todo_findings(repo, tier, tier_data))
+    return findings
+
+
+def audit_repo(
+    path: Path,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any = bounded_command_output,
+    deadline: float | None = None,
+) -> dict[str, Any]:
     repo = git_root(path)
     config_path, tier_data = load_tier(repo)
     issues: list[str] = []
@@ -1117,6 +2197,17 @@ def audit_repo(path: Path) -> dict[str, Any]:
         issues.append("missing root AGENTS.md")
     issues.extend(budget_issues(repo, tier))
     issues.extend(stale_path_issues(repo))
+    findings = reality_findings(
+        repo,
+        tier,
+        tier_data,
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
+        deadline=deadline,
+    )
+    mismatches = [f for f in findings if f["status"] == REALITY_MISMATCH]
+    unproven = [f for f in findings if f["status"] == REALITY_UNPROVEN]
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
@@ -1124,7 +2215,12 @@ def audit_repo(path: Path) -> dict[str, Any]:
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
-        "ok": not issues,
+        "reality": findings,
+        # `ok` is the exit code, not a claim that everything was measured:
+        # `unproven` is what a consumer needs to tell a clean run from an
+        # unmeasured one.
+        "unproven": len(unproven),
+        "ok": not issues and not mismatches,
     }
 
 
@@ -1145,11 +2241,6 @@ def seed_repo(args: argparse.Namespace) -> int:
         "name": TIER_NAMES[args.tier],
         "authority": {"push": args.push, "merge": args.merge},
         "flags": flags,
-        "model_routing": {
-            "harness_and_review": "sol",
-            "slices": "terra",
-            "maintenance": "luna",
-        },
         "budgets": {
             "standing_context_tokens": {1: 1000, 2: 3000, 3: 6000, 4: 8000}.get(
                 args.tier, 200
@@ -1186,7 +2277,7 @@ def tree_digest(root: Path) -> str | None:
     except OSError as exc:
         raise HarnessError(f"cannot inspect skill tree {root}: {exc}") from exc
 
-    entries: list[tuple[bytes, bytes, Path | None]] = []
+    entries: list[tuple[bytes, bytes, Path]] = [(b"", b"D", root)]
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -1215,42 +2306,46 @@ def tree_digest(root: Path) -> str | None:
                 raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
             relative = path.relative_to(root).as_posix().encode("utf-8")
             if stat.S_ISDIR(mode):
-                entries.append((relative, b"D", None))
+                entries.append((relative, b"D", path))
                 pending.append(path)
             elif stat.S_ISREG(mode):
                 entries.append((relative, b"F", path))
             else:
                 raise HarnessError(f"unsupported skill tree entry: {path}")
 
-    for relative, kind, file_path in sorted(entries, key=lambda entry: entry[0]):
+    for relative, kind, entry_path in sorted(entries, key=lambda entry: entry[0]):
         payload = b""
-        executable = b"-"
-        if file_path is not None:
-            if path_is_alias(file_path):
-                raise HarnessError(f"unsafe skill tree alias: {file_path}")
-            try:
-                entry_mode = file_path.lstat().st_mode
-                if not stat.S_ISREG(entry_mode):
-                    raise HarnessError(
-                        f"skill tree changed during inspection: {file_path}"
-                    )
-                # A helper script whose bytes match but whose executable bit has
-                # drifted (source 0755, installed 0644) is NOT the same tree: the
-                # installed skill cannot run it, and same_tree would otherwise make
-                # `sync-global --apply` skip the copy that would restore the mode.
-                # Only the executable bit is digested — the rest of the mode is
-                # umask/filesystem noise and Windows reports no meaningful bits.
-                if entry_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                    executable = b"X"
-                payload = file_path.read_bytes()
-            except FileNotFoundError as exc:
+        if path_is_alias(entry_path):
+            raise HarnessError(f"unsafe skill tree alias: {entry_path}")
+        try:
+            entry_mode = entry_path.lstat().st_mode
+            expected_kind = (
+                stat.S_ISREG(entry_mode) if kind == b"F" else stat.S_ISDIR(entry_mode)
+            )
+            if not expected_kind:
                 raise HarnessError(
-                    f"skill tree changed during inspection: {file_path}"
-                ) from exc
-            except OSError as exc:
-                raise HarnessError(
-                    f"cannot inspect skill tree {file_path}: {exc}"
-                ) from exc
+                    f"skill tree changed during inspection: {entry_path}"
+                )
+            # A file or directory whose bytes/children match but whose executable
+            # tuple has drifted is NOT the same tree: a script may no longer run,
+            # or a directory may no longer be searchable. same_tree would otherwise
+            # make `sync-global --apply` skip the copy that restores access.
+            # The remaining mode bits are umask/filesystem noise, and Windows
+            # reports no meaningful POSIX executable bits.
+            executable = bytes(
+                int(bool(entry_mode & bit))
+                for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+            )
+            if kind == b"F":
+                payload = entry_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise HarnessError(
+                f"skill tree changed during inspection: {entry_path}"
+            ) from exc
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect skill tree {entry_path}: {exc}"
+            ) from exc
         digest.update(kind)
         digest.update(executable)
         digest.update(len(relative).to_bytes(8, byteorder="big"))
@@ -1622,12 +2717,98 @@ def validate_config_hook_state(hooks: dict[str, Any]) -> None:
             )
 
 
+# Codex reads `managed_dir` on POSIX hosts and `windows_managed_dir` on
+# Windows, and each field carries its own path flavour. Validating a field
+# under the other flavour false-greens a value Codex will reject as relative.
+_REQUIREMENTS_HOOK_PATH_FIELDS: tuple[tuple[str, type[PurePath], str, str], ...] = (
+    ("managed_dir", PurePosixPath, "POSIX", "posix"),
+    ("windows_managed_dir", PureWindowsPath, "Windows", "nt"),
+)
+
+
+def requirements_hook_field_is_active_here(field: str) -> bool:
+    """Return whether THIS host is the one that consumes this managed field.
+
+    Existence is only asserted for the field the running platform actually
+    reads — the other field describes a different machine's filesystem, so
+    probing it would produce a portability-dependent verdict rather than a
+    check.
+    """
+    for name, _flavour, _label, os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if name == field:
+            return os.name == os_name
+    return False
+
+
+# `\\?\C:\dir` and `\\.\C:\dir` are the extended-length/device spellings of a
+# LOCAL drive: they carry a `\\`-prefixed drive but never leave the machine.
+# `\\?\UNC\server\share` is the device spelling of a real network share.
+_WINDOWS_LOCAL_DEVICE_DRIVE = re.compile(r"(?i)^[\\/]{2}[?.][\\/](?!unc[\\/])")
+
+
+def requirements_hook_path_is_locally_probeable(value: str) -> bool:
+    """Return whether existence can be probed without reaching a network host.
+
+    A UNC value (`\\\\server\\share\\...`, or its `//server/share` spelling)
+    turns `is_dir()` into an SMB round trip: off-VPN or with the host down it
+    blocks on name resolution for tens of seconds and then answers about
+    reachability rather than about the directory. Existence therefore stays
+    UNPROVEN for those paths; absoluteness is still asserted. POSIX network
+    mounts are indistinguishable from local paths, so this narrowing can only
+    recognize the UNC spelling.
+
+    Only a genuine server/share is exempted: the `\\\\?\\C:\\...` and
+    `\\\\.\\C:\\...` device spellings address a local drive and are still
+    probed, so `doctor` cannot certify a missing directory written that way.
+
+    This answers about WINDOWS path semantics, so callers must apply it only to
+    a value in the Windows flavour. On POSIX `//missing/share` is an ordinary
+    absolute path, not a share, and reparsing it here would skip the probe and
+    let `doctor` certify a directory Codex cannot load.
+    """
+    drive = PureWindowsPath(value).drive
+    if not drive.startswith(("\\\\", "//")):
+        return True
+    return bool(_WINDOWS_LOCAL_DEVICE_DRIVE.match(drive))
+
+
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
-    """Validate ManagedHooksRequirementsToml's optional path fields."""
-    for field in ("managed_dir", "windows_managed_dir"):
-        if field in hooks and not isinstance(hooks[field], str):
+    """Validate ManagedHooksRequirementsToml's optional path fields.
+
+    Codex documents both fields as absolute paths and refuses to load managed
+    hooks from a relative or missing directory, so a `str` type check alone
+    false-greens a managed hook source Codex would reject. Fail closed instead.
+    """
+    for field, flavour, flavour_label, _os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if field not in hooks:
+            continue
+        value = hooks[field]
+        if not isinstance(value, str):
             raise HarnessError(
                 f"existing requirements hooks.{field} must be a path string"
+            )
+        if not flavour(value).is_absolute():
+            raise HarnessError(
+                f"existing requirements hooks.{field} must be an absolute path "
+                f"in {flavour_label} form: {value!r}"
+            )
+        if not requirements_hook_field_is_active_here(field):
+            continue
+        if (
+            flavour is PureWindowsPath
+            and not requirements_hook_path_is_locally_probeable(value)
+        ):
+            continue
+        try:
+            resolvable = Path(value).is_dir()
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect requirements hooks.{field} {value!r}: {exc}"
+            ) from exc
+        if not resolvable:
+            raise HarnessError(
+                f"existing requirements hooks.{field} is not an existing directory: "
+                f"{value!r}"
             )
 
 
@@ -2052,25 +3233,75 @@ _FLOOR_WRAPPER = r"invoke_deny_floor\.(?:sh|ps1|cmd|bat)"
 # variable must match ONE of these whole-value forms — anything else (rebinding,
 # glued prefixes/suffixes, quote concatenation, relative dispatcher/interpreter)
 # fails closed, because char-level anchoring proved to be repeated whack-a-mole.
-_FLOOR_VALUE_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
-        rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
-        rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
-        rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
-        # interpreter (py.exe): SYSTEM-variable anchored, never relative
-        rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
-        rf"{_SYSTEM_VAR}\+'/py\.exe'",
-        rf"join-path {_SYSTEM_VAR} 'py\.exe'",
-        # wrapper: a repo-relative path whose final component is the wrapper
-        # script (the project's own adapter, trusted via a /hooks review)
-        rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?",
-    )
+# These shapes are anchored to HOME or a system variable, so they resolve the
+# same wherever Codex starts the session.
+_CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
+    # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
+    rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
+    rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
+    rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
+    # interpreter (py.exe): SYSTEM-variable anchored, never relative
+    rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
+    rf"{_SYSTEM_VAR}\+'/py\.exe'",
+    rf"join-path {_SYSTEM_VAR} 'py\.exe'",
+)
+# wrapper, HOME-anchored: `~/work/repo/invoke_deny_floor.sh` resolves to the
+# same file from every session cwd, so it belongs with the cwd-independent
+# shapes even though it names the project's own wrapper script.
+#
+# Unlike the dispatcher shapes above, this one is built PER PLATFORM and
+# refuses single quotes, because "cwd-independent" is only true if the anchor
+# actually expands where the command runs:
+#   * `$env:USERPROFILE` is PowerShell-only. A POSIX shell expands `$env` to
+#     nothing and runs `:USERPROFILE/...`, so the floor never starts.
+#   * single quotes suppress expansion in BOTH sh and PowerShell, so
+#     `w='$HOME/…/invoke_deny_floor.sh'` invokes a literal `$HOME` directory.
+#   * `~` is expanded by the shell only when it is unquoted; inside double
+#     quotes sh keeps it literal.
+#   * POSIX variable names are CASE-SENSITIVE, so `$home` is a different (and
+#     normally empty) variable. The recognizer lowercases before matching, so
+#     the original spelling is re-checked separately for the POSIX side;
+#     PowerShell really is case-insensitive and keeps the loose match.
+_POSIX_HOME_ENV_VAR = r"\$\{?home\}?"
+_WINDOWS_HOME_ENV_VAR = rf"(?:{_POSIX_HOME_ENV_VAR}|\$\{{?env:userprofile\}}?)"
+_WRAPPER_TAIL = rf"/(?:[\w.-]+/)*{_FLOOR_WRAPPER}"
+# Applied to the ORIGINAL-CASE text, never the lowercased normalization.
+_POSIX_HOME_ANCHOR_EXACT = re.compile(r"^(?:~|\$\{?HOME\}?)/")
+
+
+def posix_home_anchor_case_is_exact(text: str) -> bool:
+    """Whether a POSIX HOME anchor is spelled the way sh will expand it."""
+    return bool(_POSIX_HOME_ANCHOR_EXACT.match(text.strip("'\"").replace("\\", "/")))
+
+
+def _home_anchored_wrapper_source(windows: bool) -> str:
+    home_var = _WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR
+    return rf'(?:~{_WRAPPER_TAIL}|"?{home_var}{_WRAPPER_TAIL}"?)'
+
+
+_HOME_ANCHORED_WRAPPER_VALUE_PATTERNS = {
+    windows: re.compile(_home_anchored_wrapper_source(windows))
+    for windows in (False, True)
+}
+# wrapper, relative: a repo-relative path whose final component is the wrapper
+# script (the project's own adapter, trusted via a /hooks review). Being
+# relative, it only resolves when Codex's session cwd is the hook source root,
+# which is why it is the one shape `reject_relative_wrapper` drops.
+_WRAPPER_FLOOR_VALUE_SOURCE = (
+    rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
+)
+
+_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
+    re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
+)
+_FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
+    re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
 )
 
 
-def value_binds_anchored_floor_path(value: str) -> bool:
+def value_binds_anchored_floor_path(
+    value: str, *, reject_relative_wrapper: bool = False, windows: bool = False
+) -> bool:
     """Return whether an assignment value resolves to a genuine floor path.
 
     Uses a strict whitelist of the exact known-good value shapes rather than
@@ -2079,13 +3310,32 @@ def value_binds_anchored_floor_path(value: str) -> bool:
     variable's runtime value can never diverge from the pinned floor via a
     rebind, a glued prefix (``x.claude/...`` / ``evil'.claude/...'``), or
     concatenation past the marker.
+
+    ``reject_relative_wrapper`` additionally drops the RELATIVE wrapper shape,
+    which is only meaningful when the session cwd is the hook source root. A
+    HOME-anchored wrapper path survives, because it names the same file from
+    every cwd — but only under an anchor ``windows`` says this command's shell
+    actually expands, and never single-quoted.
     """
     normalized = value.lower().replace("\\", "/")
-    return any(pattern.fullmatch(normalized) for pattern in _FLOOR_VALUE_PATTERNS)
+    patterns = (
+        _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS
+        if reject_relative_wrapper
+        else _FLOOR_VALUE_PATTERNS
+    )
+    if any(pattern.fullmatch(normalized) for pattern in patterns):
+        return True
+    if not _HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized):
+        return False
+    return windows or posix_home_anchor_case_is_exact(value)
 
 
 def is_inert_floor_setup_segment(
-    segment: str, allowed_variables: set[str], *, windows: bool
+    segment: str,
+    allowed_variables: set[str],
+    *,
+    windows: bool,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     assignment = inert_floor_assignment(segment, windows=windows)
     if assignment is None:
@@ -2095,7 +3345,11 @@ def is_inert_floor_setup_segment(
         # A floor variable may only be (re)bound to the anchored floor path; any
         # other value — an attacker rebind or concatenation past the marker —
         # is rejected so the executed path cannot diverge from the pinned one.
-        return value_binds_anchored_floor_path(value)
+        return value_binds_anchored_floor_path(
+            value,
+            reject_relative_wrapper=reject_relative_wrapper,
+            windows=windows,
+        )
     literal = value.strip()
     if len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}:
         literal = literal[1:-1]
@@ -2249,30 +3503,91 @@ def segment_invokes_direct_floor(
 _WRAPPER_PATH_TOKEN = re.compile(
     rf"^(?:{_PATH_COMPONENT}/)*invoke_deny_floor\.(?:sh|ps1|cmd|bat)$"
 )
+# The subset of wrapper path tokens that name the same file from every session
+# cwd. Intermediate components are restricted to literal words so a smuggled
+# `$pwd`/`$cwd` expansion cannot ride in behind the home anchor, and the anchor
+# itself must be one this command's shell expands (see the value patterns).
+_HOME_ANCHORED_WRAPPER_TOKENS = {
+    windows: re.compile(
+        rf"^(?:~|{_WINDOWS_HOME_ENV_VAR if windows else _POSIX_HOME_ENV_VAR})"
+        rf"{_WRAPPER_TAIL}$"
+    )
+    for windows in (False, True)
+}
 
 
-def token_is_wrapper(token: str, wrapper_variables: set[str]) -> bool:
+def token_is_wrapper(
+    token: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: bool = False,
+    double_quoted: bool = False,
+) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
     # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
     # (`x=.../invoke_deny_floor.sh`) can pass.
     if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
-        return True
+        # Under ``reject_relative`` only the HOME-anchored spelling survives:
+        # every other recognized literal form resolves against the session cwd.
+        # A quoted or escaped anchor is not an anchor — the shell passes
+        # `$HOME`/`~` through literally — so it fails closed with the
+        # relative shapes.
+        if not reject_relative:
+            return True
+        if anchor_is_literal:
+            return False
+        if not _HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped):
+            return False
+        if windows:
+            return True
+        if not posix_home_anchor_case_is_exact(token):
+            return False
+        # An UNQUOTED `$HOME` expansion is subject to field splitting, so a
+        # home directory containing whitespace hands `sh` several operands and
+        # the wrapper never starts. `"$HOME/…"` is one word; tilde expansion
+        # results are exempt from field splitting, so bare `~/…` is safe.
+        return double_quoted or stripped.startswith("~")
+    # A variable-bound wrapper is admitted here on name alone; the anchoring of
+    # the value is enforced separately, because `platform_project_floor_command`
+    # requires every setup segment to pass `is_inert_floor_setup_segment` under
+    # the same ``reject_relative_wrapper`` flag.
     return token_references_variable(token, wrapper_variables)
 
 
 def shell_script_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
     if index < len(tokens) and tokens[index] == "--":
         index += 1
-    return index < len(tokens) and token_is_wrapper(tokens[index], wrapper_variables)
+    return index < len(tokens) and token_is_wrapper(
+        tokens[index],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[index])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[index])),
+    )
 
 
 def powershell_file_operand_is_wrapper(
-    tokens: list[str], wrapper_variables: set[str]
+    tokens: list[str],
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+    anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -2282,14 +3597,34 @@ def powershell_file_operand_is_wrapper(
         return False
     if len(tokens) < 3:
         return False
-    return token_is_wrapper(tokens[2], wrapper_variables)
+    return token_is_wrapper(
+        tokens[2],
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[2])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[2])),
+    )
 
 
-def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
+def segment_invokes_wrapper(
+    segment: str,
+    wrapper_variables: set[str],
+    *,
+    reject_relative: bool = False,
+    windows: bool = False,
+) -> bool:
     """Recognize conservative project-wrapper execution shapes.
 
     The wrapper must be the EXECUTED script operand — a `-c` command string or a
     trailing argument that merely mentions the wrapper path does not qualify.
+
+    ``reject_relative`` fails closed on a session-cwd-relative wrapper path.
+    Codex runs hook commands from the session cwd, so when that directory is not
+    the hook source root the relative path resolves somewhere else entirely. A
+    HOME-anchored wrapper (`~/work/repo/invoke_deny_floor.sh`) names the same
+    file from every cwd and is still certified there — but only under an anchor
+    ``windows`` says this shell expands, and never single-quoted.
     """
     stripped = segment.strip()
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
@@ -2304,9 +3639,53 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
         return False
     if not tokens:
         return False
+
+    def anchor_is_literal(token: str) -> bool:
+        """Whether the shell passes this token's anchor through UNEXPANDED.
+
+        `shlex` has already removed quotes and escapes, so the token alone
+        cannot tell `$HOME/x` from `'$HOME/x'`, `\\$HOME/x` or `"~/x"` — all of
+        which the shell hands over literally, leaving a session-cwd-relative
+        path. The raw segment is consulted for the character that introduced
+        the token:
+
+        * a backslash escapes either anchor kind;
+        * `~` expands only when wholly unquoted (sh keeps `"~/x"` literal);
+        * a variable expands inside double quotes but not single ones.
+
+        A token that is not present verbatim in the raw segment lost an escape
+        or quote INSIDE itself, which is unrecognizable, so it fails closed.
+        """
+        index = stripped.find(token)
+        if index < 0:
+            return True
+        preceding = stripped[index - 1] if index else ""
+        if preceding == "\\":
+            return True
+        if token.startswith("~"):
+            return preceding in {"'", '"'}
+        return preceding == "'"
+
+    def double_quoted(token: str) -> bool:
+        """Whether the token was written as one double-quoted shell word.
+
+        An unquoted `$HOME` expansion is subject to field splitting, so a home
+        directory containing whitespace turns one operand into several and the
+        wrapper never starts.
+        """
+        index = stripped.find(token)
+        return index > 0 and stripped[index - 1] == '"'
+
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
-    if token_is_wrapper(head, wrapper_variables):
+    if token_is_wrapper(
+        head,
+        wrapper_variables,
+        reject_relative=reject_relative,
+        windows=windows,
+        anchor_is_literal=anchor_is_literal(head),
+        double_quoted=double_quoted(head),
+    ):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
     # The shell/PowerShell interpreter that runs the wrapper must be a bare
@@ -2320,13 +3699,37 @@ def segment_invokes_wrapper(segment: str, wrapper_variables: set[str]) -> bool:
     head_base = normalized_head.lower().rsplit("/", 1)[-1]
     head_base = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head_base)
     if head_base in {"sh", "bash", "dash", "ash"}:
-        return shell_script_operand_is_wrapper(tokens, wrapper_variables)
+        return shell_script_operand_is_wrapper(
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
+        )
     if head_base in {"powershell", "pwsh"}:
-        return powershell_file_operand_is_wrapper(tokens, wrapper_variables)
+        return powershell_file_operand_is_wrapper(
+            tokens,
+            wrapper_variables,
+            reject_relative=reject_relative,
+            windows=windows,
+            anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
+        )
     return False
 
 
 def command_binds_pin(command: str, expected_pin: str | None) -> bool:
+    """Return whether the command declares this audit marker.
+
+    AUDIT-ONLY (issue #18). The `expected=<sha256>` value is a declaration
+    inside the Codex hook definition, not a runtime integrity control: nothing
+    exports it to the dispatcher, and `dispatch.py` takes no expected-hash
+    argument. It proves only that the trusted hook DEFINITION was written
+    against these dispatcher bytes, which is why a dispatcher change obliges an
+    estate-wide marker refresh plus a fresh-session `/hooks` re-trust. Runtime
+    byte integrity is separate evidence and is deliberately not claimed here.
+    """
     if expected_pin is None:
         return True
     return bool(
@@ -2344,7 +3747,11 @@ def matcher_targets_bash(matcher: Any) -> bool:
 
 
 def platform_project_floor_command(
-    command: str, expected_pin: str | None, *, windows: bool = False
+    command: str,
+    expected_pin: str | None,
+    *,
+    windows: bool = False,
+    reject_relative_wrapper: bool = False,
 ) -> bool:
     inspected = strip_shell_comments(command)
     normalized = inspected.lower().replace("\\", "/")
@@ -2369,7 +3776,12 @@ def platform_project_floor_command(
             segment_invokes_direct_floor(
                 segment, dispatcher_variables, interpreter_variables
             )
-            or segment_invokes_wrapper(segment, wrapper_variables)
+            or segment_invokes_wrapper(
+                segment,
+                wrapper_variables,
+                reject_relative=reject_relative_wrapper,
+                windows=windows,
+            )
         )
     ]
     if len(invocation_indexes) != 1:
@@ -2380,7 +3792,12 @@ def platform_project_floor_command(
     setup_segments = segments[:invocation_index]
     allowed_variables = dispatcher_variables | wrapper_variables | interpreter_variables
     if not all(
-        is_inert_floor_setup_segment(segment, allowed_variables, windows=windows)
+        is_inert_floor_setup_segment(
+            segment,
+            allowed_variables,
+            windows=windows,
+            reject_relative_wrapper=reject_relative_wrapper,
+        )
         for segment in setup_segments
     ):
         return False
@@ -2416,6 +3833,136 @@ def repo_codex_floor_candidates(
     return result
 
 
+# Any `name=<64 hex>` assignment, i.e. the audit marker an adapter declares.
+# Deliberately looser than `command_binds_pin`, so a marker that is present but
+# STALE reads as a stale marker instead of as no marker at all.
+_AUDIT_MARKER = re.compile(
+    r"(?i)(?:^|[\s{(;&|])\$?[a-z_][a-z0-9_]*\s*=\s*[\"']?([0-9a-f]{64})[\"']?"
+    r"(?=$|[\s;}})])"
+)
+
+
+# A command names the SHARED dispatcher when the `.claude/hooks/dispatch.py`
+# suffix is anchored to a home variable. Both spellings the floor recognizer
+# accepts must be recognized here too, or the inventory reports a repo-local
+# copy for an adapter the recognizer just certified: the adjacent forms
+# (`$HOME/...`, `$env:USERPROFILE+'/...'`) and PowerShell's whitespace-separated
+# `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`.
+_SHARED_DISPATCHER_REFERENCE = re.compile(
+    rf"{_HOME_VAR}[^\s;]*{_FLOOR_DISPATCH}"
+    rf"|join-path\s+{_HOME_VAR}\s+['\"]?[^\s;'\"]*{_FLOOR_DISPATCH}"
+)
+
+
+def codex_adapter_command_notes(
+    command: str, label: str, expected_pin: str
+) -> tuple[list[str], list[str]]:
+    """Describe one platform command's deviations from the adapter contract.
+
+    Returns (gaps, inventory). A gap is a deviation nothing else can supply; an
+    inventory note records a legitimate but non-default choice — a vendored
+    dispatcher or a repo wrapper that carries the flags out of static view.
+    """
+    if not command.strip():
+        # An undeclared platform command has no flags, no marker and no
+        # dispatcher by definition. Reporting each of those absences as its own
+        # violation sent readers hunting for a malformed command instead of a
+        # missing one.
+        return [f"{label} declares no command for this platform"], []
+    inspected = strip_shell_comments(command)
+    normalized = inspected.lower().replace("\\", "/")
+    delegates_to_wrapper = "invoke_deny_floor" in normalized
+    gaps: list[str] = []
+    inventory: list[str] = []
+    for flag, value in (("event", "pre"), ("runtime", "codex")):
+        if command_has_flag_value(inspected, flag, value):
+            continue
+        if delegates_to_wrapper:
+            inventory.append(
+                f"{label} leaves --{flag} {value} to a repo wrapper; follow the "
+                "launcher to confirm it"
+            )
+        else:
+            gaps.append(f"{label} never passes --{flag} {value}")
+    markers = {match.group(1).lower() for match in _AUDIT_MARKER.finditer(inspected)}
+    if not markers:
+        gaps.append(f"{label} declares no expected=<sha256> audit marker")
+    elif expected_pin not in markers:
+        gaps.append(
+            f"{label} declares a stale audit marker "
+            f"{sorted(markers)[0][:12]}... (installed dispatcher "
+            f"{expected_pin[:12]}...)"
+        )
+    if not _SHARED_DISPATCHER_REFERENCE.search(normalized):
+        if ".claude/hooks/dispatch.py" in normalized:
+            inventory.append(
+                f"{label} names a repo-local dispatcher copy rather than the "
+                "shared home-anchored one"
+            )
+        elif delegates_to_wrapper:
+            inventory.append(
+                f"{label} reaches a dispatcher only through a repo wrapper"
+            )
+        else:
+            inventory.append(f"{label} names no shared dispatcher")
+    return gaps, inventory
+
+
+def codex_adapter_contract_notes(
+    current: str, source_label: str, expected_pin: str, *, source_kind: str = "json"
+) -> tuple[list[str], list[str], int]:
+    """Inventory every candidate adapter handler in one hook source.
+
+    `doctor` already fails a repo whose canonical adapter is unpinned or stale,
+    but it reported only a count, which cannot distinguish "no marker" from
+    "stale marker" from "no --runtime codex". Estate audits need the reason.
+
+    Returns (gaps, inventory, inspected_handlers). The count exists so a caller
+    can tell "checked and clean" apart from "there was nothing to check".
+    """
+    _current_data, _hooks, groups = parse_hooks_document(
+        current, source_kind=source_kind
+    )
+    gaps: list[str] = []
+    inventory: list[str] = []
+    inspected_handlers = 0
+    for group_index, group in enumerate(groups):
+        for handler_index, handler in enumerate(group.get("hooks", [])):
+            if handler.get("type") != "command":
+                continue
+            commands = {
+                "command": handler.get("command", ""),
+                "commandWindows": decode_windows_hook_command(
+                    windows_hook_command(handler)
+                ),
+            }
+            # Candidacy must agree with `repo_codex_floor_candidates`, which
+            # decides on comment-stripped text. A commented-out mention of the
+            # dispatcher is not an adapter handler; treating it as one reported
+            # contract gaps against a handler every floor check ignores, which
+            # turned an unrelated commented command into a false red.
+            if not any(
+                ".claude/hooks/dispatch.py" in stripped.lower().replace("\\", "/")
+                or "invoke_deny_floor" in stripped.lower()
+                for stripped in (
+                    strip_shell_comments(text) for text in commands.values()
+                )
+            ):
+                continue
+            inspected_handlers += 1
+            for field, text in commands.items():
+                label = (
+                    f"{source_label}:pre_tool_use:{group_index}:{handler_index}"
+                    f".{field}"
+                )
+                command_gaps, command_inventory = codex_adapter_command_notes(
+                    text, label, expected_pin
+                )
+                gaps.extend(command_gaps)
+                inventory.extend(command_inventory)
+    return gaps, inventory, inspected_handlers
+
+
 def handler_gates_synchronously(handler: dict[str, Any]) -> bool:
     """Reject handler shapes Codex would not run as a blocking PreToolUse gate.
 
@@ -2431,6 +3978,7 @@ def repo_codex_floor_entries(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[tuple[int, int, Any]]:
     """Return positions and groups for platform-complete project floor handlers."""
     _current_data, _hooks, groups = parse_hooks_document(
@@ -2452,9 +4000,14 @@ def repo_codex_floor_entries(
         command = handler.get("command", "")
         windows_command = decode_windows_hook_command(windows_hook_command(handler))
         if platform_project_floor_command(
-            command, expected_pin
+            command,
+            expected_pin,
+            reject_relative_wrapper=reject_relative_wrapper,
         ) and platform_project_floor_command(
-            windows_command, expected_pin, windows=True
+            windows_command,
+            expected_pin,
+            windows=True,
+            reject_relative_wrapper=reject_relative_wrapper,
         ):
             result.append((group_index, 0, group))
     return result
@@ -2465,17 +4018,27 @@ def repo_codex_floor_groups(
     expected_pin: str | None = None,
     *,
     source_kind: str = "json",
+    reject_relative_wrapper: bool = False,
 ) -> list[Any]:
     """Return one group entry per platform-complete project floor handler."""
     return [
         group
         for _group_index, _handler_index, group in repo_codex_floor_entries(
-            current, expected_pin, source_kind=source_kind
+            current,
+            expected_pin,
+            source_kind=source_kind,
+            reject_relative_wrapper=reject_relative_wrapper,
         )
     ]
 
 
 def normalized_text_sha256(path: Path) -> str:
+    """Hash a file's LF-normalized text; the value adapters declare as a marker.
+
+    Line endings are normalized so the same checkout hashes identically on
+    Windows and POSIX. See `command_binds_pin` for what the declared value does
+    and does not prove.
+    """
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -2692,6 +4255,43 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
+    # `harness_reference_status` reaches the remote for the published main tip,
+    # so this probe answers to `--offline` exactly like the repo reality checks
+    # below; otherwise a supposedly offline run still waits out `git ls-remote`.
+    # ONE budget for every probe this command makes. The floor-version check
+    # and the `--repo` reality checks both call `harness_reference_status`, so
+    # a separate deadline each let an unreachable harness origin be waited out
+    # twice — and let the two legs report different reference states.
+    probe_deadline = monotonic() + REALITY_BUDGET_SECONDS
+    reference_ok, reference_detail = harness_reference_status(
+        harness_root, offline_aware_command_runner(args), probe_deadline
+    )
+    template_version = floor_version(
+        harness_root / "templates" / "hooks" / "dispatch.py"
+    )
+    deployed_version = floor_version(claude_home / "hooks" / "dispatch.py")
+    # When the working-tree template is not the canonical reference, this
+    # comparison cannot certify anything: reporting it as a pass would call
+    # unmerged branch bytes the canonical floor. It is UNPROVEN, and UNPROVEN
+    # never renders as `[ok]`.
+    checks.append(
+        (
+            "floor version",
+            (
+                (bool(template_version) and template_version == deployed_version)
+                if reference_ok
+                else REALITY_UNPROVEN
+            ),
+            f"canonical template {template_version or '<unreadable>'}; deployed "
+            f"global {deployed_version or '<unreadable>'}; reference integrity: "
+            f"{reference_detail}"
+            + (
+                ""
+                if reference_ok
+                else " — nothing here was compared against canonical bytes"
+            ),
+        )
+    )
     if args.repo:
         try:
             marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
@@ -2742,38 +4342,128 @@ def doctor(args: argparse.Namespace) -> int:
                 for hooks in repo_hook_paths
                 if (text := read_optional_text(hooks)) is not None
             ]
-            json_hook_texts = [text for _hooks, text in json_hook_documents]
-            inline_hook_texts = [
-                document
+            inline_hook_documents = [
+                (hooks, document)
                 for hooks in repo_hook_paths
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
-            repo_hook_sources = [(text, "json") for text in json_hook_texts] + [
-                (text, "config") for text in inline_hook_texts
-            ]
+
+            # Codex runs a hook command from the SESSION cwd, not from the
+            # directory that owns the hook source. Wherever those differ — a
+            # `--repo <subdir>` audit, or a linked worktree sourcing hooks from
+            # the root checkout — a repo-relative wrapper path resolves
+            # somewhere other than the hook source root, so it cannot be
+            # certified.
+            def wrapper_is_cwd_relative_here(hooks: Path) -> bool:
+                return hooks.parent.parent.resolve() != requested_path
+
+            repo_hook_sources = [
+                (hooks, text, "json") for hooks, text in json_hook_documents
+            ] + [(hooks, text, "config") for hooks, text in inline_hook_documents]
             project_floor_count = sum(
-                len(repo_codex_floor_groups(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                len(
+                    repo_codex_floor_groups(
+                        text,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
+                )
+                for hooks, text, source_kind in repo_hook_sources
             )
             candidate_floor_count = sum(
                 len(repo_codex_floor_candidates(text, source_kind=source_kind))
-                for text, source_kind in repo_hook_sources
+                for _hooks, text, source_kind in repo_hook_sources
             )
+            # Binding a repo-relative wrapper is a property of the adapter TEXT,
+            # not of this audit's cwd. Detect it for every source so the
+            # dependency is reported even from the one cwd where it happens to
+            # resolve; only the cwd that actually breaks it fails the floor.
+            cwd_relative_wrapper_sources = [
+                (hooks, source_kind, lenient - strict)
+                for hooks, text, source_kind in repo_hook_sources
+                if (
+                    lenient := len(
+                        repo_codex_floor_groups(text, source_kind=source_kind)
+                    )
+                )
+                != (
+                    strict := len(
+                        repo_codex_floor_groups(
+                            text,
+                            source_kind=source_kind,
+                            reject_relative_wrapper=True,
+                        )
+                    )
+                )
+            ]
+            unresolvable_wrapper_sources = [
+                f"{hooks} ({source_kind}): "
+                f"{count} handler(s) bind a session-cwd-relative wrapper path"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if wrapper_is_cwd_relative_here(hooks)
+            ]
+            cwd_dependent_wrapper_notes = [
+                f"{hooks} ({source_kind}): {count} handler(s) bind a "
+                "session-cwd-relative wrapper path, so this adapter certifies "
+                f"only for sessions started in {hooks.parent.parent}"
+                for hooks, source_kind, count in cwd_relative_wrapper_sources
+                if not wrapper_is_cwd_relative_here(hooks)
+            ]
             expected_pin = normalized_text_sha256(
                 harness_root / "templates" / "hooks" / "dispatch.py"
             )
             current_floor_count = sum(
                 len(
-                    repo_codex_floor_groups(text, expected_pin, source_kind=source_kind)
+                    repo_codex_floor_groups(
+                        text,
+                        expected_pin,
+                        source_kind=source_kind,
+                        reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                    )
                 )
-                for text, source_kind in repo_hook_sources
+                for hooks, text, source_kind in repo_hook_sources
+            )
+            adapter_gaps: list[str] = []
+            adapter_inventory: list[str] = []
+            adapter_handler_count = 0
+            for hooks, text, source_kind in repo_hook_sources:
+                (
+                    source_gaps,
+                    source_inventory,
+                    source_handlers,
+                ) = codex_adapter_contract_notes(
+                    text, str(hooks), expected_pin, source_kind=source_kind
+                )
+                adapter_gaps.extend(source_gaps)
+                adapter_inventory.extend(source_inventory)
+                adapter_handler_count += source_handlers
+            adapter_inventory.extend(cwd_dependent_wrapper_notes)
+            adapter_ok = not adapter_gaps
+            # With no adapter handler anywhere there is nothing to certify, and
+            # claiming a current marker would assert a fact about a file that
+            # declares none. Say which of the two clean states this is.
+            adapter_detail = "; ".join(
+                [f"contract gap: {gap}" for gap in adapter_gaps]
+                + [f"note: {note}" for note in adapter_inventory]
+            ) or (
+                f"{adapter_handler_count} adapter handler(s) across "
+                f"{len(repo_hook_sources)} inspected hook source(s) declare a "
+                "current audit marker and pass --event pre --runtime codex"
+                if adapter_handler_count
+                else f"{len(repo_hook_sources)} inspected hook source(s) declare no "
+                "handler that reaches the shared floor: nothing to check here, and "
+                "the project floor check owns that verdict"
             )
             canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
             canonical_root_floor_entries = [
                 entry
                 for hooks, hooks_text in json_hook_documents
                 if hooks == canonical_hooks
-                for entry in repo_codex_floor_entries(hooks_text, expected_pin)
+                for entry in repo_codex_floor_entries(
+                    hooks_text,
+                    expected_pin,
+                    reject_relative_wrapper=wrapper_is_cwd_relative_here(hooks),
+                )
             ]
             canonical_root_floor_count = len(canonical_root_floor_entries)
             # Hook IDs use Codex's lexical source path. Preserve an explicit
@@ -2795,12 +4485,23 @@ def doctor(args: argparse.Namespace) -> int:
             except (HarnessError, OSError, UnicodeError) as exc:
                 activation_ok = False
                 activation_detail = str(exc)
+            wrapper_detail = (
+                "session cwd "
+                f"{requested_path} is not the hook source root, so "
+                f"{'; '.join(unresolvable_wrapper_sources)}"
+                " that Codex would resolve under the session cwd instead; "
+                if unresolvable_wrapper_sources
+                else ""
+            )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
-                f"{current_floor_count} current pinned handler(s); "
+                f"{current_floor_count} current audit-marker handler(s); "
                 f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
-                f"{source_detail}; trust is checked manually in /hooks"
+                f"{wrapper_detail}"
+                f"{source_detail}; the expected=<sha256> value is an audit-only "
+                "marker, never verified at runtime; trust is checked manually "
+                "in /hooks"
             )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
@@ -2810,7 +4511,10 @@ def doctor(args: argparse.Namespace) -> int:
             source_ok = False
             source_detail = str(exc)
             project_detail = str(exc)
+            adapter_ok = False
+            adapter_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
+        checks.append(("Codex adapter contract", adapter_ok, adapter_detail))
         checks.append(
             ("Codex project hook activation", activation_ok, activation_detail)
         )
@@ -2827,24 +4531,102 @@ def doctor(args: argparse.Namespace) -> int:
                 project_detail,
             )
         )
+        try:
+            reality_repo = git_root(Path(args.repo))
+            _reality_config, reality_tier_data = load_tier(reality_repo)
+            reality_tier = (
+                reality_tier_data.get("tier")
+                if reality_tier_data.get("tier") in TIER_NAMES
+                else 1
+            )
+            findings = reality_findings(
+                reality_repo,
+                reality_tier,
+                reality_tier_data,
+                harness_root=harness_root,
+                claude_home=claude_home,
+                # `doctor --repo` runs the same reality checks as `audit`, so
+                # it needs the same escape hatch: without it an operator off
+                # network waits out the whole probe budget on `gh` and remote
+                # ref lookups before every one of them degrades to UNPROVEN.
+                command_runner=offline_aware_command_runner(args),
+                deadline=probe_deadline,
+            )
+            statuses = {finding["status"] for finding in findings}
+            reality_ok: bool | str = True
+            if REALITY_MISMATCH in statuses:
+                reality_ok = False
+            elif REALITY_UNPROVEN in statuses:
+                reality_ok = REALITY_UNPROVEN
+            reality_detail = (
+                "; ".join(
+                    f"[{finding['status']}] {finding['check']}: {finding['detail']}"
+                    for finding in findings
+                )
+                or "this repo declares nothing that is checkable against reality"
+            )
+        except (HarnessError, OSError, UnicodeError) as exc:
+            reality_ok = False
+            reality_detail = str(exc)
+        checks.append(("declared vs real", reality_ok, reality_detail))
+    # Three states, one renderer: a check that could not run prints as
+    # UNPROVEN, never as `[ok]`. It is not a failure either — an unprovable
+    # canonical reference is a property of where the operator is standing, not
+    # a defect in the floor being audited.
     for label, ok, detail in checks:
-        print(f"[{'ok' if ok else 'FAIL'}] {label}: {detail}")
-    return 0 if all(ok for _, ok, _ in checks) else 1
+        if ok == REALITY_UNPROVEN:
+            state = REALITY_UNPROVEN
+        else:
+            state = "ok" if ok else "FAIL"
+        print(f"[{state}] {label}: {detail}")
+    return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
-def audit_command(args: argparse.Namespace) -> int:
-    result = audit_repo(Path(args.path))
+def audit_command(
+    args: argparse.Namespace,
+    *,
+    harness_root: Path | None = None,
+    claude_home: Path | None = None,
+    command_runner: Any | None = None,
+) -> int:
+    """Render one audit. The seams exist so a test never runs the real world.
+
+    `audit_repo` already takes the harness checkout, the deployed `~/.claude`
+    copy and the resolver as arguments; without the same seams here, any test
+    that exercises the RENDERING falls back to the real harness checkout, the
+    real home directory and a real `git`/`gh` — which is exactly the
+    auditing-machine dependence these checks exist to remove.
+    """
+    if command_runner is None:
+        command_runner = offline_aware_command_runner(args)
+    result = audit_repo(
+        Path(args.path),
+        harness_root=harness_root,
+        claude_home=claude_home,
+        command_runner=command_runner,
+    )
     if args.json:
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
         print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
         print(result["git"])
-        if result["issues"]:
-            for issue in result["issues"]:
-                print(f"[FAIL] {issue}")
-        else:
-            print("[ok] harness audit")
+        for issue in result["issues"]:
+            print(f"[FAIL] {issue}")
+        for finding in result["reality"]:
+            print(f"[{finding['status']}] {finding['check']}: {finding['detail']}")
+        if result["ok"]:
+            # An unproven check is neither a pass nor a failure, so the summary
+            # line has to say how much of this run was actually measured.
+            unproven = result["unproven"]
+            print(
+                "[ok] harness audit"
+                + (
+                    f" — {unproven} check(s) UNPROVEN and therefore not passed"
+                    if unproven
+                    else ""
+                )
+            )
     return 0 if result["ok"] else 1
 
 
@@ -2854,6 +4636,11 @@ def parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="validate a repository harness")
     audit.add_argument("path", nargs="?", default=".")
     audit.add_argument("--json", action="store_true")
+    audit.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver; unmeasured checks report UNPROVEN",
+    )
     audit.set_defaults(func=audit_command)
 
     seed = sub.add_parser(
@@ -2889,6 +4676,12 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--skills-home")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
+    )
+    check.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver in the --repo reality checks; "
+        "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
     return root

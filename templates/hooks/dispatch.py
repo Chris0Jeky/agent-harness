@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.6 (2026-07-25)"
+FLOOR_VERSION = "1.6.13 (2026-07-26)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -51,6 +51,8 @@ _LITERAL_COMMA = "__HARNESS_LITERAL_COMMA_8F3A__"
 _LITERAL_OPEN_BRACE = "__HARNESS_LITERAL_OPEN_BRACE_2D91__"
 _LITERAL_CLOSE_BRACE = "__HARNESS_LITERAL_CLOSE_BRACE_2D91__"
 _LITERAL_BACKTICK = "__HARNESS_LITERAL_BACKTICK_2D91__"
+_LITERAL_OPEN_PAREN = "__HARNESS_LITERAL_OPEN_PAREN_2D91__"
+_LITERAL_CLOSE_PAREN = "__HARNESS_LITERAL_CLOSE_PAREN_2D91__"
 _INERT_QUOTED_PREFIX = "__HARNESS_INERT_QUOTED_31C7_"
 _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 # Minted by the tokenizer AFTER the scrub, and read by command_head: it pushes a
@@ -95,6 +97,8 @@ def restore_quoted_literal_punctuation(value: str) -> str:
         .replace(_LITERAL_OPEN_BRACE, "{")
         .replace(_LITERAL_CLOSE_BRACE, "}")
         .replace(_LITERAL_BACKTICK, "`")
+        .replace(_LITERAL_OPEN_PAREN, "(")
+        .replace(_LITERAL_CLOSE_PAREN, ")")
     )
 
 
@@ -345,10 +349,16 @@ def cmd_unescape(text: str) -> str:
     return re.sub(r"\^(.)", r"\1", text, flags=re.DOTALL)
 
 
+_CMD_SETUP_SWITCH = (
+    r"/(?:d|q|a|u|s|e:(?:on|off)|f:(?:on|off)|v:(?:on|off)|t:[0-9a-f]{2})"
+)
 _CMD_NESTED_COMMAND = re.compile(
-    r"^(?:/(?:d|q|a|u|s|e:(?:on|off)|f:(?:on|off)|v:(?:on|off)|"
-    r"t:[0-9a-f]{2}))*/(?P<mode>[ck])(?P<tail>.*)$",
+    rf"^(?:{_CMD_SETUP_SWITCH})*/(?P<mode>[ck])(?P<tail>.*)$",
     re.IGNORECASE,
+)
+_CMD_NESTED_RAW_COMMAND = re.compile(
+    rf"^cmd(?:\.exe)?\b.*?\s(?:{_CMD_SETUP_SWITCH})*/[ck]\s*(?P<child>.+)$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -574,9 +584,14 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
                 index += 2
             else:
                 index += 1
+            # Reads RESTORED text. The tokenizer masks parentheses that came out
+            # of a quoted span so the process-substitution balance walk stops
+            # counting data as syntax; a fail-CLOSED opacity guard must not
+            # inherit that as a silent relaxation, exactly as
+            # `has_dynamic_shell_token` refuses to lose a quote-masked backtick.
             if (
                 not attached
-                or attached.startswith(("@", "("))
+                or restore_quoted_literal_punctuation(attached).startswith(("@", "("))
                 or has_dynamic_shell_token(attached)
             ):
                 return None, f"Start-Process -{name} has an opaque value."
@@ -922,10 +937,19 @@ def token_reads_as_executing_expression(token: str) -> bool:
     an executable from: stamping `'git' push --force` or `'rm' -rf /` would take
     the head out of reach of every rule.
     """
+    # Restore the paren mask first. This predicate asks what the text READS as,
+    # and `"$($_.Name)"` is a subexpression however its parentheses reached this
+    # token; leaving them masked demoted every `$(...)`-inside-a-string case to
+    # "not an expression" and denied a pipeline that only prints. The backtick
+    # mask is deliberately left alone: a backtick out of a quoted span is data
+    # the shell prints, which is the opposite question.
+    restored = token.replace(_LITERAL_OPEN_PAREN, "(").replace(
+        _LITERAL_CLOSE_PAREN, ")"
+    )
     return bool(
         token
         and not token[0].isalpha()
-        and _POWERSHELL_EXECUTING_EXPRESSION.search(token)
+        and _POWERSHELL_EXECUTING_EXPRESSION.search(restored)
     )
 
 
@@ -1015,7 +1039,15 @@ def is_powershell_foreach_loop_statement(head: str, toks: list[str]) -> bool:
     never rejoined across a segment split — the body is ordinary code that the
     normal segment walk already inspects.
     """
-    if head != "foreach" or len(toks) < 2 or not toks[1].startswith("("):
+    # Restored text: a quote-masked `(` still opens the statement's header as
+    # WRITTEN, and failing to recognize it here demotes the statement to the
+    # ForEach-Object member-invocation rule, which denies. Same reasoning as the
+    # opacity guard above, in the over-blocking direction.
+    if (
+        head != "foreach"
+        or len(toks) < 2
+        or not restore_quoted_literal_punctuation(toks[1]).startswith("(")
+    ):
         return False
     return bool(re.search(r"\bin\b", " ".join(toks[1:]), re.IGNORECASE))
 
@@ -1336,7 +1368,7 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
         # A `(...)`/`@(...)` subexpression (e.g. [scriptblock]::Create(...))
         # builds a scriptblock at runtime whose body the floor never sees. This
         # stays live in an expression tail: `-join (iex '...')` still executes.
-        if token.startswith(("(", "@(")):
+        if restore_quoted_literal_punctuation(token).startswith(("(", "@(")):
             return "A dynamic pipeline scriptblock cannot be inspected safely."
         if expression_tail:
             # An operator's operand is a value, not a scriptblock source: `-join
@@ -2506,7 +2538,10 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
 
 
 def windows_operator_segments(
-    command: str, *, single_quotes_are_inert: bool = True
+    command: str,
+    *,
+    single_quotes_are_inert: bool = True,
+    aggregate_redirects: bool = True,
 ) -> list[tuple[str, str]]:
     """Split Windows command operators without splitting quoted inert text."""
     result: list[tuple[str, str]] = []
@@ -2523,6 +2558,19 @@ def windows_operator_segments(
             continue
         if char == '"' or (char == "'" and single_quotes_are_inert):
             quote = char
+            current.append(char)
+        elif char == "&" and (
+            (current and current[-1] in "<>")
+            or (
+                aggregate_redirects
+                and index + 1 < len(command)
+                and command[index + 1] == ">"
+            )
+        ):
+            # ``2>&1``, ``<&0`` and aggregate ``&>``/``&>>`` are
+            # redirections, not command separators.  Splitting here discards
+            # the executable before the Windows-quoting fallback can inspect
+            # it.  ``|&`` is consumed from the preceding ``|`` branch below.
             current.append(char)
         elif char in ";&|\n":
             operator = char
@@ -2586,13 +2634,32 @@ def windows_fallback_tokens(candidate: str) -> list[str]:
 
 def strip_windows_execution_prefix(candidate: str) -> str:
     """Expose a Windows command after inert control and redirect prefixes."""
-    candidate = re.sub(r"^[\s\"'({}&@]+", "", candidate)
-    redirect = re.compile(
-        r"(?is)^(?:\d+)?(?:>>?|<)\s*" r"(?:&\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+    # Preserve a leading ``&`` until aggregate redirections have been tested:
+    # eagerly stripping it turns ``&>file command`` into ``>file command`` and
+    # turns ``>&1 command`` into an unrecognizable ``>`` form.
+    candidate = re.sub(r"^[\s\"'({}@]+", "", candidate)
+    # `\+?=` and the brace-descriptor alternatives keep this recovery path in
+    # step with the argv parser: the cross-product gate runs every deny case
+    # behind every recognized prefix, and a prefix the argv parser strips but
+    # this one does not is a hole in exactly the Windows-quoting commands that
+    # only reach the floor through here.
+    #
+    # `[A-Za-z_][A-Za-z0-9_]*\}` is the SECOND spelling of the same descriptor:
+    # the leading-character scrub above has already eaten the opening `{` by the
+    # time this pattern runs. Over-stripping here can only expose a LATER token
+    # as the head, which adds scrutiny; under-stripping hides one.
+    prefix = re.compile(
+        r"(?is)^(?:"
+        r"--%\s+"
+        r"|[A-Za-z_][A-Za-z0-9_]*\+?=(?:\"[^\"]*\"|'[^']*'|[^\s]*)\s+"
+        r"|(?:\d+|\*|\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*\})?"
+        r"(?:&>>|&>|>>|>\||>&|<<|<&|<>|>|<)\s*"
+        r"(?:&?\d+|\"[^\"]*\"|'[^']*'|[^\s]+)\s+"
+        r")"
     )
-    while match := redirect.match(candidate):
+    while match := prefix.match(candidate):
         candidate = candidate[match.end() :].lstrip()
-    return candidate
+    return re.sub(r"^[\s\"'({}&@]+", "", candidate)
 
 
 def normalize_windows_shell_head(candidate: str) -> str:
@@ -2609,6 +2676,42 @@ def normalize_windows_shell_head(candidate: str) -> str:
     return (match.group("quoted") or match.group("bare")) + candidate[match.end() :]
 
 
+def windows_recovery_segments(
+    command: str, *, single_quotes_are_inert: bool = True
+) -> list[tuple[str, str]]:
+    """Segment a Windows command line under BOTH separator grammars.
+
+    ``&>``/``&>>`` is one aggregate redirection to PowerShell but two commands
+    to cmd.exe, where ``&`` is a separator and ``>nul rd /s /q ...`` is the
+    second command.  Nothing in the command text says which shell will run it,
+    so a recovery path that commits to the PowerShell reading silently drops the
+    cmd command that follows the redirect.  Return the union of both readings
+    and let the caller inspect every candidate; extra candidates can only add
+    scrutiny, whereas a missing one is a bypass.
+
+    The membership test is a SET, not a list scan.  The two grammars usually
+    agree, so the second pass re-offers every entry the first already emitted;
+    an ``in merged`` list scan therefore costs O(n^2) and a 4,000-segment
+    command spent longer inside this one function than the 5-second Codex hook
+    timeout allows.  A floor that answers after the timeout has failed open.
+    ``merged`` still carries the order, because a caller that inspects
+    candidates in a different order can reach a different first deny reason.
+    """
+    merged: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for aggregate_redirects in (True, False):
+        for entry in windows_operator_segments(
+            command,
+            single_quotes_are_inert=single_quotes_are_inert,
+            aggregate_redirects=aggregate_redirects,
+        ):
+            if entry in seen:
+                continue
+            seen.add(entry)
+            merged.append(entry)
+    return merged
+
+
 def unparseable_recursive_delete(command: str) -> list[list[str]]:
     """Recover recursive deletes hidden by non-POSIX Windows quoting.
 
@@ -2617,7 +2720,7 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     wrappers that execute their child text; inert commands such as echo and
     Write-Output deliberately stop the walk.
     """
-    candidates = [segment for segment, _operator in windows_operator_segments(command)]
+    candidates = [segment for segment, _operator in windows_recovery_segments(command)]
     seen: set[str] = set()
     recovered_deletes: list[list[str]] = []
 
@@ -2687,17 +2790,16 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             r"|\s+/(?:b|i|min|max|separate|shared|low|normal|high|"
             r"realtime|abovenormal|belownormal|wait)"
         )
-        cmd_wrapper = re.match(
-            r"(?is)^cmd(?:\.exe)?\b.*?\s/[ck](?:\s+|$)(?P<child>.+)$",
-            candidate,
-        )
+        cmd_wrapper = _CMD_NESTED_RAW_COMMAND.match(candidate)
         wrapper = cmd_wrapper
+        powershell_wrapper = None
         if not wrapper:
-            wrapper = re.match(
+            powershell_wrapper = re.match(
                 r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
                 r"\s[-/](?:command|c)(?:\s+|$)(?P<child>.+)$",
                 candidate,
             )
+            wrapper = powershell_wrapper
         if not wrapper:
             wrapper = re.match(r"(?is)^call\s+(?P<child>.+)$", candidate)
         if not wrapper:
@@ -2719,9 +2821,20 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
-            child_segments = windows_operator_segments(
-                child, single_quotes_are_inert=cmd_wrapper is None
-            )
+            if cmd_wrapper is not None:
+                # cmd.exe: `&` separates, single quotes do not quote.
+                child_segments = windows_operator_segments(
+                    child,
+                    single_quotes_are_inert=False,
+                    aggregate_redirects=False,
+                )
+            elif powershell_wrapper is not None:
+                # PowerShell: `&>` is one aggregate redirection.
+                child_segments = windows_operator_segments(child)
+            else:
+                # `call`/`start` are cmd keywords and `if`/`for` exist in both
+                # grammars, so the child's shell is not decidable here.
+                child_segments = windows_recovery_segments(child)
             candidates.extend(segment for segment, _operator in child_segments)
 
     return recovered_deletes
@@ -2795,6 +2908,15 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             # what lets powershell_block_depth honour the remaining bare
             # backticks as the escape characters they provably are.
             .replace("`", _LITERAL_BACKTICK)
+            # Same argument, same mechanism, for the parenthesis balance walk in
+            # process_substitution_end: `< <(printf ")x" harmless) 'git' push
+            # --force origin main` closed the substitution on the QUOTED `)`,
+            # resolved `harmless` as the head, and let the force-push through.
+            # A per-token provenance stamp cannot fix this -- `x")"x` is one
+            # token that is only PARTLY quoted -- so the provenance has to be
+            # carried at character granularity, which is what these markers are.
+            .replace("(", _LITERAL_OPEN_PAREN)
+            .replace(")", _LITERAL_CLOSE_PAREN)
         )
         quoted[placeholder] = value
         return placeholder
@@ -2818,8 +2940,10 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         # hide an otherwise recognizable recursive delete. Fail closed only
         # for that irreversible surface; benign PowerShell scriptblocks can
         # also be intentionally non-POSIX and remain inspectable by the other
-        # normalization passes below.
-        windows_segments = windows_operator_segments(command)
+        # normalization passes below.  The executing shell is unknown here, so
+        # segment under both separator grammars: reading `&>` only as a
+        # PowerShell aggregate redirect hides the cmd command behind it.
+        windows_segments = windows_recovery_segments(command)
         recovered_segments: list[tuple[list[str], str]] = []
         if len(windows_segments) > 1:
             try:
@@ -2849,17 +2973,19 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         token = raw_token
         for placeholder, value in quoted.items():
             replacement = value
-            # A quoted span that is EXACTLY an operator spelling is DATA in every shell
-            # this floor parses, so it is masked into text that matches nothing. The mask
-            # is keyed on the same pattern the token scan tests (`_OUTPUT_REDIRECT_OPERATOR`)
-            # rather than on a hard-coded `('>', '>>')`: widening the scan to `&>`/`>|`/
-            # `2>` while the mask still knew only two spellings made `echo "&>" .env` a
-            # false deny, with the byte-identical `echo ">" .env` still allowed. The
-            # suffix carries no meaning — nothing reads this placeholder back, it exists
-            # only to be a token no rule can match — so the length collision between `>>`
-            # and `>|` is inert.
-            if raw_token == placeholder and _OUTPUT_REDIRECT_OPERATOR.fullmatch(value):
-                replacement = f"__HARNESS_LITERAL_REDIRECT_{len(value)}__"
+            # A word whose FIRST characters are a quoted redirection operator is
+            # a command NAME to the shell, never syntax: `'<' input rm -rf /`
+            # asks bash to execute a program called `<`, and `'&>'out cmd` a
+            # program called `&>out`. Restoring the operator verbatim handed
+            # both to the prefix parser, which stripped them and denied a delete
+            # and a force-push that the shell would never have reached.
+            #
+            # The marker is keyed by the OPERATOR, not by len(value): the old
+            # `__HARNESS_LITERAL_REDIRECT_{len}__` spelling could not tell `>|`
+            # from `>&` from `&>`, which is the constraint issue #74 records
+            # against widening this beyond `>`/`>>`.
+            if raw_token.startswith(placeholder):
+                replacement = _LITERAL_REDIRECT_MARKERS.get(value, value)
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
         # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
@@ -3249,9 +3375,17 @@ _WRAPPERS = {
     "stdbuf",
     "xargs",
 }
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# `+=` is Bash's APPEND assignment and is accepted in the same command-scoped
+# prefix position as `=`: `FOO+=x git push --force origin main` sets FOO and
+# still execs git. Reading only `=` left `FOO+=x` standing as the head, and the
+# force-push behind it went unevaluated.
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _EXE_SUFFIX = re.compile(r"\.(exe|cmd|bat|com|ps1)$", re.IGNORECASE)
 _OPAQUE_WRAPPER = "__harness_opaque_wrapper__"
+# Head returned when a command-leading process substitution has no balancing `)`
+# in the token stream. The operand's extent is then unknown, so every token after
+# it is a guess about what the shell would run -- see command_head.
+_UNDELIMITED_REDIRECTION = "__harness_undelimited_redirection__"
 # Cmdlets whose scriptblock argument may be written glued to the name (`%{ ... }`,
 # `?{ ... }`). Splitting the head is restricted to these so an unrelated token that
 # happens to contain a brace keeps its current head resolution.
@@ -3883,6 +4017,299 @@ def gnu_target_directory_values(toks: list[str]) -> list[str]:
     return values
 
 
+_COMMAND_PREFIX_REDIRECTION_OPERATORS = (
+    "&>>",
+    "<<<",
+    "&>",
+    ">>",
+    ">|",
+    ">&",
+    "<<",
+    "<&",
+    "<>",
+    ">",
+    "<",
+)
+
+# A redirection's descriptor is a number, cmd's `*`, or -- in Bash -- a NAME in
+# braces: `{fd}>file` opens the file and stores the allocated descriptor in
+# `$fd`, so the file is truncated exactly as `1>file` truncates it and the word
+# after the target is still the executable. Recognizing only `\d+|\*` left
+# `{fd}>'.env' true` and `{fd}>out git push --force origin main` resolving `fd`
+# as the head, which matches no rule.
+#
+# The name pattern is Bash's own (a valid shell identifier), which is what keeps
+# brace EXPANSION out: `{a,b}` carries a comma, `{1..3}` a dot, `{}` is empty,
+# and `Remove-Item` a hyphen -- none of them can be read as a descriptor.
+_REDIRECTION_DESCRIPTOR = r"\d+|\*|\{[A-Za-z_][A-Za-z0-9_]*\}"
+_REDIRECTION_DESCRIPTOR_TOKEN = re.compile(rf"(?:{_REDIRECTION_DESCRIPTOR})")
+
+# Read by the tokenizer: an operator restored from a quoted span is replaced by
+# its marker so no later pass can read the DATA as syntax. Spelled from the
+# operator's characters (`&>>` -> AMPGTGT) so every operator gets a distinct
+# marker, and inside the `__HARNESS_[A-Z0-9_]*__` namespace so a typed copy is
+# deleted by `scrub_internal_markers` before the real one is minted.
+_LITERAL_REDIRECT_CHARACTER_NAMES = {">": "GT", "<": "LT", "&": "AMP", "|": "PIPE"}
+_LITERAL_REDIRECT_MARKERS = {
+    operator: "__HARNESS_LITERAL_REDIRECT_"
+    + "".join(_LITERAL_REDIRECT_CHARACTER_NAMES[char] for char in operator)
+    + "__"
+    for operator in _COMMAND_PREFIX_REDIRECTION_OPERATORS
+}
+
+
+def command_prefix_redirection_token(
+    token: str,
+) -> tuple[str, str, bool] | None:
+    """Return ``(operator, glued_target, has_descriptor)`` for a redirect token.
+
+    The quote-aware shlex pass emits ``2>&1`` as three tokens, while the
+    sanitized whitespace pass keeps it as one.  Both passes enforce different
+    rules, so command-head normalization must understand both representations.
+    """
+    match = re.match(rf"^(?P<descriptor>{_REDIRECTION_DESCRIPTOR})", token)
+    has_descriptor = match is not None
+    rest = token[match.end() :] if match else token
+    for operator in _COMMAND_PREFIX_REDIRECTION_OPERATORS:
+        if rest.startswith(operator):
+            return operator, rest[len(operator) :], has_descriptor
+    return None
+
+
+# Sentinel index: the token stream begins a process-substitution operand that
+# never closes, so the prefix has no end and no head can be resolved behind it.
+_UNTERMINATED_REDIRECTION_OPERAND = -1
+
+
+def process_substitution_end(toks: list[str], index: int) -> int | None:
+    """Return the index after a ``<(...)``/``>(...)`` operand, or ``None``.
+
+    ``punctuation_chars`` makes shlex split a multi-word producer across several
+    tokens (``<(git show HEAD:f)`` becomes ``['<', '(git', 'show', 'HEAD:f)']``),
+    so consuming a fixed token count lands the head INSIDE the substitution and
+    resolves an attacker-influenced word as the executable.  Scan to the
+    balancing ``)`` instead; the walk is bounded by the token count.
+
+    ``None`` means the operand never closed.  Callers must treat that as
+    UNDECIDABLE, not as "no redirection here": the parenthesis count also sees
+    parens restored from quoted spans (``< <(echo '(' ) rm -rf ~`` yields
+    ``['<', '<', '(echo', '(', ')', 'rm', ...]``), so a stray one silently
+    unbalances the walk.  Resolving the operator as the head instead would leave
+    every head-gated rule unevaluated for whatever follows.
+    """
+    depth = 0
+    while index < len(toks):
+        depth += toks[index].count("(") - toks[index].count(")")
+        index += 1
+        if depth <= 0:
+            return index
+    return None
+
+
+def leading_redirection_end(toks: list[str], index: int) -> int | None:
+    """Return the argv index after one command-leading redirection.
+
+    Shell redirections may precede the executable, and shlex emits the file
+    descriptor, operator, and target as separate tokens: ``2>&1 rm`` becomes
+    ``["2", ">&", "1", "rm"]``.  Treating ``2`` or ``>&`` as the command
+    head lets the real executable bypass every rule.  Consume exactly one
+    target, then let :func:`command_head` continue through any further prefix.
+
+    A leading ``<(command)``/``>(command)`` is process substitution, not a
+    redirection attached to a later executable.  The tokenizer splits it into
+    an operator plus a ``("`-headed token, so retain that spelling as a head
+    rather than skipping past it.
+
+    ``None`` means "no redirection starts here".  A substitution operand that
+    never closes returns :data:`_UNTERMINATED_REDIRECTION_OPERAND` instead --
+    a distinct answer, because the prefix demonstrably IS there and only its
+    extent is unknown.  Callers must not collapse the two.
+    """
+    if index >= len(toks):
+        return None
+    combined = command_prefix_redirection_token(toks[index])
+    if combined is not None:
+        operator, glued_target, has_descriptor = combined
+        if (
+            not has_descriptor
+            and operator in {"<", ">"}
+            and glued_target.lstrip().startswith("(")
+        ):
+            return None
+        if glued_target:
+            return index + 1
+        target_index = index + 1
+        if target_index >= len(toks):
+            return len(toks)
+        if (
+            not has_descriptor
+            and operator in {"<", ">"}
+            and toks[target_index].lstrip().startswith("(")
+        ):
+            return None
+        if (
+            toks[target_index] in {"<", ">"}
+            and target_index + 1 < len(toks)
+            and toks[target_index + 1].lstrip().startswith("(")
+        ):
+            end = process_substitution_end(toks, target_index + 1)
+            return _UNTERMINATED_REDIRECTION_OPERAND if end is None else end
+        return target_index + 1
+    operator_index = index
+    has_descriptor = False
+    if (
+        _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(toks[index])
+        and index + 1 < len(toks)
+        and _ARGV_REDIRECTION_TOKEN.fullmatch(toks[index + 1])
+    ):
+        operator_index += 1
+        has_descriptor = True
+    if not _ARGV_REDIRECTION_TOKEN.fullmatch(toks[operator_index]):
+        return None
+    target_index = operator_index + 1
+    if target_index >= len(toks):
+        return len(toks)
+    if (
+        not has_descriptor
+        and toks[operator_index] in {"<", ">"}
+        and toks[target_index].lstrip().startswith("(")
+    ):
+        return None
+    # ``< <(producer) command`` redirects from a process substitution.  The
+    # operand is the whole parenthesized producer, however many tokens shlex
+    # split it into, and all of it belongs to the redirection prefix.
+    if (
+        toks[target_index] in {"<", ">"}
+        and target_index + 1 < len(toks)
+        and toks[target_index + 1].lstrip().startswith("(")
+    ):
+        end = process_substitution_end(toks, target_index + 1)
+        return _UNTERMINATED_REDIRECTION_OPERAND if end is None else end
+    return target_index + 1
+
+
+# `<>` belongs here: POSIX `n<>file` opens the file for READ AND WRITE on
+# descriptor n, and creates it when absent. It reads like a read-only operator
+# and is spelled with `<`, which is exactly why it was missed.
+_WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>", "<>"})
+
+
+def descriptor_duplication_operand(operator: str | None, target: str) -> bool:
+    """Return True when ``operator target`` duplicates or closes a descriptor.
+
+    ``2>&1`` and ``>&-`` name no file; only a non-numeric word after ``>&``
+    (``>&out.log``) is a path.  Reading the numeric form as a write target
+    would put ``1`` in front of every secret-path heuristic that ever ships.
+    """
+    return operator in {">&", "<&"} and re.fullmatch(r"-|\d+-?", target) is not None
+
+
+def leading_redirection_write_targets(toks: list[str]) -> list[str]:
+    """Return the write targets inside a command's leading redirection prefix.
+
+    :func:`strip_leading_command_redirections` deletes that prefix so the real
+    executable resolves.  The deletion also removes the only argv an
+    inert-QUOTED redirect target ever appears in: the whole-command text scan
+    reads :func:`strip_quotes` output, where ``'.env'`` has already collapsed to
+    a placeholder.  Collect the targets here so the caller can enforce the
+    secret-path rule BEFORE the prefix is dropped, the same way repository-config
+    redirect state is recorded from the original argv.
+
+    Genuinely read-only operands (``<``, ``<&``, ``<<``, ``<<<``) are excluded:
+    reading a file is not the irreversible act the floor blocks.  ``<>`` is NOT
+    one of them -- it opens for read-write -- so it is collected.
+    """
+    targets: list[str] = []
+    index = 0
+    while index < len(toks):
+        token = toks[index]
+        if _ASSIGN.match(token) or token == "--%":
+            index += 1
+            continue
+        redirect_end = leading_redirection_end(toks, index)
+        if redirect_end is None or redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # An undelimited operand has no targets to read; command_head denies
+            # the whole segment instead.
+            break
+        operator: str | None = None
+        for consumed in toks[index:redirect_end]:
+            combined = command_prefix_redirection_token(consumed)
+            if combined is not None:
+                operator, glued_target, _has_descriptor = combined
+                if (
+                    glued_target
+                    and operator in _WRITING_REDIRECTION_OPERATORS
+                    and not descriptor_duplication_operand(operator, glued_target)
+                ):
+                    targets.append(glued_target)
+                continue
+            if _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(consumed):
+                # A bare file descriptor, never a path.
+                continue
+            if operator in _WRITING_REDIRECTION_OPERATORS and not (
+                descriptor_duplication_operand(operator, consumed)
+            ):
+                targets.append(consumed)
+        index = redirect_end
+    return targets
+
+
+def strip_leading_command_redirections(toks: list[str]) -> list[str]:
+    """Remove command-leading redirects/``--%`` while retaining assignments.
+
+    This normalization is used by every rule scanner, not only
+    :func:`command_head`.  Several guards inspect argv positionally before they
+    ask for the head, so fixing head resolution alone still let the same prefix
+    hide environment mutation, wrapper, and Windows-fallback cases.
+
+    Redirect targets are validated before this runs -- by the whole-command text
+    scan for bare targets and by :func:`leading_redirection_write_targets` for
+    inert-quoted ones -- and repository-config redirect state is recorded from
+    the original argv.  Removing the prefix here therefore exposes the
+    executable without discarding either of those two policies.
+
+    It DOES discard a third: :func:`has_opaque_posix_shell_input` reads the
+    input operands (``<``, ``<<<``, ``< <(...)``) that this strip removes, so a
+    leading redirection hides shell program text from it -- `bash < payload.sh`
+    denies while `< payload.sh bash` allows.  Pre-existing on both sides of this
+    normalization and tracked as issue #75; the fix is to collect the read
+    operands here the way write targets already are.
+    """
+    assignments: list[str] = []
+    index = 0
+    while index < len(toks):
+        token = toks[index]
+        if _ASSIGN.match(token):
+            assignments.append(token)
+            index += 1
+            continue
+        if token == "--%":
+            index += 1
+            continue
+        redirect_end = leading_redirection_end(toks, index)
+        if redirect_end is None or redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # Retain the argv rather than guessing where an undelimited operand
+            # ended: keeping tokens is the conservative view for every positional
+            # scanner that reads this normalization.
+            break
+        index = redirect_end
+    return [*assignments, *toks[index:]]
+
+
+def strip_leading_environment_assignments(toks: list[str]) -> list[str]:
+    """Expose a command hidden behind one or more POSIX ``NAME=value`` words.
+
+    Callers must inspect the original argv first because an assignment can
+    itself establish dangerous Git state.  This view exists for positional
+    scanners whose executable otherwise remains displaced by an unrelated
+    command-scoped environment setting.
+    """
+    index = 0
+    while index < len(toks) and _ASSIGN.match(toks[index]):
+        index += 1
+    return toks[index:] if index < len(toks) else toks
+
+
 def command_head(toks):
     """Normalize toks to (head, command_toks): strip leading VAR=val assignments
     and known wrappers, drop the head's directory + .exe/.cmd suffix. So
@@ -3891,6 +4318,24 @@ def command_head(toks):
     i = 0
     while i < len(toks):
         t = toks[i]
+        if t == "--%":
+            # PowerShell's stop-parsing marker changes how the following argv
+            # is decoded, not which executable runs.  At command start the next
+            # token is still the head the floor must inspect. (#46)
+            i += 1
+            continue
+        redirect_end = leading_redirection_end(toks, i)
+        if redirect_end == _UNTERMINATED_REDIRECTION_OPERAND:
+            # The operand never closed, so which token is the executable is a
+            # guess. Resolving the redirect operator as the head is not the
+            # conservative answer -- it is an ALLOW: `<` matches no rule, so
+            # every head-gated guard behind it goes unevaluated. Report the
+            # segment as undecidable and let check() fail closed, the same way
+            # an uninspectable wrapper or an undecodable word does.
+            return _UNDELIMITED_REDIRECTION, toks[i:]
+        if redirect_end is not None:
+            i = redirect_end
+            continue
         if _ASSIGN.match(t):
             i += 1
             continue
@@ -4186,6 +4631,10 @@ def git_environment_name(token: str) -> str:
     candidate = token.strip("'\"")
     if "=" in candidate:
         candidate = candidate.split("=", 1)[0]
+        # Bash's append form: the name in `GIT_EDITOR+=x` is GIT_EDITOR, so the
+        # `+` has to come off or every name-keyed Git-environment guard misses
+        # the spelling that `_ASSIGN` now admits.
+        candidate = candidate.removesuffix("+")
     lowered = candidate.lower()
     for prefix in ("$env:", "${env:", "env:", "environment::"):
         if lowered.startswith(prefix):
@@ -5148,11 +5597,12 @@ def git_process_environment_mutations(
         return set()
     mutations: set[str] = set()
     first = raw[0].lower()
-    if (
-        _ASSIGN.match(raw[0])
-        and git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
-    ):
-        mutations.add(git_environment_name(raw[0]))
+    for token in raw:
+        if not _ASSIGN.match(token):
+            break
+        name = git_environment_name(token)
+        if name in _GIT_PROCESS_COMMAND_ENVIRONMENT:
+            mutations.add(name)
     if (
         git_environment_name(raw[0]) in _GIT_PROCESS_COMMAND_ENVIRONMENT
         and ("=" in raw[0] or (len(raw) > 1 and raw[1] == "="))
@@ -5359,8 +5809,11 @@ def is_git_config_environment_mutation(
     if not raw:
         return False
     first = raw[0].lower()
-    if _ASSIGN.match(raw[0]) and is_git_config_environment_name(raw[0]):
-        return True
+    for token in raw:
+        if not _ASSIGN.match(token):
+            break
+        if is_git_config_environment_name(token):
+            return True
     if first.startswith(("$env:", "${env:")) and is_git_config_environment_name(raw[0]):
         return True
     if first in {"export", "set", "setx"}:
@@ -6117,7 +6570,17 @@ def decode_powershell_command(value: str) -> str:
 
 
 def unwrap_powershell_scriptblock(script: str) -> str:
-    """Expose the executable body of a simple outer PowerShell script block."""
+    """Expose the executable body of a simple outer PowerShell script block.
+
+    Unwrapping REPLACES the command with the body, so it may only happen when
+    the body is the whole program. Text after the closing brace that is not a
+    separator was being dropped on the floor: `{fd}>out git push --force origin
+    main` unwrapped to `fd` and the force-push was never inspected, and the same
+    hole swallowed `{ echo hi } rm -rf /critical/outside`. Bash's `{name}>file`
+    is not a script block at all -- it is a redirection whose descriptor is
+    stored in `$name` -- so refusing to unwrap keeps BOTH readings inspectable
+    rather than guessing which shell is running.
+    """
     candidate = script.strip()
     candidate = re.sub(r"^[&.]\s*(?=\{)", "", candidate, count=1)
     if candidate.startswith("{"):
@@ -6147,6 +6610,8 @@ def unwrap_powershell_scriptblock(script: str) -> str:
                     suffix = candidate[index + 1 :].strip()
                     if suffix.startswith((";", "|", "&")):
                         return f"{body} {suffix}"
+                    if suffix:
+                        return candidate
                     return body
     return candidate
 
@@ -6776,8 +7241,15 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
         return True
     # MUST stay above the readonly fallback: `echo`/`printf`/`write-host` are
     # vouched readers, so `echo x > .git/config` reopens if these are reordered.
+    #
+    # The operator set is `_WRITING_REDIRECTION_OPERATORS`, not a local literal.
+    # It drifted once already: the local copy omitted `<>`, so
+    # `1<>.git/config cat payload; git push origin` opened the config for
+    # read-WRITE, `cat` was vouched read-only, and the push behind it was let
+    # through.  One shared definition is what keeps the secret-path rule and
+    # this one from disagreeing about which spellings write.
     if any(
-        index > 0 and normalized[index - 1] in {">", ">>", ">|"}
+        index > 0 and normalized[index - 1] in _WRITING_REDIRECTION_OPERATORS
         for index in config_indexes
     ):
         return True
@@ -7645,23 +8117,44 @@ def check(
             repository_config_may_have_changed
             or segment_may_mutate_repository_config(raw)
         )
-        if dangerous_git_trace_environment_mutation(raw):
+        for redirect_target in leading_redirection_write_targets(raw):
+            if token_mentions_secret_path(redirect_target):
+                return (
+                    "deny",
+                    f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
+                )
+        raw = strip_leading_command_redirections(raw)
+        if not raw:
+            continue
+        exposed_raw = strip_leading_environment_assignments(raw)
+        mutation_views = [raw]
+        if exposed_raw != raw:
+            mutation_views.append(exposed_raw)
+        if any(
+            dangerous_git_trace_environment_mutation(view) for view in mutation_views
+        ):
             return (
                 "deny",
                 "Git trace settings cannot write to or disclose secret material.",
             )
-        if dangerous_git_index_file_mutation(raw):
+        if any(dangerous_git_index_file_mutation(view) for view in mutation_views):
             return (
                 "deny",
                 "GIT_INDEX_FILE to a secret-looking or dynamic path is floor-blocked.",
             )
-        if is_git_config_environment_mutation(raw, environment_provider_context):
+        if any(
+            is_git_config_environment_mutation(view, environment_provider_context)
+            for view in mutation_views
+        ):
             return (
                 "deny",
                 "Mutating Git's config-injection environment is floor-blocked.",
             )
-        process_environment_mutations = git_process_environment_mutations(
-            raw, environment_provider_context
+        process_environment_mutations = set().union(
+            *(
+                git_process_environment_mutations(view, environment_provider_context)
+                for view in mutation_views
+            )
         )
         if process_environment_mutations & (
             _GIT_PROCESS_ENVIRONMENT | {_UNKNOWN_GIT_PROCESS_ENVIRONMENT}
@@ -7672,17 +8165,27 @@ def check(
             )
         active_git_process_environment.update(process_environment_mutations)
         active_git_repository_environment.update(
-            git_repository_environment_mutations(raw)
+            set().union(
+                *(git_repository_environment_mutations(view) for view in mutation_views)
+            )
         )
         effective_git_repository_environment = (
             active_git_repository_environment
-            | command_scoped_repository_environment(raw)
+            | set().union(
+                *(
+                    command_scoped_repository_environment(view)
+                    for view in mutation_views
+                )
+            )
         )
+        raw = exposed_raw
         assignment_rhs = powershell_assignment_rhs(raw)
         if assignment_rhs is not None:
             if current_pass == 0 and segment_index < len(assignment_segments):
-                assignment_raw = strip_control_prefixes(
-                    assignment_segments[segment_index][0]
+                assignment_raw = strip_leading_environment_assignments(
+                    strip_leading_command_redirections(
+                        strip_control_prefixes(assignment_segments[segment_index][0])
+                    )
                 )
                 masked_rhs = powershell_assignment_rhs(assignment_raw)
                 if (
@@ -7759,7 +8262,9 @@ def check(
         # (`bash -c ...`) before the command body runs, so a leading (or env-set)
         # BASH_ENV assignment injects opaque program text the floor cannot see.
         if head in _POSIX_SHELL_HEADS and any(
-            re.match(r"^BASH_ENV=\S", token) for token in raw
+            re.match(r"^BASH_ENV=\S", token)
+            for view in mutation_views
+            for token in view
         ):
             return (
                 "deny",
@@ -7781,6 +8286,11 @@ def check(
             return "deny", "Cannot safely decode an executable shell word."
         if head == _OPAQUE_WRAPPER:
             return "deny", "Cannot safely inspect wrapper options that alter execution."
+        if head == _UNDELIMITED_REDIRECTION:
+            return (
+                "deny",
+                "Cannot safely delimit a leading process substitution.",
+            )
         if head in {"eval", "iex", "invoke-expression"}:
             evaluated_args = list(toks[1:])
             if evaluated_args and evaluated_args[0] == "--":
@@ -9533,7 +10043,18 @@ def check(
             # value-parameter fed `(Get-Content foo)`) would go uninspected. A
             # balanced single-token subexpression keeps alignment, so only the
             # unbalanced case fails closed.
-            if any(token.count("(") > token.count(")") for token in toks[1:]):
+            #
+            # Counts the RESTORED text: the tokenizer masks parentheses that came
+            # out of a quoted span so the process-substitution balance walk stops
+            # reading data as syntax, and this guard must not inherit that
+            # relaxation second-hand. Whether a quoted `"("` should still fail
+            # this guard closed is a separate question from the leading-redirect
+            # prefix, so it keeps the verdict it had.
+            if any(
+                (restored := restore_quoted_literal_punctuation(token)).count("(")
+                > restored.count(")")
+                for token in toks[1:]
+            ):
                 return (
                     "deny",
                     "A parenthesized secret-mutation subexpression cannot be inspected safely.",

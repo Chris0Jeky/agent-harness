@@ -17,12 +17,12 @@ accidental coverage:
 """
 
 import importlib.util
-import os
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
+FLOOR_ENVIRONMENT_PATH = ROOT / "tests" / "floor_environment.py"
 
 BACKTICK = chr(96)
 ESCAPED_BACKTICK = chr(92) + chr(96)
@@ -44,27 +44,29 @@ def _offline_remote(
     return False, "unit-test-stub-private"
 
 
+dispatch = load_module("double_quote_escape_dispatch", DISPATCH_PATH)
+floor_environment = load_module(
+    "floor_environment_double_quote", FLOOR_ENVIRONMENT_PATH
+)
+
+
+def decide(command: str, tier: int = 1, flags: dict | None = None) -> str:
+    """Decide `command` without inherited Git launch configuration.
+
+    Clearing only `GIT_CONFIG*` here left the `git commit -m "..."` allow
+    assertions below at the mercy of an ambient `GIT_EDITOR` / `GIT_EXEC_PATH`.
+    `tests/floor_environment.py` owns that isolation for every suite.
+    """
+    return floor_environment.hermetic_check(
+        dispatch,
+        command,
+        {"tier": tier, "flags": flags or {}},
+        str(ROOT),
+        remote_resolver=_offline_remote,
+    )[0]
+
+
 class DoubleQuoteEscapeTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.dispatch = load_module("double_quote_escape_dispatch", DISPATCH_PATH)
-
-    def decide(self, command: str, tier: int = 1, flags: dict | None = None) -> str:
-        project_dir = str(ROOT)
-        injected = {k: v for k, v in os.environ.items() if k.startswith("GIT_CONFIG")}
-        for key in injected:
-            del os.environ[key]
-        try:
-            return self.dispatch.check(
-                command,
-                {"tier": tier, "flags": flags or {}},
-                project_dir,
-                project_dir,
-                remote_resolver=_offline_remote,
-            )[0]
-        finally:
-            os.environ.update(injected)
-
     # --- the marker helper, in isolation --------------------------------
 
     def test_escaped_backtick_is_not_an_expansion_marker(self) -> None:
@@ -76,7 +78,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             'an escaped quote \\" and an escaped backslash \\\\',
         ):
             with self.subTest(body=body):
-                self.assertFalse(self.dispatch.has_shell_expansion_marker(body))
+                self.assertFalse(dispatch.has_shell_expansion_marker(body))
 
     def test_live_markers_stay_visible(self) -> None:
         for body in (
@@ -93,7 +95,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             ESCAPED_BACKTICK + "x" + ESCAPED_BACKTICK + " $(rm -rf /critical)",
         ):
             with self.subTest(body=body):
-                self.assertTrue(self.dispatch.has_shell_expansion_marker(body))
+                self.assertTrue(dispatch.has_shell_expansion_marker(body))
 
     def test_strip_quotes_makes_an_escaped_backtick_body_inert(self) -> None:
         command = (
@@ -103,10 +105,10 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + ESCAPED_BACKTICK
             + ' note"'
         )
-        sanitized, placeholders = self.dispatch.strip_quotes(command)
+        sanitized, placeholders = dispatch.strip_quotes(command)
         self.assertEqual(len(placeholders), 1)
         self.assertNotIn(BACKTICK, sanitized)
-        self.assertEqual(self.dispatch.segments(sanitized), [sanitized])
+        self.assertEqual(dispatch.segments(sanitized), [sanitized])
 
     def test_strip_quotes_keeps_a_bare_backtick_body_visible(self) -> None:
         command = (
@@ -116,9 +118,9 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + BACKTICK
             + ' note"'
         )
-        sanitized, placeholders = self.dispatch.strip_quotes(command)
+        sanitized, placeholders = dispatch.strip_quotes(command)
         self.assertEqual(placeholders, {})
-        self.assertIn("GIT_EDITOR=true", self.dispatch.segments(sanitized))
+        self.assertIn("GIT_EDITOR=true", dispatch.segments(sanitized))
 
     # --- end to end ------------------------------------------------------
 
@@ -160,7 +162,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
         ]
         for expected, command in cases:
             with self.subTest(command=command):
-                self.assertEqual(self.decide(command), expected)
+                self.assertEqual(decide(command), expected)
 
     def test_markdown_code_spans_in_bodies_and_messages_allow(self) -> None:
         for command in (
@@ -181,10 +183,10 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + ' pattern"',
         ):
             with self.subTest(command=command):
-                self.assertEqual(self.decide(command), "allow")
+                self.assertEqual(decide(command), "allow")
                 # Blast radius does not change literal text into a command.
                 self.assertEqual(
-                    self.decide(command, tier=4, flags={"wave_mode": True}), "allow"
+                    decide(command, tier=4, flags={"wave_mode": True}), "allow"
                 )
 
     def test_real_substitution_still_denies(self) -> None:
@@ -216,7 +218,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + ' $(rm -rf /critical/outside)"',
         ):
             with self.subTest(command=command):
-                self.assertEqual(self.decide(command), "deny")
+                self.assertEqual(decide(command), "deny")
 
     def test_escaped_backticks_handed_to_an_inner_shell_still_deny(self) -> None:
         """``bash -c`` receives literal backticks and then runs them itself."""
@@ -234,7 +236,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             'bash -c "' + ESCAPED_BACKTICK + "sudo rm -rf /" + ESCAPED_BACKTICK + '"',
         ):
             with self.subTest(command=command):
-                self.assertEqual(self.decide(command), "deny")
+                self.assertEqual(decide(command), "deny")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Agent Harness Blueprint
 
-Last Updated: 2026-07-13 · Applies to: every repo, every machine, every model tier
+Last Updated: 2026-07-25 · Applies to: every repo, every machine, every model tier
 Concrete schemas, skeletons, and literal file drafts live in [SPECS.md](./SPECS.md).
 
 **Thesis.** A repo's harness is defined by its **blast radius** — what can irreversibly break
@@ -164,8 +164,10 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
 at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE. Claude wires the
-shared dispatcher globally; each active Codex repo owns one pinned project adapter. Never stack a
-global and project Codex floor:
+shared dispatcher globally; each active Codex repo owns one project adapter carrying an
+**audit-only** normalized dispatcher marker — a declaration the runtime never verifies, so a
+dispatcher change obliges refreshing every consumer marker and re-trusting each adapter in a
+fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor:
 
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
@@ -211,8 +213,10 @@ structurally required (review). T0/T1 never fan out. Heuristics, not laws — de
 "disjoint" illusory (worktree waves leaked 5/6 despite protocols); when a fan-out produces
 merge conflicts, that's evidence the regions aren't real yet. **Right-size the fleet**: default
 ≤3–5 subagents, a broad sweep/audit ≤8–12, never a reflexive fleet; put wide mechanical fan-out
-on a cheap model at low effort and reserve the top model + high/xhigh for the narrow judgment
-core. This is what stops a top-model session from spawning a subagent fleet that drains the
+on the cheap tier at medium/high effort (never low — a cheap model at low effort compounds two
+handicaps) and reserve the top tier at high/xhigh for the narrow judgment core. Subagents that
+still need judgment go on the default tier at low effort, not the cheap one. This is what stops
+a top-model session from spawning a subagent fleet that drains the
 budget before finishing — the `model-effort-routing` skill (§6) is the home for the sizing rules.
 
 **Stale-map risk**: a wrong map misroutes — worse than no map. Maps carry `Last-Verified:`
@@ -223,10 +227,12 @@ stamps; the budget script flags >90 days; human edits outside the harness are th
 
 ## 4. Self-expansion — the Gardener loop (T2+)
 
-`capture (hooks, zero inline tokens) → triage (scheduled cheap-model agent) → promote/prune
+`capture (hooks, zero inline tokens) → triage (scheduled agent) → promote/prune
 (ONE ≤100-line PR) → ratify (human merges)`.
 
-- **Cadence**: weekly per active repo, cheap model, effort low, runs against its own worktree
+- **Cadence**: weekly per active repo, default-tier model at effort low (§5 — its triage and
+  promotion calls are judgment; low effort is what keeps it cheap enough to schedule), runs
+  against its own worktree
   (never the live checkout — one-writer rule per checkout). SessionStart nudges if the ledger
   exceeds 25 entries or 14 days untriaged.
 - **What it does**: classify ledger entries (4-way: blocker / non-blocking-risk / pre-existing
@@ -253,29 +259,60 @@ stamps; the budget script flags >90 days; human edits outside the harness are th
 Route by JUDGMENT vs MECHANICAL, never by size. Effort level is the cheaper dial — use it
 before switching models. Full table in SPECS §8; the shape:
 
-| Work | Model | Effort |
+Model tiers below (`top` / `default` / `cheap`) are ROUTING tiers — unrelated to the T0–T4
+blast-radius ladder in §1.
+
+| Work | Model tier | Effort |
 |---|---|---|
-| Harness growth: region maps, skills, hooks, ADRs, global laws; adversarial review; promotion/demotion audits; anything irreversible | top (Fable now → Opus later) | xhigh |
-| Feature slices inside mapped regions; routine PRs | mid (Sonnet-class) | medium–high |
-| Gardener triage, doc rotation, formatting sweeps, tombstones, classification | cheap (Haiku-class) | low |
+| Harness growth: deny floor/dispatcher, region maps, skills, hooks, ADRs, global laws; promotion/demotion audits; anything irreversible | top | xhigh |
+| Adversarial review, merge decisions | top | high (xhigh when irreversible or wide blast radius) |
+| Code implementation, debugging, feature slices inside mapped regions, routine PRs | default | high |
+| Gardener triage, tombstone classification, routing/promotion calls, judgment-bearing subagent work, lookups | default | low |
+| Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong — including wide mechanical fan-out (§3) | cheap | medium–high, never low |
+
+**Delegation is not a task class.** Route a subagent by what it is DOING, never by the fact that
+it is a subagent: a mechanical sweep handed to eight workers is still mechanical (cheap tier,
+medium/high effort, §3), and a single worker asked for an independent judgment is still judgment.
+
+Triage and classification sit on the **default** tier, not the cheap one: deciding what matters
+is judgment wearing mechanical clothes. That misclassification is what kept the Gardener
+definition (`~/.claude/agents/gardener.md` — the one canonical path this doc set uses for it)
+pinned to a cheap model through three separate prose bans.
 
 - **Default-up rule**: when unsure whether a task needs judgment, use the stronger model.
 - **Hard rails**: a weak model never merges, never edits canonical docs or the deny floor,
-  never approves its own tier's gates. Pinned via `model:` in `.claude/agents/*.md` (walls)
-  + the routing table in global CLAUDE.md (convention — hooks cannot reliably see the running
-  model, so this part is honestly a tripwire).
+  never approves its own tier's gates. Pinned via `model:` in an agent definition —
+  `~/.claude/agents/*.md` globally, `.claude/agents/*.md` per repo (walls, with
+  `tests/check-agent-models.ps1` in the config repo asserting no definition pins a banned model;
+  that script is the authority on the banned set) + the routing table in global CLAUDE.md
+  (convention — hooks cannot reliably see the running model, so this part is honestly a
+  tripwire). A `model:` pin binds the SUBAGENT it defines, never the session that delegates to
+  it: a top-level or headless run must bind its own model (see SPECS §10 for the scheduled case).
+  An agent `model:` pin is the ONE permitted derived copy of a model name — a machine-read field
+  cannot hold an indirection — and it is governed, not trusted: SPECS §10 carries the derivation
+  contract (re-pin every affected definition in the same commit that changes the skill; declare
+  the tier beside the pin; issue #76 tracks making the check enforce agreement).
 - **Acceptance test for the whole blueprint**: a weaker model completes one mapped-region task
   per active repo without reading outside the region. That passing is the success criterion.
-- **Concrete ladder lives in the `model-effort-routing` skill** (§6): Opus 4.8 as the default
-  reach with effort dialed to the task; Fable only for the hardest work, with a named Opus-4.8
-  fallback and its access window; Haiku for mechanical; and the fan-out fleet caps (§3). The
-  blueprint keeps only the DURABLE rule — effort-first, judgment-vs-mechanical, default-up — so the
-  model-specific calibration can change without a blueprint edit.
-- **The Fable-now strategy**: spend the temporary top model WRITING STRUCTURE, not doing
-  chores — global CLAUDE.md, deny floor + dispatcher, region maps for Taskdeck/olb, agent
-  definitions, this repo — then adversarially review them with it. Judgment encoded in
-  structure is judgment a weaker model inherits for free. Mechanical migration (rotation,
-  compaction, tombstones) goes to cheaper models inside that structure.
+- **Do NOT restate the ladder here.** Which named model fills `top` / `default` / `cheap`, at
+  which effort, plus the fan-out fleet caps (§3), live in the `model-effort-routing` global skill
+  (§6) and nowhere else. This blueprint owns only the DURABLE part — the task-class→tier mapping
+  above, effort-first, judgment-vs-mechanical, default-up — so the calibration can change without
+  a blueprint edit. A model name written in two places is how a stale routing row outlives three
+  separate prose bans; when in doubt, delete the local copy and point at the skill.
+  The one model-level statement that is law rather than calibration, and therefore does belong
+  here: **never Haiku, any version** (standing owner directive — quality too low). Family-wide
+  on purpose: a ban pinned to one version number reads as permission for the next one. This
+  prose is where the ban is DECLARED; the enforced banned set lives in the config repo's
+  `tests/check-agent-models.ps1`, which is what actually rejects a definition. If the two ever
+  disagree, the script is the one that binds and the mismatch is the bug — so widening the ban
+  means editing both in the same change.
+- **Spend the top tier on STRUCTURE, not chores** — global CLAUDE.md, deny floor + dispatcher,
+  region maps for Taskdeck/olb, agent definitions, this repo — then adversarially review them
+  with it. Judgment encoded in structure is judgment a cheaper model inherits for free. Mechanical
+  migration (rotation, compaction, applying tombstones) goes to cheaper tiers inside that
+  structure. This is a standing rule about where top-tier attention pays off, not a race against
+  an access window: the top tier is reserved by value, not rationed by availability.
 
 ---
 
@@ -308,14 +345,18 @@ from gone.
   sessions and lives only in memory files today.
 - **Global agents** (`~/.claude/agents/`): `reviewer.md` (NO Bash/Write — structural; a
   "read-only" instruction to a Bash-capable agent demonstrably does not hold),
-  `gardener.md` (cheap model, write-scoped to docs/ + .claude/), `worktree-worker.md`.
+  `gardener.md` — the canonical path for every reference to it is `~/.claude/agents/gardener.md`
+  (default-tier model at low effort — cheap enough to run on a schedule, but its
+  triage and promotion calls are judgment, not mechanics; write-scoped to docs/ + .claude/),
+  `worktree-worker.md`.
 - **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
   verification-closeout — already good); plus two ≤80-line workflow-mode skills: `guided-walkthrough`
   (turns a cumulative backlog — HUMAN_TODO + open PRs + ledger blockers — into a numbered q-N
   walkthrough with per-item context, suggested action, owner tag, and a step-by-step for human-only
   items; the explicitly-requested exception to law-6 batching) and `model-effort-routing` (the
-  effort→model→agent-count ladder: Opus 4.8 as the default reach, Fable only for the hardest work
-  with a named fallback, and the §3 fan-out caps that stop a reflexive subagent fleet). Global
+  effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet).
+  That skill is the SINGLE home for named models and their effort bindings — §5 and SPECS §8 carry
+  only the task-class→tier shape and point here; neither may restate the ladder. Global
   CLAUDE.md (law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
   Repo-tier skills come from the template layer here; domain skills grow per-repo by the
   second-occurrence rule.
@@ -328,7 +369,8 @@ from gone.
   vendor, dead entries removed at migration.
 - **Token instrumentation**: record a per-repo baseline (typical session cost) in tier.json at
   migration; the Gardener PR reports its own token spend; scheduled agents carry a hard spend
-  cap (cheap model + effort low + one ≤100-line PR) and the auto-pause rule is the kill switch.
+  cap (default-tier model at effort low + one ≤100-line PR) and the auto-pause rule is the kill
+  switch.
   The blueprint's promise is token economy — measure it or it's a vibe.
 
 ---
@@ -361,8 +403,8 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 
 ## 8. Estate migration map
 
-Order chosen by risk × leverage. Fable does steps marked ★ (judgment); cheap models execute
-the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
+Order chosen by risk × leverage. The top tier does steps marked ★ (judgment); cheaper tiers
+execute the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
 create a parallel plan (law 9).
 
 1. ★ **Global layer** (one evening, highest leverage): write `~/.claude/CLAUDE.md` +
@@ -412,9 +454,11 @@ create a parallel plan (law 9).
     session logs pruned, Options' 12.6KB index → one-liners.
 11. **Turn on the rhythm**: weekly Gardener on the 4 active repos only; weekly 15-minute
     estate sitting; HUMAN_TODO aggregation into hq-private.
-12. ★ **Acceptance test before the Fable window closes**: hand a weaker model one
-    mapped-region task per active repo; fix whatever it stumbles on. Then flip the routing
-    table: Opus inherits harness-growth work, Sonnet runs mapped slices.
+12. ★ **Acceptance test for the migration**: hand a cheaper-tier model one mapped-region task
+    per active repo; fix whatever it stumbles on. Passing means the judgment soaked into the
+    structure — that is the whole point of §5's routing. There is no deadline to beat here: the
+    top tier is reserved by value, not rationed by availability, so re-run this whenever the
+    structure changes materially rather than once against a closing window.
 
 ---
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -83,6 +85,24 @@ class HarnessTests(unittest.TestCase):
         return hooks
 
     @staticmethod
+    def requirements_hook_paths(existing_dir: Path) -> dict[str, str]:
+        """Point this platform's managed hook field at a real directory.
+
+        The other platform's field keeps a path that is absolute in its own
+        flavour but not in this one, which is exactly the value the harness
+        must accept without probing the filesystem.
+        """
+        if sys.platform == "win32":
+            return {
+                "managed_dir": "/managed/hooks",
+                "windows_managed_dir": str(existing_dir),
+            }
+        return {
+            "managed_dir": str(existing_dir),
+            "windows_managed_dir": "C:/managed/hooks",
+        }
+
+    @staticmethod
     def inline_floor_config_text() -> str:
         pin = harness.normalized_text_sha256(
             Path(harness.__file__).resolve().parent
@@ -154,6 +174,7 @@ class HarnessTests(unittest.TestCase):
         system_hooks: str | None = None,
         system_requirements: str | None = None,
         managed_config: str | None = None,
+        offline: bool = False,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -189,6 +210,7 @@ class HarnessTests(unittest.TestCase):
             claude_home=str(claude_home),
             skills_home=str(skills_home),
             repo=str(repo),
+            offline=offline,
         )
         original_run = harness.run
 
@@ -267,6 +289,44 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertEqual(data["name"], "daily-driver")
         self.assertTrue(data["flags"]["sensitive_data"])
+
+    def test_seed_omits_unread_model_routing_block(self) -> None:
+        repo = self.make_repo()
+        args = SimpleNamespace(
+            path=str(repo),
+            tier=3,
+            push="free",
+            merge="gated",
+            human_todo=None,
+            sensitive_data=False,
+            relaxed_work_loss_guards=False,
+            dry_run=False,
+        )
+        self.assertEqual(harness.seed_repo(args), 0)
+        data = json.loads(
+            (repo / ".agent-harness" / "tier.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("model_routing", data)
+
+    def test_audit_ignores_legacy_model_routing_block(self) -> None:
+        repo = self.make_repo()
+        (repo / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
+        tier = {
+            "tier": 2,
+            "name": "daily-driver",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {"sensitive_data": False},
+            "model_routing": {
+                "harness_and_review": "sol",
+                "slices": "terra",
+                "maintenance": "luna",
+            },
+        }
+        target = repo / ".agent-harness" / "tier.json"
+        target.parent.mkdir()
+        target.write_text(json.dumps(tier), encoding="utf-8")
+        result = harness.audit_repo(repo)
+        self.assertTrue(result["ok"], result["issues"])
 
     def test_seed_refuses_overwrite(self) -> None:
         repo = self.make_repo()
@@ -378,7 +438,44 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError):
             harness.remove_managed_codex_floor(current, dispatcher)
 
-    def test_remove_managed_floor_normalizes_deep_ignored_rewrite(self) -> None:
+    def test_remove_managed_floor_normalizes_serializer_recursion(self) -> None:
+        dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
+        managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
+        kept_handler = {"type": "command", "command": "echo keep"}
+        current = json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [managed_handler, kept_handler]}]}}
+        )
+        # Baseline that keeps the assertion below non-vacuous: this exact input
+        # rewrites cleanly, so the failure can only come from the serializer.
+        rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        self.assertEqual(
+            json.loads(rewritten)["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"refusing to rewrite hooks\.json with an ignored value",
+            ):
+                harness.remove_managed_codex_floor(current, dispatcher)
+        # The rewrite reached serialization once, carrying the retained handler:
+        # the HarnessError is the serializer boundary, not an earlier reject.
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(
+            serialized[0]["hooks"]["PreToolUse"], [{"hooks": [kept_handler]}]
+        )
+
+    def test_deep_documents_never_leak_a_raw_recursion_error(self) -> None:
+        # Whether the stdlib decoder or encoder survives a given depth is a
+        # Python-version detail (3.11 fails in the decoder, 3.14.3 in the
+        # encoder, 3.14.4 in neither). The contract is only that a RecursionError
+        # is normalized instead of escaping as itself.
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
         ignored_depth = ('{"nested":' * 10000) + "0" + ("}" * 10000)
@@ -389,8 +486,21 @@ class HarnessTests(unittest.TestCase):
             + json.dumps(managed_handler)
             + "]}]}}"
         )
-        with self.assertRaises(harness.HarnessError):
-            harness.remove_managed_codex_floor(current, dispatcher)
+        try:
+            rewritten = harness.remove_managed_codex_floor(current, dispatcher)
+        except harness.HarnessError as error:
+            # Normalized, and normalized at one of the two depth boundaries -
+            # not swallowed by some unrelated rejection.
+            self.assertRegex(
+                str(error),
+                r"invalid existing hooks\.json|"
+                r"refusing to rewrite hooks\.json with an ignored value",
+            )
+        else:
+            # A Python that survives the depth must still rewrite correctly:
+            # the managed floor is gone and the ignored subtree is intact.
+            self.assertNotIn("dispatch.py", rewritten)
+            self.assertEqual(rewritten.count('"nested"'), 10000)
 
     def test_remove_managed_floor_retains_unowned_dispatcher(self) -> None:
         managed = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -840,11 +950,10 @@ class HarnessTests(unittest.TestCase):
             }
         }
         harness.parse_hooks_document(json.dumps(valid_config), source_kind="config")
+        managed_dir = Path(self.temp.name) / "managed-hooks"
+        managed_dir.mkdir()
         valid_requirements = {
-            "hooks": {
-                "managed_dir": "/managed/hooks",
-                "windows_managed_dir": "C:/managed/hooks",
-            }
+            "hooks": self.requirements_hook_paths(managed_dir),
         }
         harness.parse_hooks_document(
             json.dumps(valid_requirements), source_kind="requirements"
@@ -871,6 +980,139 @@ class HarnessTests(unittest.TestCase):
                     harness.parse_hooks_document(
                         json.dumps(document), source_kind="requirements"
                     )
+
+    def test_requirements_hook_paths_reject_relative_managed_dirs(self) -> None:
+        for field in ("managed_dir", "windows_managed_dir"):
+            for value in ("relative", "hooks/managed", "./managed", ""):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        rf"requirements hooks\.{field} must be an absolute path",
+                    ):
+                        harness.parse_hooks_document(
+                            json.dumps({"hooks": {field: value}}),
+                            source_kind="requirements",
+                        )
+
+    def test_requirements_hook_paths_reject_missing_managed_dir(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        document = {"hooks": self.requirements_hook_paths(missing)}
+        field = "windows_managed_dir" if sys.platform == "win32" else "managed_dir"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            rf"requirements hooks\.{field} is not an existing directory",
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_requirements_unc_managed_dirs_are_never_stat_probed(self) -> None:
+        # An SMB stat blocks for tens of seconds off-VPN and then answers about
+        # reachability, so existence stays unproven for a UNC managed dir. Both
+        # spellings are recognized on both platforms.
+        for value in ("//fileserver/codex/hooks", "\\\\fileserver\\codex\\hooks"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        for value in ("C:/managed/hooks", "/managed/hooks"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The absoluteness rule still applies to a UNC-looking relative value.
+        with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
+            harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_a_unc_windows_managed_dir_is_never_stat_probed(self) -> None:
+        with mock.patch.object(
+            harness.Path, "is_dir", side_effect=AssertionError("probed a network path")
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": "\\\\fileserver\\codex\\hooks"}
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX-only managed field")
+    def test_a_double_slash_posix_managed_dir_is_probed(self) -> None:
+        # The UNC exemption answers about WINDOWS path semantics. On POSIX
+        # `//missing/share` is an ordinary absolute path, so reparsing it as a
+        # share would skip the probe and certify a directory Codex cannot load.
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths({"managed_dir": "//missing/share"})
+
+    def test_local_windows_device_paths_are_still_probed(self) -> None:
+        # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
+        # a LOCAL device: skipping the existence probe would let doctor certify
+        # a managed hook directory Codex will reject.
+        for value in ("//?/C:/managed", "\\\\?\\C:\\managed", "//./C:/managed"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The device spelling of a real share stays unprobeable.
+        for value in ("//?/UNC/fileserver/codex", "\\\\?\\UNC\\fileserver\\codex"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_missing_windows_device_managed_dir_is_rejected(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.windows_managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": f"//?/{missing.as_posix()}"}
+            )
+
+    def test_requirements_managed_dirs_are_validated_per_platform_flavor(self) -> None:
+        # Codex resolves `managed_dir` on POSIX and `windows_managed_dir` on
+        # Windows. Accepting either flavour for either field false-greens a
+        # value the consuming host will treat as relative.
+        wrong_flavour = (
+            ("managed_dir", "C:/managed/hooks"),
+            ("managed_dir", "\\\\fileserver\\codex\\hooks"),
+            ("windows_managed_dir", "/managed/hooks"),
+        )
+        for field, value in wrong_flavour:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    harness.HarnessError,
+                    rf"requirements hooks\.{field} must be an absolute path",
+                ):
+                    harness.validate_requirements_hook_paths({field: value})
+
+    def test_requirements_hook_paths_reject_managed_file(self) -> None:
+        not_a_directory = Path(self.temp.name) / "managed-hooks-file"
+        not_a_directory.write_text("", encoding="utf-8")
+        document = {"hooks": self.requirements_hook_paths(not_a_directory)}
+        with self.assertRaisesRegex(
+            harness.HarnessError, r"is not an existing directory"
+        ):
+            harness.parse_hooks_document(
+                json.dumps(document), source_kind="requirements"
+            )
+
+    def test_doctor_rejects_relative_requirements_managed_dir(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, system_requirements='[hooks]\nmanaged_dir = "relative"\n'
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] no inspectable global Codex floor", output)
+        self.assertIn("hooks.managed_dir must be an absolute path", output)
 
     def test_toml_config_rejects_out_of_range_integers(self) -> None:
         config = Path(self.temp.name) / "config.toml"
@@ -908,12 +1150,56 @@ class HarnessTests(unittest.TestCase):
 
     def test_inline_hook_conversions_normalize_serializer_recursion(self) -> None:
         config = Path(self.temp.name) / "config.toml"
+        config.write_text("hooks.nested.leaf = 0\n", encoding="utf-8")
+        # Baseline that keeps the assertions below non-vacuous.
+        self.assertEqual(
+            json.loads(harness.inline_hooks_document(config)),
+            {"hooks": {"nested": {"leaf": 0}}},
+        )
+
+        serialized = []
+
+        def failing_dumps(payload, **kwargs):
+            serialized.append(payload)
+            raise RecursionError("fixture depth")
+
+        with mock.patch.object(harness.json, "dumps", side_effect=failing_dumps):
+            for convert in (
+                harness.inline_hooks_document,
+                harness.inline_hook_documents_from_config,
+            ):
+                with self.subTest(convert=convert.__name__):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError,
+                        r"unsupported inline hooks value in .*fixture depth",
+                    ):
+                        convert(config)
+        self.assertEqual(serialized, [{"hooks": {"nested": {"leaf": 0}}}] * 2)
+
+    def test_deep_inline_hooks_never_leak_a_raw_recursion_error(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
         config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
 
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hooks_document(config)
-        with self.assertRaises(harness.HarnessError):
-            harness.inline_hook_documents_from_config(config)
+        for convert in (
+            harness.inline_hooks_document,
+            harness.inline_hook_documents_from_config,
+        ):
+            with self.subTest(convert=convert.__name__):
+                try:
+                    converted = convert(config)
+                except harness.HarnessError as error:
+                    self.assertRegex(
+                        str(error), r"unsupported inline hooks value in .*config\.toml"
+                    )
+                else:
+                    # A Python that survives the depth must carry the whole
+                    # inline document across, not a truncated prefix.
+                    document = (
+                        converted
+                        if isinstance(converted, str)
+                        else "".join(text for _location, text in converted)
+                    )
+                    self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
@@ -1079,6 +1365,78 @@ class HarnessTests(unittest.TestCase):
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_doctor_fails_closed_when_a_pin_contests_feature_disables(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[features]\nhooks = false\n", encoding="utf-8"
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config="[features]\nhooks = false\n",
+            profile_configs={"custom.config.toml": "[features]\ncodex_hooks = false\n"},
+        )
+
+        # Codex's merge order for a managed requirements pin against stored
+        # config features is not statically provable, so the contest fails
+        # closed and names both sides instead of certifying a floor that a
+        # project-local opt-out may have already killed.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("contests 3 hook-feature disable(s)", output)
+        self.assertIn("UNPROVEN", output)
+        self.assertIn("features.hooks", output)
+        self.assertIn("features.codex_hooks", output)
+
+    def test_doctor_still_rejects_feature_disables_when_the_pin_is_false(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = false\n",
+            user_config="[features]\nhooks = false\n",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("inspectable activation blocker(s)", output)
+        # A pin of false agrees with the disable; there is nothing to contest.
+        self.assertNotIn("contests", output)
+
+    def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        hooks_path = self.write_hooks(repo, valid_adapter).resolve()
+        key = f"{hooks_path}:pre_tool_use:0:0"
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            system_requirements="[features]\nhooks = true\n",
+            user_config=(
+                f"[features]\nhooks = false\n\n"
+                f"[hooks.state.{json.dumps(key)}]\nenabled = false\n"
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex project hook activation", output)
+        self.assertIn("enabled=false", output)
+        # The per-handler state blocker is independent of the feature contest:
+        # both are reported, and neither is cleared by the managed pin.
+        self.assertIn("contests 1 hook-feature disable(s)", output)
 
     def test_requirements_hook_feature_schema_is_fail_closed(self) -> None:
         requirements = Path(self.temp.name) / "requirements.toml"
@@ -1797,6 +2155,785 @@ allow_local_binding = true
             (second_skill / "SKILL.md").read_text(encoding="utf-8"),
             "intermediate skill\n",
         )
+
+    @staticmethod
+    def wrapper_adapter_text(pin: str, posix_wrapper: str, windows_wrapper: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        f"/bin/sh {posix_wrapper}"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        f"& {windows_wrapper}"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    @staticmethod
+    def direct_adapter_text(posix_command: str, windows_command: str) -> str:
+        return json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": posix_command,
+                                    "commandWindows": windows_command,
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+    def test_doctor_states_the_marker_is_audit_only(self) -> None:
+        # Issue #18: the adapter's expected=<sha256> value is a static audit
+        # marker, not runtime byte enforcement. Nothing may report it as the
+        # latter, in code or in docs.
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn(
+            "the expected=<sha256> value is an audit-only marker, never "
+            "verified at runtime",
+            output,
+        )
+
+    def test_shipped_docs_call_the_marker_audit_only(self) -> None:
+        root = Path(harness.__file__).resolve().parent
+        for name in ("README.md", "SPECS.md", "BLUEPRINT.md"):
+            with self.subTest(document=name):
+                text = (root / name).read_text(encoding="utf-8").lower()
+                self.assertIn("audit-only", text)
+
+    def test_doctor_names_an_unpinned_adapter(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                'python3 "$HOME/.claude/hooks/dispatch.py" --event pre --runtime codex',
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("declares no expected=<sha256> audit marker", output)
+        self.assertIn(".command", output)
+        self.assertIn(".commandWindows", output)
+
+    def test_doctor_names_a_stale_adapter_marker(self) -> None:
+        repo = self.make_repo()
+        stale = "b" * 64
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={stale}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre --runtime codex",
+                f"$expected='{stale}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn(f"declares a stale audit marker {stale[:12]}...", output)
+        self.assertNotIn("declares no expected=<sha256> audit marker", output)
+
+    def test_doctor_names_a_missing_runtime_flag(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f'expected={pin}; python3 "$HOME/.claude/hooks/dispatch.py" '
+                "--event pre",
+                f"$expected='{pin}'; py -3 "
+                "$env:USERPROFILE/.claude/hooks/dispatch.py --event pre",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex adapter contract", output)
+        self.assertIn("never passes --runtime codex", output)
+
+    def test_doctor_inventories_a_vendored_dispatcher(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.direct_adapter_text(
+                f"expected={pin}; python3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+                f"$expected='{pin}'; py -3 .claude/hooks/dispatch.py "
+                "--event pre --runtime codex",
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        # A vendored dispatcher is an ESTATE-recorded choice, so it reads as
+        # inventory rather than a contract gap.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("names a repo-local dispatcher copy", output)
+        self.assertNotIn("contract gap", output)
+        # It is still not a certifiable floor: the shape check rejects it.
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_join_path_dispatcher_is_not_called_a_repo_local_copy(self) -> None:
+        # PowerShell's `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`
+        # is a shared home-anchored dispatcher the floor recognizer accepts;
+        # the inventory must not contradict it by naming a repo-local copy.
+        pin = "a" * 64
+        shared = (
+            f"$dispatcher=Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'; "
+            f"$expected='{pin}'; & py -3 $dispatcher --event pre --runtime codex"
+        )
+        gaps, inventory = harness.codex_adapter_command_notes(shared, "win", pin)
+        self.assertEqual(gaps, [])
+        self.assertEqual(inventory, [])
+        # A genuinely repo-local dispatcher is still inventoried.
+        vendored = (
+            f"$expected='{pin}'; & py -3 .claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        _gaps, vendored_inventory = harness.codex_adapter_command_notes(
+            vendored, "win", pin
+        )
+        self.assertIn(
+            "win names a repo-local dispatcher copy rather than the shared "
+            "home-anchored one",
+            vendored_inventory,
+        )
+
+    def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
+        repo = self.make_repo()
+        # A hook source with a PreToolUse handler that is not a floor adapter at
+        # all: doctor must not report a current audit marker it never saw.
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 tools/lint_gate.py",
+                                        "commandWindows": "py -3 tools/lint_gate.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("declare no handler that reaches the shared floor", output)
+        self.assertNotIn("declare a current audit marker", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+
+    def test_doctor_reports_an_absent_platform_command_as_absent(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"expected={pin}; python3 "
+                                            '"$HOME/.claude/hooks/dispatch.py" '
+                                            "--event pre --runtime codex"
+                                        ),
+                                        "timeout": 5,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(".commandWindows declares no command for this platform", output)
+        # The absence is reported once, not as three separate deviations of a
+        # command that does not exist.
+        self.assertNotIn(".commandWindows never passes", output)
+        self.assertNotIn(".commandWindows declares no expected=<sha256>", output)
+
+    def test_doctor_ignores_a_commented_dispatcher_mention_in_a_sibling(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = json.loads(
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        # A second, unrelated PreToolUse handler that only MENTIONS the
+        # dispatcher inside a comment. The floor candidate count already
+        # strips comments, so the contract check must agree or a lint gate
+        # next door turns a valid adapter into a failure.
+        valid_adapter["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "^Bash$",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo hi # see ~/.claude/hooks/dispatch.py",
+                        "commandWindows": "echo hi # see ~/.claude/hooks/dispatch.py",
+                    }
+                ],
+            }
+        )
+        self.write_hooks(repo, json.dumps(valid_adapter))
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_doctor_inventories_wrapper_flag_delegation(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("leaves --runtime codex to a repo wrapper", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_repo_floor_rejects_session_cwd_relative_wrapper_paths(self) -> None:
+        pin = "a" * 64
+        cases = (
+            (".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"),
+            ("tools/invoke_deny_floor.sh", "tools/invoke_deny_floor.ps1"),
+            ("$w/invoke_deny_floor.sh", "$w/invoke_deny_floor.ps1"),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                # Codex resolves the wrapper from the session cwd, so a relative
+                # path only certifies when that is the hook source root.
+                self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+                self.assertEqual(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=True
+                    ),
+                    [],
+                )
+
+    def test_repo_floor_keeps_home_anchored_wrappers_outside_the_source_root(
+        self,
+    ) -> None:
+        # A HOME-anchored wrapper names the same file from every session cwd,
+        # so a subdirectory or linked-worktree audit must still certify it
+        # instead of reporting zero valid floor handlers.
+        pin = "a" * 64
+        cases = (
+            ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
+            (
+                # POSIX: quoted, because an unquoted expansion is field-split.
+                '"$HOME/work/repo/invoke_deny_floor.sh"',
+                "$env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+            ),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                for reject in (False, True):
+                    self.assertEqual(
+                        len(
+                            harness.repo_codex_floor_groups(
+                                text, pin, reject_relative_wrapper=reject
+                            )
+                        ),
+                        1,
+                        posix_wrapper,
+                    )
+
+    def test_home_anchored_wrapper_bound_to_a_variable_survives(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=$HOME/work/repo/invoke_deny_floor.sh; "
+                                        "/bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        '$w="$env:USERPROFILE'
+                                        '/work/repo/invoke_deny_floor.ps1"; '
+                                        "& $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject in (False, True):
+            self.assertEqual(
+                len(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=reject
+                    )
+                ),
+                1,
+            )
+
+    def test_home_anchored_wrapper_grammar_rejects_cwd_smuggling(self) -> None:
+        # The relaxation must not let a cwd-dependent expansion ride in behind
+        # the home anchor, nor accept a sibling script name.
+        for token in (
+            "$HOME/$PWD/invoke_deny_floor.sh",
+            "$HOME/${cwd}/invoke_deny_floor.sh",
+            "$HOMEDIR/work/invoke_deny_floor.sh",
+            "$HOME/work/invoke_deny_floor.sh.evil",
+        ):
+            with self.subTest(token=token):
+                self.assertFalse(
+                    harness.token_is_wrapper(token, set(), reject_relative=True), token
+                )
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        token, reject_relative_wrapper=True
+                    ),
+                    token,
+                )
+
+    def test_a_powershell_home_anchor_is_not_cwd_independent_on_posix(self) -> None:
+        # `$env:USERPROFILE` is PowerShell-only: a POSIX shell expands `$env`
+        # to nothing and runs `:USERPROFILE/...`, so the floor never starts.
+        # Certifying it from a foreign cwd would be a false green.
+        value = "$env:USERPROFILE/work/repo/invoke_deny_floor.sh"
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=False
+            )
+        )
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                value, reject_relative_wrapper=True, windows=True
+            )
+        )
+        self.assertFalse(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=False)
+        )
+        self.assertTrue(
+            harness.token_is_wrapper(value, set(), reject_relative=True, windows=True)
+        )
+        # `$HOME` and `~` expand in both shells, so they are accepted on both.
+        for portable in (
+            "$HOME/work/repo/invoke_deny_floor.sh",
+            "~/work/repo/invoke_deny_floor.sh",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=portable, windows=windows):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            portable, reject_relative_wrapper=True, windows=windows
+                        )
+                    )
+
+    def test_a_single_quoted_home_anchor_never_expands(self) -> None:
+        # Single quotes suppress expansion in BOTH sh and PowerShell, so the
+        # shell invokes a literal `$HOME` directory and the floor never runs.
+        for value in (
+            "'$HOME/work/repo/invoke_deny_floor.sh'",
+            "'~/work/repo/invoke_deny_floor.sh'",
+            "'$env:USERPROFILE/work/repo/invoke_deny_floor.ps1'",
+        ):
+            for windows in (False, True):
+                with self.subTest(value=value, windows=windows):
+                    self.assertFalse(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=True, windows=windows
+                        ),
+                        value,
+                    )
+        # A double-quoted variable still expands; a double-quoted `~` does not.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                '"$HOME/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                '"~/work/repo/invoke_deny_floor.sh"', reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_quoted_or_escaped_wrapper_anchor_is_not_certified(self) -> None:
+        # The same rule at the invocation site: `shlex` removes the quote or
+        # escape, so the raw segment is consulted for the character that
+        # introduced the token. Every one of these leaves the shell with a
+        # literal, session-cwd-relative path.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh '~/work/repo/invoke_deny_floor.sh'",
+            '/bin/sh "~/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh \\~/work/repo/invoke_deny_floor.sh",
+            "/bin/sh \\$HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertFalse(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
+        # The spellings the shell really does expand into ONE operand certify.
+        for segment in (
+            '/bin/sh "$HOME/work/repo/invoke_deny_floor.sh"',
+            "/bin/sh ~/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(
+                    harness.segment_invokes_wrapper(
+                        segment, set(), reject_relative=True
+                    ),
+                    segment,
+                )
+
+    def test_an_unquoted_posix_home_operand_is_field_split(self) -> None:
+        # `/bin/sh $HOME/…` hands sh several operands when HOME contains
+        # whitespace, and the wrapper never starts. `"$HOME/…"` is one word;
+        # tilde expansion results are exempt from field splitting.
+        self.assertFalse(
+            harness.segment_invokes_wrapper(
+                "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+                set(),
+                reject_relative=True,
+            )
+        )
+        # PowerShell does not field-split, so the Windows command is unaffected.
+        self.assertTrue(
+            harness.segment_invokes_wrapper(
+                "powershell -File $env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+                set(),
+                reject_relative=True,
+                windows=True,
+            )
+        )
+        # The assignment form is not an operand: an assignment RHS is not
+        # field-split, so binding it bare and dereferencing it stays valid.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                "$HOME/work/repo/invoke_deny_floor.sh", reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_lowercase_posix_home_variable_is_a_different_variable(self) -> None:
+        # POSIX variable names are case-sensitive: `$home` normally expands to
+        # nothing, so the command runs an absolute path with no home prefix.
+        # The recognizer lowercases before matching, so the original spelling
+        # has to be re-checked.
+        for spelling in ("$home", "$HoMe", "${home}"):
+            value = f"{spelling}/work/repo/invoke_deny_floor.sh"
+            with self.subTest(spelling=spelling):
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=False
+                    ),
+                    value,
+                )
+                # PowerShell variables really are case-insensitive.
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=True
+                    ),
+                    value,
+                )
+        for exact in ("$HOME", "${HOME}"):
+            with self.subTest(spelling=exact):
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        f"{exact}/work/repo/invoke_deny_floor.sh",
+                        reject_relative_wrapper=True,
+                    )
+                )
+        # Both still parse as a wrapper invocation when relativity is allowed.
+        for segment in (
+            "/bin/sh '$HOME/work/repo/invoke_deny_floor.sh'",
+            "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+        ):
+            with self.subTest(segment=segment):
+                self.assertTrue(harness.segment_invokes_wrapper(segment, set()))
+
+    def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=.codex/invoke_deny_floor.sh; /bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        "$w='.codex/invoke_deny_floor.ps1'; & $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(len(harness.repo_codex_floor_groups(text, pin)), 1)
+        # Indirection through a variable does not make the path resolvable.
+        self.assertEqual(
+            harness.repo_codex_floor_groups(text, pin, reject_relative_wrapper=True),
+            [],
+        )
+
+    def test_reject_relative_wrapper_drops_only_the_wrapper_shape(self) -> None:
+        # Guards the composition of the two pattern tuples: dropping the wrapper
+        # must not quietly drop the home/system-anchored shapes with it.
+        self.assertEqual(
+            len(harness._FLOOR_VALUE_PATTERNS),
+            len(harness._CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS) + 1,
+        )
+        cwd_independent = (
+            "$HOME/.claude/hooks/dispatch.py",
+            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
+            "$env:SYSTEMROOT/py.exe",
+        )
+        for value in cwd_independent:
+            with self.subTest(value=value):
+                for reject in (False, True):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=reject
+                        ),
+                        value,
+                    )
+        wrapper = ".codex/invoke_deny_floor.sh"
+        self.assertTrue(harness.value_binds_anchored_floor_path(wrapper))
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                wrapper, reject_relative_wrapper=True
+            )
+        )
+
+    def test_direct_adapters_survive_a_foreign_session_cwd(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; python3 "
+                                        '"$HOME/.claude/hooks/dispatch.py" '
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; py -3 "
+                                        "$env:USERPROFILE/.claude/hooks/dispatch.py "
+                                        "--event pre --runtime codex"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject_relative_wrapper in (False, True):
+            with self.subTest(reject_relative_wrapper=reject_relative_wrapper):
+                self.assertEqual(
+                    len(
+                        harness.repo_codex_floor_groups(
+                            text,
+                            pin,
+                            reject_relative_wrapper=reject_relative_wrapper,
+                        )
+                    ),
+                    1,
+                )
+
+    def test_doctor_certifies_a_relative_wrapper_from_the_source_root(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        # The cwd dependency is a property of the adapter text, so it is
+        # reported even from the cwd where it happens to resolve.
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("session-cwd-relative wrapper path", output)
+        # The note names the hook source root as doctor resolved it; the exact
+        # spelling of a temp path is platform-dependent (8.3 names on Windows,
+        # /private on macOS), so assert the claim, not the rendering.
+        self.assertIn("only for sessions started in", output)
+        self.assertNotIn("contract gap", output)
+
+    def test_doctor_reports_a_relative_wrapper_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        self.write_hooks(
+            repo,
+            self.wrapper_adapter_text(
+                pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+            ),
+        )
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn("session cwd", output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
+        self.assertIn("0 project floor handler(s)", output)
+        self.assertIn("0 current audit-marker handler(s)", output)
+
+    def test_doctor_certifies_a_direct_adapter_from_a_subdirectory_cwd(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        subdirectory = repo / "service"
+        subdirectory.mkdir()
+
+        result, output = self.run_doctor_with_fixture_globals(subdirectory)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor", output)
+        self.assertNotIn("session-cwd-relative wrapper path", output)
 
     def test_repo_floor_finds_direct_and_hardened_adapters(self) -> None:
         direct = {
@@ -3216,6 +4353,30 @@ allow_local_binding = true
         self.assertIn("authoritative root source is absent", output)
         self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
 
+    def test_doctor_reports_a_relative_wrapper_in_a_linked_worktree(self) -> None:
+        # Codex sources the adapter from the root checkout but runs it from the
+        # linked worktree, so a repo-relative wrapper path never resolves.
+        root, linked = self.make_linked_worktree()
+        pin = harness.normalized_text_sha256(
+            Path(harness.__file__).resolve().parent
+            / "templates"
+            / "hooks"
+            / "dispatch.py"
+        )
+        adapter = self.wrapper_adapter_text(
+            pin, ".codex/invoke_deny_floor.sh", ".codex/invoke_deny_floor.ps1"
+        )
+        root_hooks = self.write_hooks(root, adapter)
+        self.write_hooks(linked, adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(linked)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[ok] Codex hook source: linked worktree", output)
+        self.assertIn("[FAIL] project Codex floor", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+        self.assertIn("1 handler(s) bind a session-cwd-relative wrapper path", output)
+
     def test_doctor_uses_identical_root_checkout_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
@@ -3946,6 +5107,1488 @@ allow_local_binding = true
     def test_missing_command_is_reported_not_raised(self) -> None:
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)
+
+    def test_doctor_reports_floor_version_and_reference_integrity(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        with mock.patch.object(
+            harness, "harness_reference_status", return_value=(True, "fixture clean")
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+        self.assertIn("[ok] floor version: canonical template ", output)
+        self.assertIn("reference integrity: ", output)
+        self.assertIn("declared vs real: ", output)
+        self.assertEqual(result, 0, output)
+
+    def test_doctor_never_prints_an_unprovable_comparison_as_a_pass(self) -> None:
+        # A working-tree template that is not the canonical reference proves
+        # nothing about canonical bytes, so it must not render as
+        # `[ok] floor version`.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        with mock.patch.object(
+            harness, "harness_reference_status", return_value=(False, "fixture reason")
+        ):
+            result, output = self.run_doctor_with_fixture_globals(repo)
+        self.assertIn("[UNPROVEN] floor version", output)
+        self.assertNotIn("[ok] floor version", output)
+        self.assertIn("nothing here was compared against canonical bytes", output)
+        # Unprovable is not a defect in the audited floor, so it does not fail.
+        self.assertEqual(result, 0, output)
+
+    def test_doctor_repo_has_the_same_offline_switch_as_audit(self) -> None:
+        # `doctor --repo` runs the same reality checks as `audit`, which means
+        # the same `gh` and remote-ref probes. Without the switch an operator
+        # off network waits out the whole budget with no way to skip it.
+        parsed = harness.parser().parse_args(["doctor", "--repo", ".", "--offline"])
+        self.assertTrue(parsed.offline)
+        self.assertFalse(harness.parser().parse_args(["doctor", "--repo", "."]).offline)
+
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: dict[str, object] = {}
+
+        def record(*_args: object, **kwargs: object) -> list[object]:
+            captured["runner"] = kwargs.get("command_runner")
+            return []
+
+        with mock.patch.object(harness, "reality_findings", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo, offline=True)
+        self.assertIs(captured["runner"], harness.local_only_command_output)
+
+    def test_doctor_offline_also_routes_the_floor_reference_probe(self) -> None:
+        # `harness_reference_status` reaches the remote for the published main
+        # tip. It shipped hard-wired to the network runner while only the
+        # reality checks honoured `--offline`, so the offline run still waited
+        # out `git ls-remote`.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: list[object] = []
+
+        def record(
+            _root: Path, command_runner: object, _deadline: object
+        ) -> tuple[bool, str]:
+            captured.append(command_runner)
+            return False, "fixture reason"
+
+        with mock.patch.object(harness, "harness_reference_status", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo, offline=True)
+        self.assertEqual(captured, [harness.local_only_command_output])
+
+    def test_doctor_repo_uses_the_network_resolver_by_default(self) -> None:
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        captured: dict[str, object] = {}
+
+        def record(*_args: object, **kwargs: object) -> list[object]:
+            captured["runner"] = kwargs.get("command_runner")
+            return []
+
+        with mock.patch.object(harness, "reality_findings", side_effect=record):
+            self.run_doctor_with_fixture_globals(repo)
+        self.assertIs(captured["runner"], harness.bounded_command_output)
+
+    def test_doctor_fails_on_a_reality_mismatch(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".agent-harness").mkdir()
+        (repo / ".agent-harness" / "tier.json").write_text(
+            json.dumps(
+                {
+                    "tier": 2,
+                    "name": harness.TIER_NAMES[2],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": "HUMAN_TODO.md",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] declared vs real", output)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
+
+
+class FakeCommandRunner:
+    """A stand-in resolver: records argv, never spawns a process."""
+
+    def __init__(
+        self,
+        responses: dict[str, tuple[bool, str]] | None = None,
+        default: tuple[bool, str] = (False, ""),
+    ) -> None:
+        self.responses = responses or {}
+        self.default = default
+        self.calls: list[list[str]] = []
+
+    def __call__(
+        self, argv: list[str], cwd: Path | None = None, **kwargs: object
+    ) -> tuple[bool, str]:
+        self.calls.append(list(argv))
+        joined = " ".join(argv)
+        for needle, response in self.responses.items():
+            if needle in joined:
+                return response
+        return self.default
+
+
+GITHUB_REMOTE_OUTPUT = (
+    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+    "origin\thttps://github.com/acme/widgets.git (push)"
+)
+# The commit a canonical harness checkout sits on AND publishes as `main`.
+PUBLISHED_MAIN_TIP = "0123456789abcdef0123456789abcdef01234567"
+
+
+class RealityCheckTests(unittest.TestCase):
+    """Declarations measured against the world, never against other documents."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.harness_root = self.root / "harness"
+        self.claude_home = self.root / "claude-home"
+        (self.harness_root / "templates" / "hooks").mkdir(parents=True)
+        (self.claude_home / "hooks").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def make_repo(
+        self,
+        *,
+        tier: int = 2,
+        sensitive_data: bool = False,
+        human_todo: object = "unset",
+        agents_text: str = "# Agent guidance\n",
+    ) -> Path:
+        repo = self.root / f"repo-{len(list(self.root.glob('repo-*')))}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "AGENTS.md").write_text(agents_text, encoding="utf-8")
+        declaration: dict[str, object] = {
+            "tier": tier,
+            "name": harness.TIER_NAMES[tier],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {"sensitive_data": sensitive_data},
+        }
+        if human_todo != "unset":
+            declaration["human_todo"] = human_todo
+        (repo / ".agent-harness").mkdir()
+        (repo / ".agent-harness" / "tier.json").write_text(
+            json.dumps(declaration), encoding="utf-8"
+        )
+        return repo
+
+    def audit(
+        self, repo: Path, runner: FakeCommandRunner, deadline: float | None = None
+    ) -> dict[str, object]:
+        return harness.audit_repo(
+            repo,
+            harness_root=self.harness_root,
+            claude_home=self.claude_home,
+            command_runner=runner,
+            deadline=deadline,
+        )
+
+    def statuses(self, result: dict[str, object], needle: str) -> list[str]:
+        return [
+            finding["status"]
+            for finding in result["reality"]
+            if needle in finding["check"]
+        ]
+
+    def details(self, result: dict[str, object]) -> str:
+        return " | ".join(finding["detail"] for finding in result["reality"])
+
+    def canonical_reference_runner(
+        self, **overrides: tuple[bool, str]
+    ) -> FakeCommandRunner:
+        """A harness checkout that can PROVE it is the canonical reference.
+
+        Clean, on `main`, level with the local tracking ref, and sitting on the
+        commit `origin` publishes as `main`. Needles are ordered so the
+        specific `rev-parse HEAD` answer wins over the branch-name one.
+        """
+        responses: dict[str, tuple[bool, str]] = {
+            "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
+            "rev-parse": (True, "main"),
+            "status --porcelain": (True, ""),
+            "ls-files": (True, "H templates/hooks/dispatch.py"),
+            "rev-list": (True, "0\t0"),
+            "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
+        }
+        responses.update(overrides)
+        return FakeCommandRunner(responses)
+
+    def write_floor(self, path: Path, version: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f'"""floor fixture."""\n\nFLOOR_VERSION = "{version}"\n', encoding="utf-8"
+        )
+
+    # --- sensitive_data versus real remote visibility -------------------------
+
+    def test_declared_sensitive_data_on_public_remote_is_a_mismatch(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+        detail = self.details(result)
+        self.assertIn("acme/widgets", detail)
+        self.assertIn("https://github.com/acme/widgets.git", detail)
+        self.assertIn("PUBLIC", detail)
+
+    def test_public_non_origin_remote_is_advisory_not_a_failure(self) -> None:
+        # A private fork of a public project: origin private, upstream public.
+        # The exposure check must still say it loudly without failing a repo
+        # whose publishing remote is private.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "upstream\thttps://github.com/upstream/widgets.git (fetch)",
+                ),
+                "gh repo view github.com/upstream/widgets": (True, "PUBLIC"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            sorted(self.statuses(result, "remote visibility")), ["advisory", "ok"]
+        )
+        detail = self.details(result)
+        self.assertIn("PUBLIC repository upstream/widgets", detail)
+        self.assertIn("is not the publishing remote", detail)
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_public_origin_still_fails_the_audit(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "upstream\thttps://github.com/upstream/widgets.git (fetch)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
+    def test_offline_audit_runs_no_network_resolver(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.audit_command(
+                SimpleNamespace(path=str(repo), json=False, offline=True)
+            )
+        text = output.getvalue()
+        self.assertEqual(code, 0)
+        # git still answers locally; `gh` is never consulted, and the
+        # unmeasured visibility reports UNPROVEN rather than a pass.
+        self.assertIn("[ok] harness audit", text)
+        self.assertNotIn("[MISMATCH] sensitive_data", text)
+        self.assertFalse(harness.local_only_command_output(["gh", "repo", "view"])[0])
+
+    def test_declared_sensitive_data_on_private_remote_passes(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_unresolvable_visibility_is_unproven_and_never_a_pass(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)}, default=(False, "")
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("unmeasured", self.details(result))
+        # Offline is not a defect: it must not fail the audit either.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_non_github_remote_is_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://gitlab.example/acme/widgets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
+
+    def test_a_unc_remote_is_unproven_not_a_local_only_pass(self) -> None:
+        # `//server/share/repo.git` starts with `/`, so the local-path rule
+        # called a network share local and printed `ok` without measuring who
+        # can reach it.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\t//fileserver/git/secrets.git (fetch)\n"
+                    "origin\t//fileserver/git/secrets.git (push)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_ordinary_absolute_path_remote_is_still_local(self) -> None:
+        for url in ("/srv/git/widgets.git", "./widgets.git", "~/git/widgets.git"):
+            with self.subTest(url=url):
+                repo = self.make_repo(sensitive_data=True)
+                runner = FakeCommandRunner(
+                    {"remote --verbose": (True, f"origin\t{url} (fetch)")}
+                )
+                result = self.audit(repo, runner)
+                self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+
+    def test_publishing_endpoints_are_probed_before_advisory_ones(self) -> None:
+        # The probe budget is shared. With git's alphabetical remote order, a
+        # few slow advisory remotes ahead of `origin` could exhaust it and
+        # leave the one exposure this check exists to catch as UNPROVEN.
+        entries = harness.publishing_remote_endpoints(
+            [
+                ("aaa-mirror", "https://github.com/acme/mirror.git", "fetch"),
+                ("aaa-mirror", "https://github.com/acme/mirror.git", "push"),
+                ("origin", "https://github.com/acme/widgets.git", "fetch"),
+                ("origin", "https://github.com/acme/widgets.git", "push"),
+                ("zzz-upstream", "https://github.com/upstream/widgets.git", "fetch"),
+            ]
+        )
+        self.assertTrue(entries[0][2], entries)
+        self.assertEqual(entries[0][0], "origin")
+        self.assertEqual(
+            [name for name, _url, publishes, _note in entries if publishes], ["origin"]
+        )
+
+    def test_a_public_origin_survives_a_budget_spent_on_advisory_remotes(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        clock = {"now": 0.0}
+
+        class SlowRunner(FakeCommandRunner):
+            """Every visibility probe burns 3s of the 8s aggregate budget."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    clock["now"] += 3.0
+                return answer
+
+        runner = SlowRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "aaa\thttps://github.com/acme/a.git (fetch)\n"
+                    "aaa\thttps://github.com/acme/a.git (push)\n"
+                    "bbb\thttps://github.com/acme/b.git (fetch)\n"
+                    "bbb\thttps://github.com/acme/b.git (push)\n"
+                    "ccc\thttps://github.com/acme/c.git (fetch)\n"
+                    "ccc\thttps://github.com/acme/c.git (push)\n"
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
+            result = self.audit(repo, runner, deadline=8.0)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
+    def test_a_public_fetch_url_behind_a_private_pushurl_is_not_a_mismatch(
+        self,
+    ) -> None:
+        # `git remote -v` prints fetch and push endpoints on separate rows.
+        # Discarding the direction made a public FETCH mirror look like the
+        # place work is published and hard-failed the audit.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets-private.git (push)",
+                ),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            sorted(self.statuses(result, "remote visibility")), ["advisory", "ok"]
+        )
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertIn("only FETCHES from this URL", self.details(result))
+
+    def test_a_public_pushurl_behind_a_private_fetch_url_still_fails(self) -> None:
+        # The mirror image: what is pushed to is what is published.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
+    def test_a_public_sole_remote_without_origin_fails_the_audit(self) -> None:
+        # The origin-only rule presumed a private `origin` exists. With no
+        # origin at all, the remote that carries the work IS the publishing
+        # remote; calling it "not the publishing remote" turned a real exposure
+        # into an exit-0 advisory.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "github\thttps://github.com/acme/secrets.git (fetch)\n"
+                    "github\thttps://github.com/acme/secrets.git (push)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+        detail = self.details(result)
+        self.assertIn("no remote named 'origin' is configured", detail)
+        self.assertNotIn("is not the publishing remote", detail)
+
+    def test_github_slugs_survive_every_supported_remote_spelling(self) -> None:
+        # A captured port became the owner, so `gh` was asked about `22/owner`
+        # and a public origin degraded to UNPROVEN instead of a mismatch.
+        for remote, slug in (
+            ("ssh://git@github.com:22/acme/widgets.git", "acme/widgets"),
+            ("ssh://git@github.com:2222/acme/widgets", "acme/widgets"),
+            ("ssh://github.com/acme/widgets.git", "acme/widgets"),
+            ("ssh://git@github.com:acme/widgets.git", "acme/widgets"),
+            ("https://github.com/acme/widgets.git", "acme/widgets"),
+            ("https://token@github.com/acme/widgets.git", "acme/widgets"),
+            ("git@github.com:acme/widgets.git", "acme/widgets"),
+            ("https://gitlab.example/acme/widgets.git", ""),
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual(harness.github_repo_slug(remote), slug)
+
+    def test_a_ported_ssh_origin_is_probed_by_its_real_slug(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tssh://git@github.com:22/acme/widgets.git (fetch)\n"
+                    "origin\tssh://git@github.com:22/acme/widgets.git (push)",
+                ),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertIn(
+            ["gh", "repo", "view", "github.com/acme/widgets", "--json", "visibility"],
+            [argv[:6] for argv in runner.calls],
+        )
+
+    def test_undecodable_resolver_output_never_aborts_the_audit(self) -> None:
+        # Under a UTF-8 locale, `subprocess.run(text=True)` raises
+        # UnicodeDecodeError while building its result (and leaves stdout None
+        # on the Windows reader-thread path). `main()` catches only
+        # HarnessError, so the audit died with a traceback where the contract
+        # says the check is UNPROVEN. Decoding is explicit and tolerant now.
+        script = "import sys; sys.stdout.buffer.write(b'origin\\thttps://h/\\xff/r')"
+        resolved, output = harness.bounded_command_output(
+            [sys.executable, "-c", script]
+        )
+        self.assertTrue(resolved)
+        self.assertIn("origin", output)
+        self.assertIn("�", output)
+
+    def test_a_timed_out_resolver_returns_within_its_bound(self) -> None:
+        # A resolver whose DESCENDANT inherits the captured pipes (ssh behind
+        # `git ls-remote`) kept the drain waiting long past the deadline the
+        # aggregate budget is built on, because `subprocess.run` kills only the
+        # process it started. The child now runs in its own group and the whole
+        # tree is killed, and the pipes are closed rather than drained again.
+        script = (
+            "import subprocess, sys, time;"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+            " stdout=sys.stdout, stderr=sys.stderr);"
+            "time.sleep(60)"
+        )
+        started = time.monotonic()
+        resolved, output = harness.bounded_command_output(
+            [sys.executable, "-c", script], timeout=1.0
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(resolved)
+        self.assertEqual(output, "")
+        # Generous, but far below the 60s the grandchild would otherwise hold.
+        self.assertLess(elapsed, 20.0, f"bounded_command_output took {elapsed:.1f}s")
+
+    def test_embedded_credentials_never_reach_a_finding(self) -> None:
+        # `git remote --verbose` keeps URL userinfo, so an audit that echoes
+        # the raw URL leaks a PAT into the terminal, --json and CI logs.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://ci-user:s3cr3t-pat@gitlab.example/acme/repo.git"
+                    " (fetch)\n"
+                    "mirror\thttps://token@github.com/acme/widgets.git (fetch)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("ci-user", rendered)
+        self.assertNotIn("token@", rendered)
+        self.assertIn("https://***@gitlab.example/acme/repo.git", rendered)
+        self.assertIn("https://***@github.com/acme/widgets.git", rendered)
+
+    def test_a_credential_in_the_query_string_is_redacted_too(self) -> None:
+        # Userinfo is not the only place a token rides: several hosts accept
+        # `?private_token=`/`?access_token=`, and the whole tail is dropped
+        # rather than matched against known parameter names, which would fail
+        # open on the next host's spelling.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://gitlab.example/acme/repo.git"
+                    "?private_token=s3cr3t-pat (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("private_token=", rendered)
+        self.assertIn("https://gitlab.example/acme/repo.git?<redacted>", rendered)
+        self.assertEqual(
+            harness.redact_remote_url("https://h/a/b.git#frag=PAT"),
+            "https://h/a/b.git#<redacted>",
+        )
+        # A URL with no query keeps its exact spelling.
+        self.assertEqual(
+            harness.redact_remote_url("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets.git",
+        )
+
+    def test_a_file_url_wrapping_a_unc_path_is_not_local(self) -> None:
+        # `file:////server/share/repo.git` is the file-URL spelling of a UNC
+        # path; matching `file://` first called a network share local.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tfile:////fileserver/git/secrets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+        # A file URL naming a genuinely local path is still local.
+        for url in ("file:///srv/git/widgets.git", "file://localhost/srv/git/w.git"):
+            with self.subTest(url=url):
+                local_repo = self.make_repo(sensitive_data=True)
+                local_runner = FakeCommandRunner(
+                    {"remote --verbose": (True, f"origin\t{url} (fetch)")}
+                )
+                local_result = self.audit(local_repo, local_runner)
+                self.assertEqual(
+                    self.statuses(local_result, "remote visibility"), ["ok"]
+                )
+
+    def test_a_file_url_authority_is_a_network_share(self) -> None:
+        # `file://server/share/x` puts the host in the AUTHORITY, where the
+        # earlier fix's fixed-prefix strip could not see it: the remainder had
+        # no `//`, so the UNC rule missed it and `file://` claimed it as local.
+        for url in (
+            "file://fileserver/share/repo.git",
+            "file:////fileserver/share/repo.git",
+            "//fileserver/share/repo.git",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(harness.remote_names_a_network_share(url), url)
+        for url in (
+            "file:///srv/git/widgets.git",
+            "file://localhost/srv/git/widgets.git",
+            "/srv/git/widgets.git",
+            "C:/git/widgets.git",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(harness.remote_names_a_network_share(url), url)
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\tfile://fileserver/share/secrets.git (fetch)",
+                )
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("is a network share", self.details(result))
+
+    def test_a_configured_push_remote_beats_origin(self) -> None:
+        # `branch.<name>.pushRemote` and `remote.pushDefault` decide where an
+        # ordinary `git push` publishes. A private origin plus a public
+        # pushDefault is a real exposure that the origin-only rule downgraded
+        # to an exit-0 advisory.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets-private.git (push)\n"
+                    "mirror\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "mirror\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "config --get remote.pushDefault": (True, "mirror"),
+                "gh repo view github.com/acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+        self.assertIn("git is configured to push to mirror", self.details(result))
+
+    def test_a_branch_push_remote_beats_push_default(self) -> None:
+        self.assertEqual(
+            harness.configured_push_remote(
+                Path("."),
+                FakeCommandRunner(
+                    {
+                        "rev-parse --abbrev-ref HEAD": (True, "work"),
+                        "config --get branch.work.pushRemote": (True, "fork"),
+                        "config --get remote.pushDefault": (True, "mirror"),
+                    }
+                ),
+                None,
+            ),
+            ("fork", True),
+        )
+        # Nothing configured, or a silent git, still means `origin` — and that
+        # is a MEASURED answer, because `git config --get` exits non-zero for
+        # an unset key.
+        self.assertEqual(
+            harness.configured_push_remote(Path("."), FakeCommandRunner(), None),
+            ("origin", True),
+        )
+
+    def test_an_unmeasured_push_remote_is_unproven_not_origin(self) -> None:
+        # An exhausted budget cannot tell "unset" from "never ran", and
+        # guessing `origin` would downgrade a public push endpoint under
+        # `remote.pushDefault` to an exit-0 advisory.
+        runner = FakeCommandRunner()
+        self.assertEqual(
+            harness.configured_push_remote(Path("."), runner, harness.monotonic() - 1),
+            ("origin", False),
+        )
+        self.assertEqual(runner.calls, [])
+        repo = self.make_repo(sensitive_data=True)
+
+        class BudgetBurningRunner(FakeCommandRunner):
+            """`git remote --verbose` answers, then the budget is gone."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                clock["now"] += 9.0
+                return answer
+
+        clock = {"now": 0.0}
+        burning = BudgetBurningRunner(
+            {"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)}
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
+            result = self.audit(repo, burning, deadline=8.0)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("push-remote configuration", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_dot_push_remote_publishes_to_no_remote(self) -> None:
+        # `remote.pushDefault = .` targets THIS repository. Passing the literal
+        # `.` through matched no remote and then tripped the "no publishing
+        # remote configured, treat them all as publishing" rule — a hard
+        # MISMATCH for a public origin an ordinary push never reaches.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "config --get remote.pushDefault": (True, "."),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["advisory"])
+        self.assertIn("pushes to the local repository", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_the_visibility_probe_is_pinned_to_github_dot_com(self) -> None:
+        # `gh repo view OWNER/REPO` resolves against GH_HOST or the default
+        # authenticated host, so on a machine pointed at GitHub Enterprise the
+        # probe could answer PRIVATE about a different repository with the same
+        # slug while the github.com remote is public.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view github.com/acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertTrue(probes)
+        for argv in probes:
+            self.assertTrue(argv[3].startswith("github.com/"), argv)
+
+    def test_redaction_keeps_scp_syntax_actionable(self) -> None:
+        # `git@github.com:owner/repo` carries a fixed account name, not a
+        # secret; blanking it would only make the finding harder to act on.
+        self.assertEqual(
+            harness.redact_remote_url("git@github.com:acme/widgets.git"),
+            "git@github.com:acme/widgets.git",
+        )
+        self.assertEqual(
+            harness.redact_remote_url("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets.git",
+        )
+        self.assertEqual(
+            harness.redact_remote_url("ssh://git:pw@github.com/acme/widgets.git"),
+            "ssh://***@github.com/acme/widgets.git",
+        )
+
+    def test_local_only_remote_is_a_pass(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {"remote --verbose": (True, f"origin\t{self.root} (fetch)")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+
+    def test_remote_enumeration_failure_is_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(default=(False, ""))
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertTrue(result["ok"])
+
+    def test_absent_remote_is_a_pass_not_an_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner({"remote --verbose": (True, "")})
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertIn("nothing is published", self.details(result))
+
+    def test_exhausted_deadline_spawns_nothing_and_reports_unproven(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner, deadline=harness.monotonic() - 1)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertTrue(result["ok"])
+
+    def test_a_measured_answer_survives_the_budget_expiring(self) -> None:
+        """The clock is read once per command, before it starts.
+
+        Discarding an answer that already proved a remote PUBLIC would turn
+        the one finding this check exists to make into an UNPROVEN.
+        """
+        repo = self.make_repo(sensitive_data=True)
+        clock = {"now": 0.0}
+
+        class OverrunningRunner(FakeCommandRunner):
+            """The visibility probe itself consumes the rest of the budget."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                answer = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    clock["now"] += 10.0
+                return answer
+
+        runner = OverrunningRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        with mock.patch.object(harness, "monotonic", side_effect=lambda: clock["now"]):
+            result = self.audit(repo, runner, deadline=8.0)
+        # The budget really expired mid-probe, and the answer still counted.
+        self.assertGreater(clock["now"], 8.0)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+
+    def test_repo_without_the_overlay_never_touches_the_network(self) -> None:
+        repo = self.make_repo(sensitive_data=False)
+        runner = FakeCommandRunner()
+        result = self.audit(repo, runner)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.statuses(result, "remote visibility"), [])
+
+    def test_privacy_claims_match_the_phrasings_docs_actually_use(self) -> None:
+        claiming = (
+            "This private repository versions the user's config.",
+            "This repository is private.",
+            "We keep private repos for client work.",
+            "It lives in a private GitHub repository.",
+            "The repo is private and must stay that way.",
+            "Everything in this repository is kept private.",
+            "Keep the repo private.",
+            "These repos remain private.",
+            "Pushes go to a private remote.",
+        )
+        for text in claiming:
+            with self.subTest(text=text):
+                self.assertIsNotNone(harness.PRIVACY_CLAIM_PATTERN.search(text))
+        not_claiming = (
+            "Never commit a private key.",
+            "Privately held opinions are out of scope.",
+            "The repository is public.",
+            # Ordinary secrets-hygiene boilerplate: a claim about keys and
+            # secrets, not about this repository's visibility.
+            "Keep private keys out of version control.",
+            "Secrets remain private to the operator.",
+            "Private tokens stay private; rotate them quarterly.",
+            "Credentials are kept private in the vault.",
+        )
+        for text in not_claiming:
+            with self.subTest(text=text):
+                self.assertIsNone(harness.PRIVACY_CLAIM_PATTERN.search(text))
+
+    def test_a_natural_privacy_claim_raises_the_advisory(self) -> None:
+        repo = self.make_repo(
+            sensitive_data=False,
+            agents_text="This repository is private; do not publish it.\n",
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "documented privacy"), ["advisory"])
+
+    def test_documented_privacy_without_the_overlay_is_an_advisory_split(self) -> None:
+        repo = self.make_repo(
+            sensitive_data=False,
+            agents_text="This private repository versions the user's config.\n",
+        )
+        runner = FakeCommandRunner()
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "documented privacy"), ["advisory"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    # --- human_todo versus a file that exists ---------------------------------
+
+    def test_human_todo_naming_a_missing_file_is_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_human_todo_pointing_at_a_real_file_passes(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        (repo / "HUMAN_TODO.md").write_text("- [ ] item\n", encoding="utf-8")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_human_todo_escaping_the_repo_is_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="../HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+
+    def test_drive_absolute_human_todo_is_a_mismatch(self) -> None:
+        # The guard exists to catch a declaration that is not repo-relative;
+        # a drive-absolute value is exactly that, and PurePosixPath calls it
+        # relative because it carries no leading slash.
+        for declared in (
+            "C:\\Users\\jekyt\\HUMAN_TODO.md",
+            "C:/Users/jekyt/HUMAN_TODO.md",
+            "C:HUMAN_TODO.md",
+            "\\\\server\\share\\HUMAN_TODO.md",
+        ):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(human_todo=declared)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+                self.assertIn("not a repo-relative path", self.details(result))
+                self.assertFalse(result["ok"])
+
+    def test_an_inaccessible_human_todo_is_unproven_not_a_mismatch(self) -> None:
+        # `Path.is_file()` swallows the OS's refusal, so a permissions failure
+        # or an unavailable mount produced a hard MISMATCH claiming the file is
+        # absent — a repo defect asserted from a machine-state failure.
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        declared = repo / "HUMAN_TODO.md"
+        refused = {declared, repo.resolve() / "HUMAN_TODO.md"}
+        real_stat = Path.stat
+
+        def refuse(self: Path, *args: object, **kwargs: object) -> object:
+            if self in refused:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(harness.Path, "stat", refuse):
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["UNPROVEN"])
+        self.assertIn("could not be inspected", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_malformed_human_todo_is_a_mismatch_not_unproven(self) -> None:
+        # A NUL cannot appear in a path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as ValueError -> UNPROVEN -> exit 0.
+        repo = self.make_repo(human_todo="HUMAN\x00TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertIn("not a repo-relative path", self.details(result))
+        self.assertFalse(result["ok"])
+
+    def test_a_missing_human_todo_is_still_a_mismatch(self) -> None:
+        # The guarded stat must not turn ordinary absence into an unproven.
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_null_human_todo_above_t1_is_advisory_only(self) -> None:
+        repo = self.make_repo(tier=3, human_todo=None)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "human_todo"), ["advisory"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    # --- vendored floor bytes versus template versus deployed global ----------
+
+    def test_vendored_floor_drift_from_the_template_is_a_mismatch(self) -> None:
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)"
+        )
+        runner = self.canonical_reference_runner()
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+        )
+        detail = self.details(result)
+        self.assertIn("1.6.0 (2026-07-01)", detail)
+        self.assertIn("1.6.5 (2026-07-25)", detail)
+        self.assertFalse(result["ok"])
+
+    def test_matching_floor_copies_pass(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = self.canonical_reference_runner()
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "vendored hooks/dispatch.py"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_dirty_harness_checkout_is_not_treated_as_the_reference(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "main"), "status --porcelain": (True, " M x")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("uncommitted templates/hooks changes", self.details(result))
+        self.assertTrue(result["ok"])
+
+    def test_a_main_that_diverged_from_origin_is_not_the_reference(self) -> None:
+        # Clean on a local `main` is not agreement with the published one:
+        # unpushed templates/hooks commits would otherwise be canonical.
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {
+                "rev-parse": (True, "main"),
+                "status --porcelain": (True, ""),
+                "ls-files": (True, "H templates/hooks/dispatch.py"),
+                "rev-list": (True, "0\t2"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("2 ahead of and 0 behind origin/main", self.details(result))
+
+    def test_an_unreadable_published_main_is_not_the_reference(self) -> None:
+        # `origin/main` is a LOCAL tracking ref. When the published tip cannot
+        # be read, currency is unproven — and an unproven reference must never
+        # render as a pass.
+        runner = FakeCommandRunner(
+            {
+                "rev-parse": (True, "main"),
+                "status --porcelain": (True, ""),
+                "ls-files": (True, "H templates/hooks/dispatch.py"),
+            }
+        )
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("published main tip could not be read", detail)
+        self.assertIn("cannot be proven current", detail)
+
+    def test_a_hidden_index_flag_disqualifies_the_reference(self) -> None:
+        # `skip-worktree` (S) and `assume-unchanged` (lowercase) both make
+        # `git status` omit a file's local edits, so a modified template read
+        # as clean and was then hashed from the working tree — a vendored copy
+        # matching that hidden edit would report `ok` while published HEAD
+        # holds different canonical bytes.
+        for flags in (
+            "S templates/hooks/dispatch.py",
+            "h templates/hooks/smoke_test.py",
+            "H templates/hooks/dispatch.py\nS templates/hooks/smoke_test.py",
+        ):
+            with self.subTest(flags=flags):
+                runner = self.canonical_reference_runner(**{"ls-files": (True, flags)})
+                ok, detail = harness.harness_reference_status(
+                    self.harness_root, runner, deadline=None
+                )
+                self.assertFalse(ok)
+                self.assertIn("skip-worktree/assume-unchanged", detail)
+        # An unresolvable index is unproven too, never assumed clean.
+        runner = self.canonical_reference_runner(**{"ls-files": (False, "")})
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("index flags", detail)
+
+    def test_a_stale_tracking_ref_is_not_the_reference(self) -> None:
+        # `rev-list origin/main...HEAD` returns 0 0 against an unfetched
+        # tracking ref, so an obsolete working tree was called canonical and a
+        # vendored copy matching that stale template reported `ok`.
+        runner = self.canonical_reference_runner(
+            **{"ls-remote": (True, "f" * 40 + "\trefs/heads/main")}
+        )
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("local origin/main is stale", detail)
+        self.assertIn("ffffffffffff", detail)
+
+    def test_a_level_main_at_the_published_tip_is_the_reference(self) -> None:
+        runner = self.canonical_reference_runner()
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok)
+        self.assertIn("level with origin/main", detail)
+        self.assertIn(PUBLISHED_MAIN_TIP[:12], detail)
+
+    def test_an_offline_run_never_asks_the_remote_for_the_published_tip(self) -> None:
+        # `git` is not by itself a local resolver: `ls-remote` contacts the
+        # host, so `--offline` still made a network call.
+        self.assertFalse(
+            harness.command_reaches_the_network(["git", "remote", "--verbose"])
+        )
+        for argv in (
+            ["git", "ls-remote", "origin", "refs/heads/main"],
+            ["git", "fetch", "origin"],
+            ["git", "remote", "show", "origin"],
+            ["gh", "repo", "view", "acme/widgets"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertTrue(harness.command_reaches_the_network(argv))
+                self.assertEqual(harness.local_only_command_output(argv), (False, ""))
+
+        # An otherwise canonical checkout audited offline: the reference is
+        # UNPROVEN with the reason, never a silent pass.
+        class OfflineRunner(FakeCommandRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                if harness.command_reaches_the_network(argv):
+                    self.calls.append(list(argv))
+                    return False, ""
+                return super().__call__(argv, cwd, **kwargs)
+
+        offline = OfflineRunner(self.canonical_reference_runner().responses)
+        ok, detail = harness.harness_reference_status(
+            self.harness_root, offline, deadline=None
+        )
+        self.assertFalse(ok)
+        self.assertIn("published main tip could not be read", detail)
+
+    def test_floor_branch_checkout_is_not_treated_as_the_reference(self) -> None:
+        repo = self.make_repo()
+        for path in (
+            repo / "hooks" / "dispatch.py",
+            self.claude_home / "hooks" / "dispatch.py",
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+        ):
+            self.write_floor(path, "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("not main", self.details(result))
+
+    def test_deployed_global_drift_never_fails_a_repo_audit(self) -> None:
+        # `~/.claude/hooks` is the AUDITING MACHINE's state. A developer who
+        # has not run `sync-global --apply` must not turn a repo gate red, and
+        # the same repo must not silently pass on a runner with no ~/.claude.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
+        )
+        runner = self.canonical_reference_runner()
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["advisory"]
+        )
+        self.assertIn("machine-state observation", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_real_drift_still_fails_when_the_machine_is_behind(self) -> None:
+        # The loosening above must not swallow genuine repo drift: vendored
+        # bytes that differ from the canonical template still fail, even while
+        # the deployed global copy on this machine is itself stale.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.5.0 (2026-06-01)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)"
+        )
+        runner = self.canonical_reference_runner()
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["MISMATCH"]
+        )
+        self.assertFalse(result["ok"])
+
+    def test_deployed_drift_without_a_provable_template_stays_unproven(self) -> None:
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.0 (2026-07-01)")
+        self.write_floor(
+            self.claude_home / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)"
+        )
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("deployed global copy", self.details(result))
+        self.assertTrue(result["ok"])
+
+    def test_an_inaccessible_vendored_path_is_unproven_not_ok(self) -> None:
+        # `Path.is_file()` answers False for both "absent" and "the OS refused
+        # to tell me", so a permissions or transient filesystem failure printed
+        # `[ok] no vendored floor copy` for a repo that may well vendor one.
+        repo = self.make_repo()
+        denied = repo / "hooks" / "dispatch.py"
+        # `audit_repo` walks the GIT ROOT, which on macOS resolves
+        # /var/folders/... to /private/var/folders/..., so the refusal has to
+        # recognize both spellings of the same file.
+        refused = {denied, repo.resolve() / "hooks" / "dispatch.py"}
+        real_stat = Path.stat
+
+        def refuse(self: Path, *args: object, **kwargs: object) -> object:
+            if self in refused:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(harness.Path, "stat", refuse):
+            self.assertEqual(
+                harness.file_presence(denied)[0],
+                False,
+            )
+            self.assertIn("could not be inspected", harness.file_presence(denied)[1])
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertNotIn("no vendored floor copy", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    @unittest.skipUnless(
+        hasattr(os, "symlink"), "platform cannot create symbolic links"
+    )
+    def test_a_symlinked_vendored_floor_is_unproven_not_matching(self) -> None:
+        # `stat()` follows links, so a `hooks/dispatch.py` symlinked to the
+        # harness template hashed the TARGET and reported the repo as matching
+        # canonical bytes — while the repo vendors none and the link may
+        # resolve elsewhere, or nowhere, on the next machine.
+        repo = self.make_repo()
+        template = self.harness_root / "templates" / "hooks" / "dispatch.py"
+        self.write_floor(template, "1.6.5 (2026-07-25)")
+        link = repo / "hooks" / "dispatch.py"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(template, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create a symlink here: {exc}")
+        result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to", self.details(result))
+        # Unprovable is not a repo defect, so it does not fail the audit.
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_linked_vendored_floor_is_unproven_on_every_platform(self) -> None:
+        # The real-symlink test above needs a privilege Windows withholds, so
+        # this one drives the same branch through the seam and runs everywhere.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py",
+            "1.6.5 (2026-07-25)",
+        )
+        linked = repo / "hooks" / "dispatch.py"
+
+        def fake_symlink_target(path: Path) -> str:
+            # `audit_repo` walks the GIT ROOT, which spells the same file
+            # differently from the fixture path: macOS resolves /var ->
+            # /private/var, and a Windows runner hands back an 8.3 short name
+            # (C:\Users\RUNNER~1\...) that `realpath` does not expand. Compare
+            # by stat identity, which is immune to both spellings.
+            try:
+                same = os.path.samefile(path, linked)
+            except OSError:
+                same = False
+            return "/elsewhere/dispatch.py" if same else ""
+
+        with mock.patch.object(
+            harness, "symlink_target", side_effect=fake_symlink_target
+        ):
+            result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to /elsewhere/dispatch.py", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+        # Without the link the identical bytes still compare as `ok`, so the
+        # new branch is what changed the verdict.
+        plain = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(self.statuses(plain, "vendored hooks/dispatch.py"), ["ok"])
+
+    def test_a_dangling_vendored_symlink_is_unproven_not_absent(self) -> None:
+        # `file_presence` FOLLOWS the link, so a broken one answered (False,
+        # "") and the symlink branch — guarded on `present` — never ran:
+        # `[ok] no vendored floor copy` for a repo that plainly declares one.
+        repo = self.make_repo()
+        dangling = repo / "hooks" / "dispatch.py"
+
+        def fake_symlink_target(path: Path) -> str:
+            same = os.path.realpath(path) == os.path.realpath(dangling)
+            return "/gone/dispatch.py" if same else ""
+
+        with mock.patch.object(
+            harness, "symlink_target", side_effect=fake_symlink_target
+        ):
+            result = self.audit(repo, self.canonical_reference_runner())
+        self.assertEqual(
+            self.statuses(result, "vendored hooks/dispatch.py"), ["UNPROVEN"]
+        )
+        self.assertIn("is a symlink to /gone/dispatch.py", self.details(result))
+        self.assertNotIn("no vendored floor copy", self.details(result))
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_absent_vendored_path_is_still_a_clean_ok(self) -> None:
+        # The guarded stat must not turn ordinary absence into an unproven.
+        repo = self.make_repo()
+        self.assertEqual(
+            harness.file_presence(repo / "hooks" / "dispatch.py"), (False, "")
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "vendored floor bytes"), ["ok"])
+
+    def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
+        repo = self.make_repo()
+        runner = FakeCommandRunner()
+        result = self.audit(repo, runner)
+        self.assertEqual(runner.calls, [])
+        # The leg still reports: "nothing vendored" must be distinguishable
+        # from "this check never ran".
+        self.assertEqual(self.statuses(result, "vendored floor bytes"), ["ok"])
+        self.assertIn("no vendored floor copy under", self.details(result))
+
+    def test_a_dot_claude_vendored_floor_is_compared_too(self) -> None:
+        # `.claude/hooks/` is the vendored shape doctor itself recognizes;
+        # probing only `hooks/` made the whole leg a permanent no-op.
+        repo = self.make_repo()
+        self.write_floor(repo / ".claude" / "hooks" / "dispatch.py", "1.6.0")
+        self.write_floor(
+            self.harness_root / "templates" / "hooks" / "dispatch.py", "1.6.5"
+        )
+        self.write_floor(self.claude_home / "hooks" / "dispatch.py", "1.6.5")
+        runner = self.canonical_reference_runner()
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            self.statuses(result, "vendored .claude/hooks/dispatch.py"), ["MISMATCH"]
+        )
+        self.assertFalse(result["ok"])
+
+    # --- reporting ------------------------------------------------------------
+
+    def render_audit(
+        self, repo: Path, runner: FakeCommandRunner, *, as_json: bool = False
+    ) -> tuple[int, str]:
+        """Run `audit_command` against the FIXTURE world, never the real one."""
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.audit_command(
+                SimpleNamespace(path=str(repo), json=as_json),
+                harness_root=self.harness_root,
+                claude_home=self.claude_home,
+                command_runner=runner,
+            )
+        return code, output.getvalue()
+
+    def test_audit_command_prints_findings_and_fails_on_a_mismatch(self) -> None:
+        repo = self.make_repo(human_todo="HUMAN_TODO.md")
+        code, text = self.render_audit(repo, FakeCommandRunner())
+        self.assertEqual(code, 1)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", text)
+        self.assertNotIn("[ok] harness audit", text)
+
+    def test_unproven_findings_are_counted_in_the_summary_and_json(self) -> None:
+        # "[ok] harness audit" after a run that measured nothing reads as a
+        # pass. Say how much of the run was actually proven.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        runner = FakeCommandRunner(
+            {"rev-parse": (True, "floor/next"), "status --porcelain": (True, "")}
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(result["unproven"], 1)
+        self.assertTrue(result["ok"])
+        _code, text = self.render_audit(repo, runner)
+        self.assertIn("[UNPROVEN]", text)
+        self.assertNotIn("\n[ok] harness audit\n", text)
+
+    def test_the_rendered_audit_never_reads_the_real_harness_checkout(self) -> None:
+        # Regression guard: without injection this leg fell back to the real
+        # `Path(harness.__file__).parent`, the real `~/.claude` and a real
+        # `git`, so its verdict depended on the branch and cleanliness of the
+        # machine running the tests.
+        repo = self.make_repo()
+        self.write_floor(repo / "hooks" / "dispatch.py", "1.6.5 (2026-07-25)")
+        runner = self.canonical_reference_runner()
+        self.render_audit(repo, runner)
+        self.assertTrue(runner.calls, "the injected resolver was never consulted")
+        for argv in runner.calls:
+            self.assertEqual(argv[0], "git")
+
+    def test_audit_json_output_carries_every_finding(self) -> None:
+        repo = self.make_repo(tier=3, human_todo=None)
+        code, text = self.render_audit(repo, FakeCommandRunner(), as_json=True)
+        payload = json.loads(text)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
+        )
 
 
 if __name__ == "__main__":
