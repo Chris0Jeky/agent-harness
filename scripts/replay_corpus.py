@@ -165,11 +165,15 @@ COVERAGE LIMITS (read before quoting a number)
   stub answered. A version that offers `command_output` but no such default to
   rebind aborts the run (`OfflineBindingError`); a version with no
   `command_output` at all has no spawn seam to stub and replays as-is. Every
-  spawn-capable module in a loaded floor's *globals* (`subprocess`, `os`,
-  `pty`, `asyncio`) is proxied either way, so an uncovered spawn site raises
-  instead of running — but a floor that imported one of them *inside a function
-  body* would still reach the real module. No floor version has ever done that;
-  it is a residual of this design, not a covered case.
+  spawn route in a loaded floor's *globals* (`subprocess`, `os`, `pty`,
+  `asyncio`) is neutralised either way, so an uncovered spawn site raises
+  instead of running. Routes are matched by object identity, not by the name
+  the floor bound them to, so `import subprocess as sp` and `from subprocess
+  import run` are covered as well — a name-keyed version of this guard reported
+  an aliased floor as offline while `sp.run` spawned a real `git.exe` and the
+  run still printed "0 subprocesses spawned". What is NOT covered is an import
+  inside a function body, which never reaches module globals. No floor version
+  has ever done that; it is a residual of this design, not a covered case.
 * The whole ambient `GIT_*` family plus `EDITOR` / `VISUAL` / `PAGER` /
   `SSH_ASKPASS` is cleared for the duration of the run, because `check()` reads
   all of them from `os.environ` and any one of them turns a verdict into a
@@ -201,6 +205,17 @@ COVERAGE LIMITS (read before quoting a number)
   meaningful, an absolute one is a lower bound, and the deltas — computed over
   whatever was read, identically for both versions — are the only numbers this
   limitation does not touch.
+* `--corpus-cache` writes the integrity ledger of the scan that produced it as
+  the file's first row, and `--from-corpus` reads it back, so a partial scan
+  that exits 4 still exits 4 when replayed from its cache. A corpus file with
+  no such row — hand-written, or written by an older version — is not treated
+  as a failure: a corpus handed in directly is the caller's stated input rather
+  than a scan this script performed and can vouch for. The report says which of
+  the two it got (`run.cache_integrity_recorded`).
+* A runtime declared out of scope with `--codex-root none` / `--claude-root
+  none` is named in the report and in `run.unscanned_runtimes`. Without that a
+  deliberately halved corpus is indistinguishable from a scan of a real but
+  empty tree, and every rate quietly means "of the other runtime's commands".
 * Only the model's own tool-call records are read (`function_call` /
   `custom_tool_call` for Codex, `tool_use` for Claude). Codex's `event_msg`
   `exec_command_end` records are skipped on purpose: they are the runtime's
@@ -741,29 +756,69 @@ def build_corpus(
     return corpus, stats
 
 
-def save_corpus(path: Path, corpus: dict[str, dict[str, int]]) -> None:
-    """Write the corpus as JSONL. Contains raw commands: scratch dirs only."""
+# Header row of a written corpus cache. A row without a `command` key was
+# already skipped by `load_corpus`, so an older reader ignores it instead of
+# choking, and a cache written before this existed simply carries no record.
+CORPUS_CACHE_META_KEY = "replay_corpus_cache"
+
+
+def save_corpus(
+    path: Path,
+    corpus: dict[str, dict[str, int]],
+    integrity: dict[str, int] | None = None,
+) -> None:
+    """Write the corpus as JSONL, integrity ledger first.
+
+    Contains raw commands: scratch dirs only.
+
+    The ledger travels with the cache because the cache outlives the scan that
+    produced it. A partial scan exits 4 and then writes its shortened command
+    set; replaying that file with `--from-corpus` rebuilt `stats` from nothing
+    but a "loaded from file" count, found no integrity failures, and exited 0 —
+    the incompleteness laundered out of existence by a round trip through a
+    supported flag.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            json.dumps({CORPUS_CACHE_META_KEY: {"integrity": dict(integrity or {})}})
+            + "\n"
+        )
         for command, counts in corpus.items():
             row = {"command": command}
             row.update(counts)
             handle.write(json.dumps(row) + "\n")
 
 
-def load_corpus(path: Path) -> dict[str, dict[str, int]]:
+def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bool]:
+    """Return (corpus, integrity ledger, whether the file carried a ledger).
+
+    A file with no header row is a hand-written corpus or one written by an
+    older version of this script. That is not an integrity failure — a corpus
+    handed in directly is the caller's stated input, not a scan this script
+    performed and can vouch for — but it is not a clean bill of health either,
+    so the caller is told which of the two it got.
+    """
     corpus: dict[str, dict[str, int]] = {}
+    integrity: Counter[str] = Counter()
+    recorded = False
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             row = json.loads(line)
+            meta = row.get(CORPUS_CACHE_META_KEY)
+            if isinstance(meta, dict):
+                recorded = True
+                for key, value in (meta.get("integrity") or {}).items():
+                    integrity[str(key)] += int(value)
+                continue
             command = row.get("command")
             if not isinstance(command, str):
                 continue
             corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
-    return corpus
+    return corpus, integrity, recorded
 
 
 def select_commands(
@@ -1101,6 +1156,14 @@ SPAWN_ROUTES: dict[str, frozenset[str]] = {
     "pty": frozenset({"spawn", "fork", "forkpty", "openpty"}),
     "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
 }
+# Most of `os`'s spawn entry points are C builtins whose `__module__` is the
+# platform implementation module, not `os`: `os.system.__module__` is `nt` on
+# Windows and `posix` elsewhere. A `from os import system` global is therefore
+# only recognisable through the alias, and without it the identity check
+# silently skipped exactly the direct-import form it was added to catch.
+SPAWN_ROUTES["nt"] = SPAWN_ROUTES["posix"] = SPAWN_ROUTES["os"]
+# Reported under the name a floor author would recognise.
+SPAWN_ROUTE_LABELS = {"nt": "os", "posix": "os"}
 
 
 class OfflineModule:
@@ -1110,9 +1173,11 @@ class OfflineModule:
     site the `command_runner` rebinding does not cover, this turns it into a
     loud `toolfail` in the report rather than a real process.
 
-    It covers the module's *globals* only. A floor that did `import subprocess`
-    inside a function body would get the real module, and nothing here would
-    see it — stated in COVERAGE LIMITS rather than papered over.
+    It covers the module's *globals* only, matched by identity so an alias
+    (`import subprocess as sp`) and a direct import (`from subprocess import
+    run`) are caught too. A floor that did the import inside a function body
+    would still get the real module, and nothing here would see it — stated in
+    COVERAGE LIMITS rather than papered over.
     """
 
     def __init__(self, real: ModuleType, blocked: frozenset[str], label: str) -> None:
@@ -1128,18 +1193,60 @@ class OfflineModule:
         return getattr(self._real, name)
 
 
-def neutralise_spawn_routes(module: ModuleType) -> list[str]:
-    """Proxy every spawn-capable module in `module`'s globals; name what was hit.
+def blocked_spawn_callable(label: str) -> Callable[..., Any]:
+    """Stand-in for a spawn function imported directly into a floor's globals."""
 
-    Idempotent: a second call sees the proxies, which are not `ModuleType`, and
-    leaves them alone.
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ReplayHarnessError(
+            f"corpus replay is offline but dispatch called {label}"
+        )
+
+    return refuse
+
+
+def spawn_route_for(value: Any) -> tuple[str, frozenset[str]] | None:
+    """Identify a global as a guarded module or one of its spawn entry points.
+
+    Matched on the object's own identity — `__name__` for a module, `__module__`
+    for a function or class — and never on the name the floor happened to bind
+    it to. `import subprocess as sp` and `from subprocess import run` are the
+    same hazard as `import subprocess`, and a name-keyed lookup saw none of
+    them: an aliased floor was measured as offline while `sp.run` spawned a real
+    `git.exe`, and the run still reported "0 subprocesses spawned".
+    """
+    if isinstance(value, ModuleType):
+        origin = getattr(value, "__name__", "") or ""
+        blocked = SPAWN_ROUTES.get(origin)
+        return (SPAWN_ROUTE_LABELS.get(origin, origin), blocked) if blocked else None
+    origin = getattr(value, "__module__", None) or ""
+    blocked = SPAWN_ROUTES.get(origin)
+    if blocked and getattr(value, "__name__", None) in blocked:
+        label = SPAWN_ROUTE_LABELS.get(origin, origin)
+        return (f"{label}.{value.__name__}", blocked)
+    return None
+
+
+def neutralise_spawn_routes(module: ModuleType) -> list[str]:
+    """Neutralise every spawn route in `module`'s globals; name what was hit.
+
+    Returns the *global names* that were replaced, which under an alias is not
+    the module's own name — the caller wants to know what in this floor was
+    touched.
+
+    Idempotent: the replacements are neither modules nor functions belonging to
+    a guarded module, so a second call matches nothing.
     """
     wrapped = []
-    for name, blocked in SPAWN_ROUTES.items():
-        value = getattr(module, name, None)
+    for name, value in list(vars(module).items()):
+        route = spawn_route_for(value)
+        if route is None:
+            continue
+        label, blocked = route
         if isinstance(value, ModuleType):
-            setattr(module, name, OfflineModule(value, blocked, name))
-            wrapped.append(name)
+            setattr(module, name, OfflineModule(value, blocked, label))
+        else:
+            setattr(module, name, blocked_spawn_callable(label))
+        wrapped.append(name)
     return wrapped
 
 
@@ -1890,12 +1997,23 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         f"  unique commands extracted : {corpus['unique_total']}"
         f"  ({corpus['invocations_total']} invocations)"
     )
+    unscanned = list(result["run"].get("unscanned_runtimes") or [])
     for runtime in RUNTIMES:
+        # A runtime declared out of scope reads as a zero row otherwise, which
+        # is exactly what a real but empty tree looks like. The premise has to
+        # travel with the number.
+        note = "  <== NOT SCANNED (declared none)" if runtime in unscanned else ""
         print(
             f"    {runtime:<7}: {corpus['unique_by_runtime'][runtime]:>7} unique"
-            f"  {corpus['invocations_by_runtime'][runtime]:>7} invocations"
+            f"  {corpus['invocations_by_runtime'][runtime]:>7} invocations{note}"
         )
     print(f"    shared : {corpus['unique_shared']:>7} unique (seen in both runtimes)")
+    if unscanned:
+        print(
+            "  NOT SCANNED               : "
+            + ", ".join(unscanned)
+            + " - every number here describes the remaining runtime(s) only"
+        )
     print(f"  replayed                  : {corpus['unique_replayed']}")
     if corpus["notes"]:
         for key, value in sorted(corpus["notes"].items()):
@@ -2474,11 +2592,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     flags = {name: True for name in overlays}
     progress = not args.quiet
 
+    # Runtimes the caller declared out of scope with `--<runtime>-root none`.
+    # Recorded and printed because the resulting run is otherwise identical to
+    # one that scanned a real but empty tree, and "this number covers Codex
+    # only" is a premise a reader has to be handed rather than infer.
+    unscanned = [
+        name
+        for name, root in (
+            ("codex", args.codex_root),
+            ("claude", args.claude_root),
+        )
+        if root is None
+    ]
+    cache_had_ledger = True
     if args.from_corpus:
-        corpus = load_corpus(args.from_corpus)
+        corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
         stats: Counter[str] = Counter(
             {"extracted-loaded-from-corpus-file": len(corpus)}
         )
+        # The scan that produced this cache may have been incomplete. Its
+        # ledger travels in the file so the incompleteness survives the round
+        # trip instead of being laundered into exit 0.
+        stats.update(cached_integrity)
+        unscanned = []
     else:
         if progress:
             sys.stderr.write("scanning transcripts...\n")
@@ -2503,7 +2639,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write("no commands extracted; nothing to replay\n")
         return 1
     if args.corpus_cache:
-        save_corpus(args.corpus_cache, corpus)
+        save_corpus(args.corpus_cache, corpus, corpus_failures)
 
     unique_by_runtime = {name: 0 for name in RUNTIMES}
     invocations_by_runtime = {name: 0 for name in RUNTIMES}
@@ -2601,6 +2737,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "embedded_codex_exec_included": not args.no_embedded,
             "offline_git_config_reads": offline_reads,
             "cleared_host_env": sorted(injected),
+            # Premises of this run, alongside the overlays and the cleared env:
+            # which runtimes were declared out of scope, and whether a loaded
+            # cache carried the integrity ledger of the scan that wrote it.
+            "unscanned_runtimes": unscanned,
+            "cache_integrity_recorded": bool(args.from_corpus) and cache_had_ledger,
             "check_parameter_delta": check_parameter_delta(
                 baseline_parameters, candidate_parameters
             ),
@@ -2608,6 +2749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "corpus": {
             "source": (
                 f"cached-corpus {args.from_corpus}"
+                + ("" if cache_had_ledger else " (no integrity record)")
                 if args.from_corpus
                 else "transcript-scan"
             ),

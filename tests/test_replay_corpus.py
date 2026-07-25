@@ -492,6 +492,47 @@ class OfflineStubTests(unittest.TestCase):
         self.assertIs(module.os.environ, os_module.environ)
         self.assertIs(module.subprocess.PIPE, subprocess.PIPE)
 
+    def test_an_aliased_import_is_neutralised_by_identity(self):
+        # `import subprocess as sp`: a name-keyed lookup found no global called
+        # `subprocess`, so the floor was reported offline while `sp.run` spawned
+        # a real process and the run still printed "0 subprocesses spawned".
+        module = load_module("replay_offline_probe_alias", REPLAY_PATH)
+        module.sp = subprocess
+        self.assertEqual(replay.neutralise_spawn_routes(module).count("sp"), 1)
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            module.sp.run(["git", "--version"])
+        # Labelled by what it really is, not by the alias it was bound to.
+        self.assertIn("subprocess.run", str(caught.exception))
+
+    def test_a_direct_function_import_is_neutralised_too(self):
+        # `from subprocess import run` / `from os import system`: the global is
+        # the spawn entry point itself, with no module to proxy.
+        module = load_module("replay_offline_probe_direct", REPLAY_PATH)
+        module.run = subprocess.run
+        module.launch = os_module.system
+        replay.neutralise_spawn_routes(module)
+        for call, label in (
+            (lambda: module.run(["git", "--version"]), "subprocess.run"),
+            (lambda: module.launch("git --version"), "os.system"),
+        ):
+            with self.assertRaises(replay.ReplayHarnessError) as caught:
+                call()
+            self.assertIn(label, str(caught.exception))
+
+    def test_an_unrelated_global_of_the_same_name_is_left_alone(self):
+        # Identity, not name: a floor's own `run()` must keep working, or the
+        # guard would break the very version it is measuring.
+        module = load_module("replay_offline_probe_own_run", REPLAY_PATH)
+
+        def run(argv):
+            return "the floor's own helper"
+
+        module.run = run
+        module.path = os_module.path
+        replay.neutralise_spawn_routes(module)
+        self.assertEqual(module.run(["x"]), "the floor's own helper")
+        self.assertIs(module.path, os_module.path)
+
     def test_neutralising_twice_leaves_the_proxy_alone(self):
         module = load_module("replay_offline_probe_twice", REPLAY_PATH)
         module.subprocess = subprocess
@@ -2177,6 +2218,226 @@ class UnreadableCorpusTests(EndToEndTestCase):
         self.assertIsNone(replay.transcript_root("none"))
         self.assertIsNone(replay.transcript_root(""))
         self.assertEqual(replay.transcript_root("x"), Path("x"))
+
+    def test_an_unscanned_runtime_is_recorded_and_printed(self):
+        # A declared-out-of-scope runtime otherwise looks exactly like a real
+        # but empty tree: a zero row, no integrity entry, exit 0. The premise
+        # has to travel with the number, or "10% of commands blocked" silently
+        # means "of the Codex ones".
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        json_path = self.dir / "run.json"
+        code, out, _ = self.run_scan(codex, "none", "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertIn("NOT SCANNED (declared none)", out)
+        self.assertIn("describes the remaining runtime(s) only", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["unscanned_runtimes"], ["claude"])
+
+    def test_a_full_scan_records_no_unscanned_runtime(self):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        json_path = self.dir / "run.json"
+        code, out, _ = self.run_scan(codex, claude, "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertNotIn("NOT SCANNED", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["unscanned_runtimes"], [])
+
+
+class CorpusCacheProvenanceTests(EndToEndTestCase):
+    """A cache must not launder an incomplete scan into a clean exit.
+
+    `--corpus-cache` writes the shortened command set of a partial scan, and
+    `--from-corpus` rebuilt `stats` from nothing but a "loaded from file" count.
+    A run that correctly exited 4 therefore came back as exit 0 with no banner
+    after one round trip through two supported flags — the incompleteness gone,
+    the numbers unchanged and now presented as sound.
+    """
+
+    def partial_scan(self, cache):
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (codex / "locked.jsonl").mkdir()
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        self.floor = floor
+        return self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+
+    def replay_cache(self, cache, *extra):
+        return self.run_main(
+            "--from-corpus",
+            str(cache),
+            "--baseline",
+            str(self.floor),
+            "--candidate",
+            str(self.floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            *extra,
+        )
+
+    def test_the_cache_round_trip_keeps_the_corpus_incomplete(self):
+        cache = self.dir / "cache.jsonl"
+        code, _, _ = self.partial_scan(cache)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        code, out, _ = self.replay_cache(cache)
+        self.assertEqual(code, replay.EXIT_CORPUS_INCOMPLETE)
+        self.assertIn("CORPUS INCOMPLETE", out)
+        self.assertIn("file-unreadable", out)
+
+    def test_the_ledger_is_the_first_row_and_carries_no_command(self):
+        cache = self.dir / "cache.jsonl"
+        self.partial_scan(cache)
+        rows = [
+            json.loads(line)
+            for line in cache.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            rows[0],
+            {"replay_corpus_cache": {"integrity": {"unparsed-file-unreadable": 1}}},
+        )
+        # Still a corpus file: the header carries no `command`, so a reader
+        # that only looks for commands skips it rather than choking.
+        self.assertNotIn("command", rows[0])
+        self.assertEqual([row["command"] for row in rows[1:]], ["git status"])
+
+    def test_a_cache_from_a_clean_scan_still_exits_zero(self):
+        # The negative control: the ledger must not make every cache suspect.
+        codex = self.dir / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": "git status"}),
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        claude = self.dir / "claude-projects"
+        claude.mkdir()
+        floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        self.floor = floor
+        cache = self.dir / "cache.jsonl"
+        code, _, _ = self.run_main(
+            "--codex-root",
+            str(codex),
+            "--claude-root",
+            str(claude),
+            "--baseline",
+            str(floor),
+            "--candidate",
+            str(floor),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--corpus-cache",
+            str(cache),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        code, out, _ = self.replay_cache(cache)
+        self.assertEqual(code, 0)
+        self.assertNotIn("CORPUS INCOMPLETE", out)
+
+    def test_a_headerless_corpus_is_flagged_as_unvouched_not_failed(self):
+        # A hand-written corpus is the caller's stated input, not a scan this
+        # script performed, so it is not an integrity failure — but the report
+        # must not imply the provenance was checked either.
+        self.floor = self.write_dispatch("floor", "1.0.0", 'return "allow", ""')
+        cache = self.write_corpus("git status")
+        json_path = self.dir / "run.json"
+        code, out, _ = self.replay_cache(cache, "--json", str(json_path))
+        self.assertEqual(code, 0)
+        self.assertIn("(no integrity record)", out)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertFalse(run["cache_integrity_recorded"])
+
+    def test_load_corpus_reports_what_the_file_carried(self):
+        path = self.dir / "hand.jsonl"
+        path.write_text(
+            json.dumps({"command": "git status", "codex": 1, "claude": 0}) + "\n",
+            encoding="utf-8",
+        )
+        corpus, integrity, recorded = replay.load_corpus(path)
+        self.assertEqual(list(corpus), ["git status"])
+        self.assertEqual(dict(integrity), {})
+        self.assertFalse(recorded)
+
+        written = self.dir / "written.jsonl"
+        replay.save_corpus(written, corpus, {"unparsed-file-read-error": 3})
+        corpus, integrity, recorded = replay.load_corpus(written)
+        self.assertEqual(list(corpus), ["git status"])
+        self.assertEqual(dict(integrity), {"unparsed-file-read-error": 3})
+        self.assertTrue(recorded)
 
 
 class CorpusIntegrityTests(unittest.TestCase):
