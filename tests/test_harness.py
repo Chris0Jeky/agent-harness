@@ -4948,6 +4948,62 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("https://github.com/acme/widgets.git", detail)
         self.assertIn("PUBLIC", detail)
 
+    def test_public_non_origin_remote_is_advisory_not_a_failure(self) -> None:
+        # A private fork of a public project: origin private, upstream public.
+        # The exposure check must still say it loudly without failing a repo
+        # whose publishing remote is private.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "upstream\thttps://github.com/upstream/widgets.git (fetch)",
+                ),
+                "gh repo view upstream/widgets": (True, "PUBLIC"),
+                "gh repo view acme/widgets-private": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            sorted(self.statuses(result, "remote visibility")), ["advisory", "ok"]
+        )
+        detail = self.details(result)
+        self.assertIn("PUBLIC repository upstream/widgets", detail)
+        self.assertIn("is not the publishing remote", detail)
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_public_origin_still_fails_the_audit(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "upstream\thttps://github.com/upstream/widgets.git (fetch)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
+    def test_offline_audit_runs_no_network_resolver(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.audit_command(
+                SimpleNamespace(path=str(repo), json=False, offline=True)
+            )
+        text = output.getvalue()
+        self.assertEqual(code, 0)
+        # git still answers locally; `gh` is never consulted, and the
+        # unmeasured visibility reports UNPROVEN rather than a pass.
+        self.assertIn("[ok] harness audit", text)
+        self.assertNotIn("[MISMATCH] sensitive_data", text)
+        self.assertFalse(harness.local_only_command_output(["gh", "repo", "view"])[0])
+
     def test_declared_sensitive_data_on_private_remote_passes(self) -> None:
         repo = self.make_repo(sensitive_data=True)
         runner = FakeCommandRunner(

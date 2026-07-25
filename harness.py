@@ -1147,6 +1147,9 @@ PRIVACY_CLAIM_PATTERN = re.compile(
     r"private\s+(?:repo\b|repository\b|remote\b)", re.IGNORECASE
 )
 LOCAL_REMOTE_PATTERN = re.compile(r"^(?:file://|[a-zA-Z]:[\\/]|[./~])")
+# The remote work is actually published to. A public remote under any other
+# name (a fork's upstream, a mirror) is a topology note, not an exposure.
+PUBLISHING_REMOTE = "origin"
 VENDORED_FLOOR_FILES = ("dispatch.py", "smoke_test.py")
 # Both shapes a repo can carry its own floor bytes in. `.claude/hooks/` is the
 # one `doctor` already recognizes as "a repo-local dispatcher copy rather than
@@ -1173,6 +1176,22 @@ def bounded_command_output(
     except (OSError, subprocess.SubprocessError):
         return False, ""
     return proc.returncode == 0, proc.stdout.strip()
+
+
+def local_only_command_output(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """`audit --offline`: answer local resolvers, refuse every network one.
+
+    A refused resolver returns "did not answer", which every caller already
+    reports as UNPROVEN — the audit stays honest about what it did not
+    measure instead of pretending an unmeasured remote is fine.
+    """
+    if argv[:1] != ["git"]:
+        return False, ""
+    return bounded_command_output(argv, cwd, timeout)
 
 
 def output_before_deadline(
@@ -1223,15 +1242,23 @@ def github_repo_slug(remote: str) -> str:
 
 def configured_remote_urls(
     repo: Path, command_runner: Any, deadline: float | None
-) -> tuple[bool, list[str]]:
-    """Enumerate every configured remote URL; False when git could not answer."""
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Enumerate (name, url) per configured remote; False when git was silent.
+
+    The NAME matters: publishing happens to `origin`, so a public `upstream`
+    on a private fork is a normal topology rather than an exposure.
+    """
     resolved, output = output_before_deadline(
         command_runner, ["git", "remote", "--verbose"], repo, deadline
     )
     if not resolved:
         return False, []
-    urls = [parts[1] for line in output.splitlines() if len(parts := line.split()) >= 2]
-    return True, list(dict.fromkeys(urls))
+    remotes = [
+        (parts[0], parts[1])
+        for line in output.splitlines()
+        if len(parts := line.split()) >= 2
+    ]
+    return True, list(dict.fromkeys(remotes))
 
 
 def github_visibility(
@@ -1287,7 +1314,7 @@ def sensitive_data_findings(
     if not declared:
         return privacy_claim_findings(repo)
     check = "sensitive_data vs actual remote visibility"
-    resolved, urls = configured_remote_urls(repo, command_runner, deadline)
+    resolved, remotes = configured_remote_urls(repo, command_runner, deadline)
     if not resolved:
         return [
             reality_finding(
@@ -1297,17 +1324,19 @@ def sensitive_data_findings(
                 "was measured",
             )
         ]
-    if not urls:
+    if not remotes:
         return [
             reality_finding(
                 check, REALITY_OK, "no remote is configured; nothing is published"
             )
         ]
     findings: list[dict[str, str]] = []
-    for url in urls:
+    for name, url in remotes:
         if LOCAL_REMOTE_PATTERN.match(url):
             findings.append(
-                reality_finding(check, REALITY_OK, f"{url} is a local-only remote")
+                reality_finding(
+                    check, REALITY_OK, f"{name} {url} is a local-only remote"
+                )
             )
             continue
         slug = github_repo_slug(url)
@@ -1316,32 +1345,47 @@ def sensitive_data_findings(
                 reality_finding(
                     check,
                     REALITY_UNPROVEN,
-                    f"{url} is not a github.com remote; its visibility is not "
-                    "machine-checkable here",
+                    f"{name} {url} is not a github.com remote; its visibility is "
+                    "not machine-checkable here",
                 )
             )
             continue
         visibility = github_visibility(slug, repo, command_runner, deadline)
         if visibility == "PUBLIC":
+            # `origin` is where work is published, so a public origin under the
+            # overlay is the exposure this check exists to catch. Any other
+            # remote — the upstream of a private fork, a read-only mirror — is
+            # a normal topology, and hard-failing it with no allowlist and no
+            # escape hatch made the only remedy deleting the remote.
             findings.append(
                 reality_finding(
                     check,
-                    REALITY_MISMATCH,
-                    f"flags.sensitive_data is declared true but remote {url} "
-                    f"resolves to the PUBLIC repository {slug} — evidence: "
-                    f"`gh repo view {slug} --json visibility` -> PUBLIC",
+                    (
+                        REALITY_MISMATCH
+                        if name == PUBLISHING_REMOTE
+                        else REALITY_ADVISORY
+                    ),
+                    f"flags.sensitive_data is declared true but remote {name} "
+                    f"{url} resolves to the PUBLIC repository {slug} — evidence: "
+                    f"`gh repo view {slug} --json visibility` -> PUBLIC"
+                    + (
+                        ""
+                        if name == PUBLISHING_REMOTE
+                        else f"; {name} is not the publishing remote "
+                        f"({PUBLISHING_REMOTE}), so never push this repo there"
+                    ),
                 )
             )
         elif visibility in {"PRIVATE", "INTERNAL"}:
             findings.append(
-                reality_finding(check, REALITY_OK, f"{slug} is {visibility}")
+                reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")
             )
         else:
             findings.append(
                 reality_finding(
                     check,
                     REALITY_UNPROVEN,
-                    f"{slug}: `gh repo view` returned "
+                    f"{name} {slug}: `gh repo view` returned "
                     f"{visibility or '<no output>'}; visibility is unmeasured "
                     "(offline, unauthenticated, or gh is absent)",
                 )
@@ -3772,7 +3816,14 @@ def doctor(args: argparse.Namespace) -> int:
 
 
 def audit_command(args: argparse.Namespace) -> int:
-    result = audit_repo(Path(args.path))
+    result = audit_repo(
+        Path(args.path),
+        command_runner=(
+            local_only_command_output
+            if getattr(args, "offline", False)
+            else bounded_command_output
+        ),
+    )
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -3804,6 +3855,11 @@ def parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="validate a repository harness")
     audit.add_argument("path", nargs="?", default=".")
     audit.add_argument("--json", action="store_true")
+    audit.add_argument(
+        "--offline",
+        action="store_true",
+        help="run no network resolver; unmeasured checks report UNPROVEN",
+    )
     audit.set_defaults(func=audit_command)
 
     seed = sub.add_parser(

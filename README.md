@@ -41,9 +41,11 @@ emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisor
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
 repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
 `UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
+Only a PUBLIC `origin` — the remote work is published to — is a `MISMATCH`; a public
+`upstream` or mirror on a private fork is reported as an `advisory` naming the remote.
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
-degrades to `UNPROVEN` and exits 0. Because the byte comparison reads the harness working
+degrades to `UNPROVEN` and exits 0. `audit --offline` runs no network resolver at all. Because the byte comparison reads the harness working
 tree, a non-`main` or dirty harness checkout is refused as the canonical reference and said
 so. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
 that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
