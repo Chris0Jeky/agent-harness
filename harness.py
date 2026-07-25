@@ -1287,23 +1287,83 @@ def github_repo_slug(remote: str) -> str:
 
 def configured_remote_urls(
     repo: Path, command_runner: Any, deadline: float | None
-) -> tuple[bool, list[tuple[str, str]]]:
-    """Enumerate (name, url) per configured remote; False when git was silent.
+) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Enumerate (name, url, direction) rows; False when git was silent.
 
     The NAME matters: publishing happens to `origin`, so a public `upstream`
-    on a private fork is a normal topology rather than an exposure.
+    on a private fork is a normal topology rather than an exposure. So does the
+    DIRECTION: `git remote --verbose` prints the fetch and push endpoints on
+    separate rows, and `remote.<name>.pushurl` may differ from
+    `remote.<name>.url`, so discarding the third field made a public fetch
+    endpoint look like the place work is published.
     """
     resolved, output = output_before_deadline(
         command_runner, ["git", "remote", "--verbose"], repo, deadline
     )
     if not resolved:
         return False, []
-    remotes = [
-        (parts[0], parts[1])
-        for line in output.splitlines()
-        if len(parts := line.split()) >= 2
-    ]
-    return True, list(dict.fromkeys(remotes))
+    rows = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        direction = parts[2].strip("()").lower() if len(parts) > 2 else ""
+        # A row with no direction is git's own default: the same endpoint is
+        # both fetched from and pushed to.
+        rows.append((parts[0], parts[1], direction if direction else "push"))
+    return True, list(dict.fromkeys(rows))
+
+
+def publishing_remote_endpoints(
+    rows: list[tuple[str, str, str]],
+) -> list[tuple[str, str, bool, str]]:
+    """Fold `git remote -v` rows into (name, url, publishes, note) entries.
+
+    `publishes` is what decides MISMATCH vs advisory. It is true only for a URL
+    work can actually be pushed to under the remote this repo publishes
+    through:
+
+    * a URL that is a PUSH endpoint — a public `url` behind a private
+      `pushurl` is a fetch mirror, not a place anything is published;
+    * of `origin`, or of ANY remote when no `origin` is configured. The
+      origin-only rule presumed a private `origin` exists; with no origin at
+      all, calling the one remote that carries the work "not the publishing
+      remote" turned a real exposure into an exit-0 advisory.
+
+    `note` is the clause that explains a non-publishing verdict, so the finding
+    says which of the two reasons applied.
+    """
+    by_name: dict[str, dict[str, list[str]]] = {}
+    for name, url, direction in rows:
+        endpoints = by_name.setdefault(name, {"fetch": [], "push": []})
+        bucket = endpoints["push" if direction == "push" else "fetch"]
+        if url not in bucket:
+            bucket.append(url)
+    has_origin = PUBLISHING_REMOTE in by_name
+    entries: list[tuple[str, str, bool, str]] = []
+    for name, endpoints in by_name.items():
+        # git prints both rows; a fetch-only listing means the same endpoint.
+        push_urls = endpoints["push"] or endpoints["fetch"]
+        publishing_remote = name == PUBLISHING_REMOTE or not has_origin
+        for url in dict.fromkeys(endpoints["fetch"] + endpoints["push"]):
+            if not publishing_remote:
+                note = (
+                    f"{name} is not the publishing remote ({PUBLISHING_REMOTE}), "
+                    "so never push this repo there"
+                )
+            elif url not in push_urls:
+                note = f"{name} only FETCHES from this URL; it pushes to " + ", ".join(
+                    redact_remote_url(each) for each in push_urls
+                )
+            elif has_origin:
+                note = ""
+            else:
+                note = (
+                    f"no remote named {PUBLISHING_REMOTE!r} is configured, so "
+                    f"{name} is treated as a publishing remote"
+                )
+            entries.append((name, url, publishing_remote and url in push_urls, note))
+    return entries
 
 
 def github_visibility(
@@ -1376,7 +1436,7 @@ def sensitive_data_findings(
             )
         ]
     findings: list[dict[str, str]] = []
-    for name, url in remotes:
+    for name, url, publishes, note in publishing_remote_endpoints(remotes):
         shown = redact_remote_url(url)
         if LOCAL_REMOTE_PATTERN.match(url):
             findings.append(
@@ -1398,28 +1458,20 @@ def sensitive_data_findings(
             continue
         visibility = github_visibility(slug, repo, command_runner, deadline)
         if visibility == "PUBLIC":
-            # `origin` is where work is published, so a public origin under the
-            # overlay is the exposure this check exists to catch. Any other
-            # remote — the upstream of a private fork, a read-only mirror — is
-            # a normal topology, and hard-failing it with no allowlist and no
-            # escape hatch made the only remedy deleting the remote.
+            # A public endpoint work is actually PUSHED to is the exposure this
+            # check exists to catch. Anything else — the upstream of a private
+            # fork, a read-only mirror, a public fetch URL behind a private
+            # pushurl — is a normal topology, and hard-failing it with no
+            # allowlist and no escape hatch made the only remedy deleting the
+            # remote.
             findings.append(
                 reality_finding(
                     check,
-                    (
-                        REALITY_MISMATCH
-                        if name == PUBLISHING_REMOTE
-                        else REALITY_ADVISORY
-                    ),
+                    REALITY_MISMATCH if publishes else REALITY_ADVISORY,
                     f"flags.sensitive_data is declared true but remote {name} "
                     f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
                     f"`gh repo view {slug} --json visibility` -> PUBLIC"
-                    + (
-                        ""
-                        if name == PUBLISHING_REMOTE
-                        else f"; {name} is not the publishing remote "
-                        f"({PUBLISHING_REMOTE}), so never push this repo there"
-                    ),
+                    + (f"; {note}" if note else ""),
                 )
             )
         elif visibility in {"PRIVATE", "INTERNAL"}:

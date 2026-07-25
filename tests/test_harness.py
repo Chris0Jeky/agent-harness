@@ -5044,6 +5044,72 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
         self.assertNotIn("gh repo view", " ".join(" ".join(c) for c in runner.calls))
 
+    def test_a_public_fetch_url_behind_a_private_pushurl_is_not_a_mismatch(
+        self,
+    ) -> None:
+        # `git remote -v` prints fetch and push endpoints on separate rows.
+        # Discarding the direction made a public FETCH mirror look like the
+        # place work is published and hard-failed the audit.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets-private.git (push)",
+                ),
+                "gh repo view acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(
+            sorted(self.statuses(result, "remote visibility")), ["advisory", "ok"]
+        )
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertIn("only FETCHES from this URL", self.details(result))
+
+    def test_a_public_pushurl_behind_a_private_fetch_url_still_fails(self) -> None:
+        # The mirror image: what is pushed to is what is published.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "origin\thttps://github.com/acme/widgets-private.git (fetch)\n"
+                    "origin\thttps://github.com/acme/widgets.git (push)",
+                ),
+                "gh repo view acme/widgets-private": (True, "PRIVATE"),
+                "gh repo view acme/widgets": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+        self.assertFalse(result["ok"])
+
+    def test_a_public_sole_remote_without_origin_fails_the_audit(self) -> None:
+        # The origin-only rule presumed a private `origin` exists. With no
+        # origin at all, the remote that carries the work IS the publishing
+        # remote; calling it "not the publishing remote" turned a real exposure
+        # into an exit-0 advisory.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (
+                    True,
+                    "github\thttps://github.com/acme/secrets.git (fetch)\n"
+                    "github\thttps://github.com/acme/secrets.git (push)",
+                ),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+        detail = self.details(result)
+        self.assertIn("no remote named 'origin' is configured", detail)
+        self.assertNotIn("is not the publishing remote", detail)
+
     def test_github_slugs_survive_every_supported_remote_spelling(self) -> None:
         # A captured port became the owner, so `gh` was asked about `22/owner`
         # and a public origin degraded to UNPROVEN instead of a mismatch.
