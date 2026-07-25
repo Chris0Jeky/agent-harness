@@ -984,6 +984,183 @@ class PlanCheckCallTests(unittest.TestCase):
             replay.build_check_caller(Empty)
 
 
+class PremiseMismatchTests(EndToEndTestCase):
+    """Two signatures replay under two premises, and that must be said out loud.
+
+    `remote_resolver` is stubbed to "every remote is private" only for a version
+    that declares it. A version that does not keeps its internal resolver, which
+    reads through the offline `command_output` stub and reports the remote
+    unresolved. Under `sensitive_data` that is allow on one side and deny on the
+    other for the same push, so the whole class lands in NEWLY ALLOWED as if it
+    were a relaxation.
+    """
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def test_only_roles_are_compared_not_the_calling_convention(self):
+        # Positional versus keyword is a calling detail, never a premise.
+        self.assertEqual(
+            replay.check_parameter_delta(
+                ["command", "tier_cfg", "project_dir", "remote_resolver"],
+                [
+                    "command",
+                    "tier_cfg",
+                    "project_dir",
+                    "remote_resolver=remote_resolver",
+                ],
+            ),
+            [],
+        )
+
+    def test_a_role_bound_on_one_side_only_is_reported(self):
+        self.assertEqual(
+            replay.check_parameter_delta(
+                ["command", "tier_cfg", "project_dir"],
+                ["command", "tier_cfg", "project_dir", "remote_resolver"],
+            ),
+            ["remote_resolver"],
+        )
+
+    def test_the_asymmetry_is_warned_about_and_recorded(self):
+        corpus = self.write_corpus("git push")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        # A warning, not an abort: comparing two signatures is why this exists.
+        self.assertEqual(code, 0)
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertIn("remote_resolver", text.split("PREMISE MISMATCH")[1][:400])
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(
+            run["check_parameter_delta"], ["command_cwd", "remote_resolver"]
+        )
+
+    # The two halves of the finding's scenario, as close to the real floors as a
+    # fixture gets: the old one resolves the remote itself (and therefore reads
+    # through the offline `command_output` stub, which returns ""), the new one
+    # takes a `remote_resolver` (and therefore gets `stub_resolver`'s "private").
+    RESOLVES_INTERNALLY = '''
+    FLOOR_VERSION = "1.2.0"
+
+
+    def command_output(argv, cwd="", timeout=None):
+        raise AssertionError("the replay must not spawn a subprocess")
+
+
+    def remote_url(project_dir, command_runner=command_output):
+        return command_runner(["git", "config", "--get", "remote.origin.url"], "")
+
+
+    def check(command, tier_cfg, project_dir):
+        """Pre-`remote_resolver`: resolves the remote through command_output."""
+        if command.startswith("git push") and tier_cfg["flags"].get("sensitive_data"):
+            if not remote_url(project_dir):
+                return "deny", (
+                    "sensitive_data repo: could not verify push remote "
+                    "privacy (origin)"
+                )
+        return "allow", ""
+    '''
+
+    TAKES_A_RESOLVER = '''
+    FLOOR_VERSION = "1.6.5"
+
+
+    def command_output(argv, cwd="", timeout=None):
+        raise AssertionError("the replay must not spawn a subprocess")
+
+
+    def remote_url(project_dir, command_runner=command_output):
+        return command_runner(["git", "config", "--get", "remote.origin.url"], "")
+
+
+    def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+        """Current shape: the replay hands it a resolver that says "private"."""
+        if command.startswith("git push") and tier_cfg["flags"].get("sensitive_data"):
+            public, _name = remote_resolver(["git", "push"], project_dir)
+            if public:
+                return "deny", "sensitive_data repo: refusing a push to public remote"
+        return "allow", ""
+    '''
+
+    def test_asymmetric_stubbing_reads_as_a_relaxation_and_is_flagged(self):
+        corpus = self.write_corpus("git push")
+        old = self.write_floor("resolves_internally", self.RESOLVES_INTERNALLY)
+        new = self.write_floor("takes_a_resolver", self.TAKES_A_RESOLVER)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(old),
+            "--candidate",
+            str(new),
+            "--tier",
+            "2",
+            "--flag",
+            "sensitive_data",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        # Same policy on both sides; the delta is produced entirely by which
+        # side got the stub. Without the warning a reviewer reads this as a
+        # relaxation needing security review.
+        self.assertEqual(payload["tiers"]["2"]["delta"]["newly_allowed_unique"], 1)
+        self.assertIn("could not verify push remote privacy", text)
+        self.assertIn("PREMISE MISMATCH", text)
+        self.assertEqual(
+            payload["run"]["check_parameter_delta"],
+            ["command_cwd", "remote_resolver"],
+        )
+
+    def test_matching_signatures_print_no_warning(self):
+        corpus = self.write_corpus("git push")
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(modern),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("PREMISE MISMATCH", text)
+        run = json.loads(json_path.read_text(encoding="utf-8"))["run"]
+        self.assertEqual(run["check_parameter_delta"], [])
+
+
 class SignatureDispatchTests(EndToEndTestCase):
     """Issue #39: a baseline several versions old must replay, not read 100%."""
 

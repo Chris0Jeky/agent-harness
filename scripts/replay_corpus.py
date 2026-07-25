@@ -106,15 +106,30 @@ COVERAGE LIMITS (read before quoting a number)
   not the directory it originally ran in. Rules keyed on "inside/outside the
   project" therefore judge a synthetic cwd. Baseline and candidate see the same
   synthetic cwd, so the *deltas* are sound; the absolute rate is an approximation.
-* The replay spawns no subprocess and touches no network. `check()` accepts a
-  `remote_resolver` and it is stubbed to "private"; it has no comparable hook
-  for the `git config --get-regexp remote.*` read behind a refspec-less
-  `git push`, so the `command_runner` defaults inside the loaded module are
-  rebound to a stub that returns `""` (see `make_module_offline`). Without that,
-  every such push spawns two real `git.exe` processes per version, the verdict
-  depends on `--project-dir`'s actual git config, and a transient slow spawn on
-  one side of the comparison alone can manufacture a phantom delta row. The run
-  reports how many reads the stub answered.
+* The replay spawns no subprocess and touches no network. The remote-privacy
+  stub is **conditional**, and that is a premise, not a detail: `remote_resolver`
+  is supplied only to a version whose `check()` declares it (`build_check_caller`
+  binds by role). A floor predating that parameter keeps its own internal
+  resolver, which then resolves through the stubbed-empty `command_output` and
+  typically reports the remote *unresolved* rather than private. Under
+  `--flag sensitive_data` those are opposite verdicts for the same push: allow
+  on the side that got the stub, `could not verify push remote privacy` on the
+  side that did not, so every such push lands in NEWLY ALLOWED as if it were a
+  relaxation. A run whose two versions bind different `check()` roles therefore
+  prints a `PREMISE MISMATCH` block above the tables and records the roles in
+  the JSON `run.check_parameter_delta`. It is a warning, not an abort:
+  comparing two signatures is the whole point of the instrument (issue #39), so
+  the run must still happen — it just may not be read as a like-for-like delta
+  on any rule keyed on remote privacy.
+* There is no comparable hook for the `git config --get-regexp remote.*` read
+  behind a refspec-less `git push`, so the `command_runner` defaults inside the
+  loaded module are rebound to a stub that returns `""` (see
+  `make_module_offline`). Without that, every such push spawns two real
+  `git.exe` processes per version, the verdict depends on `--project-dir`'s
+  actual git config, and a transient slow spawn on one side of the comparison
+  alone can manufacture a phantom delta row. The run reports how many reads the
+  stub answered. Unlike the resolver this one is unconditional: a version that
+  offers no such default to rebind aborts the run (`OfflineBindingError`).
 * The whole ambient `GIT_*` family plus `EDITOR` / `VISUAL` / `PAGER` /
   `SSH_ASKPASS` is cleared for the duration of the run, because `check()` reads
   all of them from `os.environ` and any one of them turns a verdict into a
@@ -883,6 +898,33 @@ def describe_check_signature(module: ModuleType) -> list[str]:
     return list(getattr(check_caller(module), "replay_bound_parameters", []))
 
 
+def bound_roles(parameters: Sequence[str]) -> set[str]:
+    """The argument *roles* behind a `check_parameters` record.
+
+    An entry is either a bare role (bound positionally) or `name=role` (bound by
+    keyword). Only the role decides what premise the version ran under;
+    positional-versus-keyword is a calling detail and must not read as a
+    mismatch.
+    """
+    return {str(entry).split("=", 1)[-1] for entry in parameters}
+
+
+def check_parameter_delta(
+    baseline_parameters: Sequence[str], candidate_parameters: Sequence[str]
+) -> list[str]:
+    """Roles bound on exactly one side of the comparison.
+
+    Non-empty means the two versions did not replay under the same premise. The
+    load-bearing case is `remote_resolver`: the side that declares it gets
+    `stub_resolver` -> every remote private -> allow, while the side that does
+    not keeps its internal resolver, reads through the empty `command_output`
+    stub, and reports the remote unresolved -> deny under `sensitive_data`. The
+    difference is an artifact of asymmetric stubbing and would otherwise be
+    reported as a policy relaxation with nothing marking it.
+    """
+    return sorted(bound_roles(baseline_parameters) ^ bound_roles(candidate_parameters))
+
+
 # Incremented by `stub_command_runner`; reported so the run can prove how many
 # subprocesses it did NOT spawn. Per-process under `spawn`, so it is returned
 # with each chunk rather than read from the parent.
@@ -1584,6 +1626,25 @@ def print_report(result: dict[str, Any], top: int, width: int) -> None:
         f"candidate : floor {candidate['version']}  {candidate['path']}\n"
         f"            check({', '.join(candidate.get('check_parameters') or [])})"
     )
+    mismatch = list(result["run"].get("check_parameter_delta") or [])
+    if mismatch:
+        # Not fatal: replaying two different signatures is the instrument's
+        # purpose. But the two sides then ran under different premises, and a
+        # delta row produced by that is not a policy change.
+        print(
+            "PREMISE MISMATCH: the two versions bind different check() "
+            "arguments (" + ", ".join(mismatch) + ").\n"
+            "            Only a version declaring remote_resolver gets the "
+            "private-remote stub; the\n"
+            "            other resolves internally through the offline "
+            "command_output stub and can\n"
+            "            report the remote unresolved instead. Under "
+            "sensitive_data that is an\n"
+            "            allow on one side and a deny on the other for the "
+            "same push, so remote-\n"
+            "            privacy rows in the deltas below may be stubbing "
+            "artifacts, not policy."
+        )
     print(f"project   : {result['project_dir']}")
     print(
         "overlays  : "
@@ -2148,6 +2209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "embedded_codex_exec_included": not args.no_embedded,
             "offline_git_config_reads": offline_reads,
             "cleared_host_env": sorted(injected),
+            "check_parameter_delta": check_parameter_delta(
+                baseline_parameters, candidate_parameters
+            ),
         },
         "corpus": {
             "source": (
