@@ -6388,11 +6388,15 @@ class RealityCheckTests(unittest.TestCase):
         linked = repo / "hooks" / "dispatch.py"
 
         def fake_symlink_target(path: Path) -> str:
-            # `audit_repo` walks the GIT ROOT, which resolves differently from
-            # the fixture path on macOS (/var -> /private/var) and on a Windows
-            # runner (8.3 short names), so identity has to be resolved, not
-            # compared textually.
-            same = os.path.realpath(path) == os.path.realpath(linked)
+            # `audit_repo` walks the GIT ROOT, which spells the same file
+            # differently from the fixture path: macOS resolves /var ->
+            # /private/var, and a Windows runner hands back an 8.3 short name
+            # (C:\Users\RUNNER~1\...) that `realpath` does not expand. Compare
+            # by stat identity, which is immune to both spellings.
+            try:
+                same = os.path.samefile(path, linked)
+            except OSError:
+                same = False
             return "/elsewhere/dispatch.py" if same else ""
 
         with mock.patch.object(
