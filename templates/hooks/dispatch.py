@@ -4032,6 +4032,164 @@ def git_option_is_present(
     return bool(git_option_values(args, long_option, short_options))
 
 
+# Flags that Git's revision / diff / grep parsers treat as COMPLETE: none of
+# them consumes the following argv entry, so a bare `--` after one really is the
+# end-of-options marker rather than that option's value.
+#
+# It is an allowlist because the failure directions are not symmetric: a missing
+# entry costs a false positive on a shape nobody types (a file literally named
+# `--ext-diff` behind an unlisted flag), while a wrong entry is a bypass of an
+# at-every-tier deny. It is matched CASE-SENSITIVELY, because Git short options
+# are case-sensitive and lowercasing conflates `-I` (`git diff -I <regex>`,
+# which takes a value) with `-i`.
+#
+# One shared set serves every family the terminator is consulted for, so an
+# entry has to be valueless in ALL of them. That is why these are absent:
+#   -n  --line-number for grep, but --max-count=<n> for log
+#   -l  --files-with-matches for grep, but <num> for diff
+#   -m  -m for log, but --max-count=<num> for grep
+#   -v  --invert-match for grep, but --reroll-count=<n> for format-patch
+#   -G  --basic-regexp for grep, but -G<regex> for diff
+#   -A -B -C  context counts for grep
+_GIT_TERMINATOR_SAFE_FLAGS = {
+    "-E",
+    "-F",
+    "-P",
+    "-R",
+    "-a",
+    "-b",
+    "-i",
+    "-p",
+    "-q",
+    "-r",
+    "-s",
+    "-t",
+    "-u",
+    "-w",
+    "-z",
+    "--abbrev-commit",
+    "--all",
+    "--author-date-order",
+    "--basic-regexp",
+    "--binary",
+    "--boundary",
+    "--cached",
+    "--cc",
+    "--check",
+    "--cherry-pick",
+    "--children",
+    "--color",
+    "--compact-summary",
+    "--count",
+    "--date-order",
+    "--decorate",
+    "--exit-code",
+    "--extended-regexp",
+    "--files-with-matches",
+    "--files-without-match",
+    "--find-copies-harder",
+    "--first-parent",
+    "--fixed-strings",
+    "--follow",
+    "--full-history",
+    "--full-index",
+    "--function-context",
+    "--graph",
+    "--histogram",
+    "--ignore-all-space",
+    "--ignore-blank-lines",
+    "--ignore-case",
+    "--ignore-cr-at-eol",
+    "--ignore-space-at-eol",
+    "--ignore-space-change",
+    "--indent-heuristic",
+    "--invert-match",
+    "--irreversible-delete",
+    "--left-right",
+    "--merges",
+    "--minimal",
+    "--name-only",
+    "--name-status",
+    "--no-abbrev-commit",
+    "--no-color",
+    "--no-commit-id",
+    "--no-decorate",
+    "--no-ext-diff",
+    "--no-index",
+    "--no-indent-heuristic",
+    "--no-merges",
+    "--no-patch",
+    "--no-prefix",
+    "--no-renames",
+    "--no-textconv",
+    "--null",
+    "--numstat",
+    "--oneline",
+    "--parents",
+    "--patch",
+    "--patch-with-raw",
+    "--patch-with-stat",
+    "--patience",
+    "--perl-regexp",
+    "--quiet",
+    "--raw",
+    "--recurse-submodules",
+    "--reverse",
+    "--root",
+    "--shortstat",
+    "--show-function",
+    "--show-signature",
+    "--simplify-merges",
+    "--staged",
+    "--stat",
+    "--stdout",
+    "--summary",
+    "--text",
+    "--textconv",
+    "--untracked",
+    "--word-regexp",
+}
+
+
+def git_end_of_options_index(args: list[str]) -> int | None:
+    """Return the index of the bare ``--`` Git would treat as end-of-options.
+
+    ``--`` only ends option parsing when the parser is BETWEEN options. Git's
+    parse-options otherwise hands it to whatever option is still waiting for a
+    separate value, so ``git diff --output -- --ext-diff`` writes the diff to a
+    file literally named ``--`` and then parses ``--ext-diff`` as an option and
+    launches the configured external-diff helper. Truncating argv at the first
+    ``--`` would hide the very token the caller is scanning for.
+
+    So the terminator is honoured only where argv proves it: ``--`` is the first
+    token, the token before it is an operand (an option waiting for a value
+    would have eaten that operand instead), the token before it carries its
+    value glued with ``=``, or the token before it is a known valueless flag.
+    Anything else is unprovable and returns None, which makes the caller scan
+    the whole of argv -- the fail-closed direction.
+    """
+    for index, token in enumerate(args):
+        if token != "--":
+            continue
+        if index == 0:
+            return index
+        previous = args[index - 1]
+        if previous == "-" or not previous.startswith("-"):
+            return index
+        if "=" in previous:
+            return index
+        if previous in _GIT_TERMINATOR_SAFE_FLAGS:
+            return index
+        return None
+    return None
+
+
+def git_options_before_terminator(args: list[str]) -> list[str]:
+    """Return the argv slice Git parses as options, per the proven terminator."""
+    terminator = git_end_of_options_index(args)
+    return args if terminator is None else args[:terminator]
+
+
 _BUILTIN_GIT_MERGE_STRATEGIES = {
     "octopus",
     "ort",
@@ -4044,7 +4202,7 @@ _BUILTIN_GIT_MERGE_STRATEGIES = {
 
 def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | None:
     """Return a reason when Git argv can select an arbitrary child process."""
-    grep_option_args = args[: args.index("--")] if "--" in args else args
+    grep_option_args = git_options_before_terminator(args)
     if subcommand == "grep" and any(
         token == "-O"
         or token.startswith("-O")
@@ -4130,8 +4288,11 @@ def dangerous_git_process_launcher(subcommand: str, args: list[str]) -> str | No
     if diff_args is not None:
         # `--` ends option parsing, so `git diff -- --ext-diff` names a FILE and
         # cannot select a helper. Same treatment `git grep -O` already gets.
-        if "--" in diff_args:
-            diff_args = diff_args[: diff_args.index("--")]
+        # Only a PROVEN terminator counts: an option still waiting for a
+        # separate value swallows `--` instead (`git diff --output --
+        # --ext-diff` writes to a file named `--` and then runs the helper), so
+        # an unprovable `--` leaves the whole of argv in the scan.
+        diff_args = git_options_before_terminator(diff_args)
         if any(
             token.lower() == "--ext-diff"
             or git_option_abbreviates(token.lower().split("=", 1)[0], "--ext-diff")
