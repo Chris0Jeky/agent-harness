@@ -784,5 +784,434 @@ class MaxCommandCharsReportingTests(EndToEndTestCase):
         self.assertIn("--max-command-chars (100)", headline)
 
 
+# Two throwaway floors that differ only in what `check()` declares. `LEGACY` is
+# the shape floor 1.2.0 actually ships (issue #39): three parameters, no
+# `command_cwd`, no `remote_resolver`. `MODERN` is today's shape. Both deny the
+# same one command, so any difference in their measured block rate is the
+# instrument, not the policy.
+LEGACY_FLOOR = '''
+FLOOR_VERSION = "1.2.0"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir):
+    """The pre-`remote_resolver` signature, verbatim from floor 1.2.0."""
+    if command == "git push --force":
+        return "deny", "no force variants at all"
+    return "allow", ""
+'''
+
+MODERN_FLOOR = """
+FLOOR_VERSION = "1.6.5"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(
+    command,
+    tier_cfg,
+    project_dir,
+    command_cwd,
+    _depth=0,
+    remote_resolver=None,
+    _remote_cache=None,
+):
+    assert command_cwd == project_dir
+    assert remote_resolver is not None
+    if command == "git push --force":
+        return "deny", "no force variants at all"
+    return "allow", ""
+"""
+
+# A floor that reaches for a subprocess the offline stub does not cover. The
+# harness's own guard fires; that is the *tool* failing, not a policy verdict.
+SPAWNING_FLOOR = """
+import subprocess
+
+FLOOR_VERSION = "9.9.9"
+
+
+def command_output(argv, cwd="", timeout=None):  # pragma: no cover - never runs
+    raise AssertionError("the replay must not spawn a subprocess")
+
+
+def reads_git_config(project_dir, command_runner=command_output):
+    return command_runner(["git", "config"], project_dir)
+
+
+def check(command, tier_cfg, project_dir, command_cwd, remote_resolver=None):
+    if command == "git push":
+        subprocess.run(["git", "config", "--get-regexp", "remote.*"])
+    return "allow", ""
+"""
+
+
+class PlanCheckCallTests(unittest.TestCase):
+    """The binding plan is what makes an old baseline measurable at all."""
+
+    def plan(self, function):
+        import inspect
+
+        return replay.plan_check_call(inspect.signature(function))
+
+    def test_the_legacy_three_parameter_shape_binds_positionally(self):
+        def check(command, tier_cfg, project_dir):  # pragma: no cover - not called
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        self.assertEqual(positional, ["command", "tier_cfg", "project_dir"])
+        self.assertEqual(keyword, [])
+
+    def test_the_current_shape_binds_cwd_and_the_resolver_too(self):
+        def check(  # pragma: no cover - not called
+            command,
+            tier_cfg,
+            project_dir,
+            command_cwd,
+            _depth=0,
+            remote_resolver=None,
+        ):
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        # `_depth` is unknown to the replay and has a default, so it is left
+        # alone -- which closes the positional run and sends `remote_resolver`
+        # through as a keyword.
+        self.assertEqual(
+            positional, ["command", "tier_cfg", "project_dir", "command_cwd"]
+        )
+        self.assertEqual(keyword, [("remote_resolver", "remote_resolver")])
+
+    def test_a_keyword_only_resolver_is_bound_by_name(self):
+        def check(  # pragma: no cover - not called
+            command, tier_cfg, project_dir, *, remote_resolver=None
+        ):
+            return "allow", ""
+
+        positional, keyword = self.plan(check)
+        self.assertEqual(positional, ["command", "tier_cfg", "project_dir"])
+        self.assertEqual(keyword, [("remote_resolver", "remote_resolver")])
+
+    def test_an_unsupplied_required_parameter_is_refused_loudly(self):
+        # The whole point: never guess. A guess would raise per command and be
+        # counted as a block, which is the bug this replaces.
+        def check(command, tier_cfg, project_dir, audit_sink):  # pragma: no cover
+            return "allow", ""
+
+        with self.assertRaises(replay.CheckSignatureError) as caught:
+            self.plan(check)
+        self.assertIn("audit_sink", str(caught.exception))
+
+    def test_a_signature_without_the_replay_subject_is_refused(self):
+        def check(tier_cfg, project_dir=""):  # pragma: no cover - not called
+            return "allow", ""
+
+        with self.assertRaises(replay.CheckSignatureError) as caught:
+            self.plan(check)
+        self.assertIn("command", str(caught.exception))
+
+    def test_a_positional_only_parameter_after_a_skip_cannot_be_bound(self):
+        source = (
+            "def check(command, tier_cfg, unknown=1, project_dir='', /):\n"
+            "    return 'allow', ''\n"
+        )
+        namespace = {}
+        exec(source, namespace)  # noqa: S102 - a signature fixture, never called
+        with self.assertRaises(replay.CheckSignatureError):
+            self.plan(namespace["check"])
+
+    def test_build_check_caller_rejects_a_module_with_no_check(self):
+        class Empty:
+            __name__ = "empty"
+
+        with self.assertRaises(replay.CheckSignatureError):
+            replay.build_check_caller(Empty)
+
+
+class SignatureDispatchTests(EndToEndTestCase):
+    """Issue #39: a baseline several versions old must replay, not read 100%."""
+
+    def write_floor(self, name, source):
+        path = self.dir / f"{name}.py"
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        return path
+
+    def test_decide_calls_a_legacy_three_parameter_check_successfully(self):
+        module = load_module(
+            "replay_legacy_floor", self.write_floor("legacy", LEGACY_FLOOR)
+        )
+        self.assertEqual(
+            replay.decide(module, "git push --force", 4, str(self.dir)),
+            ("deny", "no force variants at all"),
+        )
+        # And the ordinary command is allowed, rather than becoming an `error`
+        # decision that `summarize_tier` would count as a block.
+        self.assertEqual(
+            replay.decide(module, "git status", 4, str(self.dir))[0], "allow"
+        )
+
+    def test_two_signatures_measure_the_same_policy_identically(self):
+        corpus = self.write_corpus("git push --force", "git status", "ls")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "4",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        baseline = payload["tiers"]["4"]["baseline"]
+        candidate = payload["tiers"]["4"]["candidate"]
+        # Before the fix this row read 3 blocked / 100%, with three `error`
+        # decisions carrying "check() takes 3 positional arguments".
+        self.assertEqual(baseline["unique_blocked"], 1)
+        self.assertEqual(baseline["decisions"].get("error", 0), 0)
+        self.assertEqual(baseline["unique_blocked"], candidate["unique_blocked"])
+        delta = payload["tiers"]["4"]["delta"]
+        self.assertEqual(delta["newly_blocked_unique"], 0)
+        self.assertEqual(delta["newly_allowed_unique"], 0)
+        self.assertNotIn("check() RAISED", text)
+
+    def test_the_bound_parameters_are_recorded_and_printed(self):
+        corpus = self.write_corpus("git status")
+        legacy = self.write_floor("legacy", LEGACY_FLOOR)
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        json_path = self.dir / "out.json"
+        code, text, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(legacy),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--json",
+            str(json_path),
+            "--quiet",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["baseline"]["check_parameters"],
+            ["command", "tier_cfg", "project_dir"],
+        )
+        self.assertEqual(
+            payload["candidate"]["check_parameters"],
+            [
+                "command",
+                "tier_cfg",
+                "project_dir",
+                "command_cwd",
+                "remote_resolver=remote_resolver",
+            ],
+        )
+        # A reader must be able to see which shape produced the number.
+        self.assertIn("check(command, tier_cfg, project_dir)", text)
+
+    def test_an_unbindable_floor_aborts_before_any_number_is_printed(self):
+        corpus = self.write_corpus("git status")
+        modern = self.write_floor("modern", MODERN_FLOOR)
+        broken = self.write_floor(
+            "broken",
+            """
+            FLOOR_VERSION = "0.0.1"
+
+
+            def check(command, tier_cfg, project_dir, audit_sink):
+                return "allow", ""
+            """,
+        )
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(broken),
+            "--candidate",
+            str(modern),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertIn("audit_sink", err)
+        # No block rate at all: an unmeasurable version gets no table.
+        self.assertNotIn("block rate by tier", text)
+
+
+class ToolFailureBucketTests(EndToEndTestCase):
+    """A harness malfunction must be its own bucket, never a deny."""
+
+    def test_a_harness_error_is_toolfail_and_a_floor_crash_stays_error(self):
+        class HarnessBreaks:
+            __name__ = "harness_breaks"
+
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                raise replay.ReplayHarnessError("offline guard fired")
+
+        class FloorBreaks:
+            __name__ = "floor_breaks"
+
+            @staticmethod
+            def check(command, tier_cfg, project_dir, command_cwd, **kwargs):
+                raise ValueError("the floor itself crashed")
+
+        self.assertEqual(replay.decide(HarnessBreaks, "x", 2, ".")[0], replay.TOOLFAIL)
+        self.assertEqual(replay.decide(FloorBreaks, "x", 2, ".")[0], "error")
+
+    def test_toolfail_is_in_no_rate(self):
+        commands = ["a", "b", "c", "d"]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        verdicts = [
+            [("allow", "")],
+            [("deny", "no")],
+            [(replay.TOOLFAIL, "ReplayHarnessError: offline guard fired")],
+            [(replay.TOOLFAIL, "ReplayHarnessError: offline guard fired")],
+        ]
+        summary = replay.summarize_tier(commands, corpus, verdicts, 0)
+        self.assertEqual(summary["unique_toolfail"], 2)
+        self.assertEqual(summary["unique_measured"], 2)
+        self.assertEqual(summary["unique_blocked"], 1)
+        # 1/2 measured, not 3/4: counting the two failures as blocked is exactly
+        # the artifact issue #39 mistook for a 100% block rate.
+        self.assertAlmostEqual(summary["unique_block_rate"], 0.5)
+        self.assertEqual(len(summary["reasons"]), 1)
+        self.assertEqual(summary["toolfail_reasons"][0]["unique"], 2)
+
+    def test_toolfail_never_lands_in_an_allow_edge_bucket(self):
+        commands = ["a", "b"]
+        corpus = {command: {"codex": 1, "claude": 0} for command in commands}
+        baseline = [[(replay.TOOLFAIL, "harness")], [("allow", "")]]
+        candidate = [[("allow", "")], [(replay.TOOLFAIL, "harness")]]
+        delta = replay.compare_tier(commands, corpus, baseline, candidate, 0, 5)
+        self.assertEqual(delta["tool_failed_unique"], 2)
+        for label in ("newly_blocked", "newly_allowed", "ask_gained", "crash_moved"):
+            self.assertEqual(delta[f"{label}_unique"], 0, label)
+
+    def test_the_offline_guard_produces_toolfail_and_exit_three(self):
+        corpus = self.write_corpus("git push", "git status")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, text, err = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+        )
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+        self.assertNotEqual(replay.EXIT_TOOL_FAILURE, replay.EXIT_ERRORS_PRESENT)
+        self.assertIn("REPLAY TOOL FAILURE", text)
+        # Loud on both streams: a gate may capture only one of them.
+        self.assertIn("REPLAY TOOL FAILURE", err)
+        self.assertIn("toolfail=1", text)
+
+    def test_allow_errors_cannot_suppress_a_tool_failure(self):
+        corpus = self.write_corpus("git push")
+        path = self.dir / "spawning.py"
+        path.write_text(textwrap.dedent(SPAWNING_FLOOR).lstrip(), encoding="utf-8")
+        code, _, _ = self.run_main(
+            "--from-corpus",
+            str(corpus),
+            "--baseline",
+            str(path),
+            "--candidate",
+            str(path),
+            "--tier",
+            "2",
+            "--project-dir",
+            str(self.dir),
+            "--quiet",
+            "--allow-errors",
+        )
+        # --allow-errors censuses floor crashes; there is nothing to census when
+        # the script could not run the floor.
+        self.assertEqual(code, replay.EXIT_TOOL_FAILURE)
+
+    def test_count_toolfails_sums_every_replayed_tier(self):
+        result = {
+            "tier_order": [1, 2],
+            "tiers": {
+                1: {
+                    "baseline": {"unique_toolfail": 2},
+                    "candidate": {"unique_toolfail": 0},
+                },
+                2: {
+                    "baseline": {"unique_toolfail": 5},
+                    "candidate": {"unique_toolfail": 1},
+                },
+            },
+        }
+        self.assertEqual(
+            replay.count_toolfails(result), {"baseline": 7, "candidate": 1}
+        )
+
+
+class CorpusIntegrityTests(unittest.TestCase):
+    """A shorter corpus that nobody was told about is a silent measurement bug."""
+
+    def test_an_unreadable_transcript_is_counted(self):
+        stats = Counter()
+        with tempfile.TemporaryDirectory() as tmp:
+            # Opening a directory raises OSError on every supported platform.
+            records = list(replay.iter_jsonl(Path(tmp), stats))
+        self.assertEqual(records, [])
+        self.assertEqual(stats["unparsed-file-unreadable"], 1)
+
+    def test_an_unwalkable_transcript_tree_is_counted(self):
+        class Unwalkable:
+            def rglob(self, pattern):
+                raise PermissionError("the profile subtree is locked")
+
+        stats = Counter()
+        self.assertEqual(replay.iter_transcripts(Unwalkable(), stats), [])
+        self.assertEqual(stats["unparsed-transcript-tree-unwalkable"], 1)
+
+    def test_a_missing_verdict_aborts_instead_of_being_defaulted(self):
+        with self.assertRaises(replay.ReplayHarnessError) as caught:
+            replay.assert_every_command_replayed(
+                [[("allow", "")], None], [[("allow", "")], [("allow", "")]]
+            )
+        self.assertIn("1 of 2", str(caught.exception))
+        # The complete case must stay silent.
+        replay.assert_every_command_replayed([[("allow", "")]], [[("allow", "")]])
+
+
 if __name__ == "__main__":
     unittest.main()
