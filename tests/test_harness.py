@@ -6388,7 +6388,12 @@ class RealityCheckTests(unittest.TestCase):
         linked = repo / "hooks" / "dispatch.py"
 
         def fake_symlink_target(path: Path) -> str:
-            return "/elsewhere/dispatch.py" if path == linked else ""
+            # `audit_repo` walks the GIT ROOT, which resolves differently from
+            # the fixture path on macOS (/var -> /private/var) and on a Windows
+            # runner (8.3 short names), so identity has to be resolved, not
+            # compared textually.
+            same = os.path.realpath(path) == os.path.realpath(linked)
+            return "/elsewhere/dispatch.py" if same else ""
 
         with mock.patch.object(
             harness, "symlink_target", side_effect=fake_symlink_target
