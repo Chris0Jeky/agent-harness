@@ -171,6 +171,22 @@ class PushConfigForceTests(unittest.TestCase):
                 self.assertEqual(decision, "deny", reason)
                 self.assertIn("push-config-unverifiable", reason)
 
+    def test_bare_push_denied_after_every_writing_redirect_spelling(self) -> None:
+        # `n<>file` opens for READ AND WRITE, so it rewrites the config exactly
+        # as `>` does while reading like an input operator -- and the vouched
+        # reader in front of it (`cat`) is what made the omission invisible.
+        # Every spelling in `_WRITING_REDIRECTION_OPERATORS` has to reach this
+        # rule or the two halves of "which operators write" disagree.
+        repo = self._repo(None)
+        for operator in sorted(self.dispatch._WRITING_REDIRECTION_OPERATORS):
+            for command in (
+                f"cat payload {operator} .git/config; git push origin",
+                f"1{operator}.git/config cat payload; git push origin",
+            ):
+                with self.subTest(command=command):
+                    decision, reason = self._decide(repo, command)
+                    self.assertEqual(decision, "deny", reason)
+
     def test_bare_push_allowed_under_unrelated_env_assignment(self) -> None:
         # A generic PowerShell env assignment (the common wave `$env:WT_PROJECT_DIR`
         # pattern) does not redirect git, so the bare push stays verifiable.
