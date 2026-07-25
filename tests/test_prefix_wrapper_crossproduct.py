@@ -1186,17 +1186,28 @@ class ShapeRosterTests(CrossProductBase):
         ]
         self.assertEqual(failures, [], "benign corpus must be allowed unwrapped")
 
-    def test_embedding_skips_stay_bounded(self):
-        """A shape that can embed almost nothing tests almost nothing."""
+    def test_every_shape_reaches_most_of_both_corpora(self):
+        """A shape that can carry almost no payload proves almost nothing.
+
+        Counts both exclusions together — the dialect scope and the quoting skip — so
+        neither can erode a shape's real coverage without failing here. Measured floor
+        today: 79.6% of the deny corpus and 91.4% of the benign corpus, worst shape.
+        """
         for shape in SHAPES:
-            skipped = sum(
-                1 for command, _t, _f in DENY_CORPUS if shape.apply(command) is None
-            )
-            self.assertLess(
-                skipped,
-                0.15 * len(DENY_CORPUS),
-                f"{shape.name} skips {skipped}/{len(DENY_CORPUS)} deny payloads",
-            )
+            for corpus, label, threshold in (
+                (DENY_CORPUS, "deny", 0.70),
+                (BENIGN_CORPUS, "benign", 0.80),
+            ):
+                reached = sum(
+                    1
+                    for command, _tier, _flags in corpus
+                    if shape.accepts(command) and shape.apply(command) is not None
+                )
+                self.assertGreater(
+                    reached,
+                    threshold * len(corpus),
+                    f"{shape.name} reaches only {reached}/{len(corpus)} {label} payloads",
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience entry point
