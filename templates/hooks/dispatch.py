@@ -2639,6 +2639,31 @@ def normalize_windows_shell_head(candidate: str) -> str:
     return (match.group("quoted") or match.group("bare")) + candidate[match.end() :]
 
 
+def windows_recovery_segments(
+    command: str, *, single_quotes_are_inert: bool = True
+) -> list[tuple[str, str]]:
+    """Segment a Windows command line under BOTH separator grammars.
+
+    ``&>``/``&>>`` is one aggregate redirection to PowerShell but two commands
+    to cmd.exe, where ``&`` is a separator and ``>nul rd /s /q ...`` is the
+    second command.  Nothing in the command text says which shell will run it,
+    so a recovery path that commits to the PowerShell reading silently drops the
+    cmd command that follows the redirect.  Return the union of both readings
+    and let the caller inspect every candidate; extra candidates can only add
+    scrutiny, whereas a missing one is a bypass.
+    """
+    merged: list[tuple[str, str]] = []
+    for aggregate_redirects in (True, False):
+        for entry in windows_operator_segments(
+            command,
+            single_quotes_are_inert=single_quotes_are_inert,
+            aggregate_redirects=aggregate_redirects,
+        ):
+            if entry not in merged:
+                merged.append(entry)
+    return merged
+
+
 def unparseable_recursive_delete(command: str) -> list[list[str]]:
     """Recover recursive deletes hidden by non-POSIX Windows quoting.
 
@@ -2647,7 +2672,7 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     wrappers that execute their child text; inert commands such as echo and
     Write-Output deliberately stop the walk.
     """
-    candidates = [segment for segment, _operator in windows_operator_segments(command)]
+    candidates = [segment for segment, _operator in windows_recovery_segments(command)]
     seen: set[str] = set()
     recovered_deletes: list[list[str]] = []
 
@@ -2719,12 +2744,14 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
         )
         cmd_wrapper = _CMD_NESTED_RAW_COMMAND.match(candidate)
         wrapper = cmd_wrapper
+        powershell_wrapper = None
         if not wrapper:
-            wrapper = re.match(
+            powershell_wrapper = re.match(
                 r"(?is)^(?:powershell|pwsh)(?:\.exe)?\b.*?"
                 r"\s[-/](?:command|c)(?:\s+|$)(?P<child>.+)$",
                 candidate,
             )
+            wrapper = powershell_wrapper
         if not wrapper:
             wrapper = re.match(r"(?is)^call\s+(?P<child>.+)$", candidate)
         if not wrapper:
@@ -2746,11 +2773,20 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
             wrapper = re.match(r"(?is)^for\b.+?\s+do\s+(?P<child>.+)$", candidate)
         if wrapper:
             child = re.sub(r"^[\s\"'({}&@]+", "", wrapper.group("child"))
-            child_segments = windows_operator_segments(
-                child,
-                single_quotes_are_inert=cmd_wrapper is None,
-                aggregate_redirects=cmd_wrapper is None,
-            )
+            if cmd_wrapper is not None:
+                # cmd.exe: `&` separates, single quotes do not quote.
+                child_segments = windows_operator_segments(
+                    child,
+                    single_quotes_are_inert=False,
+                    aggregate_redirects=False,
+                )
+            elif powershell_wrapper is not None:
+                # PowerShell: `&>` is one aggregate redirection.
+                child_segments = windows_operator_segments(child)
+            else:
+                # `call`/`start` are cmd keywords and `if`/`for` exist in both
+                # grammars, so the child's shell is not decidable here.
+                child_segments = windows_recovery_segments(child)
             candidates.extend(segment for segment, _operator in child_segments)
 
     return recovered_deletes
@@ -2833,8 +2869,10 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
         # hide an otherwise recognizable recursive delete. Fail closed only
         # for that irreversible surface; benign PowerShell scriptblocks can
         # also be intentionally non-POSIX and remain inspectable by the other
-        # normalization passes below.
-        windows_segments = windows_operator_segments(command)
+        # normalization passes below.  The executing shell is unknown here, so
+        # segment under both separator grammars: reading `&>` only as a
+        # PowerShell aggregate redirect hides the cmd command behind it.
+        windows_segments = windows_recovery_segments(command)
         recovered_segments: list[tuple[list[str], str]] = []
         if len(windows_segments) > 1:
             try:

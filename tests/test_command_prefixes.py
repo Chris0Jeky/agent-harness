@@ -245,5 +245,41 @@ class CmdAggregateSeparatorTests(unittest.TestCase):
                             self.assertEqual(decision, "deny", reason)
 
 
+class WindowsGrammarSegmentationTests(unittest.TestCase):
+    """`&>` is one redirect in PowerShell and two commands in cmd.exe.
+
+    The recovery paths cannot know which shell runs the line, so committing to
+    the PowerShell reading drops the cmd command hiding behind the redirect.
+    """
+
+    OUTSIDE_DELETE = r'rd /s /q "C:\critical\outside path\"'
+
+    def test_aggregate_redirect_does_not_hide_a_following_delete(self):
+        for operator in ("&>", "&>>"):
+            for lead in ("echo x", "call other.bat", "start other.exe"):
+                command = f"{lead} {operator}nul {self.OUTSIDE_DELETE}"
+                with self.subTest(command=command):
+                    decision, reason = decide(command)
+                    self.assertEqual(decision, "deny", reason)
+
+    def test_both_separator_readings_are_recovered(self):
+        merged = dispatch.windows_recovery_segments("echo x &>nul rd /s /q C:\\x")
+        segments = [segment for segment, _operator in merged]
+        self.assertIn("echo x &>nul rd /s /q C:\\x", segments)
+        self.assertIn("echo x", segments)
+        self.assertIn(">nul rd /s /q C:\\x", segments)
+
+    def test_powershell_aggregate_redirect_stays_allowed(self):
+        commands = (
+            r'Get-Content "C:\logs\app\" &> out.txt',
+            r'Write-Output "note\" &>> build.log',
+            "npm test &> combined.log",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "allow", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
