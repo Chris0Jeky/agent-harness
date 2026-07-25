@@ -2474,7 +2474,8 @@ allow_local_binding = true
         cases = (
             ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
             (
-                "$HOME/work/repo/invoke_deny_floor.sh",
+                # POSIX: quoted, because an unquoted expansion is field-split.
+                '"$HOME/work/repo/invoke_deny_floor.sh"',
                 "$env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
             ),
         )
@@ -2636,9 +2637,8 @@ allow_local_binding = true
                     ),
                     segment,
                 )
-        # The spellings the shell really does expand still certify.
+        # The spellings the shell really does expand into ONE operand certify.
         for segment in (
-            "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
             '/bin/sh "$HOME/work/repo/invoke_deny_floor.sh"',
             "/bin/sh ~/work/repo/invoke_deny_floor.sh",
         ):
@@ -2648,6 +2648,64 @@ allow_local_binding = true
                         segment, set(), reject_relative=True
                     ),
                     segment,
+                )
+
+    def test_an_unquoted_posix_home_operand_is_field_split(self) -> None:
+        # `/bin/sh $HOME/…` hands sh several operands when HOME contains
+        # whitespace, and the wrapper never starts. `"$HOME/…"` is one word;
+        # tilde expansion results are exempt from field splitting.
+        self.assertFalse(
+            harness.segment_invokes_wrapper(
+                "/bin/sh $HOME/work/repo/invoke_deny_floor.sh",
+                set(),
+                reject_relative=True,
+            )
+        )
+        # PowerShell does not field-split, so the Windows command is unaffected.
+        self.assertTrue(
+            harness.segment_invokes_wrapper(
+                "powershell -File $env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+                set(),
+                reject_relative=True,
+                windows=True,
+            )
+        )
+        # The assignment form is not an operand: an assignment RHS is not
+        # field-split, so binding it bare and dereferencing it stays valid.
+        self.assertTrue(
+            harness.value_binds_anchored_floor_path(
+                "$HOME/work/repo/invoke_deny_floor.sh", reject_relative_wrapper=True
+            )
+        )
+
+    def test_a_lowercase_posix_home_variable_is_a_different_variable(self) -> None:
+        # POSIX variable names are case-sensitive: `$home` normally expands to
+        # nothing, so the command runs an absolute path with no home prefix.
+        # The recognizer lowercases before matching, so the original spelling
+        # has to be re-checked.
+        for spelling in ("$home", "$HoMe", "${home}"):
+            value = f"{spelling}/work/repo/invoke_deny_floor.sh"
+            with self.subTest(spelling=spelling):
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=False
+                    ),
+                    value,
+                )
+                # PowerShell variables really are case-insensitive.
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        value, reject_relative_wrapper=True, windows=True
+                    ),
+                    value,
+                )
+        for exact in ("$HOME", "${HOME}"):
+            with self.subTest(spelling=exact):
+                self.assertTrue(
+                    harness.value_binds_anchored_floor_path(
+                        f"{exact}/work/repo/invoke_deny_floor.sh",
+                        reject_relative_wrapper=True,
+                    )
                 )
         # Both still parse as a wrapper invocation when relativity is allowed.
         for segment in (

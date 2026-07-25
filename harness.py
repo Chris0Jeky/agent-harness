@@ -2185,9 +2185,20 @@ _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
 #     `w='$HOME/…/invoke_deny_floor.sh'` invokes a literal `$HOME` directory.
 #   * `~` is expanded by the shell only when it is unquoted; inside double
 #     quotes sh keeps it literal.
+#   * POSIX variable names are CASE-SENSITIVE, so `$home` is a different (and
+#     normally empty) variable. The recognizer lowercases before matching, so
+#     the original spelling is re-checked separately for the POSIX side;
+#     PowerShell really is case-insensitive and keeps the loose match.
 _POSIX_HOME_ENV_VAR = r"\$\{?home\}?"
 _WINDOWS_HOME_ENV_VAR = rf"(?:{_POSIX_HOME_ENV_VAR}|\$\{{?env:userprofile\}}?)"
 _WRAPPER_TAIL = rf"/(?:[\w.-]+/)*{_FLOOR_WRAPPER}"
+# Applied to the ORIGINAL-CASE text, never the lowercased normalization.
+_POSIX_HOME_ANCHOR_EXACT = re.compile(r"^(?:~|\$\{?HOME\}?)/")
+
+
+def posix_home_anchor_case_is_exact(text: str) -> bool:
+    """Whether a POSIX HOME anchor is spelled the way sh will expand it."""
+    return bool(_POSIX_HOME_ANCHOR_EXACT.match(text.strip("'\"").replace("\\", "/")))
 
 
 def _home_anchored_wrapper_source(windows: bool) -> str:
@@ -2241,7 +2252,9 @@ def value_binds_anchored_floor_path(
     )
     if any(pattern.fullmatch(normalized) for pattern in patterns):
         return True
-    return bool(_HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized))
+    if not _HOME_ANCHORED_WRAPPER_VALUE_PATTERNS[windows].fullmatch(normalized):
+        return False
+    return windows or posix_home_anchor_case_is_exact(value)
 
 
 def is_inert_floor_setup_segment(
@@ -2437,6 +2450,7 @@ def token_is_wrapper(
     reject_relative: bool = False,
     windows: bool = False,
     anchor_is_literal: bool = False,
+    double_quoted: bool = False,
 ) -> bool:
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
@@ -2448,10 +2462,21 @@ def token_is_wrapper(
         # A quoted or escaped anchor is not an anchor — the shell passes
         # `$HOME`/`~` through literally — so it fails closed with the
         # relative shapes.
-        return not reject_relative or (
-            not anchor_is_literal
-            and bool(_HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped))
-        )
+        if not reject_relative:
+            return True
+        if anchor_is_literal:
+            return False
+        if not _HOME_ANCHORED_WRAPPER_TOKENS[windows].fullmatch(stripped):
+            return False
+        if windows:
+            return True
+        if not posix_home_anchor_case_is_exact(token):
+            return False
+        # An UNQUOTED `$HOME` expansion is subject to field splitting, so a
+        # home directory containing whitespace hands `sh` several operands and
+        # the wrapper never starts. `"$HOME/…"` is one word; tilde expansion
+        # results are exempt from field splitting, so bare `~/…` is safe.
+        return double_quoted or stripped.startswith("~")
     # A variable-bound wrapper is admitted here on name alone; the anchoring of
     # the value is enforced separately, because `platform_project_floor_command`
     # requires every setup segment to pass `is_inert_floor_setup_segment` under
@@ -2466,6 +2491,7 @@ def shell_script_operand_is_wrapper(
     reject_relative: bool = False,
     windows: bool = False,
     anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as sh/bash's script under a strict option prefix."""
     index = 1
@@ -2477,6 +2503,7 @@ def shell_script_operand_is_wrapper(
         reject_relative=reject_relative,
         windows=windows,
         anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[index])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[index])),
     )
 
 
@@ -2487,6 +2514,7 @@ def powershell_file_operand_is_wrapper(
     reject_relative: bool = False,
     windows: bool = False,
     anchor_is_literal: Any = None,
+    double_quoted: Any = None,
 ) -> bool:
     """Require the wrapper as PowerShell's immediate -File operand."""
     if len(tokens) < 2 or not tokens[1].startswith(("-", "/")):
@@ -2502,6 +2530,7 @@ def powershell_file_operand_is_wrapper(
         reject_relative=reject_relative,
         windows=windows,
         anchor_is_literal=bool(anchor_is_literal and anchor_is_literal(tokens[2])),
+        double_quoted=bool(double_quoted and double_quoted(tokens[2])),
     )
 
 
@@ -2564,6 +2593,16 @@ def segment_invokes_wrapper(
             return preceding in {"'", '"'}
         return preceding == "'"
 
+    def double_quoted(token: str) -> bool:
+        """Whether the token was written as one double-quoted shell word.
+
+        An unquoted `$HOME` expansion is subject to field splitting, so a home
+        directory containing whitespace turns one operand into several and the
+        wrapper never starts.
+        """
+        index = stripped.find(token)
+        return index > 0 and stripped[index - 1] == '"'
+
     head = tokens[0]
     # Direct execution: the wrapper (or a variable bound to it) is the head.
     if token_is_wrapper(
@@ -2572,6 +2611,7 @@ def segment_invokes_wrapper(
         reject_relative=reject_relative,
         windows=windows,
         anchor_is_literal=anchor_is_literal(head),
+        double_quoted=double_quoted(head),
     ):
         return True
     normalized_head = head.strip("'\"").replace("\\", "/")
@@ -2592,6 +2632,7 @@ def segment_invokes_wrapper(
             reject_relative=reject_relative,
             windows=windows,
             anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
         )
     if head_base in {"powershell", "pwsh"}:
         return powershell_file_operand_is_wrapper(
@@ -2600,6 +2641,7 @@ def segment_invokes_wrapper(
             reject_relative=reject_relative,
             windows=windows,
             anchor_is_literal=anchor_is_literal,
+            double_quoted=double_quoted,
         )
     return False
 
