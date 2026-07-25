@@ -1031,6 +1031,50 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(harness.HarnessError, r"must be an absolute path"):
             harness.validate_requirements_hook_paths({"managed_dir": "fileserver/x"})
 
+    def test_local_windows_device_paths_are_still_probed(self) -> None:
+        # `\\?\C:\...` and `\\.\C:\...` carry a `\\`-prefixed drive but address
+        # a LOCAL device: skipping the existence probe would let doctor certify
+        # a managed hook directory Codex will reject.
+        for value in ("//?/C:/managed", "\\\\?\\C:\\managed", "//./C:/managed"):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+        # The device spelling of a real share stays unprobeable.
+        for value in ("//?/UNC/fileserver/codex", "\\\\?\\UNC\\fileserver\\codex"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    harness.requirements_hook_path_is_locally_probeable(value)
+                )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only managed field")
+    def test_missing_windows_device_managed_dir_is_rejected(self) -> None:
+        missing = Path(self.temp.name) / "managed-hooks-absent"
+        with self.assertRaisesRegex(
+            harness.HarnessError,
+            r"requirements hooks\.windows_managed_dir is not an existing directory",
+        ):
+            harness.validate_requirements_hook_paths(
+                {"windows_managed_dir": f"//?/{missing.as_posix()}"}
+            )
+
+    def test_requirements_managed_dirs_are_validated_per_platform_flavor(self) -> None:
+        # Codex resolves `managed_dir` on POSIX and `windows_managed_dir` on
+        # Windows. Accepting either flavour for either field false-greens a
+        # value the consuming host will treat as relative.
+        wrong_flavour = (
+            ("managed_dir", "C:/managed/hooks"),
+            ("managed_dir", "\\\\fileserver\\codex\\hooks"),
+            ("windows_managed_dir", "/managed/hooks"),
+        )
+        for field, value in wrong_flavour:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    harness.HarnessError,
+                    rf"requirements hooks\.{field} must be an absolute path",
+                ):
+                    harness.validate_requirements_hook_paths({field: value})
+
     def test_requirements_hook_paths_reject_managed_file(self) -> None:
         not_a_directory = Path(self.temp.name) / "managed-hooks-file"
         not_a_directory.write_text("", encoding="utf-8")
@@ -2271,6 +2315,32 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_join_path_dispatcher_is_not_called_a_repo_local_copy(self) -> None:
+        # PowerShell's `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`
+        # is a shared home-anchored dispatcher the floor recognizer accepts;
+        # the inventory must not contradict it by naming a repo-local copy.
+        pin = "a" * 64
+        shared = (
+            f"$dispatcher=Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'; "
+            f"$expected='{pin}'; & py -3 $dispatcher --event pre --runtime codex"
+        )
+        gaps, inventory = harness.codex_adapter_command_notes(shared, "win", pin)
+        self.assertEqual(gaps, [])
+        self.assertEqual(inventory, [])
+        # A genuinely repo-local dispatcher is still inventoried.
+        vendored = (
+            f"$expected='{pin}'; & py -3 .claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        _gaps, vendored_inventory = harness.codex_adapter_command_notes(
+            vendored, "win", pin
+        )
+        self.assertIn(
+            "win names a repo-local dispatcher copy rather than the shared "
+            "home-anchored one",
+            vendored_inventory,
+        )
+
     def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
         repo = self.make_repo()
         # A hook source with a PreToolUse handler that is not a floor adapter at
@@ -2421,6 +2491,96 @@ allow_local_binding = true
                         text, pin, reject_relative_wrapper=True
                     ),
                     [],
+                )
+
+    def test_repo_floor_keeps_home_anchored_wrappers_outside_the_source_root(
+        self,
+    ) -> None:
+        # A HOME-anchored wrapper names the same file from every session cwd,
+        # so a subdirectory or linked-worktree audit must still certify it
+        # instead of reporting zero valid floor handlers.
+        pin = "a" * 64
+        cases = (
+            ("~/work/repo/invoke_deny_floor.sh", "~/work/repo/invoke_deny_floor.ps1"),
+            (
+                "$HOME/work/repo/invoke_deny_floor.sh",
+                "$env:USERPROFILE/work/repo/invoke_deny_floor.ps1",
+            ),
+        )
+        for posix_wrapper, windows_wrapper in cases:
+            with self.subTest(wrapper=posix_wrapper):
+                text = self.wrapper_adapter_text(pin, posix_wrapper, windows_wrapper)
+                for reject in (False, True):
+                    self.assertEqual(
+                        len(
+                            harness.repo_codex_floor_groups(
+                                text, pin, reject_relative_wrapper=reject
+                            )
+                        ),
+                        1,
+                        posix_wrapper,
+                    )
+
+    def test_home_anchored_wrapper_bound_to_a_variable_survives(self) -> None:
+        pin = "a" * 64
+        text = json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f"expected={pin}; "
+                                        "dispatcher=$HOME/.claude/hooks/dispatch.py; "
+                                        "w=$HOME/work/repo/invoke_deny_floor.sh; "
+                                        "/bin/sh $w"
+                                    ),
+                                    "commandWindows": (
+                                        f"$expected='{pin}'; "
+                                        "$d=$env:USERPROFILE"
+                                        "+'/.claude/hooks/dispatch.py'; "
+                                        "$w='$HOME/work/repo/invoke_deny_floor.ps1'; "
+                                        "& $w"
+                                    ),
+                                    "timeout": 5,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+        for reject in (False, True):
+            self.assertEqual(
+                len(
+                    harness.repo_codex_floor_groups(
+                        text, pin, reject_relative_wrapper=reject
+                    )
+                ),
+                1,
+            )
+
+    def test_home_anchored_wrapper_grammar_rejects_cwd_smuggling(self) -> None:
+        # The relaxation must not let a cwd-dependent expansion ride in behind
+        # the home anchor, nor accept a sibling script name.
+        for token in (
+            "$HOME/$PWD/invoke_deny_floor.sh",
+            "$HOME/${cwd}/invoke_deny_floor.sh",
+            "$HOMEDIR/work/invoke_deny_floor.sh",
+            "$HOME/work/invoke_deny_floor.sh.evil",
+        ):
+            with self.subTest(token=token):
+                self.assertFalse(
+                    harness.token_is_wrapper(token, set(), reject_relative=True), token
+                )
+                self.assertFalse(
+                    harness.value_binds_anchored_floor_path(
+                        token, reject_relative_wrapper=True
+                    ),
+                    token,
                 )
 
     def test_repo_floor_rejects_relative_wrapper_bound_to_a_variable(self) -> None:

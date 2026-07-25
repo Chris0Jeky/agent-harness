@@ -21,7 +21,7 @@ import sys
 import tomllib
 import uuid
 from datetime import date, datetime, time, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import Any
 
@@ -2407,19 +2407,33 @@ def validate_config_hook_state(hooks: dict[str, Any]) -> None:
             )
 
 
-def requirements_hook_path_resolves_here(value: str) -> bool:
-    """Return whether the running platform can resolve this managed hook path.
+# Codex reads `managed_dir` on POSIX hosts and `windows_managed_dir` on
+# Windows, and each field carries its own path flavour. Validating a field
+# under the other flavour false-greens a value Codex will reject as relative.
+_REQUIREMENTS_HOOK_PATH_FIELDS: tuple[tuple[str, type[PurePath], str, str], ...] = (
+    ("managed_dir", PurePosixPath, "POSIX", "posix"),
+    ("windows_managed_dir", PureWindowsPath, "Windows", "nt"),
+)
 
-    The two fields carry different path flavours, and which one Codex consumes
-    depends on the host. Absoluteness is therefore accepted under either
-    flavour, but existence is only asserted for a value that is unambiguously
-    absolute under THIS platform's rules — a Windows path audited on Linux (or
-    a POSIX path audited on Windows) is a different machine's fact, so probing
-    it would produce a portability-dependent verdict rather than a check.
+
+def requirements_hook_field_is_active_here(field: str) -> bool:
+    """Return whether THIS host is the one that consumes this managed field.
+
+    Existence is only asserted for the field the running platform actually
+    reads — the other field describes a different machine's filesystem, so
+    probing it would produce a portability-dependent verdict rather than a
+    check.
     """
-    if os.name == "nt":
-        return PureWindowsPath(value).is_absolute()
-    return PurePosixPath(value).is_absolute()
+    for name, _flavour, _label, os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
+        if name == field:
+            return os.name == os_name
+    return False
+
+
+# `\\?\C:\dir` and `\\.\C:\dir` are the extended-length/device spellings of a
+# LOCAL drive: they carry a `\\`-prefixed drive but never leave the machine.
+# `\\?\UNC\server\share` is the device spelling of a real network share.
+_WINDOWS_LOCAL_DEVICE_DRIVE = re.compile(r"(?i)^[\\/]{2}[?.][\\/](?!unc[\\/])")
 
 
 def requirements_hook_path_is_locally_probeable(value: str) -> bool:
@@ -2432,8 +2446,15 @@ def requirements_hook_path_is_locally_probeable(value: str) -> bool:
     UNPROVEN for those paths; absoluteness is still asserted. POSIX network
     mounts are indistinguishable from local paths, so this narrowing can only
     recognize the UNC spelling.
+
+    Only a genuine server/share is exempted: the `\\\\?\\C:\\...` and
+    `\\\\.\\C:\\...` device spellings address a local drive and are still
+    probed, so `doctor` cannot certify a missing directory written that way.
     """
-    return not PureWindowsPath(value).drive.startswith(("\\\\", "//"))
+    drive = PureWindowsPath(value).drive
+    if not drive.startswith(("\\\\", "//")):
+        return True
+    return bool(_WINDOWS_LOCAL_DEVICE_DRIVE.match(drive))
 
 
 def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
@@ -2443,7 +2464,7 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
     hooks from a relative or missing directory, so a `str` type check alone
     false-greens a managed hook source Codex would reject. Fail closed instead.
     """
-    for field in ("managed_dir", "windows_managed_dir"):
+    for field, flavour, flavour_label, _os_name in _REQUIREMENTS_HOOK_PATH_FIELDS:
         if field not in hooks:
             continue
         value = hooks[field]
@@ -2451,14 +2472,12 @@ def validate_requirements_hook_paths(hooks: dict[str, Any]) -> None:
             raise HarnessError(
                 f"existing requirements hooks.{field} must be a path string"
             )
-        if not (
-            PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
-        ):
+        if not flavour(value).is_absolute():
             raise HarnessError(
-                f"existing requirements hooks.{field} must be an absolute path: "
-                f"{value!r}"
+                f"existing requirements hooks.{field} must be an absolute path "
+                f"in {flavour_label} form: {value!r}"
             )
-        if not requirements_hook_path_resolves_here(value):
+        if not requirements_hook_field_is_active_here(field):
             continue
         if not requirements_hook_path_is_locally_probeable(value):
             continue
@@ -2908,17 +2927,23 @@ _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
     rf"{_SYSTEM_VAR}\+'/py\.exe'",
     rf"join-path {_SYSTEM_VAR} 'py\.exe'",
 )
-# wrapper: a repo-relative path whose final component is the wrapper script
-# (the project's own adapter, trusted via a /hooks review). Being relative, it
-# only resolves when Codex's session cwd is the hook source root, which is why
-# it is the one shape `reject_relative_wrapper` drops.
+# wrapper, HOME-anchored: `~/work/repo/invoke_deny_floor.sh` resolves to the
+# same file from every session cwd, so it belongs with the cwd-independent
+# shapes even though it names the project's own wrapper script.
+_HOME_ANCHORED_WRAPPER_VALUE_SOURCE = (
+    rf"['\"]?{_HOME_VAR}/(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
+)
+# wrapper, relative: a repo-relative path whose final component is the wrapper
+# script (the project's own adapter, trusted via a /hooks review). Being
+# relative, it only resolves when Codex's session cwd is the hook source root,
+# which is why it is the one shape `reject_relative_wrapper` drops.
 _WRAPPER_FLOOR_VALUE_SOURCE = (
     rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
 )
 
 _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
     re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
-)
+) + (re.compile(_HOME_ANCHORED_WRAPPER_VALUE_SOURCE),)
 _FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
     re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
 )
@@ -2936,8 +2961,10 @@ def value_binds_anchored_floor_path(
     rebind, a glued prefix (``x.claude/...`` / ``evil'.claude/...'``), or
     concatenation past the marker.
 
-    ``reject_relative_wrapper`` additionally drops the wrapper shape, which is
-    only meaningful when the session cwd is the hook source root.
+    ``reject_relative_wrapper`` additionally drops the RELATIVE wrapper shape,
+    which is only meaningful when the session cwd is the hook source root. A
+    HOME-anchored wrapper path survives, because it names the same file from
+    every cwd.
     """
     normalized = value.lower().replace("\\", "/")
     patterns = (
@@ -3119,22 +3146,31 @@ def segment_invokes_direct_floor(
 _WRAPPER_PATH_TOKEN = re.compile(
     rf"^(?:{_PATH_COMPONENT}/)*invoke_deny_floor\.(?:sh|ps1|cmd|bat)$"
 )
+# The subset of wrapper path tokens that name the same file from every session
+# cwd. Intermediate components are restricted to literal words so a smuggled
+# `$pwd`/`$cwd` expansion cannot ride in behind the home anchor.
+_HOME_ANCHORED_WRAPPER_TOKEN = re.compile(
+    rf"^{_HOME_VAR}/(?:[\w.-]+/)*{_FLOOR_WRAPPER}$"
+)
 
 
 def token_is_wrapper(
     token: str, wrapper_variables: set[str], *, reject_relative: bool = False
 ) -> bool:
-    if reject_relative:
-        # Every recognized wrapper form is repo-relative, and a variable-bound
-        # wrapper only reaches here once `value_binds_anchored_floor_path`
-        # accepted an equally relative value.
-        return False
     stripped = token.strip("'\"").lower().replace("\\", "/")
     # The WHOLE token must be a clean path whose final component is the wrapper
     # script, so neither `invoke_deny_floor.sh.evil` nor an assignment word
     # (`x=.../invoke_deny_floor.sh`) can pass.
     if _WRAPPER_PATH_TOKEN.fullmatch(stripped):
-        return True
+        # Under ``reject_relative`` only the HOME-anchored spelling survives:
+        # every other recognized literal form resolves against the session cwd.
+        return not reject_relative or bool(
+            _HOME_ANCHORED_WRAPPER_TOKEN.fullmatch(stripped)
+        )
+    # A variable-bound wrapper is admitted here on name alone; the anchoring of
+    # the value is enforced separately, because `platform_project_floor_command`
+    # requires every setup segment to pass `is_inert_floor_setup_segment` under
+    # the same ``reject_relative_wrapper`` flag.
     return token_references_variable(token, wrapper_variables)
 
 
@@ -3176,9 +3212,9 @@ def segment_invokes_wrapper(
 
     ``reject_relative`` fails closed on a session-cwd-relative wrapper path.
     Codex runs hook commands from the session cwd, so when that directory is not
-    the hook source root the relative path resolves somewhere else entirely —
-    every recognized wrapper shape is repo-relative, so such an adapter cannot
-    be certified from a subdirectory or a linked worktree.
+    the hook source root the relative path resolves somewhere else entirely. A
+    HOME-anchored wrapper (`~/work/repo/invoke_deny_floor.sh`) names the same
+    file from every cwd and is still certified there.
     """
     stripped = segment.strip()
     stripped = re.sub(r"(?i)^\(\s*", "", stripped)
@@ -3341,6 +3377,18 @@ _AUDIT_MARKER = re.compile(
 )
 
 
+# A command names the SHARED dispatcher when the `.claude/hooks/dispatch.py`
+# suffix is anchored to a home variable. Both spellings the floor recognizer
+# accepts must be recognized here too, or the inventory reports a repo-local
+# copy for an adapter the recognizer just certified: the adjacent forms
+# (`$HOME/...`, `$env:USERPROFILE+'/...'`) and PowerShell's whitespace-separated
+# `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`.
+_SHARED_DISPATCHER_REFERENCE = re.compile(
+    rf"{_HOME_VAR}[^\s;]*{_FLOOR_DISPATCH}"
+    rf"|join-path\s+{_HOME_VAR}\s+['\"]?[^\s;'\"]*{_FLOOR_DISPATCH}"
+)
+
+
 def codex_adapter_command_notes(
     command: str, label: str, expected_pin: str
 ) -> tuple[list[str], list[str]]:
@@ -3380,7 +3428,7 @@ def codex_adapter_command_notes(
             f"{sorted(markers)[0][:12]}... (installed dispatcher "
             f"{expected_pin[:12]}...)"
         )
-    if not re.search(rf"{_HOME_VAR}[^\s;]*\.claude/hooks/dispatch\.py", normalized):
+    if not _SHARED_DISPATCHER_REFERENCE.search(normalized):
         if ".claude/hooks/dispatch.py" in normalized:
             inventory.append(
                 f"{label} names a repo-local dispatcher copy rather than the "
