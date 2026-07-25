@@ -2114,27 +2114,32 @@ _FLOOR_WRAPPER = r"invoke_deny_floor\.(?:sh|ps1|cmd|bat)"
 # variable must match ONE of these whole-value forms — anything else (rebinding,
 # glued prefixes/suffixes, quote concatenation, relative dispatcher/interpreter)
 # fails closed, because char-level anchoring proved to be repeated whack-a-mole.
-_FLOOR_VALUE_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
-        rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
-        rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
-        rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
-        # interpreter (py.exe): SYSTEM-variable anchored, never relative
-        rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
-        rf"{_SYSTEM_VAR}\+'/py\.exe'",
-        rf"join-path {_SYSTEM_VAR} 'py\.exe'",
-        # wrapper: a repo-relative path whose final component is the wrapper
-        # script (the project's own adapter, trusted via a /hooks review)
-        rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?",
-    )
+# These shapes are anchored to HOME or a system variable, so they resolve the
+# same wherever Codex starts the session.
+_CWD_INDEPENDENT_FLOOR_VALUE_SOURCES = (
+    # dispatcher: HOME-anchored only (var+separator, `+`-concat, Join-Path)
+    rf"['\"]?{_HOME_VAR}/{_FLOOR_DISPATCH}['\"]?",
+    rf"{_HOME_VAR}\+'/{_FLOOR_DISPATCH}'",
+    rf"join-path {_HOME_VAR} '{_FLOOR_DISPATCH}'",
+    # interpreter (py.exe): SYSTEM-variable anchored, never relative
+    rf"['\"]?{_SYSTEM_VAR}/py\.exe['\"]?",
+    rf"{_SYSTEM_VAR}\+'/py\.exe'",
+    rf"join-path {_SYSTEM_VAR} 'py\.exe'",
+)
+# wrapper: a repo-relative path whose final component is the wrapper script
+# (the project's own adapter, trusted via a /hooks review). Being relative, it
+# only resolves when Codex's session cwd is the hook source root, which is why
+# it is the one shape `reject_relative_wrapper` drops.
+_WRAPPER_FLOOR_VALUE_SOURCE = (
+    rf"['\"]?(?:{_FLOOR_VAR}/)?(?:[\w.-]+/)*{_FLOOR_WRAPPER}['\"]?"
 )
 
-# Every recognized wrapper shape is a repo-relative path (see the wrapper entry
-# above), so dropping it is the whole rule when the session cwd is not the hook
-# source root: nothing that remains can be mistaken for a resolvable wrapper.
-_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = _FLOOR_VALUE_PATTERNS[:-1]
+_CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS = tuple(
+    re.compile(pattern) for pattern in _CWD_INDEPENDENT_FLOOR_VALUE_SOURCES
+)
+_FLOOR_VALUE_PATTERNS = _CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS + (
+    re.compile(_WRAPPER_FLOOR_VALUE_SOURCE),
+)
 
 
 def value_binds_anchored_floor_path(

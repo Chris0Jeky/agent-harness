@@ -2256,6 +2256,35 @@ allow_local_binding = true
             [],
         )
 
+    def test_reject_relative_wrapper_drops_only_the_wrapper_shape(self) -> None:
+        # Guards the composition of the two pattern tuples: dropping the wrapper
+        # must not quietly drop the home/system-anchored shapes with it.
+        self.assertEqual(
+            len(harness._FLOOR_VALUE_PATTERNS),
+            len(harness._CWD_INDEPENDENT_FLOOR_VALUE_PATTERNS) + 1,
+        )
+        cwd_independent = (
+            "$HOME/.claude/hooks/dispatch.py",
+            "$env:USERPROFILE+'/.claude/hooks/dispatch.py'",
+            "$env:SYSTEMROOT/py.exe",
+        )
+        for value in cwd_independent:
+            with self.subTest(value=value):
+                for reject in (False, True):
+                    self.assertTrue(
+                        harness.value_binds_anchored_floor_path(
+                            value, reject_relative_wrapper=reject
+                        ),
+                        value,
+                    )
+        wrapper = ".codex/invoke_deny_floor.sh"
+        self.assertTrue(harness.value_binds_anchored_floor_path(wrapper))
+        self.assertFalse(
+            harness.value_binds_anchored_floor_path(
+                wrapper, reject_relative_wrapper=True
+            )
+        )
+
     def test_direct_adapters_survive_a_foreign_session_cwd(self) -> None:
         pin = "a" * 64
         text = json.dumps(
