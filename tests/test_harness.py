@@ -2275,6 +2275,32 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] project Codex floor", output)
 
+    def test_join_path_dispatcher_is_not_called_a_repo_local_copy(self) -> None:
+        # PowerShell's `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`
+        # is a shared home-anchored dispatcher the floor recognizer accepts;
+        # the inventory must not contradict it by naming a repo-local copy.
+        pin = "a" * 64
+        shared = (
+            f"$dispatcher=Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'; "
+            f"$expected='{pin}'; & py -3 $dispatcher --event pre --runtime codex"
+        )
+        gaps, inventory = harness.codex_adapter_command_notes(shared, "win", pin)
+        self.assertEqual(gaps, [])
+        self.assertEqual(inventory, [])
+        # A genuinely repo-local dispatcher is still inventoried.
+        vendored = (
+            f"$expected='{pin}'; & py -3 .claude/hooks/dispatch.py "
+            "--event pre --runtime codex"
+        )
+        _gaps, vendored_inventory = harness.codex_adapter_command_notes(
+            vendored, "win", pin
+        )
+        self.assertIn(
+            "win names a repo-local dispatcher copy rather than the shared "
+            "home-anchored one",
+            vendored_inventory,
+        )
+
     def test_doctor_says_when_no_adapter_handler_was_inspected(self) -> None:
         repo = self.make_repo()
         # A hook source with a PreToolUse handler that is not a floor adapter at

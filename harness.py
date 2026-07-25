@@ -2614,6 +2614,18 @@ _AUDIT_MARKER = re.compile(
 )
 
 
+# A command names the SHARED dispatcher when the `.claude/hooks/dispatch.py`
+# suffix is anchored to a home variable. Both spellings the floor recognizer
+# accepts must be recognized here too, or the inventory reports a repo-local
+# copy for an adapter the recognizer just certified: the adjacent forms
+# (`$HOME/...`, `$env:USERPROFILE+'/...'`) and PowerShell's whitespace-separated
+# `Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'`.
+_SHARED_DISPATCHER_REFERENCE = re.compile(
+    rf"{_HOME_VAR}[^\s;]*{_FLOOR_DISPATCH}"
+    rf"|join-path\s+{_HOME_VAR}\s+['\"]?[^\s;'\"]*{_FLOOR_DISPATCH}"
+)
+
+
 def codex_adapter_command_notes(
     command: str, label: str, expected_pin: str
 ) -> tuple[list[str], list[str]]:
@@ -2653,7 +2665,7 @@ def codex_adapter_command_notes(
             f"{sorted(markers)[0][:12]}... (installed dispatcher "
             f"{expected_pin[:12]}...)"
         )
-    if not re.search(rf"{_HOME_VAR}[^\s;]*\.claude/hooks/dispatch\.py", normalized):
+    if not _SHARED_DISPATCHER_REFERENCE.search(normalized):
         if ".claude/hooks/dispatch.py" in normalized:
             inventory.append(
                 f"{label} names a repo-local dispatcher copy rather than the "
