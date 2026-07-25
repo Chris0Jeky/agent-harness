@@ -7124,8 +7124,15 @@ def segment_may_mutate_repository_config(raw: list[str]) -> bool:
         return True
     # MUST stay above the readonly fallback: `echo`/`printf`/`write-host` are
     # vouched readers, so `echo x > .git/config` reopens if these are reordered.
+    #
+    # The operator set is `_WRITING_REDIRECTION_OPERATORS`, not a local literal.
+    # It drifted once already: the local copy omitted `<>`, so
+    # `1<>.git/config cat payload; git push origin` opened the config for
+    # read-WRITE, `cat` was vouched read-only, and the push behind it was let
+    # through.  One shared definition is what keeps the secret-path rule and
+    # this one from disagreeing about which spellings write.
     if any(
-        index > 0 and normalized[index - 1] in {">", ">>", ">|", "&>", "&>>", ">&"}
+        index > 0 and normalized[index - 1] in _WRITING_REDIRECTION_OPERATORS
         for index in config_indexes
     ):
         return True

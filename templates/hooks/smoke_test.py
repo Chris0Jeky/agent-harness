@@ -344,6 +344,12 @@ CASES = [
     ("1<> '.env' echo x", 1, {}, "deny"),
     ("<> '.env' git status", 1, {}, "deny"),
     ("1<>'.env' echo x", 1, {}, "deny"),
+    # ... and the same operator rewrites the repository config, where a vouched
+    # reader in front of it (`cat`) is what hid the omission: the push behind
+    # the rewrite has to stay unverifiable.
+    ("1<>.git/config cat payload; git push origin", 1, {}, "deny"),
+    ("<> .git/config cat payload; git push origin", 1, {}, "deny"),
+    ("cat payload <> .git/config; git push origin", 1, {}, "deny"),
     ("2>err.log git status", 1, {}, "allow"),
     ("&>combined.log npm test", 1, {}, "allow"),
     ("> build.log make all", 1, {}, "allow"),
