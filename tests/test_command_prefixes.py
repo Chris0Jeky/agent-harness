@@ -144,7 +144,7 @@ class CommandHeadPrefixTests(unittest.TestCase):
         # heuristic -- only real provenance answers it.
         for command in (
             "< <(printf \")x\" harmless) 'git' push --force origin main",
-            "< <(printf \")\" harmless \"(\" ) 'git' push --force origin main",
+            '< <(printf ")" harmless "(" ) \'git\' push --force origin main',
             "< <(printf \")x\" harmless) 'rm' -rf /critical/outside",
         ):
             with self.subTest(command=command):

@@ -3050,7 +3050,7 @@ CASES = [
     # `harmless` stand as the head while the quoted `'git'` was masked out of
     # the sanitized pass. The second spelling balances the remainder too.
     ("< <(printf \")x\" harmless) 'git' push --force origin main", 1, {}, "deny"),
-    ("< <(printf \")\" harmless \"(\" ) 'git' push --force origin main", 1, {}, "deny"),
+    ('< <(printf ")" harmless "(" ) \'git\' push --force origin main', 1, {}, "deny"),
     ("< <(printf \")x\" harmless) 'rm' -rf /critical/outside", 1, {}, "deny"),
     # A BACKSLASH-escaped paren keeps no provenance: shlex consumes the escape,
     # so the extent stays unknown and the segment fails closed.
