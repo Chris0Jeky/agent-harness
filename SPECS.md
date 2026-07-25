@@ -1,6 +1,6 @@
 # Harness Specs
 
-Last Updated: 2026-07-13 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
+Last Updated: 2026-07-25 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
 ## §1 Global `~/.claude/CLAUDE.md` — literal draft (~40 lines)
 
@@ -268,23 +268,35 @@ False positives train hook-disabling; when in doubt, don't fire.
 
 ## §8 Model & effort routing (full table)
 
-| Task class | Model | Effort | Walls vs tripwires |
+Model tiers (`top` / `default` / `cheap`) are ROUTING tiers — unrelated to the T0–T4
+blast-radius ladder.
+
+| Task class | Model tier | Effort | Walls vs tripwires |
 |---|---|---|---|
 | Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: `.claude/agents` pins + review requirement |
-| Adversarial review, merge decisions | top | xhigh | wall at T4 (gate), tripwire below |
 | Region maps, skills, ADRs, global laws | top | xhigh | convention |
-| Feature slices in mapped regions | mid | medium–high | convention |
-| Bulk mechanical edits, test running | mid/cheap | low–medium | convention |
-| Gardener triage, doc rotation, formatting, tombstones | cheap | low | wall: gardener.md model pin + PR-only output |
+| Adversarial review, merge decisions | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
+| Code implementation, debugging, feature slices in mapped regions | default | high | convention |
+| Gardener triage, tombstone classification, promotion routing | default | low | wall: gardener.md model pin + PR-only output |
+| Subagent work, lookups, conversation, small mechanical edits | default | low | convention |
+| Bulk mechanical sweeps, doc rotation, formatting, test running | cheap | medium–high (never low) | convention |
 
 Effort is the first dial (cheaper than a model swap). Default-up when unsure. Interactive
 sessions: pick per the table at session start; don't leave xhigh pinned globally for
 maintenance work.
 
-The current concrete calibration — which named model at which effort, any temporary access
-window, and the fan-out fleet caps — lives in the `model-effort-routing` global skill, not here.
-This table is the durable judgment-vs-mechanical shape; the skill carries the model-specific
-detail so it updates without a SPECS edit.
+**Triage and classification are judgment, not mechanics** — deciding what matters is a call, so
+they sit on the default tier even though they run on a schedule. A cheap tier only earns work
+that is genuinely simple, well-specified, and hard to get wrong; and when it does, it runs at
+medium/high effort, because a cheap model at low effort compounds two handicaps.
+
+**The tiers above are deliberately unnamed, and this table does not restate the ladder.** Which
+model fills `top` / `default` / `cheap`, and the fan-out fleet caps (≤3–5, ≤8–12 for a sweep),
+live in the `model-effort-routing` global skill — the single home. A named model written in two
+files is how a stale routing row survives repeated prose bans; if this table and the skill ever
+disagree, the skill wins and the local copy is the bug. The one model-level statement that is law
+rather than calibration: **never Haiku 4.5** (standing owner directive). This table is the durable
+judgment-vs-mechanical shape and changes only when that shape changes.
 
 ## §9 Bootstrapper CLI + ESTATE.md
 
@@ -310,7 +322,10 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 ## §10 Gardener spec
 
 - Invocation: Claude Code scheduled routine (or Windows Task Scheduler fallback:
-  `claude -p "/gardener" --model haiku` with effort low), weekly per ACTIVE repo only.
+  `claude -p "/gardener"` at effort low), weekly per ACTIVE repo only. Pass no `--model` flag:
+  the model comes from the `model:` pin in `agents/gardener.md`, which is the wall. A model named
+  on the command line silently overrides that wall and drifts independently of it — a literal
+  `--model haiku` sat in this line while Haiku was banned in prose elsewhere in the estate.
 - Runs in its own worktree — never the live checkout (one-writer rule; scheduled agents must
   not race interactive sessions or wave agents).
 - Output contract: exactly ONE branch + PR, ≤100 changed lines, title `gardener: <repo> <date>`,
@@ -349,9 +364,11 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - 5 global process skills: safe-shell, small-safe-slice, verification-closeout (≤40 lines each,
   keep as-is); plus two ≤80-line workflow-mode skills — `guided-walkthrough` (backlog→numbered-q-N
   guided mode: per item context + suggested action + owner tag + step-by-step for human-only items)
-  and `model-effort-routing` (effort→model→fan-out ladder; Opus 4.8 default reach, Fable-with-fallback
-  for the hardest work, fleet caps ≤3–5 / ≤8–12). These are the single home for their behavior;
-  global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point at them.
+  and `model-effort-routing` (effort→model→fan-out ladder and fleet caps ≤3–5 / ≤8–12). These are
+  the single home for their behavior — in particular, `model-effort-routing` is the ONLY place that
+  names models and their effort bindings; §8 above and BLUEPRINT §5 carry the task-class→tier shape
+  and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
+  at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
 - Plugins: keep pr-review-toolkit/code-review/feature-dev ONLY where a repo hasn't chosen its
   local skill for that verb (record per-repo in ESTATE.md); delete disabled marketplace clones.
