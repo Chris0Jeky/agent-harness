@@ -103,14 +103,39 @@ def bare(command: str, tier: int = 1):
 class DerivedIsolationSetTests(unittest.TestCase):
     """The set must be derived from dispatch, never mirrored."""
 
+    def test_every_family_constant_is_classified(self):
+        """A NEW `_GIT_*_ENVIRONMENT` family must be classified, not ignored.
+
+        The per-name derivation below only proves the families we already know
+        about flow through. Reflecting over dispatch closes the level above it:
+        a family added tomorrow fails here until someone decides, in writing,
+        whether the helper has to clear it.
+        """
+        self.assertEqual(
+            sorted(floor_environment.environment_family_constants(dispatch)),
+            sorted(
+                set(floor_environment._ISOLATED_CONSTANTS)
+                | set(floor_environment._UNISOLATED_CONSTANTS)
+            ),
+            "dispatch.py grew or lost a _GIT_*_ENVIRONMENT family; add it to "
+            "_ISOLATED_CONSTANTS in tests/floor_environment.py if check() reads "
+            "it off os.environ, or to _UNISOLATED_CONSTANTS with the reason",
+        )
+        self.assertEqual(
+            set(floor_environment._ISOLATED_CONSTANTS)
+            & set(floor_environment._UNISOLATED_CONSTANTS),
+            set(),
+        )
+
     def test_every_named_constant_is_covered(self):
-        for constant in (
-            "_GIT_PROCESS_COMMAND_ENVIRONMENT",
-            "_GIT_PROCESS_ENVIRONMENT",
-            "_GIT_REPOSITORY_ENVIRONMENT",
-            "_GIT_TRACE_ENVIRONMENT",
-            "_GIT_TRACE_TARGET_ENVIRONMENT",
-            "_GIT_TRACE_DISCLOSURE_ENVIRONMENT",
+        for constant in sorted(
+            floor_environment.environment_family_constants(dispatch)
+            - {
+                # The two command-text-only families intentionally carry names
+                # (HOME, USERPROFILE, ...) the helper must NOT clear.
+                "_GIT_REPOSITORY_CONTEXT_ENVIRONMENT",
+                "_GIT_REPOSITORY_COMMAND_ENVIRONMENT",
+            }
         ):
             with self.subTest(constant=constant):
                 names = set(getattr(dispatch, constant))

@@ -30,12 +30,14 @@ Deliberately NOT covered, so the claim stays exactly as strong as the code:
   `GIT_CONFIG_NOSYSTEM`, because that name does reach those subprocesses.
 
 `tests/test_floor_environment.py` fails if dispatch grows an ambient read
-outside that inventory, or if a tests/ suite calls `check()` without this
+outside that inventory, if it grows a `_GIT_*_ENVIRONMENT` family constant that
+is not classified below, or if a tests/ suite calls `check()` without this
 helper.
 """
 
 import contextlib
 import os
+import re
 
 # Ambient names dispatch reads that are not members of a named constant.
 _EXTRA_ISOLATED_NAMES = frozenset({"GIT_INDEX_FILE"})
@@ -43,15 +45,57 @@ _EXTRA_ISOLATED_NAMES = frozenset({"GIT_INDEX_FILE"})
 # Prefix families: dispatch matches these by shape, not by membership.
 _ISOLATED_PREFIXES = ("GIT_CONFIG",)
 
+# Every `_GIT_*_ENVIRONMENT` constant dispatch defines must appear in exactly
+# one of the two tables below, and `test_every_family_constant_is_classified`
+# fails until a NEW one does. Reflecting the names is the drift guard;
+# auto-UNIONING them would not be safe, because two of these families are
+# matched against assignments in the COMMAND TEXT rather than against the host
+# environment and contain names (HOME, USERPROFILE, XDG_CONFIG_HOME) that the
+# test process must keep — `dispatch.is_within_temp` and
+# `is_safe_containment_root` resolve `~` and would change containment verdicts
+# without them.
+_ISOLATED_CONSTANTS = (
+    "_GIT_PROCESS_COMMAND_ENVIRONMENT",
+    "_GIT_REPOSITORY_ENVIRONMENT",
+    "_GIT_TRACE_ENVIRONMENT",
+)
+_UNISOLATED_CONSTANTS = {
+    "_GIT_PROCESS_ENVIRONMENT": (
+        "subset of _GIT_PROCESS_COMMAND_ENVIRONMENT, already isolated"
+    ),
+    "_GIT_TRACE_TARGET_ENVIRONMENT": "subset of _GIT_TRACE_ENVIRONMENT",
+    "_GIT_TRACE_DISCLOSURE_ENVIRONMENT": "subset of _GIT_TRACE_ENVIRONMENT",
+    "_GIT_REPOSITORY_CONTEXT_ENVIRONMENT": (
+        "never read off os.environ — check() intersects it with assignments "
+        "parsed out of the command text only. It holds HOME / HOMEDRIVE / "
+        "HOMEPATH / USERPROFILE / XDG_CONFIG_HOME, which the test process "
+        "needs for `~` resolution, so clearing them would corrupt every "
+        "path-containment verdict"
+    ),
+    "_GIT_REPOSITORY_COMMAND_ENVIRONMENT": (
+        "union of _GIT_REPOSITORY_ENVIRONMENT and the context family above; "
+        "same command-text-only reason"
+    ),
+}
+_FAMILY_CONSTANT = re.compile(r"^_GIT_[A-Z0-9_]*_ENVIRONMENT$")
+
+
+def environment_family_constants(dispatch) -> frozenset:
+    """Every `_GIT_*_ENVIRONMENT` name-set constant dispatch defines."""
+    return frozenset(
+        name
+        for name in dir(dispatch)
+        if _FAMILY_CONSTANT.match(name)
+        and isinstance(getattr(dispatch, name), (set, frozenset))
+    )
+
 
 def isolated_environment_names(dispatch) -> frozenset:
     """The exact-match half of the isolation set, derived from `dispatch`."""
-    return frozenset(
-        set(dispatch._GIT_PROCESS_COMMAND_ENVIRONMENT)
-        | set(dispatch._GIT_REPOSITORY_ENVIRONMENT)
-        | set(dispatch._GIT_TRACE_ENVIRONMENT)
-        | set(_EXTRA_ISOLATED_NAMES)
-    )
+    names = set(_EXTRA_ISOLATED_NAMES)
+    for constant in _ISOLATED_CONSTANTS:
+        names |= set(getattr(dispatch, constant))
+    return frozenset(names)
 
 
 def should_isolate(dispatch, name: str) -> bool:
