@@ -358,9 +358,49 @@ CASES = [
     ("echo hi >| '.env'", 1, {}, "deny"),
     ("echo hi &> '.env'", 1, {}, "deny"),
     ("> 'out file.txt' echo secret123 > '.env'", 1, {}, "deny"),
-    # descriptor duplication binds a descriptor, not a path: the token after `>&`
-    # is `1`, so the quoted `.env` here is an argument and stays allowed.
+    # Numeric descriptor duplication is portable. A non-numeric word is ambiguous in
+    # Bash but is a real file target in zsh, so unknown shell syntax stays conservative.
     ("2>&1 '.env' echo hi", 1, {}, "allow"),
+    ("2>& '.env' echo hi", 1, {}, "deny"),
+    ("echo hi 2>& '.env'", 1, {}, "deny"),
+    ("bash -c \"echo hi 2>& '.env'\"", 1, {}, "allow"),
+    ("zsh -c \"echo hi 2>& '.env'\"", 1, {}, "deny"),
+    ("{fd}>&.env echo hi", 1, {}, "deny"),
+    ('bash -c "{fd}>&.env echo hi"', 1, {}, "allow"),
+    ('zsh -c "{fd}>&.env echo hi"', 1, {}, "deny"),
+    ("bash -c \"eval 'echo hi >.e\\nv'\"", 1, {}, "deny"),
+    ("bash -c \"eval '2>&.env echo hi'\"", 1, {}, "allow"),
+    # An escaped `>` is argv text, not shell syntax. The even-backslash control leaves
+    # the second backslash escaped and the `>` active, so it must still deny.
+    (r"printf '%s\n' \>'.env'", 1, {}, "allow"),
+    (r"printf '%s\n' \> '.env'", 1, {}, "allow"),
+    (r"printf '%s\n' \\> '.env'", 1, {}, "deny"),
+    # Backslash is not cmd.exe's escape character. Once /c selects cmd syntax, the
+    # same bytes are an active redirect and must retain the parent floor's deny.
+    (r'cmd /d /s /c "echo hi \>.env"', 1, {}, "deny"),
+    # Caret is ordinary POSIX argv before an active redirect, so a cmd-specific escape
+    # must not be treated as a universal literal marker.
+    (r"echo hi ^>.env", 1, {}, "deny"),
+    # A raw target ends at an unquoted shell separator. Swallowing the separator into
+    # the filename launders the secret basename and turns each executable write into an
+    # allow, so pin every separator family in its glued form.
+    ("echo hi >.env;echo ok", 1, {}, "deny"),
+    ("echo hi >.env&&echo ok", 1, {}, "deny"),
+    ("echo hi >.env|echo ok", 1, {}, "deny"),
+    ("echo hi >.env&echo ok", 1, {}, "deny"),
+    ("echo hi >(cat)", 1, {}, "deny"),
+    ("echo hi > >(cat)", 1, {}, "deny"),
+    ("echo hi > <(cat)", 1, {}, "deny"),
+    # POSIX removes a backslash before an ordinary target character. Preserve both the
+    # operator's syntax provenance and the filename a shell will actually open.
+    (r"echo hi >.\env", 1, {}, "deny"),
+    (r"echo hi >.e\nv", 1, {}, "deny"),
+    (r"echo hi >.en\v", 1, {}, "deny"),
+    # A backslash inside quotes stays literal in POSIX argv. Unescape only the raw,
+    # placeholder-bearing word so quote provenance survives target normalization.
+    (r"echo hi >'.e\nv'", 1, {}, "allow"),
+    (r'echo hi >".e\nv"', 1, {}, "allow"),
+    (r"echo hi >.e'\n'v", 1, {}, "allow"),
     ("git commit -m 'redirect &> .env is blocked'", 1, {}, "allow"),
     # ...and the mirror of the widened operator set: a quoted span that IS an operator
     # spelling is DATA. Every deny above has this twin so the two halves of the change
@@ -392,6 +432,44 @@ CASES = [
     ('echo "9>|" .env', 1, {}, "allow"),
     ("echo x 2>& .env", 1, {}, "deny"),
     ('echo "2>&" .env', 1, {}, "allow"),
+    # A quoted operator used as an ordinary option value must remain one argv word
+    # when launcher/scriptblock recursion reconstructs child text. Dropping the minted
+    # provenance marker shifted `.env` into curl's -o slot and caused a false deny.
+    (
+        'taskset -c 0 curl -q -o ">" .env https://example.invalid/file',
+        1,
+        {},
+        "allow",
+    ),
+    (
+        '1 | ForEach-Object { curl -q -o ">" .env https://example.invalid/file }',
+        1,
+        {},
+        "allow",
+    ),
+    ('wsl curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
+    ('call curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
+    ('cmd /d /c curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
+    ("cmd /d /c echo x '>' .env", 1, {}, "deny"),
+    (
+        'Start-Job -ScriptBlock { curl -q -o ">" .env '
+        "https://example.invalid/file }",
+        1,
+        {},
+        "allow",
+    ),
+    (
+        'Start-ThreadJob -ScriptBlock { curl -q -o ">" .env '
+        "https://example.invalid/file }",
+        1,
+        {},
+        "allow",
+    ),
+    # eval concatenates its argv and parses the result as shell program text, so an
+    # operator quoted in the outer shell becomes active syntax in the evaluated child.
+    ('eval ">" .env', 1, {}, "deny"),
+    ('eval "2>" .env', 1, {}, "deny"),
+    ('eval "<" .env', 1, {}, "allow"),
     ("echo '2>' .env", 1, {}, "allow"),
     ("echo '1>>' .env", 1, {}, "allow"),
     # ...and the real descriptor-prefixed redirect into a QUOTED secret path
@@ -2614,6 +2692,7 @@ CASES = [
     ("tee -a notes.txt credentials.json", 1, {}, "deny"),
     ("echo x >| .env", 1, {}, "deny"),
     ("echo secret >& .env", 1, {}, "deny"),
+    # Unknown-shell `n>&word` remains a target because zsh opens it as a file.
     ("echo secret 1>&.env", 1, {}, "deny"),
     ("echo x >| notes.txt >| .env", 1, {}, "deny"),
     ("Remove-Item .env*", 1, {}, "deny"),
@@ -3025,6 +3104,13 @@ CASES = [
     ("`echo git` push --force origin main", 1, {}, "deny"),
     ("call git push --force origin main", 1, {}, "deny"),
     ("Start-Process git -ArgumentList 'push','--force','origin','main'", 1, {}, "deny"),
+    (
+        "Start-Process curl -ArgumentList '-q','-o', \">\", '.env',"
+        "'https://example.invalid/file'",
+        1,
+        {},
+        "allow",
+    ),
     (
         "Start-Process -FilePath git -ArgumentList push,--force,origin,main",
         1,
@@ -3942,6 +4028,15 @@ CASES = [
     # --- child-executing launchers (PR #1 recovery: bot findings) ---
     ("watch git push --force origin main", 1, {}, "deny"),
     ("watch -n 1 rm -rf /critical/outside", 1, {}, "deny"),
+    ('watch "git push --force origin main"', 1, {}, "deny"),
+    ('watch "rm -rf /critical/outside"', 1, {}, "deny"),
+    ('watch "echo x > .env"', 1, {}, "deny"),
+    ('watch echo x ">" .env', 1, {}, "deny"),
+    ('watch -x "git push --force origin main"', 1, {}, "allow"),
+    ('watch --exec "rm -rf /critical/outside"', 1, {}, "allow"),
+    ("watch -x git push --force origin main", 1, {}, "deny"),
+    ("watch -q 2 git push --force origin main", 1, {}, "deny"),
+    ("watch --equexit 2 git status", 1, {}, "allow"),
     ("watch git status", 1, {}, "allow"),
     ("flock /tmp/lock git push --force origin main", 1, {}, "deny"),
     ("flock -c 'git push --force origin main' /tmp/lock", 1, {}, "deny"),

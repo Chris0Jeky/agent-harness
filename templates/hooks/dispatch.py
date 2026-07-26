@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.15 (2026-07-26)"
+FLOOR_VERSION = "1.6.16 (2026-07-26)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -61,6 +61,8 @@ _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 # deleted, and deleting it in a recursed child restores the text as written.
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
 _QUOTED_SPAN_MARK = "__HARNESS_QUOTED_SPAN_5B4E__"
+_CMD_DOUBLE_QUOTED_REDIRECT_MARK = "__HARNESS_CMD_DOUBLE_QUOTED_REDIRECT__"
+_CMD_DOUBLE_QUOTED_REDIRECT_END = "__HARNESS_CMD_DOUBLE_QUOTED_REDIRECT_END__"
 _SEGMENT_SEPARATOR_PREFIX = "__HARNESS_SEGMENT_SEPARATOR_"
 _SEGMENT_SEPARATOR_SUFFIX = "__"
 
@@ -370,7 +372,7 @@ def cmd_nested_script(toks: list[str]) -> tuple[bool, str | None]:
             continue
         tail = match.group("tail")
         parts = ([tail] if tail else []) + toks[index + 1 :]
-        return True, " ".join(parts) or None
+        return True, join_cmd_child_argv(parts) or None
     return False, None
 
 
@@ -621,7 +623,7 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
         index += 1
     if not executable:
         return None, "Start-Process has no literal executable path."
-    return shlex.join([executable, *child_args]), ""
+    return join_direct_child_argv([executable, *child_args]), ""
 
 
 def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]:
@@ -729,7 +731,11 @@ def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]
             index += 1
         if depth != 0:
             return None, index, "A background-job scriptblock is malformed."
-        literal = " ".join(chunks)
+        # Reconstruct executable scriptblock text with the same argv round trip as
+        # foreground PowerShell blocks. A quoted redirect operator is DATA in the
+        # parent argv; emitting its minted marker verbatim lets the recursive scrub
+        # delete that word and shift every following argument.
+        literal = rejoin_argv_as_command(chunks)
         body = unwrap_powershell_scriptblock(literal)
         if body == literal:
             return None, index, "A background-job scriptblock is malformed."
@@ -1386,6 +1392,37 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     return None
 
 
+def restore_literal_redirect_markers(value: str) -> str:
+    """Restore minted quoted-operator markers to the argv text they represent."""
+    restored = restore_quoted_literal_markers(value)
+    restored = restored.replace(_CMD_DOUBLE_QUOTED_REDIRECT_MARK, "").replace(
+        _CMD_DOUBLE_QUOTED_REDIRECT_END, ""
+    )
+    for operator, marker in _LITERAL_REDIRECT_MARKERS.items():
+        restored = restored.replace(marker, operator)
+    return restored
+
+
+def requote_literal_redirect_marker(token: str) -> str | None:
+    """Re-quote a minted literal-redirect marker for a child inspection pass."""
+    for operator, marker in _LITERAL_REDIRECT_MARKERS.items():
+        if marker not in token:
+            continue
+        # The parent tokenizer minted this marker for an operator that reached argv
+        # as QUOTED DATA. Re-emitting the marker verbatim hands it across a trust
+        # boundary, where the child anti-forgery scrub deletes it and shifts every
+        # following argv position. Restore and quote the operator so the child derives
+        # fresh provenance of its own. A typed marker cannot reach here: the parent
+        # scrub removes it before minting any live marker.
+        # Generic child boundaries preserve ARGV, not the parent's quote dialect.
+        # Quoting the complete restored value with shlex is what keeps an adjacent
+        # single-quoted `$` / backtick / literal quote inert. cmd.exe is the one
+        # boundary where double-quote provenance changes semantics; its renderer
+        # consumes the paired span markers separately below.
+        return shlex.quote(restore_literal_redirect_markers(token))
+    return None
+
+
 def requote_argv_token(token: str) -> str:
     """Re-quote one argv token so re-tokenizing it yields the SAME token.
 
@@ -1402,6 +1439,9 @@ def requote_argv_token(token: str) -> str:
     verbatim, so ordinary argv and the synthesized `;`/`|` separators stay
     byte-identical and every head, path and flag match is unaffected.
     """
+    literal_redirect = requote_literal_redirect_marker(token)
+    if literal_redirect is not None:
+        return literal_redirect
     if not token:
         return "''"
     if token_is_argv_redirection(token):
@@ -1590,15 +1630,67 @@ def join_child_argv(tokens) -> str:
     rule and allowed, so every leading-redirect payload behind `wsl` / `taskset` /
     `flock` / `watch` / `chrt` / `coproc` was laundered by the rebuild itself.
 
-    `requote_argv_token` already keeps redirections bare for the recursion path;
-    the launcher path reached for `shlex.join` instead and lost it. Only that one
-    rule is shared: everything else still goes through `shlex.quote`, so a literal
-    `;` argument stays a quoted word here rather than becoming a separator.
+    The scriptblock recursion path and this launcher path deliberately keep their
+    existing general quoting rules: launcher argv needs `shlex.quote` to preserve
+    glob and brace arguments. They share only the literal-redirect round trip, which
+    keeps the exact operator as argv DATA. A literal `;` argument therefore stays a
+    quoted word here rather than turning into a separator.
+    """
+    rendered: list[str] = []
+    for token in tokens:
+        literal_redirect = requote_literal_redirect_marker(token)
+        if literal_redirect is not None:
+            rendered.append(literal_redirect)
+        elif token_is_argv_redirection(token):
+            rendered.append(token)
+        else:
+            rendered.append(shlex.quote(token))
+    return " ".join(rendered)
+
+
+def join_direct_child_argv(tokens) -> str:
+    """Rebuild direct process argv as child-inspection text.
+
+    Unlike a shell launcher, Start-Process hands every ArgumentList value directly to
+    the executable, so even redirection-looking words are argv DATA. Preserve its
+    existing `shlex.join` semantics and add only the minted literal-redirect round trip
+    that prevents the child anti-forgery scrub from deleting an argument.
     """
     return " ".join(
-        token if token_is_argv_redirection(token) else shlex.quote(token)
-        for token in tokens
+        requote_literal_redirect_marker(token) or shlex.quote(token) for token in tokens
     )
+
+
+def join_cmd_child_argv(tokens) -> str:
+    """Rebuild cmd.exe-reparsed argv while preserving double-quote semantics.
+
+    cmd treats `">"` as data but gives single quotes no special protection. The
+    tokenizer records that narrow distinction only for exact quoted redirect words;
+    all other cmd quoting remains under the broader #69 contract.
+    """
+    rendered: list[str] = []
+    for token in tokens:
+        if _CMD_DOUBLE_QUOTED_REDIRECT_MARK in token:
+            # Keep the double quotes around exactly the span that had them. Widening
+            # the quotes over an adjacent suffix changes other shell dialects (`$`
+            # and backticks become live) and can make a literal `"` malformed.
+            start = token.find(_CMD_DOUBLE_QUOTED_REDIRECT_MARK)
+            body_start = start + len(_CMD_DOUBLE_QUOTED_REDIRECT_MARK)
+            end = token.find(_CMD_DOUBLE_QUOTED_REDIRECT_END, body_start)
+            if end < 0:
+                rendered.append(restore_literal_redirect_markers(token))
+                continue
+            before = restore_literal_redirect_markers(token[:start])
+            quoted = restore_literal_redirect_markers(token[body_start:end])
+            after = restore_literal_redirect_markers(
+                token[end + len(_CMD_DOUBLE_QUOTED_REDIRECT_END) :]
+            )
+            rendered.append(f'{before}"{quoted}"{after}')
+        elif any(marker in token for marker in _LITERAL_REDIRECT_MARKERS.values()):
+            rendered.append(restore_literal_redirect_markers(token))
+        else:
+            rendered.append(restore_quoted_literal_markers(token))
+    return " ".join(rendered)
 
 
 def rejoin_argv_as_command(parts: list[str]) -> str:
@@ -2998,18 +3090,118 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     return recovered_deletes
 
 
-#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
-#: destination file. The quote-aware token scan has to recognise the same grammar the
-#: text-mode fallback regex already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it only
-#: knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked while
-#: their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a descriptor
-#: number rather than a path, so it decides on the token that follows.
+#: Output-redirection spellings whose NEXT shell word is a destination. The scan below
+#: keeps raw-text escape provenance that shlex cannot retain and distinguishes a numeric
+#: descriptor duplication (`2>&word`) from bare Bash `>&word`, which names a file.
 #:
-#: The tokenizer's quote-provenance mask below reads the SAME pattern on purpose. The two
-#: are one decision seen from both sides — "is this token an operator?" — so recognising a
-#: spelling in the scan without masking it in the tokenizer turns a quoted operator
-#: LITERAL into a false deny, and masking without recognising re-opens the bypass.
-_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
+#: The tokenizer's quote-provenance mask covers the same file-redirect spellings from
+#: the other direction: a quoted operator is data, while an unquoted operator binds a
+#: target. Tests pin both sides so widening one reader cannot silently outrun the other.
+_OUTPUT_REDIRECT_WITH_TARGET = re.compile(
+    r"(?P<operator>&>>?|>{1,2}[|&]?)\s*" r"(?P<target>[<>]?\(|[^\s;|&()<>]+)"
+)
+
+
+def posix_metacharacter_is_escaped(text: str, index: int) -> bool:
+    """Whether the metacharacter at `index` has an odd backslash prefix.
+
+    Backslash is the one provenance loss this repair addresses: POSIX shells consume it
+    before shlex exposes argv, while PowerShell retains the whole spelling as inert argv.
+    Caret and backtick are deliberately not accepted here because their meaning diverges
+    across shells. This is narrow redirect handling, not the tokenizer-wide #77 fix.
+    """
+    if index <= 0 or text[index - 1] != "\\":
+        return False
+    start = index - 1
+    while start > 0 and text[start - 1] == "\\":
+        start -= 1
+    return (index - start) % 2 == 1
+
+
+def posix_unescape_shell_word(value: str) -> str:
+    """Return the argv word a POSIX shell produces from bare backslash escapes."""
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and index + 1 < len(value):
+            next_char = value[index + 1]
+            if (
+                next_char == "\r"
+                and index + 2 < len(value)
+                and value[index + 2] == "\n"
+            ):
+                index += 3
+                continue
+            if next_char == "\n":
+                index += 2
+                continue
+            result.append(next_char)
+            index += 2
+            continue
+        result.append(value[index])
+        index += 1
+    return "".join(result)
+
+
+def redirection_descriptor_before(
+    text: str, operator_index: int, *, named_descriptors: bool = False
+) -> bool:
+    """Whether a bounded descriptor spelling appears immediately before `>`."""
+    start = operator_index
+    while start > 0 and text[start - 1].isdigit():
+        start -= 1
+    if start != operator_index:
+        return start == 0 or text[start - 1].isspace() or text[start - 1] in ";|&(){}"
+    if not named_descriptors:
+        return False
+    named = re.search(r"\{[A-Za-z_][A-Za-z0-9_]*\}$", text[:operator_index])
+    if named is None:
+        return False
+    return (
+        named.start() == 0
+        or text[named.start() - 1].isspace()
+        or text[named.start() - 1] in ";|&(){}"
+    )
+
+
+def output_redirect_targets(
+    text: str,
+    *,
+    backslash_escapes: bool = True,
+    descriptor_words_are_files: bool = True,
+):
+    """Yield real output-file targets without laundering escapes or fd duplication.
+
+    The input has already had inert quoted spans replaced with placeholders. Searching
+    text rather than rebuilt argv keeps the one fact shlex discards: `\\>` is a literal
+    greater-than word, while `>` is syntax. When the first character of a multi-character
+    operator is escaped, resume at the next character so `\\>>file` still sees the
+    second, active `>` instead of turning an escape into a bypass.
+    """
+    cursor = 0
+    while True:
+        match = _OUTPUT_REDIRECT_WITH_TARGET.search(text, cursor)
+        if match is None:
+            return
+        operator = match.group("operator")
+        operator_start = match.start("operator")
+        redirect_index = text.find(">", operator_start, match.end("operator"))
+        if backslash_escapes and posix_metacharacter_is_escaped(text, redirect_index):
+            cursor = redirect_index + 1
+            continue
+        if (
+            operator.endswith("&")
+            and redirection_descriptor_before(
+                text,
+                redirect_index,
+                named_descriptors=not descriptor_words_are_files,
+            )
+            and not descriptor_words_are_files
+        ):
+            cursor = match.end()
+            continue
+        yield match.group("target")
+        cursor = match.end()
 
 
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
@@ -3028,6 +3220,7 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
     # ValueError fallback below, which re-reads `command`, is covered too.
     command = scrub_internal_markers(command)
     quoted: dict[str, str] = {}
+    cmd_double_quoted_redirects: set[str] = set()
 
     def protect(match: "re.Match[str]") -> str:
         placeholder = f"__HARNESS_QUOTED_{len(quoted)}__"
@@ -3050,6 +3243,8 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 value = shlex.split(token, posix=True)[0]
             except (IndexError, ValueError):
                 value = token[1:-1]
+        if token.startswith('"') and literal_redirect_replacement(value) is not None:
+            cmd_double_quoted_redirects.add(placeholder)
         if len(value) >= 2 and (value[0], value[-1]) in {("(", ")"), ("{", "}")}:
             # Read by command_head, which resolves an executable through a
             # leading `(`/`{` (`(git) push`). A group that came out of a QUOTED
@@ -3146,6 +3341,12 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 literal = literal_redirect_replacement(value)
                 if literal is not None:
                     replacement = literal
+                    if placeholder in cmd_double_quoted_redirects:
+                        replacement = (
+                            _CMD_DOUBLE_QUOTED_REDIRECT_MARK
+                            + replacement
+                            + _CMD_DOUBLE_QUOTED_REDIRECT_END
+                        )
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
         # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
@@ -3952,8 +4153,41 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
     """Return a child command string for watch/flock/coproc/chrt/taskset, "" for
     none, or None when the child is opaque and the launcher must be denied."""
     if head == "watch":
-        index, _ = _scan_launcher_options(toks, {"n"}, {"--interval"})
+        index, _ = _scan_launcher_options(toks, {"n", "q"}, {"--interval", "--equexit"})
+        option_tokens = toks[1:index]
+        exec_mode = False
+        for option in option_tokens:
+            lowered = option.lower()
+            if (
+                lowered.startswith("--ex")
+                and "--exec".startswith(lowered)
+                and "=" not in lowered
+            ):
+                exec_mode = True
+                break
+            if option.startswith("-") and not option.startswith("--"):
+                for character in option[1:]:
+                    if character == "x":
+                        exec_mode = True
+                        break
+                    if character in {"n", "q"}:
+                        # The cluster tail is this value, not more switches.
+                        break
+                if exec_mode:
+                    break
         child = toks[index:]
+        if not child:
+            return ""
+        if exec_mode:
+            # watch -x passes argv straight to exec; a one-word command containing
+            # spaces remains one (usually nonexistent) executable name.
+            return join_direct_child_argv(
+                restore_quoted_literal_markers(token) for token in child
+            )
+        # Default GNU watch concatenates argv and hands the result to `sh -c`.
+        # Outer-shell quotes are already gone, so do not re-quote each word: a quoted
+        # one-word program and separate argv both become the same executable source.
+        return " ".join(restore_literal_redirect_markers(token) for token in child)
     elif head == "flock":
 
         def _flock_command(tok: str, follow: str | None) -> str | None:
@@ -4251,13 +4485,17 @@ def literal_redirect_replacement(token: str) -> str | None:
     spellings, and it mirrors how a glued suffix survives: ``'&>'out`` restores
     as marker + ``out``, the program name the shell would really look for.
 
-    Matching the mask to the SCAN is the whole point. ``_OUTPUT_REDIRECT_OPERATOR``
-    recognises ``\\d*&?>{1,2}[|&]?``, so widening it to ``2>`` / ``1>>`` without
-    widening this made ``echo "2>" .env`` a false deny while the byte-identical
-    ``echo ">" .env`` allowed -- one decision, "is this token an operator?",
-    answered two different ways depending on the descriptor.
+    Matching the mask to the SCAN is the whole point. `output_redirect_targets`
+    recognises descriptor-prefixed file redirects such as ``2>`` / ``1>>``; widening
+    that scan without widening this mask made ``echo "2>" .env`` a false deny while
+    the byte-identical ``echo ">" .env`` allowed -- one decision, "is this token an
+    operator?", answered two different ways depending on the descriptor.
     """
-    parsed = command_prefix_redirection_token(token)
+    # `protect()` masks braces before this reader runs. Restore them only for the
+    # grammar decision so a quoted Bash named descriptor (`"{fd}>&"`) gets the same
+    # provenance as a numeric descriptor; keep the protected prefix in the returned
+    # token so structural brace readers still see quoted data rather than a block.
+    parsed = command_prefix_redirection_token(restore_quoted_literal_punctuation(token))
     if parsed is None:
         return None
     operator, glued_target, _has_descriptor = parsed
@@ -4387,26 +4625,36 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
 _WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>", "<>"})
 
 
-def descriptor_duplication_operand(operator: str | None, target: str) -> bool:
+def descriptor_duplication_operand(
+    operator: str | None,
+    target: str,
+    *,
+    has_descriptor: bool = False,
+    descriptor_words_are_files: bool = True,
+) -> bool:
     """Return True when ``operator target`` duplicates or closes a descriptor.
 
-    ``2>&1`` and ``>&-`` name no file; only a non-numeric word after ``>&``
-    (``>&out.log``) is a path.  Reading the numeric form as a write target
-    would put ``1`` in front of every secret-path heuristic that ever ships.
+    ``2>&1`` and ``>&-`` name no file. Bash also rejects an explicit descriptor
+    plus a non-numeric word (`2>&out.log`) as ambiguous, but zsh opens that word as
+    a file. Unknown/runtime-neutral syntax therefore keeps the word as a target;
+    only an explicitly selected Bash dialect may classify it as duplication.
     """
-    return operator in {">&", "<&"} and re.fullmatch(r"-|\d+-?", target) is not None
+    return operator in {">&", "<&"} and (
+        re.fullmatch(r"-|\d+-?", target) is not None
+        or (has_descriptor and not descriptor_words_are_files)
+    )
 
 
-def leading_redirection_write_targets(toks: list[str]) -> list[str]:
+def leading_redirection_write_targets(
+    toks: list[str], *, descriptor_words_are_files: bool = True
+) -> list[str]:
     """Return the write targets inside a command's leading redirection prefix.
 
     :func:`strip_leading_command_redirections` deletes that prefix so the real
-    executable resolves.  The deletion also removes the only argv an
-    inert-QUOTED redirect target ever appears in: the whole-command text scan
-    reads :func:`strip_quotes` output, where ``'.env'`` has already collapsed to
-    a placeholder.  Collect the targets here so the caller can enforce the
-    secret-path rule BEFORE the prefix is dropped, the same way repository-config
-    redirect state is recorded from the original argv.
+    executable resolves. Collect its targets first so the quote-aware argv pass
+    independently enforces the secret-path rule before that syntax is discarded.
+    The raw-text pass covers trailing redirects and keeps escape provenance; this
+    pass pins the same leading-prefix grammar after tokenization.
 
     Genuinely read-only operands (``<``, ``<&``, ``<<``, ``<<<``) are excluded:
     reading a file is not the irreversible act the floor blocks.  ``<>`` is NOT
@@ -4425,14 +4673,25 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
             # the whole segment instead.
             break
         operator: str | None = None
+        first = command_prefix_redirection_token(token)
+        prefix_has_descriptor = bool(first and first[2]) or bool(
+            _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(token)
+            and index + 1 < len(toks)
+            and _ARGV_REDIRECTION_TOKEN.fullmatch(toks[index + 1])
+        )
         for consumed in toks[index:redirect_end]:
             combined = command_prefix_redirection_token(consumed)
             if combined is not None:
-                operator, glued_target, _has_descriptor = combined
+                operator, glued_target, has_descriptor = combined
                 if (
                     glued_target
                     and operator in _WRITING_REDIRECTION_OPERATORS
-                    and not descriptor_duplication_operand(operator, glued_target)
+                    and not descriptor_duplication_operand(
+                        operator,
+                        glued_target,
+                        has_descriptor=has_descriptor or prefix_has_descriptor,
+                        descriptor_words_are_files=descriptor_words_are_files,
+                    )
                 ):
                     targets.append(glued_target)
                 continue
@@ -4440,7 +4699,12 @@ def leading_redirection_write_targets(toks: list[str]) -> list[str]:
                 # A bare file descriptor, never a path.
                 continue
             if operator in _WRITING_REDIRECTION_OPERATORS and not (
-                descriptor_duplication_operand(operator, consumed)
+                descriptor_duplication_operand(
+                    operator,
+                    consumed,
+                    has_descriptor=prefix_has_descriptor,
+                    descriptor_words_are_files=descriptor_words_are_files,
+                )
             ):
                 targets.append(consumed)
         index = redirect_end
@@ -4455,11 +4719,12 @@ def strip_leading_command_redirections(toks: list[str]) -> list[str]:
     ask for the head, so fixing head resolution alone still let the same prefix
     hide environment mutation, wrapper, and Windows-fallback cases.
 
-    Redirect targets are validated before this runs -- by the whole-command text
-    scan for bare targets and by :func:`leading_redirection_write_targets` for
-    inert-quoted ones -- and repository-config redirect state is recorded from
-    the original argv.  Removing the prefix here therefore exposes the
-    executable without discarding either of those two policies.
+    Redirect targets are validated before this runs by two independent views:
+    :func:`output_redirect_targets` retains raw operator/escape provenance, while
+    :func:`leading_redirection_write_targets` pins the tokenized leading-prefix
+    grammar, including inert-quoted targets. Repository-config redirect state is
+    also recorded from the original argv. Removing the prefix here therefore
+    exposes the executable without discarding any of those policies.
 
     It DOES discard a third: :func:`has_opaque_posix_shell_input` reads the
     input operands (``<``, ``<<<``, ``< <(...)``) that this strip removes, so a
@@ -7993,6 +8258,20 @@ def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
     }
 
 
+def normalize_named_descriptors_for_segmentation(sanitized: str) -> str:
+    """Keep Bash ``{name}>`` descriptors intact through the brace splitter.
+
+    The sanitized fallback splits on braces to expose executable block bodies. A named
+    redirection descriptor is not a block, so represent it with an equivalent numeric
+    descriptor before that structural pass; quote-aware/raw passes retain the original.
+    """
+    return re.sub(
+        r"(?<![A-Za-z0-9_])\{[A-Za-z_][A-Za-z0-9_]*\}(?=>)",
+        "9",
+        sanitized,
+    )
+
+
 def segments(sanitized: str):
     """Split a sanitized command line into per-command segments.
 
@@ -8272,6 +8551,7 @@ def check(
     _remote_cache: dict | None = None,
     _remote_deadline: float | None = None,
     _git_repository_environment: frozenset[str] | None = None,
+    _shell_dialect: str | None = None,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _remote_cache is None:
@@ -8321,6 +8601,7 @@ def check(
             _remote_cache,
             _remote_deadline,
             frozenset(repository_environment_seed),
+            _shell_dialect="powershell",
         )
     call_normalized = normalize_literal_call_operators(command)
     # `@` belongs in the alternation: `& @{x={...}}.x` is as dynamic a call
@@ -8340,8 +8621,12 @@ def check(
     ):
         return "deny", "A dynamic scriptblock invocation cannot be inspected safely."
     sanitized, inert_placeholders = strip_quotes(command)
-    for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
-        redirect_target = full_redirect.group(1).strip("'\"")
+    for redirect_target in output_redirect_targets(
+        sanitized,
+        backslash_escapes=_shell_dialect != "cmd",
+        descriptor_words_are_files=_shell_dialect != "bash",
+    ):
+        redirect_target = redirect_target.strip("'\"")
         if has_dynamic_shell_token(redirect_target) or re.match(
             r"^[<>]?\(", redirect_target
         ):
@@ -8357,12 +8642,20 @@ def check(
         # all, so this loop never sees it). The dynamic-target test above keeps
         # reading the UNRESOLVED token on purpose: `> "%TARGET%"` is deliberately
         # left quoted by strip_quotes and is decided by the per-segment rules.
-        resolved_target = decode_inert_git_token(redirect_target, inert_placeholders)
-        if token_mentions_secret_path(resolved_target):
-            return (
-                "deny",
-                f"Redirecting output into a secret-looking file ({resolved_target}) is floor-blocked.",
+        target_candidates = [redirect_target]
+        if _shell_dialect not in {"cmd", "powershell"}:
+            posix_target = posix_unescape_shell_word(redirect_target)
+            if posix_target != redirect_target:
+                target_candidates.append(posix_target)
+        for target_candidate in target_candidates:
+            resolved_candidate = decode_inert_git_token(
+                target_candidate, inert_placeholders
             )
+            if token_mentions_secret_path(resolved_candidate):
+                return (
+                    "deny",
+                    f"Redirecting output into a secret-looking file ({resolved_candidate}) is floor-blocked.",
+                )
 
     # Pipe rules run on the full sanitized text (the pipe IS the signal).
     if has_download_pipe_to_shell(command):
@@ -8399,7 +8692,9 @@ def check(
         pass_id += 1
     execution_segments.extend(
         (tokens(segment), False, segment, "", pass_id, index)
-        for index, segment in enumerate(segments(sanitized))
+        for index, segment in enumerate(
+            segments(normalize_named_descriptors_for_segmentation(sanitized))
+        )
     )
     # A literal scriptblock split across segments continues in the segments that
     # follow it within the same pass; complete_scriptblock_argv walks these so a
@@ -8424,7 +8719,7 @@ def check(
     command_aliases: dict[str, str] = {}
     previous_pass = None
 
-    def _recurse_child(child_command: str):
+    def _recurse_child(child_command: str, *, shell_dialect: str | None = None):
         """Inspect a wrapper/launcher's child command with the live segment cwd
         and Git-env context. Closes over the loop locals, read at call time."""
         return check(
@@ -8439,6 +8734,7 @@ def check(
             _remote_cache,
             _remote_deadline,
             frozenset(effective_git_repository_environment),
+            _shell_dialect=shell_dialect or _shell_dialect,
         )
 
     def _inspect_literal_scriptblock_bodies(argv: list[str]):
@@ -8532,7 +8828,7 @@ def check(
             ):
                 if not subexpression_invokes_a_command(body):
                     continue
-                decision = _recurse_child(body)
+                decision = _recurse_child(body, shell_dialect="powershell")
                 if decision[0] != "allow":
                     return decision
         return "allow", ""
@@ -8585,7 +8881,10 @@ def check(
                         rejoin_argv_as_command(assigned)
                     ) and _statement_invokes_a_command(assigned):
                         invokes_a_command = True
-                        rhs_decision = _recurse_child(rejoin_argv_as_command(assigned))
+                        rhs_decision = _recurse_child(
+                            rejoin_argv_as_command(assigned),
+                            shell_dialect="powershell",
+                        )
                         if rhs_decision[0] != "allow":
                             return rhs_decision
                     else:
@@ -8621,7 +8920,7 @@ def check(
             text if index == len(program) - 1 else f"{text} {separator or ';'}"
             for index, (text, separator) in enumerate(program)
         )
-        return _recurse_child(body_program)
+        return _recurse_child(body_program, shell_dialect="powershell")
 
     for (
         raw,
@@ -8651,7 +8950,9 @@ def check(
             repository_config_may_have_changed
             or segment_may_mutate_repository_config(raw)
         )
-        for redirect_target in leading_redirection_write_targets(raw):
+        for redirect_target in leading_redirection_write_targets(
+            raw, descriptor_words_are_files=_shell_dialect != "bash"
+        ):
             if token_mentions_secret_path(redirect_target):
                 return (
                     "deny",
@@ -8739,6 +9040,7 @@ def check(
                         _remote_cache,
                         _remote_deadline,
                         frozenset(effective_git_repository_environment),
+                        _shell_dialect="powershell",
                     )
                     if assignment_decision[0] != "allow":
                         return assignment_decision
@@ -8837,7 +9139,12 @@ def check(
             ):
                 evaluated_args.pop(0)
             if evaluated_args:
-                evaluated = restore_quoted_literal_markers(" ".join(evaluated_args))
+                evaluated_text = " ".join(evaluated_args)
+                evaluated = (
+                    restore_literal_redirect_markers(evaluated_text)
+                    if head == "eval"
+                    else restore_quoted_literal_markers(evaluated_text)
+                )
                 if is_dynamic_value(evaluated):
                     return (
                         "deny",
@@ -8862,6 +9169,11 @@ def check(
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
+                    _shell_dialect=(
+                        "powershell"
+                        if head in {"iex", "invoke-expression"}
+                        else _shell_dialect or "posix"
+                    ),
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -8884,6 +9196,13 @@ def check(
                 "an uninspected child command. If elevation is truly needed, the human runs it.",
             )
         if head in {"start-process", "saps"}:
+            if not quote_aware:
+                # The sanitized pass replaces each literal ArgumentList element with
+                # an inert placeholder. Reconstructing a direct child from those
+                # placeholders loses option arity (`-q` disappears from curl) and can
+                # manufacture a false deny. The quote-aware pass above carries the
+                # complete literal argv and is the authoritative view for this API.
+                continue
             child_command, error = powershell_start_process_command(toks)
             if child_command is None:
                 return "deny", error
@@ -8922,6 +9241,7 @@ def check(
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
+                    _shell_dialect="powershell",
                 )
                 if child_decision[0] != "allow":
                     return child_decision
@@ -8997,7 +9317,7 @@ def check(
                 child = restore_quoted_literal_markers(value)
                 if is_dynamic_value(child):
                     return "deny", "A dynamic script -c command cannot be inspected."
-                child_decision = _recurse_child(child)
+                child_decision = _recurse_child(child, shell_dialect="sh")
                 if child_decision[0] != "allow":
                     return child_decision
                 break
@@ -9015,7 +9335,7 @@ def check(
                         "deny",
                         f"A dynamic {head} child command cannot be inspected safely.",
                     )
-                child_decision = _recurse_child(child_command)
+                child_decision = _recurse_child(child_command, shell_dialect="posix")
                 if child_decision[0] != "allow":
                     return child_decision
             continue
@@ -9080,6 +9400,7 @@ def check(
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
+                    _shell_dialect="posix",
                 )
                 if wsl_decision[0] != "allow":
                     return wsl_decision
@@ -9087,8 +9408,11 @@ def check(
         if head == "call":
             if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
                 return "deny", "A dynamic cmd call target cannot be inspected safely."
+            call_child = join_cmd_child_argv(
+                restore_quoted_literal_markers(token) for token in toks[1:]
+            )
             nested_decision = check(
-                restore_quoted_literal_markers(" ".join(toks[1:])),
+                call_child,
                 tier_cfg,
                 project_dir,
                 current_cwd,
@@ -9099,6 +9423,7 @@ def check(
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
+                _shell_dialect="cmd",
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -9341,6 +9666,11 @@ def check(
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
+                _shell_dialect=(
+                    "cmd"
+                    if head == "cmd"
+                    else "powershell" if head in {"pwsh", "powershell"} else head
+                ),
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -9815,6 +10145,7 @@ def check(
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
+                    _shell_dialect=_shell_dialect,
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -11236,23 +11567,6 @@ def check(
                 "deny",
                 "A file API write to a secret-looking or dynamic path is floor-blocked.",
             )
-        if quote_aware:
-            for index, token in enumerate(raw[:-1]):
-                if _OUTPUT_REDIRECT_OPERATOR.fullmatch(
-                    token
-                ) and token_mentions_secret_path(raw[index + 1]):
-                    return (
-                        "deny",
-                        f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
-                    )
-        else:
-            redir = re.search(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", segment_text)
-            if redir and token_mentions_secret_path(redir.group(1)):
-                return (
-                    "deny",
-                    f"Redirecting output into a secret-looking file ({redir.group(1)}) is floor-blocked.",
-                )
-
         # ---- sensitive_data overlay ----
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":

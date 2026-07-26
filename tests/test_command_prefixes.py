@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shlex
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -278,8 +279,127 @@ class LiteralRedirectionOperatorTests(unittest.TestCase):
         ]
         self.assertEqual(len(set(markers)), len(markers))
 
+    def test_quoted_operator_marker_round_trips_through_child_text(self):
+        values = (*self.OPERATORS, "2>", "9>|", "{fd}>&")
+        for value in values:
+            with self.subTest(value=value):
+                parent = dispatch.quote_aware_segments(f'"{value}"')[0][0]
+                self.assertIn("__HARNESS_LITERAL_REDIRECT_", parent)
+                expected = dispatch.restore_literal_redirect_markers(parent)
+                for _generation in range(2):
+                    child_text = dispatch.join_child_argv([parent])
+                    child = dispatch.quote_aware_segments(child_text)[0][0]
+                    self.assertEqual(
+                        dispatch.restore_literal_redirect_markers(child), expected
+                    )
+                    parent = child
+
+    def test_quoted_operator_option_value_survives_every_child_rejoin(self):
+        wrappers = (
+            "taskset -c 0 <CMD>",
+            "flock /tmp/floor.lock <CMD>",
+            "watch -x <CMD>",
+            "wsl <CMD>",
+            "call <CMD>",
+            "taskset -c 0 wsl <CMD>",
+            "1 | ForEach-Object { <CMD> }",
+            "Start-Job -ScriptBlock { <CMD> }",
+            "Start-ThreadJob -ScriptBlock { <CMD> }",
+            "Start-Job -ScriptBlock { Start-ThreadJob -ScriptBlock { <CMD> } }",
+        )
+        for operator in (*self.OPERATORS, "2>", "9>|", "{fd}>&"):
+            payload = f'curl -q -o "{operator}" .env https://example.invalid/file'
+            self.assertEqual(decide(payload)[0], "allow")
+            for template in wrappers:
+                command = template.replace("<CMD>", payload)
+                with self.subTest(operator=operator, command=command):
+                    decision, reason = decide(command)
+                    self.assertEqual(decision, "allow", reason)
+
+    def test_quoted_operator_keeps_an_adjacent_suffix_inert(self):
+        wrappers = (
+            "taskset -c 0 <CMD>",
+            "flock /tmp/floor.lock <CMD>",
+            "watch -x <CMD>",
+            "wsl <CMD>",
+            "1 | ForEach-Object { <CMD> }",
+            "Start-Job -ScriptBlock { <CMD> }",
+            "Start-ThreadJob -ScriptBlock { <CMD> }",
+        )
+        for suffix in ("foo$bar", "foo`bar", 'foo"bar'):
+            payload = (
+                'curl -q -o ">"' + shlex.quote(suffix) + " .env "
+                "https://example.invalid/file"
+            )
+            self.assertEqual(decide(payload)[0], "allow")
+            for template in wrappers:
+                command = template.replace("<CMD>", payload)
+                with self.subTest(suffix=suffix, command=command):
+                    decision, reason = decide(command)
+                    self.assertEqual(decision, "allow", reason)
+
+        for suffix in ("foo", "foo$bar", "foo`bar"):
+            command = (
+                'cmd /d /c curl -q -o ">"' + suffix + " .env "
+                "https://example.invalid/file"
+            )
+            with self.subTest(cmd_suffix=suffix):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "allow", reason)
+
+    def test_quoted_operator_option_value_survives_start_process_argv(self):
+        for operator in (*self.OPERATORS, "2>", "9>|", "{fd}>&"):
+            command = (
+                "Start-Process curl -ArgumentList "
+                f"'-q','-o', \"{operator}\", '.env',"
+                "'https://example.invalid/file'"
+            )
+            with self.subTest(operator=operator):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "allow", reason)
+
+    def test_eval_restores_quoted_operator_argv_as_program_syntax(self):
+        for operator in (">", ">>", ">|", ">&", "&>", "&>>", "<>", "2>", "{fd}>"):
+            command = f'eval "{operator}" .env'
+            with self.subTest(operator=operator):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("secret-looking file", reason)
+        self.assertEqual(decide('eval "<" .env')[0], "allow")
+
+    def test_watch_default_reparses_source_but_exec_preserves_direct_argv(self):
+        for payload in (
+            "git push --force origin main",
+            "rm -rf /critical/outside",
+            "echo x > .env",
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(decide(f'watch "{payload}"')[0], "deny")
+                self.assertEqual(decide(f'watch -x "{payload}"')[0], "allow")
+        self.assertEqual(decide('watch echo x ">" .env')[0], "deny")
+        self.assertEqual(decide("watch -x git push --force origin main")[0], "deny")
+        self.assertEqual(decide("watch -q 2 git push --force origin main")[0], "deny")
+        self.assertEqual(decide("watch --equexit 2 git status")[0], "allow")
+
+    def test_cmd_reparse_preserves_double_quoted_operator_data(self):
+        for operator in (*self.OPERATORS, "2>", "9>|", "{fd}>&"):
+            payload = f'curl -q -o "{operator}" .env https://example.invalid/file'
+            for template in ("cmd /d /c <CMD>", "cmd /d /c cmd /d /c <CMD>"):
+                command = template.replace("<CMD>", payload)
+                with self.subTest(operator=operator, command=command):
+                    decision, reason = decide(command)
+                    self.assertEqual(decision, "allow", reason)
+        # cmd.exe does not treat single quotes as quoting. Restoring that operator as
+        # syntax keeps the conservative write reading instead of granting POSIX rules.
+        self.assertEqual(decide("cmd /d /c echo x '>' .env")[0], "deny")
+
     def test_a_typed_marker_cannot_be_forged(self):
-        for marker in dispatch._LITERAL_REDIRECT_MARKERS.values():
+        markers = (
+            *dispatch._LITERAL_REDIRECT_MARKERS.values(),
+            dispatch._CMD_DOUBLE_QUOTED_REDIRECT_MARK,
+            dispatch._CMD_DOUBLE_QUOTED_REDIRECT_END,
+        )
+        for marker in markers:
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, dispatch.scrub_internal_markers(marker))
 
@@ -370,7 +490,8 @@ class DangerousPrefixTests(unittest.TestCase):
                 self.assertEqual(decide(command)[0], "allow")
 
     def test_descriptor_duplication_is_not_a_write_target(self):
-        # `2>&1` duplicates a descriptor; `1` is not a path, in either spelling.
+        # Numeric operands duplicate in every supported shell. A non-numeric word is
+        # dialect-dependent: Bash rejects it, while zsh opens it as a file.
         for argv in (
             ["2>&1", "git", "status"],
             ["2", ">&", "1", "git", "status"],
@@ -380,15 +501,76 @@ class DangerousPrefixTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv):
                 self.assertEqual(dispatch.leading_redirection_write_targets(argv), [])
-        # A non-numeric word after `>&` is still a real file, still collected.
+        # Unknown shell syntax stays conservative; an explicit Bash parse may classify
+        # the same word as an ambiguous duplication operand.
         self.assertEqual(
             dispatch.leading_redirection_write_targets(["2>&out.log", "git", "status"]),
             ["out.log"],
         )
-        for command in ("2>&1 git status", "2 >& 1 git status", "2>&- git status"):
+        self.assertEqual(
+            dispatch.leading_redirection_write_targets(
+                ["2>&out.log", "git", "status"],
+                descriptor_words_are_files=False,
+            ),
+            [],
+        )
+        for command in (
+            "2>&1 git status",
+            "2 >& 1 git status",
+            "2>&- git status",
+            "bash -c \"2>&'.env' git status\"",
+            "bash -c \"{fd}>&'.env' git status\"",
+            'bash -c "{fd}>&.env git status"',
+        ):
             with self.subTest(command=command):
                 self.assertEqual(decide(command)[0], "allow")
         self.assertEqual(decide("2>&'.env' git status")[0], "deny")
+        self.assertEqual(decide("zsh -c \"2>&'.env' git status\"")[0], "deny")
+        self.assertEqual(decide("{fd}>&'.env' git status")[0], "deny")
+        self.assertEqual(decide("zsh -c \"{fd}>&'.env' git status\"")[0], "deny")
+        self.assertEqual(decide(">&'.env' git status")[0], "deny")
+
+    def test_raw_redirect_scan_keeps_operator_and_target_provenance(self):
+        allows = (
+            r"printf '%s\n' \>'.env'",
+            r"echo hi >'.e\nv'",
+            r'echo hi >".e\nv"',
+            r"echo hi >.e'\n'v",
+            r'''powershell -Command "& { echo hi >'.e\nv' }"''',
+            r'''powershell -Command "iex 'echo hi >.e\nv'"''',
+        )
+        denies = (
+            r"printf '%s\n' \\> '.env'",
+            r'cmd /d /s /c "echo hi \>.env"',
+            r"echo hi ^>.env",
+            r"echo hi >.\env",
+            r"echo hi >.e\nv",
+            r"echo hi >.en\v",
+            r"bash -c 'echo hi >.\env'",
+            r"sh -c 'echo hi >.e\nv'",
+            "bash -c \"eval 'echo hi >.e\\nv'\"",
+        )
+        for command in allows:
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "allow")
+        for command in denies:
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "deny")
+
+        self.assertEqual(decide("bash -c \"eval '2>&.env echo hi'\"")[0], "allow")
+
+    def test_raw_redirect_target_ends_at_shell_separators(self):
+        for separator in (";", "&&", "|", "&"):
+            command = f"echo hi >.env{separator}echo ok"
+            with self.subTest(command=command):
+                self.assertEqual(decide(command)[0], "deny")
+
+    def test_dynamic_redirect_targets_stay_denied(self):
+        for command in ("echo hi >(cat)", "echo hi > >(cat)", "echo hi > <(cat)"):
+            with self.subTest(command=command):
+                decision, reason = decide(command)
+                self.assertEqual(decision, "deny")
+                self.assertIn("dynamic redirect target", reason)
 
     def test_reading_a_secret_file_through_the_prefix_stays_allowed(self):
         # The floor blocks the irreversible, not disclosure by read.  Denying
