@@ -90,12 +90,14 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 ../remove` denies) and `prune` falls through unhandled.
 
 ## Human gates (only you can do these) — reconciled 2026-07-26
+(`HUMAN_TODO.md` is authoritative; it also carries H-5 and H-6, which have no numbered gate in this list.)
 
 1. **Deploy the floor** — **DONE and doctor-verified** (canonical 1.6.12 == deployed 1.6.12;
    the owner-directed `sync-global --apply` also refreshed `~/.codex/AGENTS.md` and the Codex
    skills, backups under `~/.codex/backups/20260726T195246Z`). HUMAN_TODO H-1 carries the
    evidence; the tick is yours.
-2. **Re-trust and canary the deployed bytes** — STILL OPEN (the one live gate): fresh Codex
+2. **Re-trust and canary the deployed bytes** — STILL OPEN (the one verification gate left;
+   H-4 stays an ongoing manual chore): fresh Codex
    session per repo in its exact CWD, `/hooks` shows the expected adapter, allow/deny canary.
    The Claude-side hook has live DENY evidence (two `[floor 1.6.12]` banners on 2026-07-26).
 3. **`~/.claude` pushes** — **DONE**: `e42e211` and the follow-on memory commit are on pushed
@@ -105,8 +107,9 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 
 ## What was NOT verified
 
-- No live hook execution anywhere. Every floor result is from calling `check()` in-process or
-  from CI, never from the running PreToolUse hook.
+- Live hook execution is limited to two observed Claude-side denies on 2026-07-26
+  (`[floor 1.6.12]` banners, mid-session — not a scripted canary). No Codex-side live
+  execution at all; every other floor result is from calling `check()` in-process or from CI.
 - The corpus replay for #53 showed **0 newly blocked / 1 newly allowed** across 91,300 unique
   commands — but the corpus contains no command using the shapes #53 changed most, so that zero
   is *unmeasured*, not *safe*. #70 and #71 had no replay at their final heads.
