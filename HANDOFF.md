@@ -93,13 +93,15 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 (`HUMAN_TODO.md` is authoritative; it also carries H-5 and H-6, which have no numbered gate in this list.)
 
 1. **Deploy the floor** — **DONE and doctor-verified** (canonical 1.6.12 == deployed 1.6.12;
-   the owner-directed `sync-global --apply` also refreshed `~/.codex/AGENTS.md` and the Codex
-   skills, backups under `~/.codex/backups/20260726T195246Z`). HUMAN_TODO H-1 carries the
-   evidence; the tick is yours.
+   the owner-directed `sync-global --apply` also refreshed `~/.codex/AGENTS.md` — backup under
+   `~/.codex/backups/20260726T195246Z` — and three shared skills in `~/.agents/skills`, whose
+   backups live under `~/.agents/skills/.harness-backups/20260726T195246Z`). HUMAN_TODO H-1
+   carries the evidence; the tick is yours.
 2. **Re-trust and canary the deployed bytes** — STILL OPEN (the one verification gate left;
    H-4 stays an ongoing manual chore): fresh Codex
-   session per repo in its exact CWD, `/hooks` shows the expected adapter, allow/deny canary.
-   The Claude-side hook has live DENY evidence (two `[floor 1.6.12]` banners on 2026-07-26).
+   session per repo in its exact CWD, `/hooks` shows the expected adapter, then the allow/deny
+   canary on BOTH runtimes — the Claude-side hook has live DENY evidence (two `[floor 1.6.12]`
+   banners on 2026-07-26), but no deliberate ALLOW canary has run anywhere.
 3. **`~/.claude` pushes** — **DONE**: `e42e211` and the follow-on memory commit are on pushed
    `main`; `settings.json` stayed uncommitted by design. See HUMAN_TODO H-3 for the
    branch-rule-bypass note that push surfaced.
