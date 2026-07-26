@@ -70,8 +70,8 @@ half-worked. Nothing is speculative.
     friction found mid-task becomes a one-line tracked issue, never a detour. No new gates whose
     subject is other gates or doc consistency — grandfathered: the ones already built AND the
     ones this blueprint itself prescribes (§3 stale-map stamps, the T3 docs-stamp/budget lane,
-    §7's vendor parity-diffs); the Gardener may propose retiring any whose upkeep exceeds what
-    it catches. Sessions are judged
+    §7's vendor parity-diffs, SPECS §7's stop-hook states); the Gardener may propose retiring
+    any whose upkeep exceeds what it catches. Sessions are judged
     by finished tasks: budget each task, park at ~2× budget, and close with a scoreboard
     (finished / parked / rounds used) ahead of the evidence sections. (Issue #92 measured the
     inverse: 9:1 ceremony-to-execution and zero product-capability PRs.)
@@ -232,6 +232,18 @@ parser and bypass matrix cover the explicitly tested command forms; the walls at
 branch protection and restricted toolsets. A change to the floor is T4-class work (top model +
 review) no matter which repo it runs in.
 
+**FEATURE-FROZEN (2026-07-26 — ratified in issue #92; decision record #96).** The floor is a
+tripwire at its useful maximum: 272 → ~9.5k lines bought a measured 12–14% false-positive
+rate on real agent commands with no recorded save of a real irreversible action, and seven
+versions of hardening shipped without ever executing anywhere. Only two classes of change may
+touch `dispatch.py`: **(a)** false-positive fixes that blocked real work, and **(b)** the
+ratified #21 slice sequence. A newly discovered bypass family is recorded as one line in
+[FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md) and its issue closed — never fixed — unless it
+regresses the §6 charter matrix as literally written (a listed must-block form newly allowed,
+or a listed must-allow newly blocked). No new floor version ships until the deployed one is
+re-trusted and canaried (HUMAN_TODO H-2); shrinking the FP rate toward the ~0.1% it once
+measured is the only hardening direction left open.
+
 ---
 
 ## 3. Regions — the context-economy primitive (T3+; embryo at T2)
@@ -372,7 +384,9 @@ from gone.
   fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
   tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
-  the law set shipped; deployment state is measured by `doctor`/`audit`, never asserted here.
+  the law set shipped (the last two folded 2026-07-26). NO shipped check yet measures which
+  guidance text `~/.claude` serves — #98 tracks that gap; this document asserts nothing about
+  deployment.
 - **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
   global `defaultMode` returns to prompt/acceptEdits; remove global
   `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.
