@@ -116,6 +116,16 @@ def load_module(name: str, path: Path):
 
 dispatch = load_module("dispatch_crossproduct", DISPATCH_PATH)
 smoke = load_module("smoke_crossproduct", SMOKE_PATH)
+#: The repository's one hermetic-decision helper. This module scrubs a SUPERSET of
+#: what it isolates (see `_scrubbed_environment_names`), so routing through it adds
+#: no verdict change here — what it adds is that the sweep cannot drift out of
+#: sync when dispatch grows a new ambient read, because the isolation set is
+#: derived from dispatch's own constants rather than mirrored. It is also the one
+#: spelling `tests/test_floor_environment.py` accepts: that suite fails any module
+#: under `tests/` that calls `dispatch.check` directly.
+floor_environment = load_module(
+    "floor_environment_crossproduct", ROOT / "tests" / "floor_environment.py"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +294,10 @@ def decide_with_reason(
     """
     if _PROJECT_DIR is None:  # pragma: no cover - guards misuse outside the module
         raise RuntimeError("module fixture not initialised")
-    return dispatch.check(
+    return floor_environment.hermetic_check(
+        dispatch,
         command,
         {"tier": tier, "flags": flags or {}},
-        _PROJECT_DIR,
         _PROJECT_DIR,
         remote_resolver=_stub_remote_resolver,
     )
