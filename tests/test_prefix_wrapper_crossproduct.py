@@ -887,6 +887,16 @@ QUOTED_SECRET_REDIRECTS = [
     'echo tok > "id_rsa"',
     "cat notes > '.env.local'",
     "> 'out file.txt' echo secret123 > '.env'",
+    # DESCRIPTOR-prefixed spellings, in both positions. The mask that keeps a
+    # quoted `"2>"` inert must not reach a REAL `2>` whose destination happens
+    # to be quoted, so the two directions are asserted against each other.
+    "1>> '.env' echo hi",
+    "9> '.env' echo hi",
+    "9>| '.env' echo hi",
+    "2>& '.env' echo hi",
+    "echo hi 2> '.env'",
+    "echo hi 1>> '.env'",
+    "echo hi 9> '.env'",
 ]
 
 #: The same operator grammar with a BENIGN quoted target: these must stay allowed, so a
@@ -918,6 +928,20 @@ QUOTED_BENIGN_REDIRECTS = [
     'echo "2>" .env',
     'echo "1>>" .env',
     "echo '&>' .env",
+    # ...and the DESCRIPTOR-prefixed half, which is the one the merge with main
+    # broke and which nothing else in the repository measured. This branch
+    # widened the token scan to `\d*&?>{1,2}[|&]?`, main's tokenizer mask is
+    # keyed on the bare operator table, and that table has no descriptor entry —
+    # so `"2>"` was read as an operator by the scan and never masked as data,
+    # denying `echo "2>" .env` while the byte-identical `echo ">" .env` allowed.
+    # Neither half is wrong alone; only the composition is, which is why this
+    # gate found it and the smoke matrix, the review and the corpus replay of
+    # either branch on its own could not.
+    'echo "9>" .env',
+    'echo "9>|" .env',
+    'echo "2>&" .env',
+    "echo '2>' .env",
+    "echo '1>>' .env",
 ]
 
 #: How many ENFORCED shapes deny each charter probe FOR THE PROBE'S OWN RULE — the
@@ -1023,38 +1047,24 @@ _ALL_BUT_SECRET_REDIRECTS = [
 ]
 
 # --- issue #46: a leading redirection or `--%` defeats head resolution ---------------
-# The head resolver walks argv past wrappers, `VAR=val` prefixes and paths, but a
-# redirection operator (or PowerShell's stop-parsing token) in position 0 is not skipped,
-# so the head resolves to the operator, matches no rule and the segment falls through to
-# allow. Secret-file writes survive because that rule scans the whole command rather than
-# the resolved head.
+# CLOSED ON MAIN, and this gate is what proved it. The head resolver used to walk argv
+# past wrappers, `VAR=val` prefixes and paths but NOT past a redirection operator (or
+# PowerShell's stop-parsing token) in position 0, so the head resolved to the operator,
+# matched no rule, and the segment fell through to allow. Twenty-two shapes were recorded
+# here. Twenty-one of them now deny all five probes they used to launder — every leading
+# redirect spelling in the roster (truncate, append, clobber, /dev/null, stderr, high fd,
+# both, both-append, `>&`, `2>&1`, split dup, input, herestring, the three quoted-target
+# spellings, the pair, and both assignment orders) plus bare `--%` — so they are promoted
+# out of the baseline and into ENFORCED_SHAPES, where the whole deny corpus is swept
+# against them rather than five probes.
+#
+# `stop-parsing-glued` is the one that is still open, so it is the only entry left. Do
+# not fold it back in with the others: a shape-level entry deletes every corpus check for
+# that shape, and the twenty-one promotions are the coverage this branch is buying.
 _bypass(
-    [
-        "redirect-truncate",
-        "redirect-append",
-        "redirect-clobber",
-        "redirect-devnull",
-        "redirect-stderr",
-        "redirect-fd-high",
-        "redirect-both",
-        "redirect-both-append",
-        "redirect-gt-amp",
-        "redirect-dup",
-        "redirect-dup-split",
-        "redirect-input",
-        "redirect-herestring",
-        "redirect-quoted-single",
-        "redirect-quoted-double",
-        "redirect-quoted-glued",
-        "redirect-pair",
-        "stop-parsing",
-        "stop-parsing-glued",
-        "assignment-then-redirect",
-        "redirect-then-assignment",
-        "assignment-then-stop-parsing",
-    ],
+    ["stop-parsing-glued"],
     "#46",
-    "leading redirection / --% defeats head resolution",
+    "a GLUED PowerShell stop-parsing token still defeats head resolution",
     _ALL_BUT_SECRET_REDIRECTS,
 )
 
@@ -1513,12 +1523,14 @@ _case_bypass(
     "#68",
     "git trace/env poisoning is not recognised once a launcher holds position 0",
 )
+# `assignment`, `assignment-multi` and `assignment-quoted` used to be here too: a
+# `VAR=val` prefix in front of `env GIT_TRACE_PACKFILE=.env git fetch` lost the trace
+# anchor. main closed that, this gate reported it as UNEXPECTEDLY FIXED, and the three
+# shapes are now swept against this payload like any other rather than excused for it.
+# The launcher shapes below still lose it.
 _case_bypass(
     ["env GIT_TRACE_PACKFILE=.env git fetch"],
     [
-        "assignment",
-        "assignment-multi",
-        "assignment-quoted",
         "command-builtin",
         "exec-builtin",
         "ionice",
@@ -1598,6 +1610,49 @@ _case_bypass(
     "taskset option arity swallows the payload head",
 )
 
+# --- issue #79: an unterminated process-substitution operand fails closed only at 0 ---
+# `process_substitution_end` returns None when the parenthesis balance cannot be decided,
+# and the segment then denies because no head can be resolved behind the prefix. That
+# fail-closed deny only fires when the redirect is the FIRST token of the command: put a
+# newline, a subshell or a launcher in front of it and the deny is gone. Pre-existing on
+# main and identical on both sides of this branch; surfaced here because promoting the #46
+# shapes let `DenyDirectionTests` reach the whole corpus instead of stopping at the first
+# UNEXPECTEDLY-FIXED report.
+_PROCESS_SUBSTITUTION_UNBALANCED = [
+    '< <(printf ")" harmless "(" ) \'git\' push --force origin main',
+    "< <(printf \")x\" harmless) 'git' push --force origin main",
+    "< <(printf \")x\" harmless) 'rm' -rf /critical/outside",
+    r"< <(printf \( ) git status",
+]
+_case_bypass(
+    _PROCESS_SUBSTITUTION_UNBALANCED,
+    ["leading-newline", "taskset", "flock", "watch", "wsl", "wsl-exec"],
+    "#79",
+    "an undecidable process-substitution operand stops failing closed once anything "
+    "precedes the redirect",
+)
+# `subshell` loses only the backslash-escaped spelling: the other three carry a quoted
+# paren, which the subshell's own parens re-balance. Recorded per pair rather than folded
+# into the group above, because an over-broad entry would be reported as UNEXPECTEDLY
+# FIXED for the three it does not actually cover.
+_case_bypass(
+    [r"< <(printf \( ) git status"],
+    ["subshell"],
+    "#79",
+    "an undecidable process-substitution operand stops failing closed once anything "
+    "precedes the redirect",
+)
+
+# --- issue #80: a leading `>|` hides a GLOB refspec force from the push guard ---------
+# `>` / `>>` / `&>` / `2>` / `>&` all keep it; `>|` alone does not, while the explicit
+# `--force` flag still denies behind the same prefix. One rule, not the whole push guard.
+_case_bypass(
+    ["git push origin [+]main", "git push origin --for* main"],
+    ["redirect-clobber"],
+    "#80",
+    "a leading >| redirect hides a glob/character-class force refspec from the push guard",
+)
+
 # --- issue #69: cmd /c does not recurse a nested POSIX interpreter body --------------
 _case_bypass(
     [
@@ -1664,9 +1719,17 @@ class CrossProductBase(unittest.TestCase):
                 failures.append((shape.name, tier, flags, expected, got, composed))
         return failures, skipped
 
-    def report(self, failures, direction: str) -> None:
+    def render(self, failures, direction: str) -> str | None:
+        """The failure report as TEXT, so a caller can print it alongside another.
+
+        Split out from `report` because the two reports used to be sequential `self.fail`
+        calls, and `fail` raises: an UNEXPECTEDLY-FIXED baseline therefore hid every live
+        bypass in the same sweep. Promoting the twenty-one #46 shapes revealed 81 corpus
+        failures that had been accumulating behind three case-level entries, none of which
+        any run had ever printed.
+        """
         if not failures:
-            return
+            return None
         shown = min(10, len(failures))
         lines = [f"{len(failures)} {direction} failure(s); showing {shown}:"]
         for name, tier, flags, expected, got, composed in failures[:shown]:
@@ -1678,7 +1741,33 @@ class CrossProductBase(unittest.TestCase):
             "A shape that legitimately cannot be covered belongs in DOCUMENTED_BYPASSES "
             "or DOCUMENTED_OVER_BLOCKS with the issue it belongs to — never weakened away."
         )
-        self.fail("\n".join(lines))
+        return "\n".join(lines)
+
+    def fail_with(self, *messages) -> None:
+        """Fail with EVERY report the sweep produced, never only the first."""
+        present = [message for message in messages if message]
+        if present:
+            self.fail("\n\n".join(present))
+
+    def report(self, failures, direction: str) -> None:
+        self.fail_with(self.render(failures, direction))
+
+    def unexpectedly_fixed(self, fixed, baseline: str) -> str | None:
+        """The UNEXPECTEDLY-FIXED report for a case-level baseline, as text."""
+        if not fixed:
+            return None
+        head = (
+            f"UNEXPECTEDLY FIXED — these documented case-level entries now behave. "
+            f"Remove them from {baseline} so the fix is guarded:\n"
+        )
+        return (
+            head
+            + "\n".join(
+                f"  shape={name} payload={payload!r}\n    {composed!r}"
+                for name, payload, composed in fixed[:20]
+            )
+            + (f"\n  ... and {len(fixed) - 20} more" if len(fixed) > 20 else "")
+        )
 
 
 class QuotedSecretRedirectTests(CrossProductBase):
@@ -1715,6 +1804,44 @@ class QuotedSecretRedirectTests(CrossProductBase):
             [],
             "Quoting a BENIGN redirect target, or naming a secret file inside commit "
             "prose, must not deny — otherwise the deny above is just blanket blocking.",
+        )
+
+    def test_a_descriptor_does_not_change_what_a_quoted_operator_means(self):
+        """`'2>'` and `'>'` are both program NAMES; the floor must not split them.
+
+        Asserted as AGREEMENT rather than as a frozen verdict, because the point is
+        that the descriptor cannot be the thing that decides. Freezing "allow" would
+        pass just as well if a future change denied only the descriptor spelling
+        again, which is exactly the state the merge with main produced: the token
+        scan read `2>`/`1>>` as operators while the tokenizer's mask, keyed on the
+        bare operator table, did not — so one character decided whether a quoted
+        span was syntax or data. Protection an attacker removes by deleting a
+        character is not protection; the two spellings have to move together.
+
+        The absolute verdicts are pinned separately, in `smoke_test.CASES`.
+        """
+        payloads = [
+            "rm -rf /critical/outside",
+            "git push --force origin main",
+            "sudo apt-get install thing",
+            "rm .env",
+            "echo hi",
+        ]
+        disagreements = []
+        for base, descriptor in ((">", "2>"), (">>", "1>>"), (">|", "9>|")):
+            for payload in payloads:
+                for quote in ("'", '"'):
+                    plain = f"{quote}{base}{quote} out.txt {payload}"
+                    numbered = f"{quote}{descriptor}{quote} out.txt {payload}"
+                    if decide(plain) != decide(numbered):
+                        disagreements.append(
+                            (plain, decide(plain), numbered, decide(numbered))
+                        )
+        self.assertEqual(
+            disagreements,
+            [],
+            "a leading DESCRIPTOR changed whether a quoted redirect operator is read "
+            "as syntax or as data (plain, verdict, numbered, verdict)",
         )
 
     def test_quoted_and_bare_secret_targets_agree(self):
@@ -1834,17 +1961,10 @@ class DenyDirectionTests(CrossProductBase):
                     failures.append((shape.name, tier, flags, "deny", got, composed))
                 elif got == "deny" and recorded:
                     fixed.append((shape.name, command, composed))
-        if fixed:
-            self.fail(
-                "UNEXPECTEDLY FIXED — these documented case-level bypasses now deny. "
-                "Remove them from DOCUMENTED_CASE_BYPASSES so the fix is guarded:\n"
-                + "\n".join(
-                    f"  shape={name} payload={payload!r}\n    {composed!r}"
-                    for name, payload, composed in fixed[:20]
-                )
-                + (f"\n  ... and {len(fixed) - 20} more" if len(fixed) > 20 else "")
-            )
-        self.report(failures, "bypass-direction")
+        self.fail_with(
+            self.unexpectedly_fixed(fixed, "DOCUMENTED_CASE_BYPASSES"),
+            self.render(failures, "bypass-direction"),
+        )
 
 
 class DenyReasonTests(CrossProductBase):
@@ -1911,18 +2031,10 @@ class FalsePositiveDirectionTests(CrossProductBase):
                     failures.append((shape.name, tier, flags, "allow", got, composed))
                 elif got == "allow" and recorded:
                     fixed.append((shape.name, command, composed))
-        if fixed:
-            self.fail(
-                "UNEXPECTEDLY FIXED — these documented case-level over-blocks now "
-                "allow. Remove them from DOCUMENTED_CASE_OVER_BLOCKS so the fix is "
-                "guarded:\n"
-                + "\n".join(
-                    f"  shape={name} payload={payload!r}\n    {composed!r}"
-                    for name, payload, composed in fixed[:20]
-                )
-                + (f"\n  ... and {len(fixed) - 20} more" if len(fixed) > 20 else "")
-            )
-        self.report(failures, "false-positive-direction")
+        self.fail_with(
+            self.unexpectedly_fixed(fixed, "DOCUMENTED_CASE_OVER_BLOCKS"),
+            self.render(failures, "false-positive-direction"),
+        )
 
 
 class DocumentedBaselineTests(CrossProductBase):
