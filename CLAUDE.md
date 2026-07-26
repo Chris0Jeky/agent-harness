@@ -25,8 +25,10 @@ py -3 -m pip install -r requirements-dev.txt   # ruff + black, pinned
 # Full verification (same gates as CI, which runs on Windows/macOS/Linux, Python 3.11)
 py -3 -m unittest discover -s tests -p "test_*.py" -v
 py -3 templates\hooks\smoke_test.py            # deny-floor bypass matrix
-py -3 -m ruff check harness.py tests\test_harness.py tests\test_curl_option_arity.py tests\test_git_editor_terminal_flows.py scripts\generate_curl_option_arity_fixture.py templates\hooks\dispatch.py templates\hooks\smoke_test.py
-py -3 -m black --check <same file list as ruff>
+# ruff/black/py_compile run over an EXPLICIT file list that lives in ci.yml and grows
+# with every new module. Read it from there rather than from a copy that goes stale:
+py -3 -m ruff check $(sed -n '/name: Run Ruff/,/name: Check Black/p' .github/workflows/ci.yml | grep -oE '[a-z_/]+\.py')
+py -3 -m black --check <same list>
 
 # Single test
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v
@@ -38,8 +40,9 @@ py -3 harness.py seed <repo> --tier N [--sensitive-data]
 py -3 harness.py sync-global --config-root <claude-config checkout> [--apply]
 ```
 
-Ruff and Black run only on the explicit file list above (see `.github/workflows/ci.yml`);
-new Python files must be added to all three CI steps (ruff, black, py_compile).
+`.github/workflows/ci.yml` is the single source of that file list — it had drifted to 19 entries
+while this file still named 7. New Python files must be added to all three CI steps (ruff, black,
+py_compile) or they are silently unlinted.
 
 ## Architecture
 
