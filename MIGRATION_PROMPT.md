@@ -1,6 +1,6 @@
 # Migration Prompt — re-work a repo's harness to the blueprint
 
-Last Updated: 2026-07-25 · Paste the block below into a top-tier session — the model per the
+Last Updated: 2026-07-26 · Paste the block below into a top-tier session — the model per the
 `model-effort-routing` skill, which is the only place that names one — opened in the
 target repo. Then paste the matching per-repo appendix from the bottom of this file.
 
@@ -14,7 +14,7 @@ top routed model: do the judgment work yourself (tier reasoning, region maps, la
 anything irreversible); delegate only mechanical sweeps.
 
 RESOURCES (read in this order, nothing else up front; discover paths, do not assume a user profile):
-1. <agent-harness-root>/BLUEPRINT.md   — the tier ladder and ten laws
+1. <agent-harness-root>/BLUEPRINT.md   — the tier ladder and twelve laws
 2. <agent-harness-root>/SPECS.md       — schemas, budgets, hook wiring, skeletons
 3. <config-root>/ESTATE.md             — this repo's assigned tier + flags, when current for this machine
 4. The per-repo appendix pasted below this prompt     — priorities and cautions for THIS repo
@@ -31,6 +31,15 @@ GROUND RULES:
 - Second-occurrence law: do NOT build speculative scaffolding (no empty region dirs, no skills
   for workflows that haven't recurred, no memory hierarchies for future growth).
 - Out-of-scope findings become tracked issues, never silent drops. Tracked-issue-or-it-doesn't-exist.
+- Autonomy-first defaults (BLUEPRINT §1): tiers add verification, never permission — T1/T2
+  merge on green proving checks (self-review), T3 adds ONE bounded independent review round,
+  T4 the full declared two-review gate; reviews are bounded (one review round + one fix round,
+  CRITICAL/HIGH-confirmed bar — the `review-and-ship` skill). Seed tier.json authority to
+  match. Replace zero-skip / unbounded-fix-round RESTATEMENTS with a link to the global laws
+  (one home per policy) — but keep any gate the repo has DECLARED (tier.json authority, a T4
+  two-review gate, a bounded wait for the bot review to arrive); PR aging re-expresses as that
+  bounded wait rather than being deleted, and a T4 repo's merge-gate language changes by
+  propose-first, never unilaterally.
 
 DO, IN ORDER:
 1. SURVEY (read-only): current .claude/settings(.local).json, hooks, skills (count + line
@@ -62,8 +71,9 @@ DO, IN ORDER:
    (SPECS §4 skeletons). Write the maps yourself — this is judgment work.
 8. VERIFY + REPORT: smoke tests green; repo test suite if anything it covers changed; update
    the repo's row in ~/.claude/ESTATE.md (tier confirmed, aliases, decisions taken); close
-   with the handoff shape: Changed / Verified / NOT verified / Failures+workarounds / Docs
-   sync / Next safe slice — plus the gap table now marked done/deferred/issue-N.
+   scoreboard-first (tasks finished / parked / review rounds used), then the handoff shape:
+   Changed / Verified / NOT verified / Failures+workarounds / Docs sync / Next safe slice —
+   plus the gap table now marked done/deferred/issue-N.
 
 The acceptance test for your work: after this migration, a WEAKER model given one
 mapped-region task in this repo should complete it without reading outside the region and
@@ -82,7 +92,8 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
   checks: `gh api repos/{owner}/{repo}/branches/main/protection` — the estate has had
   configured-but-empty protection before.
 - tier.json: tier 4, authority push=gated merge=gated. Keep its earned rules and write them in:
-  2-review merge gate, PR aging, tagged-release pulls, forward-only migrations, UAI deploy
+  2-review merge gate (bounded per BLUEPRINT law 11 — one review round + one fix round),
+  tagged-release pulls, forward-only migrations, UAI deploy
   sequencing, coverage/tsc ratchets.
 - Memory compaction is the big win: .codex/memories ≈ 1,251 files + memories/ ≈ 111 files +
   12.6KB MEMORY index. Target shape: extract-api's 4-file consolidated endpoint. Session logs
@@ -130,5 +141,6 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
 
 ### Any NEW repo
 - `harness seed --tier 1` equivalent until the CLI exists: copy templates/hooks/, write a
-  ≤40-line CLAUDE.md and tier.json (tier 1), add the ESTATE.md row. Nothing else until the
-  second-occurrence law demands it.
+  ≤40-line CLAUDE.md and tier.json (tier 1 — sandbox autonomy: merge on green, no review
+  owed, per BLUEPRINT §1), add the ESTATE.md row. Nothing else until the second-occurrence
+  law demands it.

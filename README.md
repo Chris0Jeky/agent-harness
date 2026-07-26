@@ -6,7 +6,7 @@ explicit where their hook/config contracts differ.
 
 | File | What it is |
 |---|---|
-| `BLUEPRINT.md` | The law: tier ladder (T0 tombstone → T4 live wire), the ten laws, regions, the Gardener loop, model/effort routing, estate migration map |
+| `BLUEPRINT.md` | The law: tier ladder (T0 tombstone → T4 live wire), the twelve laws, regions, the Gardener loop, model/effort routing, estate migration map |
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
