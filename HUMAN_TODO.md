@@ -1,42 +1,22 @@
 # HUMAN_TODO
 
-Actions only the human can take. Agents add items here and never check them off.
+Read at session start. Surface every open item in every session summary. **Only the human checks
+an item off** — agents add items and append to the changelog, never tick a box.
 
-Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_todo`), so law 5
-has a file to surface in every session summary.
+Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_todo`).
 
 ## Open
 
-- [ ] **H-1 — Re-trust the floor in a fresh session.** `main` carries floor **1.6.12**;
-  `~/.claude/hooks/dispatch.py` still runs **1.6.5**, and both `.codex/hooks.json` pins changed.
-  Start a new session in the exact CWD, confirm `/hooks` shows the expected active adapter, then
-  run an allow/deny canary (something safe, and something the charter must block) before relying
-  on it. Static analysis cannot substitute for this — `doctor`'s own docstring says so.
+- [ ] **H-1** — Deploy floor **1.6.12** to `~/.claude/hooks` (installed floor is still **1.6.5**): `py -3 harness.py sync-global --config-root <claude-config checkout>` to preview, then `--apply`, from a clean `main`. See [HANDOFF.md](HANDOFF.md#human-gates-only-you-can-do-these).
+- [ ] **H-2** — After H-1, re-trust in a fresh session in the exact CWD (`/hooks`) and run a live allow/deny canary **against the newly deployed bytes**, per [SPECS §5](SPECS.md).
+- [ ] **H-3** — Push the pending `~/.claude` commit `e42e211` (ESTATE + memory); blocked by a dirty `settings.json` holding session-only `effortLevel: xhigh`.
+- [ ] **H-4** — Prune accumulated `.worktrees/` checkouts by hand until [#41](https://github.com/Chris0Jeky/agent-harness/issues/41) lands; never prune one a live session holds.
 
-- [ ] **H-2 — Deploy the floor globally, after H-1.** `py -3 harness.py sync-global
-  --config-root <claude-config checkout>` to preview, then `--apply`. Confirm `main` **and** a
-  clean working tree first: `--apply` copies the checkout's *working tree* bytes, so an
-  uncommitted edit ships as readily as a committed one.
+## Changelog
 
-- [ ] **H-3 — Push the pending `~/.claude` commit.** `e42e211` (ESTATE + memory updates) is
-  committed but unpushed. It is blocked by a dirty `settings.json` holding a session's `/model`
-  and `/effort` state; `effortLevel: xhigh` was explicitly session-only, so it should not be
-  committed. Resolve that file, then `git pull --rebase && git push`.
-
-- [ ] **H-4 — Prune accumulated worktrees.** `.worktrees/` only grows: `git worktree remove` is
-  floor-blocked unconditionally and `relaxed_work_loss_guards` is false, so nothing but a human
-  removes anything. Check each is clean and contained before removing, and never prune a
-  checkout a live session holds. The guard itself is being fixed in **#41** — after that lands,
-  a clean contained worktree can be removed by an agent and this item shrinks to the `--force`
-  cases.
-
-- [ ] **H-5 — PR #71** (the cross-product gate, #63) is **not** ready to merge, despite green
-  three-OS CI at `922cde3` and green local gates (661 tests, 2121/2121 smoke). It carries **13
-  untriaged Codex connector threads** (1×P1, 12×P2) raised against its latest heads, and the
-  zero-skip review law means each needs a fix or an explicit written classification before merge.
-  That triage is the next session's first task, not a human action — listed here only so the open
-  PR is not mistaken for finished work.
-
-## Done
-
-_(nothing yet — this file was created 2026-07-26)_
+- 2026-07-26 — File created and declared in `tier.json`; the repo had `human_todo: null`, so law 5
+  had no file to surface. Seeded with the four gates left open by the floor 1.6.5 → 1.6.12 session.
+- 2026-07-26 — H-1/H-2 order corrected: deploying after canarying meant the canary exercised the
+  old 1.6.5 bytes and the new ones shipped untested. Deploy first, canary the deployed bytes.
+- 2026-07-26 — Dropped an entry tracking PR #71's review triage: that is agent work, and an item
+  no agent may check off would have become a permanent stale line. It lives in `HANDOFF.md`.

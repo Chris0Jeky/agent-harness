@@ -25,10 +25,11 @@ py -3 -m pip install -r requirements-dev.txt   # ruff + black, pinned
 # Full verification (same gates as CI, which runs on Windows/macOS/Linux, Python 3.11)
 py -3 -m unittest discover -s tests -p "test_*.py" -v
 py -3 templates\hooks\smoke_test.py            # deny-floor bypass matrix
-# ruff/black/py_compile run over an EXPLICIT file list that lives in ci.yml and grows
-# with every new module. Read it from there rather than from a copy that goes stale:
-py -3 -m ruff check $(sed -n '/name: Run Ruff/,/name: Check Black/p' .github/workflows/ci.yml | grep -oE '[a-z_/]+\.py')
-py -3 -m black --check <same list>
+# ruff/black/py_compile run over an EXPLICIT file list that lives in ci.yml and grows with
+# every new module. Read it from there rather than from a copy here that goes stale:
+$files = (Select-String -Path .github\workflows\ci.yml -Pattern '[a-z_/]+\.py' -AllMatches).Matches.Value | Sort-Object -Unique
+py -3 -m ruff check $files
+py -3 -m black --check $files
 
 # Single test
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v

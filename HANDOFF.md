@@ -48,9 +48,13 @@ Its recorded baselines are deliberate — a documented bypass that starts passin
 
 **Beware the review treadmill.** The connector re-reviews every pushed head, so each fix round
 draws a new round of comments; one branch this session went six rounds, every round finding
-genuine second-order defects in the previous round's fixes. The convergence rule that worked:
-**P1/high blocks merge; P2/low must be answered but may become a tracked follow-up issue.** Apply
-it deliberately rather than chasing the queue to zero.
+genuine second-order defects in the previous round's fixes.
+
+Zero-skip (SPECS §1) still binds: **every in-scope finding gets fixed, at every severity**, and a
+tracked issue is only for findings genuinely out of the PR's scope. What varies is ordering, not
+whether the work happens — a P1 halts the merge immediately, while an in-scope P2 can be fixed in
+the same pass as the rest. Do not read "answer and track" as permission to merge past an in-scope
+low.
 
 ## The redesign, ratified
 
@@ -81,10 +85,14 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 
 ## Human gates (only you can do these)
 
-1. **`/hooks` re-trust.** `main` is at floor 1.6.12; `~/.claude/hooks` still runs **1.6.5**. Both
-   Codex adapter pins changed. Start a fresh session in the exact CWD, confirm `/hooks` shows the
-   expected adapter, then run an allow/deny canary before trusting it.
-2. **Deploy the floor** — `harness.py sync-global --apply` from a clean `main`, after (1).
+1. **Deploy the floor first.** `main` is at 1.6.12; `~/.claude/hooks` still runs **1.6.5**.
+   `py -3 harness.py sync-global --config-root <claude-config checkout>` to preview, then
+   `--apply` (the flag is required). Run it from a clean `main`: `--apply` copies the checkout's
+   *working tree*, so an uncommitted edit ships as readily as a committed one.
+2. **Then re-trust and canary the deployed bytes.** Both Codex adapter pins changed. Start a fresh
+   session in the exact CWD, confirm `/hooks` shows the expected adapter, and run an allow/deny
+   canary. Order matters: canarying before deploying exercises the old 1.6.5 dispatcher and lets
+   the new bytes ship untested.
 3. **`~/.claude` has one unpushed commit** (`e42e211`, the ESTATE + memory update). It could not
    be pushed because `settings.json` is dirty with this session's `/model` + `/effort` state —
    `effortLevel: xhigh` was explicitly session-only, so committing it would wrongly persist it.
@@ -106,5 +114,4 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 Every PR went through 2–4 rounds of independent adversarial review plus the Codex connector,
 which re-reviews each new head. That found real defects at every round, including a **HIGH
 charter regression inside the fix for #46** (a quoted `> '.env'` went deny→allow) that green
-smoke and a clean replay both missed. The convergence rule used: P1/high blocks merge; P2/low
-must be answered but may become a tracked follow-up.
+smoke and a clean replay both missed.
