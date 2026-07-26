@@ -1481,6 +1481,67 @@ _case_over_block(
     "the time builtin denies a benign download that is allowed bare",
 )
 
+# --- issue #81: PR #70's git-argv rules do not survive a child re-parse --------------
+# Filed from this gate's first run against #70's merged rules, and identical on
+# origin/main 438a332 — none of these is introduced by this branch. Three families, all
+# in the OVER-BLOCK direction (#21 surface, not a bypass): the bare command allows and
+# the composed one denies.
+#
+# 1. A quoted refspec becomes a second lease destination once a rebuild restores the
+#    quoted span. `strip_shell_redirections` states as a precondition that it must be
+#    given tokens whose inert spans are still MASKED as placeholders; a child re-parse
+#    breaks that.
+_case_over_block(
+    ['git push --force-with-lease origin "fix/x"'],
+    [
+        "do-block-iex",
+        "try-block-iex",
+        "subshell",
+        "taskset",
+        "flock",
+        "watch",
+        "wsl",
+        "wsl-exec",
+    ],
+    "#81",
+    "a quoted refspec is re-read as a second --force-with-lease destination once the "
+    "command is re-parsed as a child",
+)
+# 2. The read-only plumbing admissions #70 added by ARITY are lost inside an evaluator
+#    body or a subshell.
+_case_over_block(
+    [
+        "git update-index --refresh",
+        "git update-index --really-refresh",
+        "git update-index -q --refresh",
+        "git sparse-checkout list",
+    ],
+    ["do-block-iex", "try-block-iex", "subshell"],
+    "#81",
+    "read-only plumbing loses its arity admission inside an evaluator body or subshell",
+)
+_case_over_block(
+    ["git stash show -- --ext-diff", "git clone -b main source dest"],
+    ["do-block-iex"],
+    "#81",
+    "read-only plumbing loses its arity admission inside an evaluator body or subshell",
+)
+# 3. The `--output` scan #70 scoped to where git actually parses it loses that scoping
+#    behind the `time` builtin, and reads the option value as a secret-file write.
+_case_over_block(
+    [
+        "git merge-base --output=.env a b",
+        "git check-ignore --output=.env x",
+        "git hash-object --output=.env f",
+        "git hash-object --path --output .env",
+        "git diff -- --output=.env",
+        "git diff --cached -- --output=.env",
+    ],
+    ["time-builtin"],
+    "#81",
+    "the --output scan loses its git-parses-it-here scoping behind the time builtin",
+)
+
 #: Holes that are narrower than a whole shape: the shape unwraps correctly for almost the
 #: entire charter corpus but disarms one RULE. Keyed by payload, valued by the shapes that
 #: let it through. A pair recorded here that starts denying is reported as unexpectedly
@@ -1651,6 +1712,29 @@ _case_bypass(
     ["redirect-clobber"],
     "#80",
     "a leading >| redirect hides a glob/character-class force refspec from the push guard",
+)
+# The same `>|` hole, met from the other side: PR #70 made a redirection-shaped token
+# after the remote a real `--force-with-lease` DESTINATION (issue #44), and a leading
+# `>|` hides that too. Six spellings, all identical on origin/main.
+_case_bypass(
+    [
+        "git push --force-with-lease origin fix/x '2>&1'",
+        'git push --force-with-lease origin fix/x "2>&1"',
+        'git push --force-with-lease origin fix/x "> out.txt"',
+        "git push --force-with-lease origin fix/x 2 > out.txt",
+        "git push --force-with-lease origin fix/x 2 >& 1",
+        "git push --force-with-lease origin fix/x 2 >out.txt",
+    ],
+    ["redirect-clobber"],
+    "#80",
+    "a leading >| redirect hides a quoted lease destination from the push guard",
+)
+# ...and the `cmd /c` body, which is #69's existing hole reaching #70's new rule.
+_case_bypass(
+    ["git push --force-with-lease origin fix/x '2>&1'"],
+    ["cmd-c"],
+    "#69",
+    "single-quoted program text inside a cmd /c body is read as inert data",
 )
 
 # --- issue #69: cmd /c does not recurse a nested POSIX interpreter body --------------
