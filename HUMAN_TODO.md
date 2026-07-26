@@ -7,7 +7,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
 ## Open
 
-- [ ] **H-1** — Deploy floor **1.6.12** to `~/.claude/hooks` (installed floor is still **1.6.5**): `py -3 harness.py sync-global --config-root <claude-config checkout>` to preview, then `--apply`, from a clean `main`. See [HANDOFF.md](HANDOFF.md#human-gates-only-you-can-do-these).
+- [ ] **H-1** — Deploy floor **1.6.12** to `~/.claude/hooks` (installed floor was **1.6.5** when this was filed — but on 2026-07-26 a later session observed a live deny banner reporting **1.6.12** already running: confirm with `py -3 harness.py doctor` before re-applying; `sync-global --apply` copies the working tree, so never run it from a dirty checkout). See [HANDOFF.md](HANDOFF.md#human-gates-only-you-can-do-these). H-2 remains owed either way.
 - [ ] **H-2** — After H-1, re-trust in a fresh session in the exact CWD (`/hooks`) and run a live allow/deny canary **against the newly deployed bytes**, per [SPECS §5](SPECS.md).
 - [ ] **H-3** — Push the pending `~/.claude` commit `e42e211` (ESTATE + memory); blocked by a dirty `settings.json` holding session-only `effortLevel: xhigh`.
 - [ ] **H-4** — Prune accumulated `.worktrees/` checkouts by hand until [#41](https://github.com/Chris0Jeky/agent-harness/issues/41) lands; never prune one a live session holds.

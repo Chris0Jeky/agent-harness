@@ -35,8 +35,11 @@ GROUND RULES:
   merge on green proving checks (self-review), T3 adds ONE bounded independent review round,
   T4 the full declared two-review gate; reviews are bounded (one review round + one fix round,
   CRITICAL/HIGH-confirmed bar — the `review-and-ship` skill). Seed tier.json authority to
-  match, and never leave zero-skip/PR-aging review language in a migrated repo's docs — link
-  the global laws instead (one home per policy).
+  match. Replace zero-skip / unbounded-fix-round RESTATEMENTS with a link to the global laws
+  (one home per policy) — but keep any gate the repo has DECLARED (tier.json authority, a T4
+  two-review gate, a bounded wait for the bot review to arrive); PR aging re-expresses as that
+  bounded wait rather than being deleted, and a T4 repo's merge-gate language changes by
+  propose-first, never unilaterally.
 
 DO, IN ORDER:
 1. SURVEY (read-only): current .claude/settings(.local).json, hooks, skills (count + line

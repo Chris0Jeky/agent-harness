@@ -37,8 +37,10 @@ It has already paid for itself three times over:
 **It is NOT ready to merge.** It carries **13 untriaged Codex connector threads** (1×P1, 12×P2)
 raised against its latest heads. Under the bounded pipeline (global law 2 / BLUEPRINT law 11,
 ratified in issue #92 after this handoff was first written), they get ONE severity-bar triage:
-confirmed CRITICAL/HIGH (P1-class) findings earn fix commits; everything else becomes a
-tracked issue or a one-line decline on the thread. **That single pass is the PR's next
+findings confirmed CRITICAL/HIGH by their CONTENT earn fix commits — the connector's P1/P2
+label never decides; a P2 naming a confirmed correctness, security, or data-loss defect meets
+the bar (this repo has seen a HIGH charter regression arrive mid-review) — and everything
+else becomes a tracked issue or a one-line decline on the thread. **That single pass is the PR's next
 step.** The full thread text is saved at
 `.../scratchpad/pr71-open-threads.md`, or re-fetch with:
 
@@ -89,7 +91,9 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 
 ## Human gates (only you can do these)
 
-1. **Deploy the floor first.** `main` is at 1.6.12; `~/.claude/hooks` still runs **1.6.5**.
+1. **Deploy the floor first.** `main` is at 1.6.12; `~/.claude/hooks` ran **1.6.5** when this
+   was written — a later 2026-07-26 session observed a live deny banner reporting **1.6.12**
+   already running, so verify with `doctor` before re-applying.
    `py -3 harness.py sync-global --config-root <claude-config checkout>` to preview, then
    `--apply` (the flag is required). Run it from a clean `main`: `--apply` copies the checkout's
    *working tree*, so an uncommitted edit ships as readily as a committed one.
