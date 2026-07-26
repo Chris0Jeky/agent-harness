@@ -9,9 +9,11 @@ tip `734d007`). The claude-config repo (`~/.claude`, its own T3 repo) is the CAN
 this section is a dated reference mirror so the harness repo reads stand-alone. On any drift,
 claude-config wins and this copy is the bug — refresh the mirror, never fork it. The named
 models inside the mirror belong to claude-config's file; this repo's own routing text (§8)
-still names no models. The per-repo memory duplicates the first law set graduated are deleted;
-deployment state (which text `~/.claude` actually serves) is measured by `doctor`, never
-asserted here.
+still names no routing-tier assignments (its one model mention is the declared family-wide
+Haiku ban). The per-repo memory duplicates the law set graduated are deleted — the last two in
+this repo's own memory were folded 2026-07-26. NO shipped check yet measures which guidance
+text `~/.claude` actually serves (#98 tracks that gap): this mirror asserts nothing about
+deployment.
 
 ```markdown
 # Global laws — all repos, all tiers
@@ -472,7 +474,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - **Where the model name may live (the derivation contract).** The `model-effort-routing` skill
   is the SOURCE: it alone defines which named model fills `default`. Prose — this spec, the
   blueprint, the scheduled-routine description — carries the tier name and points at the skill,
-  never a model name. Agent definitions are the ONE permitted DERIVED copy, because `model:` in
+  never a model name (the §1 mirror's QUOTED text is the one exemption — see §13). Agent definitions are the ONE permitted DERIVED copy, because `model:` in
   `~/.claude/agents/gardener.md` is a machine-read field that cannot hold an indirection. Being
   permitted, that copy is governed rather than trusted:
   1. Changing which model fills a tier in the skill is NOT DONE until every agent definition
@@ -531,7 +533,10 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
   `model-effort-routing` (effort→model→fan-out ladder and fleet caps ≤3–5 / ≤8–12), and
   `review-and-ship` (the §14 bounded review pipeline in executable form). These are
   the single home for their behavior — in particular, `model-effort-routing` is the ONLY place that
-  names models and their effort bindings; §8 above and BLUEPRINT §5 carry the task-class→tier shape
+  names models and their effort bindings (the dated §1 mirror QUOTES claude-config's file,
+  which names models in its working style — a quotation, not a second home: the skill stays
+  authoritative for model names even where the mirror's text disagrees, and claude-config stays
+  authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
   and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
   at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
@@ -547,5 +552,6 @@ shipped from claude-config for both runtimes. Reference, don't restate: the skil
 single home for the step-by-step, and law 2 of the §1 mirror plus BLUEPRINT law 11 are the
 law it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
 commits only; the rest tracked or declined on the thread), one fix round verified against the
-fix diff, then ship or park. Tier changes WHO reviews and how many eyes the single round gets
-(T3 one independent pass, T4 two adversarial reviews), never how many rounds run.
+fix diff — at T3+ the re-requested Codex review after that fix round IS the verification pass,
+not a new round — then ship or park. Tier changes WHO reviews and how many eyes the single
+round gets (T3 one independent pass, T4 two adversarial reviews), never how many rounds run.
