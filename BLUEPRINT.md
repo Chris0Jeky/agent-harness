@@ -68,8 +68,10 @@ half-worked. Nothing is speculative.
     defects of their own.)
 12. **Mission first.** Harness, floor, gate, and doc work happens only when it IS the mission;
     friction found mid-task becomes a one-line tracked issue, never a detour. No new gates whose
-    subject is other gates or doc consistency — existing ones are grandfathered, and the
-    Gardener may propose retiring any whose upkeep exceeds what it catches. Sessions are judged
+    subject is other gates or doc consistency — grandfathered: the ones already built AND the
+    ones this blueprint itself prescribes (§3 stale-map stamps, the T3 docs-stamp/budget lane,
+    §7's vendor parity-diffs); the Gardener may propose retiring any whose upkeep exceeds what
+    it catches. Sessions are judged
     by finished tasks: budget each task, park at ~2× budget, and close with a scoreboard
     (finished / parked / rounds used) ahead of the evidence sections. (Issue #92 measured the
     inverse: 9:1 ceremony-to-execution and zero product-capability PRs.)
@@ -82,7 +84,8 @@ half-worked. Nothing is speculative.
 authority; what rises with blast radius is how much independent verification a merge must carry
 — none at T1/T2 beyond green proving checks, ONE bounded independent review round at T3, the
 full declared two-review gate at T4. A tier is never a reason to wait, ask, or leave finished
-work unmerged.
+work unmerged — within the repo's declared authority: `.agent-harness/tier.json` binds over
+these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 
 | Tier | Name | Defined by (blast radius) | Standing context | CI | Authority (default) | Estate examples |
 |---|---|---|---|---|---|---|
@@ -145,21 +148,28 @@ Everything in T2, plus:
 - **Branch protection requiring the lane by name** (verify via `gh api`, don't assume).
 - **Region system ON** (§3) — the promotion trigger and the cure are the same thing.
 - **Bounded review pipeline** (the `review-and-ship` skill is the concrete home): ONE review
-  round — publish ready-for-review, request the bot review, post findings on the PR — then one
-  severity-bar triage: only confirmed CRITICAL/HIGH defects earn fix commits, and everything
-  else becomes a tracked issue or a one-line decline on the thread. One fix round, verified
-  against the fix diff, then ship or park (law 11); never pause mid-pipeline to ask whether to
-  continue. PostToolUse nudge after `gh pr create` points at the skill (~20 tokens, exactly
-  when relevant).
+  round — publish ready-for-review, request the bot review, post findings on the PR. The round
+  counts only once an independent review has actually arrived: the requested bot review, or an
+  independent agent review when no bot lands within a bounded wait — never merge at T3+ on
+  zero independent findings. Then one severity-bar triage: only confirmed CRITICAL/HIGH
+  defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
+  on the thread. Severity is judged by the finding's content, never the reviewer's label — a
+  bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
+  data-loss defect. One fix round, verified against the fix diff — the re-requested bot review
+  at T3+ IS that verification pass, not a second round — then ship or park (law 11); never
+  pause mid-pipeline to ask whether to continue. PostToolUse nudge after `gh pr create` points
+  at the skill (~20 tokens, exactly when relevant).
 - **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
   this session must have a findings comment; src edits must have a test run (warn at T3, block
   at T4). Stated-override path required, or it trains hook-disabling. Spec in SPECS §7.
 - Two-file truth split with hard caps: "now" doc ≤150 lines, history rotates to archive.
 - Diff-scoped pre-commit (staged .cs → build, .ts/.vue → typecheck) IF measured ≤60s, else the
   check stays in CI. The latency budget is the law; content adapts.
-**Promote to T4** when deployed anywhere, consumed automatically, or other people, money, or
-production data enter the blast radius — autonomy stays constant; the verification a merge
-must carry is what rises. **Demotion
+**Promote to T4** when deployed anywhere, when consumption is automated (failures propagate
+with no human buffer), or when a failure would HARM other people, money, or production data —
+a person merely consuming the output promotes T2→T3; T4 begins where failure hurts a third
+party rather than inconveniencing a consumer. Autonomy stays constant; the verification a
+merge must carry is what rises. **Demotion
 trigger:** a required lane red >7 days while work continues means the gate is dead — fix it or
 formally demote; permanently red gates teach gate-ignoring.
 
@@ -355,12 +365,13 @@ selected scripts — NOT caches/history) with a private remote, plus scheduled b
 `projects/*/memory/`. Today the entire meta-system and 139 memory files are one disk failure
 from gone.
 
-- **Global CLAUDE.md** (shipped 2026-07-26 from the claude-config repo; text mirrored in
-  SPECS §1): the universal laws once re-earned per repo as duplicate memory files — never merge
-  red CI, bounded reviews (one round + one fix round, CRITICAL/HIGH-confirmed bar),
-  verify-before-done, close-keyword hygiene, no `--delete-branch` on stacked bases, HUMAN_TODO
-  surfacing, question protocol, worktree guard, tier check, loop convergence, mission-first.
-  The graduated per-repo memory duplicates were deleted in the change that shipped it.
+- **Global CLAUDE.md** (ratified 2026-07-26, issue #92; the claude-config repo is the
+  canonical home and SPECS §1 the in-repo reference mirror): the universal laws once re-earned
+  per repo as duplicate memory files — never merge red CI, bounded reviews (one round + one
+  fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
+  `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
+  tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
+  the law set shipped; deployment state is measured by `doctor`/`audit`, never asserted here.
 - **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
   global `defaultMode` returns to prompt/acceptEdits; remove global
   `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.
@@ -383,11 +394,14 @@ from gone.
   triage and promotion calls are judgment, not mechanics; write-scoped to docs/ + .claude/),
   `worktree-worker.md`.
 - **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
-  verification-closeout — already good); plus two ≤80-line workflow-mode skills: `guided-walkthrough`
+  verification-closeout — already good); plus three ≤80-line workflow-mode skills: `guided-walkthrough`
   (turns a cumulative backlog — HUMAN_TODO + open PRs + ledger blockers — into a numbered q-N
   walkthrough with per-item context, suggested action, owner tag, and a step-by-step for human-only
-  items; the explicitly-requested exception to law-6 batching) and `model-effort-routing` (the
-  effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet).
+  items; the explicitly-requested exception to the global CLAUDE.md question-batching law),
+  `model-effort-routing` (the
+  effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet),
+  and `review-and-ship` (the bounded review pipeline — law 11 in executable form; ships from
+  claude-config for both runtimes).
   That skill is the SINGLE home for named models and their effort bindings — §5 and SPECS §8 carry
   only the task-class→tier shape and point here; neither may restate the ladder. Global
   CLAUDE.md (law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
