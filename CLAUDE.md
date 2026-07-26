@@ -108,7 +108,8 @@ harness.py), then a new-session `/hooks` re-trust per repo. Never call it runtim
   tier: any change requires the smoke suite, the harness unit tests, and an independent
   read-only review before merge. It is FEATURE-FROZEN (BLUEPRINT §2; issue #96): only
   false-positive fixes and the ratified #21 slices may change it — a new bypass family
-  becomes a `FLOOR_LIMITATIONS.md` line, never a fix.
+  becomes a `FLOOR_LIMITATIONS.md` line, never a fix — unless it regresses the SPECS §6
+  charter matrix in canonical form, which is always repaired.
 - Keep `harness.py` and `dispatch.py` stdlib-only and portable across Windows/macOS/Linux.
 - Never hard-code a user profile path (audit flags it); discover `$HOME`, `$CODEX_HOME`, and
   Git roots at runtime.

@@ -233,16 +233,20 @@ branch protection and restricted toolsets. A change to the floor is T4-class wor
 review) no matter which repo it runs in.
 
 **FEATURE-FROZEN (2026-07-26 — ratified in issue #92; decision record #96).** The floor is a
-tripwire at its useful maximum: 272 → ~9.5k lines bought a measured 12–14% false-positive
-rate on real agent commands with no recorded save of a real irreversible action, and seven
-versions of hardening shipped without ever executing anywhere. Only two classes of change may
-touch `dispatch.py`: **(a)** false-positive fixes that blocked real work, and **(b)** the
-ratified #21 slice sequence. A newly discovered bypass family is recorded as one line in
-[FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md) and its issue closed — never fixed — unless it
-regresses the §6 charter matrix as literally written (a listed must-block form newly allowed,
-or a listed must-allow newly blocked). No new floor version ships until the deployed one is
-re-trusted and canaried (HUMAN_TODO H-2); shrinking the FP rate toward the ~0.1% it once
-measured is the only hardening direction left open.
+tripwire at its useful maximum: 272 → ~9.5k lines as measured in issue #92 (11.3k by 1.6.12)
+bought a 12–14% false-positive rate on real agent commands with no recorded save of a real
+irreversible action, and seven versions of hardening shipped without ever executing anywhere.
+Only three classes of change may touch `dispatch.py`: **(a)** false-positive fixes that
+blocked real work, **(b)** the ratified #21 slice sequence, and **(c)** repairs to a SPECS §6
+charter regression as literally written (a listed must-block form newly allowed, or a listed
+must-allow form newly blocked) — the catastrophe matrix is always repaired. A newly
+discovered bypass FAMILY — a wrapper, interpreter, encoding, or shell shape the parser does
+not model — is recorded as one line in [FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md) and its
+issue closed, never fixed. No new floor version is DEPLOYED until the currently deployed one
+is re-trusted and canaried (HUMAN_TODO H-2) — a permitted fix still merges to `main` and
+bumps `FLOOR_VERSION`; what waits on H-2 is `sync-global --apply` and the consumer marker
+refresh. Shrinking the FP rate toward the ~0.1% it once measured is the only hardening
+direction left open.
 
 ---
 

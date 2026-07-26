@@ -3,12 +3,14 @@
 The floor is **FEATURE-FROZEN** (BLUEPRINT §2; decision record: issue #96, ratified in #92).
 This file is the ledger of its known bypass families: shapes the argv parser does not model
 and — under the freeze — will not grow to model. The SPECS §6 charter matrix still blocks in
-canonical form (CI-asserted by the smoke suite), and several families below are additionally
-pinned in both directions by `tests/test_prefix_wrapper_crossproduct.py` (PR #71), which fails
-`UNEXPECTEDLY FIXED` if a documented bypass starts blocking. A new discovery gets one line
+canonical form (CI-asserted by the smoke suite). Once open PR #71 lands, several families
+below will additionally be pinned in both directions by its
+`tests/test_prefix_wrapper_crossproduct.py`, which fails `UNEXPECTEDLY FIXED` if a documented
+bypass starts blocking — until then the pin is pending, not live. A new discovery gets one line
 here plus a closed issue, never a fix — unless it regresses the charter matrix as literally
 written. The walls remain branch protection and restricted toolsets (BLUEPRINT law 5); the
-floor is a tripwire, not a sandbox.
+floor is a tripwire, not a sandbox. Budget: this ledger caps at 120 lines; overflow rotates
+to `archive/floor-limitations-<year>.md` (laws 3/4).
 
 ## Surfaces the floor never sees (it inspects only Bash argv)
 
@@ -28,15 +30,16 @@ floor is a tripwire, not a sandbox.
 
 ## Shell-shape gaps in modelled rules
 
-- **Quote-masked payloads inside unmodelled PowerShell scriptblock/expression shapes** — `if ($true) { iex '<cmd>' }`, `… -and (iex '<cmd>')`, and compound assignment `$x += iex '<cmd>'` reach neither body-inspection call site nor the assignment unwrap, so any charter command (force-push, `rm -rf` outside project, pipe-to-shell) is allowed wrapped while denied bare; ~1,062 of the 1,071 smoke deny cases bypass this way on 1.5.3/1.6.0/1.6.1 (#37).
+- **Quote-masked payloads inside unmodelled PowerShell scriptblock/expression shapes** — `if ($true) { iex '<cmd>' }`, `… -and (iex '<cmd>')`, and compound assignment `$x += iex '<cmd>'` reach neither body-inspection call site nor the assignment unwrap, so any charter command (force-push, `rm -rf` outside project, pipe-to-shell) is allowed wrapped while denied bare; ~1,062 of the 1,071 smoke deny cases bypass this way on 1.5.3/1.6.0/1.6.1, re-confirmed live against 1.6.12 in the 2026-07-26 triage (#37).
 - **Leading redirection before a shell head** — `has_opaque_posix_shell_input` reads its evidence after `strip_leading_command_redirections` has consumed it, so `< payload.sh bash`, `<<<'…' bash` and `< <(…) bash` hand a POSIX shell uninspected program text while the canonical `bash < payload.sh` denies (#75; non-freeze sub-items spun out to #95).
 - **Unterminated process-substitution operand under a prefix** — the fail-closed deny for an undecidable `< <(printf \( )` operand fires only when the redirect is token 0; a leading newline, a subshell, or `taskset`/`flock`/`watch`/`wsl` in front of it drops the deny (#79).
 - **Clobber-redirect prefix (`>|`) + glob/character-class force refspec** — a `>|` write-redirect prefix desynchronizes the push argument walk, so glob-spelled force refspecs (`git push origin [+]main`, `--for* main`) allow; the explicit `--force` flag and the five other redirect spellings still deny (#80).
-- **Raw file writes to `.git/config` / `.git/hooks/*`** — the floor guards `git config`, `git -c` and `GIT_CONFIG_*` but not a redirect/`Set-Content`/`tee` into the config or hooks files, so execution- or destination-bearing keys (`core.fsmonitor`, `core.hooksPath`, `remote.*.push`, `diff.external`, aliases) can be planted and fire on a later benign git command; push-time force is still caught by `configured_push_may_force()` (#27).
+- **Raw file writes to `.git/config` / `.git/hooks/*`** — the floor guards `git config`, `git -c` and `GIT_CONFIG_*` but not a redirect/`Set-Content`/`tee` into the config or hooks files, so execution- or destination-bearing keys (`core.fsmonitor`, `core.hooksPath`, `remote.*.push`, `diff.external`, aliases) can be planted and fire on a later benign git command; push-time force on a refspec-less push is still caught by `configured_bare_push_is_dangerous()` — a bounded residual: it covers bare pushes only and fails open when the resolver deadline is exhausted (#27).
 
 ## What stays actionable under the freeze
 
 False-positive fixes (`floor-fp` label: #12, #65, #77, #81, #90), the ratified #21 slice
-sequence (`floor-slice` label: #26 → #41 → #62 → #24 → #38/#58 → #48/#59), charter-scoped #3,
+sequence (`floor-slice` label: #26 → #41 → #62 [folds #17, #32] → #24 → #38/#58 → #48/#59),
+charter-scoped #3 (repairable under freeze class (c)),
 and everything outside the floor's rules (doctor, docs, adapter contract, measurement — e.g.
 #74, whose fix rides PR #71). Decision record and full triage: issue #96.
