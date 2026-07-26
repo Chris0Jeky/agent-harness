@@ -297,12 +297,19 @@ directions: charter denies stay denied, curated benign commands stay allowed.
 A shape the floor does not cover is recorded in that module's baselines with the issue it
 belongs to, so the repo states where the tripwire ends instead of leaving it unstated:
 `DOCUMENTED_BYPASSES` (whole shapes: #46, #56, #37, #9, #67), `DOCUMENTED_CASE_BYPASSES`
-(individual rules disarmed by an otherwise-covered wrapper: #68, #69),
+(individual rules disarmed by an otherwise-covered wrapper: #68, #69, #79, #80),
 `DOCUMENTED_OVER_BLOCKS` (shapes that deny EVERY benign payload: #21 plus the charter's
 own privilege-transition denials) and `DOCUMENTED_CASE_OVER_BLOCKS` (its payload-granular
 mirror). A baseline entry that starts behaving correctly fails the gate as UNEXPECTEDLY
 FIXED, so a fix has to be promoted into the enforced set rather than left un-guarded
-against a later re-break.
+against a later re-break. That promotion is the mechanism, not a formality: 21 of the 22
+#46 shapes and 3 of the #68 case entries were retired this way once main closed them, and
+`stop-parsing-glued` is all that remains of #46.
+
+UNEXPECTEDLY FIXED and the corpus sweep are reported TOGETHER. They were sequential
+`self.fail` calls, and `fail` raises, so a recorded entry that started behaving correctly
+suppressed every live bypass in the same run — three case-level entries were hiding 81
+corpus failures that no run had ever printed.
 
 Two properties keep a baseline from meaning less than it looks. A SHAPE-level entry must
 record which probes it lets through or denies — an empty evidence list would exempt a
