@@ -31,10 +31,26 @@ It has already paid for itself three times over:
   over-blocks where #70's git-argv rules do not survive a child re-parse (reproduced on `main`,
   not introduced by the branch).
 
-**State:** merged with main, all gates green locally (661 tests, gate suite OK, lint clean, pins
-match), pushed at `922cde3`. **Next step: confirm exact-head CI, then merge.** Its recorded
-baselines are deliberate — a documented bypass that starts passing fails the gate as
+**State at `922cde3`:** merged with main (floor 1.6.12), three-OS CI **green**, and green locally
+— 661 tests, **2121/2121 smoke**, lint clean, both pins matching the post-bump dispatcher.
+
+**It is NOT ready to merge.** It carries **13 untriaged Codex connector threads** (1×P1, 12×P2)
+raised against its latest heads. Zero-skip means each needs a fix or an explicit written
+classification first. **That is the next session's first task.** The full thread text is saved at
+`.../scratchpad/pr71-open-threads.md`, or re-fetch with:
+
+```
+gh api graphql -f query='{repository(owner:"Chris0Jeky",name:"agent-harness"){pullRequest(number:71){reviewThreads(first:60){nodes{isResolved path line comments(first:3){nodes{body}}}}}}}'
+```
+
+Its recorded baselines are deliberate — a documented bypass that starts passing fails the gate as
 "UNEXPECTEDLY FIXED", so nothing silently improves or silently rots.
+
+**Beware the review treadmill.** The connector re-reviews every pushed head, so each fix round
+draws a new round of comments; one branch this session went six rounds, every round finding
+genuine second-order defects in the previous round's fixes. The convergence rule that worked:
+**P1/high blocks merge; P2/low must be answered but may become a tracked follow-up issue.** Apply
+it deliberately rather than chasing the queue to zero.
 
 ## The redesign, ratified
 

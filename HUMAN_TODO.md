@@ -30,8 +30,12 @@ has a file to surface in every session summary.
   a clean contained worktree can be removed by an agent and this item shrinks to the `--force`
   cases.
 
-- [ ] **H-5 — Merge PR #71** (the cross-product gate, #63) once its exact-head CI is green. It is
-  merged with main and green locally. Everything else from the 2026-07-25/26 session is landed.
+- [ ] **H-5 — PR #71** (the cross-product gate, #63) is **not** ready to merge, despite green
+  three-OS CI at `922cde3` and green local gates (661 tests, 2121/2121 smoke). It carries **13
+  untriaged Codex connector threads** (1×P1, 12×P2) raised against its latest heads, and the
+  zero-skip review law means each needs a fix or an explicit written classification before merge.
+  That triage is the next session's first task, not a human action — listed here only so the open
+  PR is not mistaken for finished work.
 
 ## Done
 
