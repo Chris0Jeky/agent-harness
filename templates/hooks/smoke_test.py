@@ -525,6 +525,66 @@ CASES = [
     ("git push --force-with-lease origin HEAD", 2, {}, "deny"),
     ("git push --force-with-lease --all origin", 2, {}, "deny"),
     ("git push --force-with-lease origin feat", 4, {}, "deny"),
+    # A redirection is consumed by the SHELL; git never sees it in argv. It used
+    # to survive into the lease destination list, so `2>&1` counted as a second
+    # destination and the safe verb refused the shape agents actually type
+    # (issue #44). Both tokenizers are covered: the quote-aware pass splits
+    # `2>&1` into `['2', '>&', '1']`, the sanitized pass keeps it glued.
+    ("git push --force-with-lease origin fix/x 2>&1", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>&1 | tail -4", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x > out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >>push.log", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>/dev/null", 2, {}, "allow"),
+    ("git push --force-with-lease origin feat 1>out.txt 2>&1", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x 2>&1", 4, {}, "deny"),
+    # The destination the guard exists for, and a redirect used to hide one.
+    ("git push --force-with-lease origin main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin master > out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin HEAD:main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x main 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease origin 2>&1 main", 2, {}, "deny"),
+    ("git push --force-with-lease origin 2>&1", 2, {}, "deny"),
+    ("git push --force-with-lease 2>&1", 2, {}, "deny"),
+    ("git push --force origin fix/x 2>&1", 2, {}, "deny"),
+    ("git push -f origin fix/x 2>&1", 2, {}, "deny"),
+    # QUOTED, the same text is not structure: the shell hands git the literal
+    # argv entry `2>&1` and the push creates `refs/heads/2>&1`, so it is a lease
+    # destination like any other and stripping it smuggled a non-feature branch
+    # past the guard (PR #70 review). Provenance also has to survive the
+    # recursion into a nested shell.
+    ('git push --force-with-lease origin fix/x "2>&1"', 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x '2>&1'", 2, {}, "deny"),
+    ('git push --force-with-lease origin fix/x "> out.txt"', 2, {}, "deny"),
+    ('git push --force-with-lease origin "2>&1"', 2, {}, "deny"),
+    ("bash -c 'git push --force-with-lease origin fix/x \"2>&1\"'", 2, {}, "deny"),
+    # ...and quoting a feature branch must not start denying it.
+    ('git push --force-with-lease origin "fix/x"', 2, {}, "allow"),
+    ("git push --force-with-lease origin 'fix/x' 2>&1", 2, {}, "allow"),
+    ("bash -c 'git push --force-with-lease origin fix/x 2>&1'", 2, {}, "allow"),
+    # A descriptor has to be GLUED to the operator. Measured on bash 5.2:
+    # `f z 2 >out` passes `[z] [2]`, `f y 2>&1` passes only `[y]`. So a spaced
+    # numeric token is a refspec and the lease guard has to judge it (PR #70).
+    ("git push --force-with-lease origin fix/x 2 >out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x 2 > out.txt", 2, {}, "deny"),
+    ("git push --force-with-lease origin fix/x 2 >& 1", 2, {}, "deny"),
+    # The complete operator is consumed, including bash's noclobber `>|`, whose
+    # target used to be left behind in the destination list and deny.
+    ("git push --force-with-lease origin fix/x 2>out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >| out.txt", 2, {}, "allow"),
+    ("git push --force-with-lease origin fix/x >|out.txt", 2, {}, "allow"),
+    # `-b` is valueless for grep/diff but takes a value for clone/init, so the
+    # shared allowlist may not end the scan outside its swept families. Measured
+    # on git 2.45.1: `git init -b -- --separate-git-dir=zzz repo` created `zzz`.
+    ("git clone -b -- --upload-pack=helper source dest", 2, {}, "deny"),
+    ("git init -b -- --separate-git-dir=.env repo", 2, {}, "deny"),
+    ("git clone -u -- --config=core.pager=helper source dest", 2, {}, "deny"),
+    ("git clone -b main source dest", 2, {}, "allow"),
+    # A second `--` bounds the scan under both readings, so what git really runs
+    # stops being denied: `git grep -e -- -- -Osh` searches the file `-Osh`.
+    ("git grep -e -- -- -Osh", 2, {}, "allow"),
+    ("git diff --output -- -- --ext-diff", 2, {}, "allow"),
+    ("git grep -e -- -Osh", 2, {}, "deny"),
+    ("git diff --output -- --ext-diff", 2, {}, "deny"),
     # --- relaxed_work_loss_guards: declared relaxed-git posture, allow below T4/wave ---
     ("git reset --hard HEAD~1", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
@@ -2118,6 +2178,30 @@ CASES = [
     ("git sparse-checkout set src", 1, {}, "deny"),
     ("git credential fill", 1, {}, "deny"),
     ("git credential-manager get", 1, {}, "deny"),
+    # update-index and sparse-checkout are read/write MIXED, so they are
+    # admitted by arity rather than by name (issue #45): the refresh forms only
+    # re-stat files whose content already matches the index, and `list` only
+    # prints the sparse patterns. Every writing spelling above still denies, and
+    # so does an operand, an unknown option, or a missing refresh request.
+    ("git update-index --refresh", 1, {}, "allow"),
+    ("git update-index --refresh", 4, {}, "allow"),
+    ("git update-index -q --refresh", 1, {}, "allow"),
+    ("git update-index --really-refresh", 1, {}, "allow"),
+    ("git sparse-checkout list", 1, {}, "allow"),
+    ("git sparse-checkout list", 4, {}, "allow"),
+    ("git update-index --add README.md", 1, {}, "deny"),
+    ("git update-index --force-remove README.md", 1, {}, "deny"),
+    ("git update-index --assume-unchanged config.json", 1, {}, "deny"),
+    ("git update-index --refresh README.md", 1, {}, "deny"),
+    ("git update-index --refresh -- README.md", 1, {}, "deny"),
+    ("git update-index --refresh --not-a-known-option", 1, {}, "deny"),
+    ("git update-index", 1, {}, "deny"),
+    ("git sparse-checkout init", 1, {}, "deny"),
+    ("git sparse-checkout reapply", 1, {}, "deny"),
+    ("git sparse-checkout disable", 1, {}, "deny"),
+    ("git sparse-checkout list --stdin", 1, {}, "deny"),
+    ("git -c core.pager=payload update-index --refresh", 1, {}, "deny"),
+    ("git -c core.sshCommand=payload sparse-checkout list", 1, {}, "deny"),
     # global-option hiding in front of admitted plumbing must still deny
     ("git -c alias.mb=merge-base mb main HEAD", 1, {}, "deny"),
     ("git -c core.pager=payload merge-base main HEAD", 1, {}, "deny"),
@@ -2130,22 +2214,70 @@ CASES = [
     ("git diff-files --ext-diff", 1, {}, "deny"),
     ("git diff-tree --output=.env -r HEAD", 1, {}, "deny"),
     ("git diff-tree --output=$OUT -r HEAD", 1, {}, "deny"),
-    # `--output` is a revision-walking option, not a diff-only one, so every
-    # admitted read-only plumbing subcommand can truncate a secret with it.
-    # Verified against real git: `git rev-list --output=victim HEAD` took a
-    # 35-byte file to 0 bytes with rc=0, because git opens the path with "w"
-    # while parsing options. Floor 1.6.3 admitted rev-list as read-only without
-    # extending this guard and newly ALLOWED these at every tier including T4;
-    # neither the smoke matrix nor an 80k-command corpus replay caught it,
-    # because replay measures what has been run, not what is reachable.
+    # `--output` is a revision-walking option, not a diff-only one, so the
+    # admitted plumbing that Git routes through setup_revisions() can truncate a
+    # secret with it. Verified against real git: `git rev-list --output=victim
+    # HEAD` took a 35-byte file to 0 bytes with rc=0, because git opens the path
+    # with "w" while parsing options. Floor 1.6.3 admitted rev-list as read-only
+    # without extending this guard and newly ALLOWED these at every tier
+    # including T4; neither the smoke matrix nor an 80k-command corpus replay
+    # caught it, because replay measures what has been run, not what is
+    # reachable.
     ("git rev-list --output=.env HEAD", 1, {}, "deny"),
     ("git rev-list --output=.env HEAD", 4, {}, "deny"),
     ("git rev-list --output=id_rsa HEAD", 1, {}, "deny"),
     ("git rev-list --output=../../../.env HEAD", 1, {}, "deny"),
     ("git rev-list --output=$OUT HEAD", 1, {}, "deny"),
-    ("git merge-base --output=.env a b", 1, {}, "deny"),
-    ("git check-ignore --output=.env x", 1, {}, "deny"),
-    ("git hash-object --output=.env f", 1, {}, "deny"),
+    # The plumbing that does NOT parse revision/diff options is a different
+    # case, and 1.6.5 guarded it on the theory that "guarding a subcommand that
+    # does not accept --output costs nothing". It costs a false positive: for
+    # `git hash-object --path --output .env` the token is `--path`'s VALUE and
+    # `.env` is the file being read, so the blanket scan denied a read-only hash
+    # (issue #55). Re-measured on git 2.45.1 against a 35-byte sink: merge-base,
+    # check-ignore, hash-object, check-attr, count-objects, merge-tree, var and
+    # verify-pack all exit 129 with `unknown option` and leave the file at 35
+    # bytes, while rev-list and diff-tree take it to 0. Nothing was protected
+    # here, so these three now allow -- and the deny rows above are the ones
+    # that carry the guard.
+    ("git merge-base --output=.env a b", 1, {}, "allow"),
+    ("git check-ignore --output=.env x", 1, {}, "allow"),
+    ("git hash-object --output=.env f", 1, {}, "allow"),
+    ("git hash-object --path --output .env", 1, {}, "allow"),
+    ("git hash-object -- --ext-diff", 1, {}, "allow"),
+    ("git diff -- --ext-diff", 1, {}, "allow"),
+    ("git diff --ext-diff -- file", 1, {}, "deny"),
+    # A `--` is only the end of options when nothing was waiting to consume it.
+    # `--output` and `-O` are OPT_FILENAME: they take the `--` as the file name
+    # (git writes a file literally called `--`) and then parse `--ext-diff` as
+    # an option, launching the external-diff helper. Truncating at the first
+    # `--` hid exactly the token this scan exists to find, so an unprovable
+    # terminator now leaves the whole of argv in the scan.
+    ("git diff --output -- --ext-diff", 1, {}, "deny"),
+    ("git log -O -- --ext-diff", 1, {}, "deny"),
+    ("git diff -I -- --ext-diff", 1, {}, "deny"),
+    ("git stash show --output -- --ext-diff", 1, {}, "deny"),
+    ("git rev-list --output -- --ext-diff HEAD", 1, {}, "deny"),
+    ("git diff --output -- --ext-dif", 1, {}, "deny"),
+    ("git diff --not-a-known-option -- --ext-diff", 1, {}, "deny"),
+    # `--cc` is a valueless combined-diff flag for log/diff but takes a separate
+    # <email> for format-patch, an external-diff family member: measured on git
+    # 2.45.1, `git format-patch --cc -- -1 --stdout` prints `Cc: --` and parses
+    # the next token as an OPTION. So it is not a terminator-safe flag.
+    ("git format-patch --cc -- --ext-diff", 1, {}, "deny"),
+    ("git format-patch --cc -- --ext-diff -1 --stdout", 1, {}, "deny"),
+    # The secret-file guard walks the same argv, so it needs the same proof:
+    # `git format-patch --cc -- --output=<f> -1` really creates <f> (measured).
+    ("git format-patch --cc -- --output=.env -1", 1, {}, "deny"),
+    ("git diff --anchored -- --output=.env", 1, {}, "deny"),
+    # ... and a PROVEN terminator still ends option parsing, so the false
+    # positive #55 fixed stays fixed.
+    ("git diff --cached -- --ext-diff", 1, {}, "allow"),
+    ("git log --graph --oneline -- --ext-diff", 1, {}, "allow"),
+    ("git stash show -- --ext-diff", 1, {}, "allow"),
+    ("git format-patch --stat -- --ext-diff -1", 1, {}, "allow"),
+    ("git format-patch -s -- --ext-diff -1", 1, {}, "allow"),
+    ("git diff -- --output=.env", 1, {}, "allow"),
+    ("git diff --cached -- --output=.env", 1, {}, "allow"),
     # The read-only admission itself must survive the guard.
     ("git rev-list --output=notes.txt HEAD", 1, {}, "allow"),
     ("git rev-list HEAD --count", 1, {}, "allow"),
@@ -2239,6 +2371,11 @@ CASES = [
     ("git grep --open-files-in-pager=sh needle", 1, {}, "deny"),
     ("git grep --open-files-in-pager needle", 1, {}, "deny"),
     ("git grep --open-files-in-pag=sh needle", 1, {}, "deny"),
+    # `-f` and `-e` and `-m` all take a separate value, so they swallow the
+    # `--` and `-O` is still parsed as the pager option.
+    ("git grep -f -- -O needle", 1, {}, "deny"),
+    ("git grep -e -- -Osh", 1, {}, "deny"),
+    ("git grep -m -- -Osh needle", 1, {}, "deny"),
     ("GIT_EDITOR=helper git branch --edit-description", 1, {}, "deny"),
     # Bash's append assignment is the same command-scoped prefix, and the name
     # it establishes is GIT_EDITOR, not `GIT_EDITOR+`.
@@ -3714,6 +3851,7 @@ CASES = [
     ("git grep -n needle", 1, {}, "allow"),
     ("git grep -- -Osh", 1, {}, "allow"),
     ("git grep -e needle -- -Osh", 1, {}, "allow"),
+    ("git grep -i -- -Osh", 1, {}, "allow"),
     ("Rename-Item notes.txt -NewName report.txt", 1, {}, "allow"),
     ("ren notes.txt -NewN report.txt", 1, {}, "allow"),
     ("New-Item -ItemType File notes.txt -Force", 1, {}, "allow"),
