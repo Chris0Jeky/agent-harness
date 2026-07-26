@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.12 (2026-07-26)"
+FLOOR_VERSION = "1.6.15 (2026-07-26)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -1404,7 +1404,7 @@ def requote_argv_token(token: str) -> str:
     """
     if not token:
         return "''"
-    if _ARGV_REDIRECTION_TOKEN.fullmatch(token):
+    if token_is_argv_redirection(token):
         # shlex splits `>`/`>>`/`2>&1` into their own punctuation token, and
         # segmentation only ever CONSUMES a run made purely of `;&|` -- so a run
         # that still holds a `<` or `>` reached the argv as real structure and
@@ -1428,10 +1428,32 @@ def requote_argv_token(token: str) -> str:
         # `foreach ($p in $paths) { foreach ($i in 1..3) { "$($lines[$i])" } }`
         # readable at every level of the nesting.
         token = token[len(_QUOTED_SPAN_MARK) :]
-        return "'" + token.replace("'", "'\"'\"'") + "'"
+        return _quoted_argv_span(token)
     if not _ARGV_TOKEN_NEEDS_QUOTING.search(token):
         return token
-    return "'" + token.replace("'", "'\"'\"'") + "'"
+    return _quoted_argv_span(token)
+
+
+def _quoted_argv_span(token: str) -> str:
+    """Encode `token` so the child tokenizer restores it CHARACTER-IDENTICALLY.
+
+    Alternating `'...'` / `"'"` spans round-trip any text, with one exception the
+    encoding has to steer around: the child's literal-redirect mask replaces a
+    LEADING quoted span that is exactly a redirection operator, because a user
+    who writes `'&>'out cmd` means a program called `&>out`. The floor writing
+    the same bytes does NOT mean that -- it is rebuilding a token it already
+    tokenized -- so `iex "1<>'.env' echo x"` came back as
+    `'1<>'"'"'.env'"'"' echo x'`, the mask ate the `1<>`, and a secret-file
+    redirect inside the evaluator body turned into the word `1.env`.
+
+    An empty leading span costs one token of text and removes the ambiguity: the
+    span the child sees first is `''`, which is nothing, so the operator span
+    that follows is no longer in leading position and is restored verbatim.
+    """
+    encoded = "'" + token.replace("'", "'\"'\"'") + "'"
+    if literal_redirect_replacement(token.split("'", 1)[0]) is None:
+        return encoded
+    return "''" + encoded
 
 
 # Characters the child tokenizer treats as structure rather than as text:
@@ -1531,6 +1553,54 @@ def strip_shell_redirections(
     return kept
 
 
+def token_is_argv_redirection(token: str) -> bool:
+    """Whether `token` reached argv as redirection STRUCTURE, not as text.
+
+    A DESCRIPTOR belongs to the operator: `2>` and `1>>` are one redirection
+    token to every reader in this file, so a rebuild that treats the bare `>`
+    as structure and `2>` as a word describes two different programs.
+
+    The grammar is `_ARGV_REDIRECTION_DESCRIPTOR` -- the ARGV one, not
+    `_REDIRECTION_DESCRIPTOR` -- and the difference is `*`, deliberately. This
+    decides whether a token is rebuilt BARE, i.e. handed to the child as
+    structure the shell will consume rather than as a word the program will
+    see. `*` is a descriptor in PowerShell and a glob in POSIX, where
+    `cmd *> f` really does pass `*` as an argument, and the floor cannot know
+    which shell will run the text; emitting it as structure would drop a real
+    operand. Keeping `*` a word is the fail-closed reading of that ambiguity,
+    which is the same call `strip_shell_redirections` makes above (PR #70
+    review) for the same reason.
+    """
+    if _ARGV_REDIRECTION_TOKEN.fullmatch(token):
+        return True
+    match = re.match(rf"^(?:{_ARGV_REDIRECTION_DESCRIPTOR.pattern})", token)
+    if match is None:
+        return False
+    return bool(_ARGV_REDIRECTION_TOKEN.fullmatch(token[match.end() :]))
+
+
+def join_child_argv(tokens) -> str:
+    """`shlex.join` for a launcher's child argv, with redirections left as SYNTAX.
+
+    `shlex.quote` quotes anything holding a shell metacharacter, so a redirection
+    operator that reached argv as STRUCTURE came back out as a quoted WORD -- and
+    the tokenizer's literal-redirect mask then read the floor's own quoting as a
+    user asking to run a program called `>`. The child was handed
+    `'>' out.txt rm -rf /critical/outside`, resolved `>` as the head, matched no
+    rule and allowed, so every leading-redirect payload behind `wsl` / `taskset` /
+    `flock` / `watch` / `chrt` / `coproc` was laundered by the rebuild itself.
+
+    `requote_argv_token` already keeps redirections bare for the recursion path;
+    the launcher path reached for `shlex.join` instead and lost it. Only that one
+    rule is shared: everything else still goes through `shlex.quote`, so a literal
+    `;` argument stays a quoted word here rather than becoming a separator.
+    """
+    return " ".join(
+        token if token_is_argv_redirection(token) else shlex.quote(token)
+        for token in tokens
+    )
+
+
 def rejoin_argv_as_command(parts: list[str]) -> str:
     """Rebuild command TEXT from argv tokens without losing argument boundaries.
 
@@ -1554,7 +1624,7 @@ def rejoin_argv_as_command(parts: list[str]) -> str:
         if (
             rendered
             and text.startswith("(")
-            and _ARGV_REDIRECTION_TOKEN.fullmatch(rendered[-1])
+            and token_is_argv_redirection(rendered[-1])
         ):
             # shlex splits `<(wget ...)` into the punctuation run `<` and the
             # token `(wget`. Re-inserting a space breaks the process
@@ -2928,6 +2998,20 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     return recovered_deletes
 
 
+#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
+#: destination file. The quote-aware token scan has to recognise the same grammar the
+#: text-mode fallback regex already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it only
+#: knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked while
+#: their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a descriptor
+#: number rather than a path, so it decides on the token that follows.
+#:
+#: The tokenizer's quote-provenance mask below reads the SAME pattern on purpose. The two
+#: are one decision seen from both sides — "is this token an operator?" — so recognising a
+#: spelling in the scan without masking it in the tokenizer turns a quoted operator
+#: LITERAL into a false deny, and masking without recognising re-opens the bypass.
+_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
+
+
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
     """Tokenize executable argv while protecting quoted operator characters.
 
@@ -3059,7 +3143,9 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
             # from `>&` from `&>`, which is the constraint issue #74 records
             # against widening this beyond `>`/`>>`.
             if raw_token.startswith(placeholder):
-                replacement = _LITERAL_REDIRECT_MARKERS.get(value, value)
+                literal = literal_redirect_replacement(value)
+                if literal is not None:
+                    replacement = literal
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
         # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
@@ -3958,7 +4044,7 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
             return None  # compound coproc block is opaque
     if not child:
         return ""
-    return shlex.join(restore_quoted_literal_markers(token) for token in child)
+    return join_child_argv(restore_quoted_literal_markers(token) for token in child)
 
 
 def parse_alias_definitions(head: str, toks: list[str]) -> dict[str, str]:
@@ -4148,6 +4234,39 @@ def command_prefix_redirection_token(
         if rest.startswith(operator):
             return operator, rest[len(operator) :], has_descriptor
     return None
+
+
+def literal_redirect_replacement(token: str) -> str | None:
+    """Inert text for a quoted span that is EXACTLY a redirection operator.
+
+    ``None`` means the span is not one and the caller restores it verbatim.
+
+    The span is decomposed with the SAME grammar the prefix parser above uses,
+    which is what keeps the tokenizer's mask and every pass that reads its
+    output in step. A DESCRIPTOR is not operator syntax -- ``2`` is an ordinary
+    word character to every rule downstream -- so ``2>`` yields ``2`` followed
+    by the ``>`` marker rather than a marker of its own. That keeps the marker
+    table keyed by operator (issue #74: a len-keyed marker cannot tell ``>|``
+    from ``>&`` from ``&>``) while still covering the descriptor-prefixed
+    spellings, and it mirrors how a glued suffix survives: ``'&>'out`` restores
+    as marker + ``out``, the program name the shell would really look for.
+
+    Matching the mask to the SCAN is the whole point. ``_OUTPUT_REDIRECT_OPERATOR``
+    recognises ``\\d*&?>{1,2}[|&]?``, so widening it to ``2>`` / ``1>>`` without
+    widening this made ``echo "2>" .env`` a false deny while the byte-identical
+    ``echo ">" .env`` allowed -- one decision, "is this token an operator?",
+    answered two different ways depending on the descriptor.
+    """
+    parsed = command_prefix_redirection_token(token)
+    if parsed is None:
+        return None
+    operator, glued_target, _has_descriptor = parsed
+    if glued_target:
+        # `'>out'` is one quoted word: the shell looks for a program called
+        # `>out`, and the span is already inert as data. Only a span that is
+        # nothing BUT an operator can be mistaken for syntax downstream.
+        return None
+    return token[: len(token) - len(operator)] + _LITERAL_REDIRECT_MARKERS[operator]
 
 
 # Sentinel index: the token stream begins a process-substitution operand that
@@ -8227,10 +8346,22 @@ def check(
             r"^[<>]?\(", redirect_target
         ):
             return "deny", "A dynamic redirect target cannot be inspected safely."
-        if token_mentions_secret_path(redirect_target):
+        # A QUOTED destination is still a destination. `strip_quotes` has already
+        # rewritten `> '.env'` to `> <placeholder>`, so testing the placeholder text
+        # let the quoted spelling outrun its unquoted twin: `taskset -c 0 echo x >
+        # '.env'` allowed while `taskset -c 0 echo x > .env` denied. That divergence
+        # is the exact shape of the PR #53 charter regression. Only the token in
+        # REDIRECT-TARGET POSITION is resolved -- a quoted span anywhere else stays
+        # inert, so commit-message and PR-body prose is still never program text
+        # (`git commit -m "echo secret > .env"` has no bare `>` in `sanitized` at
+        # all, so this loop never sees it). The dynamic-target test above keeps
+        # reading the UNRESOLVED token on purpose: `> "%TARGET%"` is deliberately
+        # left quoted by strip_quotes and is decided by the per-segment rules.
+        resolved_target = decode_inert_git_token(redirect_target, inert_placeholders)
+        if token_mentions_secret_path(resolved_target):
             return (
                 "deny",
-                f"Redirecting output into a secret-looking file ({redirect_target}) is floor-blocked.",
+                f"Redirecting output into a secret-looking file ({resolved_target}) is floor-blocked.",
             )
 
     # Pipe rules run on the full sanitized text (the pipe IS the signal).
@@ -8928,7 +9059,7 @@ def check(
                     continue
                 break
             if child_index < len(toks):
-                wsl_child = shlex.join(
+                wsl_child = join_child_argv(
                     restore_quoted_literal_markers(token)
                     for token in toks[child_index:]
                 )
@@ -11107,7 +11238,9 @@ def check(
             )
         if quote_aware:
             for index, token in enumerate(raw[:-1]):
-                if token in (">", ">>") and token_mentions_secret_path(raw[index + 1]):
+                if _OUTPUT_REDIRECT_OPERATOR.fullmatch(
+                    token
+                ) and token_mentions_secret_path(raw[index + 1]):
                     return (
                         "deny",
                         f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",

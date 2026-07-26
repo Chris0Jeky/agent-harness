@@ -334,6 +334,90 @@ CASES = [
     ("runas /savecred /user:x whoami", 1, {}, "deny"),
     ("echo secret123 > .env", 1, {}, "deny"),
     ("echo tok >> config/credentials.json", 1, {}, "deny"),
+    # QUOTED secret redirect targets. PR #53's charter regression was exactly this
+    # shape going deny -> allow (a command-leading redirect into a quoted secret file),
+    # and until now the matrix held no case where the secret path itself was quoted:
+    # every recorded secret redirect had a bare target, so a change that stopped
+    # restoring a quoted redirect target into the token scan looked green.
+    ("echo secret123 > '.env'", 1, {}, "deny"),
+    ('echo secret123 > ".env"', 1, {}, "deny"),
+    ("echo secret123 >'.env'", 1, {}, "deny"),
+    ("echo secret123 >> '.env'", 1, {}, "deny"),
+    ("echo tok > 'config/credentials.json'", 1, {}, "deny"),
+    ('echo tok > "id_rsa"', 1, {}, "deny"),
+    ("> '.env' echo hi", 1, {}, "deny"),
+    ('> ".env" echo hi', 1, {}, "deny"),
+    (">'.env' echo hi", 1, {}, "deny"),
+    (">> '.env' echo hi", 1, {}, "deny"),
+    ("2> '.env' echo hi", 1, {}, "deny"),
+    # `>|` and `&>` bind their destination the same way `>` does; the quote-aware
+    # token scan used to know only `>`/`>>`, so these two spellings reached a quoted
+    # secret file unblocked while their unquoted twins denied.
+    (">| '.env' echo hi", 1, {}, "deny"),
+    ("&> '.env' echo hi", 1, {}, "deny"),
+    ("echo hi >| '.env'", 1, {}, "deny"),
+    ("echo hi &> '.env'", 1, {}, "deny"),
+    ("> 'out file.txt' echo secret123 > '.env'", 1, {}, "deny"),
+    # descriptor duplication binds a descriptor, not a path: the token after `>&`
+    # is `1`, so the quoted `.env` here is an argument and stays allowed.
+    ("2>&1 '.env' echo hi", 1, {}, "allow"),
+    ("git commit -m 'redirect &> .env is blocked'", 1, {}, "allow"),
+    # ...and the mirror of the widened operator set: a quoted span that IS an operator
+    # spelling is DATA. Every deny above has this twin so the two halves of the change
+    # cannot drift apart — widening the token scan without widening the tokenizer's
+    # quote-provenance mask made these false denies while `echo ">" .env` still allowed.
+    ("echo x &> .env", 1, {}, "deny"),
+    ('echo "&>" .env', 1, {}, "allow"),
+    ("echo x >| .env", 1, {}, "deny"),
+    ('echo ">|" .env', 1, {}, "allow"),
+    ("echo x 2> .env", 1, {}, "deny"),
+    ('echo "2>" .env', 1, {}, "allow"),
+    ("echo x &>> .env", 1, {}, "deny"),
+    ('echo "&>>" .env', 1, {}, "allow"),
+    ("echo x >& .env", 1, {}, "deny"),
+    ('echo ">&" .env', 1, {}, "allow"),
+    ("echo x 1>> .env", 1, {}, "deny"),
+    ('echo "1>>" .env', 1, {}, "allow"),
+    ("echo '&>' .env", 1, {}, "allow"),
+    # DESCRIPTOR-prefixed spellings, both directions. The token scan recognises
+    # `\d*&?>{1,2}[|&]?`, so it reads `2>` / `1>>` / `9>|` as operators, but the
+    # tokenizer's mask was keyed on the bare operator table, which has no
+    # descriptor-prefixed entry -- so a quoted `"2>"` was scanned as syntax and
+    # never masked as data. That asymmetry denied `echo "2>" .env` while the
+    # byte-identical `echo ">" .env` allowed. Every deny below has its quoted
+    # twin so the two halves cannot drift apart again.
+    ("echo x 9> .env", 1, {}, "deny"),
+    ('echo "9>" .env', 1, {}, "allow"),
+    ("echo x 9>| .env", 1, {}, "deny"),
+    ('echo "9>|" .env', 1, {}, "allow"),
+    ("echo x 2>& .env", 1, {}, "deny"),
+    ('echo "2>&" .env', 1, {}, "allow"),
+    ("echo '2>' .env", 1, {}, "allow"),
+    ("echo '1>>' .env", 1, {}, "allow"),
+    # ...and the real descriptor-prefixed redirect into a QUOTED secret path
+    # still denies, in leading and trailing position, which is the half a mask
+    # that over-reached would break.
+    ("1>> '.env' echo hi", 1, {}, "deny"),
+    ("9> '.env' echo hi", 1, {}, "deny"),
+    ("echo hi 2> '.env'", 1, {}, "deny"),
+    ("echo hi 1>> '.env'", 1, {}, "deny"),
+    # A quoted operator in HEAD position is a program NAME, not syntax: the
+    # shell looks for an executable called `2>` and the words behind it are its
+    # ARGUMENTS, so `rm -rf` never runs. The floor has always read the bare
+    # spellings that way (`'>' out.txt ...` allows on every floor since the
+    # literal-redirect marker landed); the descriptor spellings denied only
+    # because the mask did not cover them, which is protection an attacker
+    # removes by deleting one character. Recorded as a PAIR so the two spellings
+    # can never disagree again.
+    ("'>' out.txt rm -rf /critical/outside", 1, {}, "allow"),
+    ("'2>' out.txt rm -rf /critical/outside", 1, {}, "allow"),
+    ("'>>' out.txt git push --force origin main", 1, {}, "allow"),
+    ("'1>>' out.txt git push --force origin main", 1, {}, "allow"),
+    # ...while the BARE spelling of each keeps reading through to the payload.
+    ("> out.txt rm -rf /critical/outside", 1, {}, "deny"),
+    ("2> out.txt rm -rf /critical/outside", 1, {}, "deny"),
+    (">> out.txt git push --force origin main", 1, {}, "deny"),
+    ("1>> out.txt git push --force origin main", 1, {}, "deny"),
     # Command-LEADING redirects: the prefix is stripped so the real head
     # resolves, so the target must be judged before the strip.  A quoted target
     # is only ever visible in argv -- the text pass sees a placeholder.

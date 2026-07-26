@@ -384,6 +384,39 @@ Parsing notes: tokenize argv (shlex for POSIX; separate lightweight matcher for 
 pipe forms — shlex won't parse `| Remove-Item`); split on `;`, `&&`, `|` and check each
 segment; NEVER match against `-m`/`--body` string arguments.
 
+### §6.1 Cross-product gate — where the tripwire ends (issue #63)
+
+The matrix above tests each command in canonical form. `tests/test_prefix_wrapper_crossproduct.py`
+crosses it with the shapes real command lines carry — 28 prefix spellings (leading
+redirections, `--%`, `VAR=value`, combinations) and 74 wrapper spellings (launchers,
+container/remote exec, nested interpreters, scriptblock/evaluator forms) — and asserts BOTH
+directions: charter denies stay denied, curated benign commands stay allowed.
+
+A shape the floor does not cover is recorded in that module's baselines with the issue it
+belongs to, so the repo states where the tripwire ends instead of leaving it unstated:
+`DOCUMENTED_BYPASSES` (whole shapes: #46, #56, #37, #9, #67), `DOCUMENTED_CASE_BYPASSES`
+(individual rules disarmed by an otherwise-covered wrapper: #68, #69, #79, #80),
+`DOCUMENTED_OVER_BLOCKS` (shapes that deny EVERY benign payload: #21 plus the charter's
+own privilege-transition denials) and `DOCUMENTED_CASE_OVER_BLOCKS` (its payload-granular
+mirror). A baseline entry that starts behaving correctly fails the gate as UNEXPECTEDLY
+FIXED, so a fix has to be promoted into the enforced set rather than left un-guarded
+against a later re-break. That promotion is the mechanism, not a formality: 21 of the 22
+#46 shapes and 3 of the #68 case entries were retired this way once main closed them, and
+`stop-parsing-glued` is all that remains of #46.
+
+UNEXPECTEDLY FIXED and the corpus sweep are reported TOGETHER. They were sequential
+`self.fail` calls, and `fail` raises, so a recorded entry that started behaving correctly
+suppressed every live bypass in the same run — three case-level entries were hiding 81
+corpus failures that no run had ever printed.
+
+Two properties keep a baseline from meaning less than it looks. A SHAPE-level entry must
+record which probes it lets through or denies — an empty evidence list would exempt a
+shape from ~955 corpus checks while asserting nothing — and a shape's composed line must
+be a command that actually runs: a payload embedded inside an interpreter's own quoted
+program (`perl -e`, `python -c`, `node -e`, `awk`, `expect -c`) is a string literal of
+that LANGUAGE, never a second layer of shell quoting, which would close the template's
+span and compose a syntax error. Both are asserted, not conventions.
+
 ## §7 Stop-hook verification (T3 warn / T4 block)
 
 Fire ONLY on narrowly detectable states; never on research-only sessions:
