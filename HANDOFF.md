@@ -35,8 +35,11 @@ It has already paid for itself three times over:
 — 661 tests, **2121/2121 smoke**, lint clean, both pins matching the post-bump dispatcher.
 
 **It is NOT ready to merge.** It carries **13 untriaged Codex connector threads** (1×P1, 12×P2)
-raised against its latest heads. Zero-skip means each needs a fix or an explicit written
-classification first. **That is the next session's first task.** The full thread text is saved at
+raised against its latest heads. Under the bounded pipeline (global law 2 / BLUEPRINT law 11,
+ratified in issue #92 after this handoff was first written), they get ONE severity-bar triage:
+confirmed CRITICAL/HIGH (P1-class) findings earn fix commits; everything else becomes a
+tracked issue or a one-line decline on the thread. **That single pass is the PR's next
+step.** The full thread text is saved at
 `.../scratchpad/pr71-open-threads.md`, or re-fetch with:
 
 ```
@@ -46,15 +49,16 @@ gh api graphql -f query='{repository(owner:"Chris0Jeky",name:"agent-harness"){pu
 Its recorded baselines are deliberate — a documented bypass that starts passing fails the gate as
 "UNEXPECTEDLY FIXED", so nothing silently improves or silently rots.
 
-**Beware the review treadmill.** The connector re-reviews every pushed head, so each fix round
-draws a new round of comments; one branch this session went six rounds, every round finding
-genuine second-order defects in the previous round's fixes.
+**The review treadmill, and why it is over.** The connector re-reviews every pushed head, so
+each fix round draws a new round of comments; one branch this session went six rounds, every
+round finding genuine second-order defects in the previous round's fixes. That treadmill is
+exactly the loop law 11 now terminates: two rounds is the ceiling — re-request the review
+after the final fix round, triage what arrives once, then ship or park.
 
-Zero-skip (SPECS §1) still binds: **every in-scope finding gets fixed, at every severity**, and a
-tracked issue is only for findings genuinely out of the PR's scope. What varies is ordering, not
-whether the work happens — a P1 halts the merge immediately, while an in-scope P2 can be fixed in
-the same pass as the rest. Do not read "answer and track" as permission to merge past an in-scope
-low.
+**Superseded (2026-07-26, issue #92):** the zero-skip rule this section used to state is
+replaced by the bounded pipeline — one review round + one fix round; fix commits only for
+confirmed CRITICAL/HIGH defects; everything else a tracked issue or a one-line decline, never
+a silent drop. Global CLAUDE.md law 2 is the home (mirrored in SPECS §1).
 
 ## The redesign, ratified
 

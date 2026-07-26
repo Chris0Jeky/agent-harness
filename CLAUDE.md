@@ -10,7 +10,7 @@ and parsing; runtime-specific hook output stays explicit.
 
 Doc hierarchy — read in this order, only as deep as needed:
 - `README.md` — executable commands and current shipped state
-- `BLUEPRINT.md` — durable policy (tier ladder, the ten laws, regions, model routing)
+- `BLUEPRINT.md` — durable policy (tier ladder, the twelve laws, regions, model routing)
 - `SPECS.md` — schemas, budgets, hook wiring, deny-floor test matrix
 - `BOOK.md` — rationale only; never needed for routine work
 - `legacy/` — historical source material; never run anything in it
