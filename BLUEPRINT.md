@@ -1,6 +1,6 @@
 # Agent Harness Blueprint
 
-Last Updated: 2026-07-25 · Applies to: every repo, every machine, every model tier
+Last Updated: 2026-07-26 · Applies to: every repo, every machine, every model tier
 Concrete schemas, skeletons, and literal file drafts live in [SPECS.md](./SPECS.md).
 
 **Thesis.** A repo's harness is defined by its **blast radius** — what can irreversibly break
@@ -9,12 +9,17 @@ authority agents hold, and what the repo is allowed to grow for itself. The harn
 model may be weak, wrong, or cheaper next year: judgment gets encoded into *structure* (hooks,
 budgets, region maps, restricted toolsets) that a weaker model inherits for free.
 
+**The harness guards catastrophe, not capability.** Hard walls exist only for the irreversible —
+secret exposure, destroyed or unowned work, rewritten shared history, public leaks, production
+data. Everything reversible stays within agent autonomy at every tier: tiers scale
+*verification* with blast radius, and they never subtract autonomy (ratified in issue #92).
+
 Every mechanism here was either proven in the estate or is the missing half of something that
 half-worked. Nothing is speculative.
 
 ---
 
-## 0. The Ten Laws (cross-cutting, all tiers)
+## 0. The Twelve Laws (cross-cutting, all tiers)
 
 1. **Enforcement ladder.** memory → CLAUDE.md → skill → hook → CI → structure (restricted
    toolset, branch protection, sandbox). Every rule lives at exactly ONE layer — the cheapest
@@ -53,18 +58,42 @@ half-worked. Nothing is speculative.
 10. **Misleading authority is worse than nothing.** Dead repos get 3-line tombstones; stale
     authoritative docs (metricalgo's 245-line AGENTS.md for a path that no longer exists) get
     deleted, not maintained; superseded docs leave the routed path.
+11. **Every loop terminates.** Review is one review round plus one fix round, then ship or park.
+    Fix commits are earned only by confirmed CRITICAL/HIGH defects; every other finding becomes
+    a tracked issue or a one-line decline on the thread — never a silent drop, never a
+    fix-commit cascade. A red gate gets three genuinely different attempts, a disputed fact one
+    re-measure; then ship what is sound and park the rest. Evidence invalidation is scoped: a
+    head change re-proves what changed, never everything. (Issue #92 measured the unbounded
+    form: 90% of this repo's PR commits were post-review fixes, and fix rounds introduced
+    defects of their own.)
+12. **Mission first.** Harness, floor, gate, and doc work happens only when it IS the mission;
+    friction found mid-task becomes a one-line tracked issue, never a detour. No new gates whose
+    subject is other gates or doc consistency — grandfathered: the ones already built AND the
+    ones this blueprint itself prescribes (§3 stale-map stamps, the T3 docs-stamp/budget lane,
+    §7's vendor parity-diffs); the Gardener may propose retiring any whose upkeep exceeds what
+    it catches. Sessions are judged
+    by finished tasks: budget each task, park at ~2× budget, and close with a scoreboard
+    (finished / parked / rounds used) ahead of the evidence sections. (Issue #92 measured the
+    inverse: 9:1 ceremony-to-execution and zero product-capability PRs.)
 
 ---
 
 ## 1. The Tier Ladder
 
+**Tiers add verification, never permission.** Every tier ships autonomously on its own
+authority; what rises with blast radius is how much independent verification a merge must carry
+— none at T1/T2 beyond green proving checks, ONE bounded independent review round at T3, the
+full declared two-review gate at T4. A tier is never a reason to wait, ask, or leave finished
+work unmerged — within the repo's declared authority: `.agent-harness/tier.json` binds over
+these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
+
 | Tier | Name | Defined by (blast radius) | Standing context | CI | Authority (default) | Estate examples |
 |---|---|---|---|---|---|---|
 | T0 | **Tombstone** | Nothing runs here | ≤200 tokens | none | none | jekyt, repos, Taskdeck-gemini, pr812-fixes, junk wrappers |
-| T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | full, incl. main | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
-| T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free | extract-api (reference implementation), NavSentinel |
-| T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push free, merge behind self-review gate | Taskdeck (after diet), wealthlens-hq |
-| T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind full gate | olb/series_tools_python, staticprofit (if revived) |
+| T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | full, incl. main; no review owed | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
+| T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free; self-review on green checks | extract-api (reference implementation), NavSentinel |
+| T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push free; merge on green + one bounded independent review round | Taskdeck (after diet), wealthlens-hq |
+| T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind the full declared gate (two independent reviews + green CI) | olb/series_tools_python, staticprofit (if revived) |
 
 **Overlay flags** (orthogonal to tier, set in `tier.json`):
 - `sensitive_data` — adds privacy denies (block pushes to public remotes, `gh repo create --public`)
@@ -118,27 +147,41 @@ Everything in T2, plus:
   red-lane law (below).
 - **Branch protection requiring the lane by name** (verify via `gh api`, don't assume).
 - **Region system ON** (§3) — the promotion trigger and the cure are the same thing.
-- **Atomic review pipeline skill**: review → post findings on PR → fix ALL severities → push →
-  verify; one skill, never pauses between steps ("the answer is ALWAYS yes"). PostToolUse nudge
-  after `gh pr create` points at it (~20 tokens, exactly when relevant).
+- **Bounded review pipeline** (the `review-and-ship` skill is the concrete home): ONE review
+  round — publish ready-for-review, request the bot review, post findings on the PR. The round
+  counts only once an independent review has actually arrived: the requested bot review, or an
+  independent agent review when no bot lands within a bounded wait — never merge at T3+
+  without an arrived independent review, and a clean review (zero findings) satisfies the
+  round: the PR ships on it. Then one severity-bar triage: only confirmed CRITICAL/HIGH
+  defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
+  on the thread. Severity is judged by the finding's content, never the reviewer's label — a
+  bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
+  data-loss defect. One fix round, verified against the fix diff — the re-requested bot review
+  at T3+ IS that verification pass, not a second round — then ship or park (law 11); never
+  pause mid-pipeline to ask whether to continue. PostToolUse nudge after `gh pr create` points
+  at the skill (~20 tokens, exactly when relevant).
 - **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
   this session must have a findings comment; src edits must have a test run (warn at T3, block
   at T4). Stated-override path required, or it trains hook-disabling. Spec in SPECS §7.
 - Two-file truth split with hard caps: "now" doc ≤150 lines, history rotates to archive.
 - Diff-scoped pre-commit (staged .cs → build, .ts/.vue → typecheck) IF measured ≤60s, else the
   check stays in CI. The latency budget is the law; content adapts.
-**Promote to T4** when deployed anywhere, consumed automatically, or you want agent MERGE
-autonomy for batches — autonomy and independent verification rise together. **Demotion
+**Promote to T4** when deployed anywhere, when consumption is automated (failures propagate
+with no human buffer), or when a failure would HARM other people, money, or production data —
+a person merely consuming the output promotes T2→T3; T4 begins where failure hurts a third
+party rather than inconveniencing a consumer. Autonomy stays constant; the verification a
+merge must carry is what rises. **Demotion
 trigger:** a required lane red >7 days while work continues means the gate is dead — fix it or
 formally demote; permanently red gates teach gate-ignoring.
 
 ### T4 — Live wire
 Everything in T3, plus:
-- **Canonical merge gate** (verbatim from extract-api working-style): 2 independent adversarial
-  reviews — at least one from the toolset-restricted no-Bash/no-Write reviewer agent — + ALL
-  bot threads resolved + green CI + PR aged so external bots weigh in (bots caught real bugs
-  self-review missed 3+ recorded times) + never `--delete-branch` a stacked base. Sweep-then-push
-  for large PRs: one multi-agent sweep, one push — never 14 round-per-push cycles.
+- **Canonical merge gate**: 2 independent adversarial reviews — at least one from the
+  toolset-restricted no-Bash/no-Write reviewer agent — + green CI + the requested bot review
+  triaged once by the severity bar (bots caught real bugs self-review missed 3+ recorded
+  times) + never `--delete-branch` a stacked base. T4 raises how many independent eyes the
+  single review round gets, never how many rounds run — law 11's ceiling binds here too.
+  Sweep-then-push for large PRs: one multi-agent sweep, one push — never round-per-push cycles.
 - **Blocking diff-scoped gitleaks** in the required lane (pr-mode never reds on legacy).
 - **Advisory-first gate flips** (ADR-0035 pattern): every new gate lands `enforce:false` with an
   inline comment naming the flip condition, tracking issue, and break-glass path.
@@ -323,11 +366,13 @@ selected scripts — NOT caches/history) with a private remote, plus scheduled b
 `projects/*/memory/`. Today the entire meta-system and 139 memory files are one disk failure
 from gone.
 
-- **Global CLAUDE.md** (~40 lines, literal draft in SPECS §1): the universal laws currently
-  re-earned per repo as duplicate memory files — never merge red CI, zero-skip reviews,
-  verify-before-done, close-keyword hygiene, no `--delete-branch` on stacked bases, HUMAN_TODO
-  surfacing, question protocol, worktree guard, tier check. Ship it in the same commit that
-  DELETES the graduated per-repo memory duplicates.
+- **Global CLAUDE.md** (ratified 2026-07-26, issue #92; the claude-config repo is the
+  canonical home and SPECS §1 the in-repo reference mirror): the universal laws once re-earned
+  per repo as duplicate memory files — never merge red CI, bounded reviews (one round + one
+  fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
+  `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
+  tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
+  the law set shipped; deployment state is measured by `doctor`/`audit`, never asserted here.
 - **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
   global `defaultMode` returns to prompt/acceptEdits; remove global
   `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.
@@ -350,11 +395,14 @@ from gone.
   triage and promotion calls are judgment, not mechanics; write-scoped to docs/ + .claude/),
   `worktree-worker.md`.
 - **Global process skills** stay ≤40 lines, stack-agnostic (safe-shell, small-safe-slice,
-  verification-closeout — already good); plus two ≤80-line workflow-mode skills: `guided-walkthrough`
+  verification-closeout — already good); plus three ≤80-line workflow-mode skills: `guided-walkthrough`
   (turns a cumulative backlog — HUMAN_TODO + open PRs + ledger blockers — into a numbered q-N
   walkthrough with per-item context, suggested action, owner tag, and a step-by-step for human-only
-  items; the explicitly-requested exception to law-6 batching) and `model-effort-routing` (the
-  effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet).
+  items; the explicitly-requested exception to the global CLAUDE.md question-batching law),
+  `model-effort-routing` (the
+  effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet),
+  and `review-and-ship` (the bounded review pipeline — law 11 in executable form; ships from
+  claude-config for both runtimes).
   That skill is the SINGLE home for named models and their effort bindings — §5 and SPECS §8 carry
   only the task-class→tier shape and point here; neither may restate the ladder. Global
   CLAUDE.md (law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
@@ -380,9 +428,11 @@ from gone.
 **Single-runtime by default.** No `.codex/` mirror unless a second vendor genuinely runs
 sessions in that repo (decision recorded in ESTATE.md per repo).
 
-- **Keep external bot reviewers everywhere at T3+** (Codex/Gemini on PRs): they are a free
-  external review tier that caught real bugs self-review missed. "PR must age so automation
-  weighs in" is load-bearing, not ceremony.
+- **Keep external bot reviewers everywhere at T3+** (Codex on PRs — Codex only, never Copilot):
+  a free independent review tier that caught real bugs self-review missed. Publish
+  ready-for-review (a draft invites no bots), request the review, and triage what arrives once
+  by the severity bar — the bots supply T3's independent round; they never license an unbounded
+  comment loop (law 11).
 - **If a second runtime is real** (olb today): thin vendor shim only — routing README +
   runtime config + one dated `00_ACTIVE.md` pointer (edited on pivots; it propagated the
   archive pivot in one 54-line edit). Shared skill BODIES with 4-line vendor adapters, plus a
@@ -393,7 +443,7 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
   while CLAUDE.md says "only when asked" — same repo.)
 - **Global vendor mirror**: the universal laws Claude gets from `~/.claude/CLAUDE.md` reach Codex
   through `~/.codex/AGENTS.md` (Codex's global personal-instructions file) — a faithful mirror of
-  the ten laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
+  the twelve laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
   and the floor note. It declares `~/.claude/CLAUDE.md` canonical and must be kept in sync (a
   parity-diff belongs on the roadmap). This is WHY per-repo dual-runtime AGENTS.md files stay thin:
   the universal rules arrive globally for Codex exactly as they do for Claude, so nothing is
@@ -468,6 +518,16 @@ create a parallel plan (law 9).
   ≤500 lines at T3; the blueprint is subject to the one-home rule and Gardener pruning like
   everything else. If the quarterly demotion review gets skipped, ceremony calcifies — same
   disease, better names.
+- **The harness generates its own workload.** An unbounded frontier — shell-bypass families,
+  gates that check gates — consumes sessions without finishing any mission: measured
+  2026-07-26, zero of this repo's 24 PRs added product capability and 81% of its open issues
+  were floor bypasses or floor false positives (issue #92). Law 12 quarantines meta-work, and
+  the Gardener may propose retiring any gate whose upkeep exceeds what it catches.
+- **Evidence becomes the product.** Closeouts that demand evidence categories but no task count
+  teach agents to optimize evidence instead of outcomes (the overnight doctrine measured 9:1
+  ceremony-to-execution by word count — issue #92). The law-12 scoreboard — finished / parked /
+  rounds used, ahead of the evidence sections — is the countermeasure; when rigor rises while
+  throughput falls, the harness itself is the defect.
 - **The dispatcher is a single point of failure.** One parser bug—or a runtime's fail-open hook
   launch/output behavior—can drop the floor. Rule-evaluation exceptions fail closed after a Bash
   command is identified, but wiring still requires audit, smoke tests, and live canaries; changes
