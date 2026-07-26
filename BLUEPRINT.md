@@ -150,8 +150,9 @@ Everything in T2, plus:
 - **Bounded review pipeline** (the `review-and-ship` skill is the concrete home): ONE review
   round — publish ready-for-review, request the bot review, post findings on the PR. The round
   counts only once an independent review has actually arrived: the requested bot review, or an
-  independent agent review when no bot lands within a bounded wait — never merge at T3+ on
-  zero independent findings. Then one severity-bar triage: only confirmed CRITICAL/HIGH
+  independent agent review when no bot lands within a bounded wait — never merge at T3+
+  without an arrived independent review, and a clean review (zero findings) satisfies the
+  round: the PR ships on it. Then one severity-bar triage: only confirmed CRITICAL/HIGH
   defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
   on the thread. Severity is judged by the finding's content, never the reviewer's label — a
   bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
