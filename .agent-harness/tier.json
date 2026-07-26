@@ -19,6 +19,6 @@
   "budgets": {
     "standing_context_tokens": 6000
   },
-  "human_todo": null,
+  "human_todo": "HUMAN_TODO.md",
   "last_reviewed": "2026-07-13"
 }
