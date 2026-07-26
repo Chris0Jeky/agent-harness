@@ -89,22 +89,18 @@ clean check the floor cannot — so plain removal can allow below T4 and only `-
 ask channel. Two bugs to fix in the same slice: the match is positional-blind (`git worktree add
 ../remove` denies) and `prune` falls through unhandled.
 
-## Human gates (only you can do these)
+## Human gates (only you can do these) — reconciled 2026-07-26
 
-1. **Deploy the floor first.** `main` is at 1.6.12; `~/.claude/hooks` ran **1.6.5** when this
-   was written — a later 2026-07-26 session observed a live deny banner reporting **1.6.12**
-   already running, so verify with `doctor` before re-applying.
-   `py -3 harness.py sync-global --config-root <claude-config checkout>` to preview, then
-   `--apply` (the flag is required). Run it from a clean `main`: `--apply` copies the checkout's
-   *working tree*, so an uncommitted edit ships as readily as a committed one.
-2. **Then re-trust and canary the deployed bytes.** Both Codex adapter pins changed. Start a fresh
-   session in the exact CWD, confirm `/hooks` shows the expected adapter, and run an allow/deny
-   canary. Order matters: canarying before deploying exercises the old 1.6.5 dispatcher and lets
-   the new bytes ship untested.
-3. **`~/.claude` has one unpushed commit** (`e42e211`, the ESTATE + memory update). It could not
-   be pushed because `settings.json` is dirty with this session's `/model` + `/effort` state —
-   `effortLevel: xhigh` was explicitly session-only, so committing it would wrongly persist it.
-   Resolve that file, then `git pull --rebase && git push`.
+1. **Deploy the floor** — **DONE and doctor-verified** (canonical 1.6.12 == deployed 1.6.12;
+   the owner-directed `sync-global --apply` also refreshed `~/.codex/AGENTS.md` and the Codex
+   skills, backups under `~/.codex/backups/20260726T195246Z`). HUMAN_TODO H-1 carries the
+   evidence; the tick is yours.
+2. **Re-trust and canary the deployed bytes** — STILL OPEN (the one live gate): fresh Codex
+   session per repo in its exact CWD, `/hooks` shows the expected adapter, allow/deny canary.
+   The Claude-side hook has live DENY evidence (two `[floor 1.6.12]` banners on 2026-07-26).
+3. **`~/.claude` pushes** — **DONE**: `e42e211` and the follow-on memory commit are on pushed
+   `main`; `settings.json` stayed uncommitted by design. See HUMAN_TODO H-3 for the
+   branch-rule-bypass note that push surfaced.
 4. **Worktrees still accumulate** (#41). Pruning remains manual until that slice lands.
 
 ## What was NOT verified
