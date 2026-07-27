@@ -92,10 +92,13 @@ graduation) → #62 (re-tier the opacity family; folds #32, #17) → #24 (litera
 resolution — the only lever that also helps T4) → #38/#58 (here-string/heredoc bodies are data)
 → #48/#59 (sensitive_data target-aware).
 
-For **#41** specifically: plain `git worktree remove` already refuses a dirty tree — git does the
-clean check the floor cannot — so plain removal can allow below T4 and only `--force` needs the
-ask channel. Two bugs to fix in the same slice: the match is positional-blind (`git worktree add
-../remove` denies) and `prune` falls through unhandled.
+**#41** shipped: plain `git worktree remove` refuses a tree with tracked modifications or
+untracked files — git does the check the floor cannot — and the branch survives, so the plain
+form allows at T1–T3 and only `--force` needs the ask channel. It is **not** harmless, and the
+first draft of the slice wrongly said it was: git's clean check ignores gitignored content,
+which removal then deletes (`.env`, local databases, build trees). Two bugs fixed in the same
+slice: the match tested `token == "remove"` anywhere in argv, so option *values*
+(`add -b remove`, `lock --reason remove`) denied, and `prune` fell through unhandled.
 
 ## Human gates (only you can do these) — reconciled 2026-07-26
 (`HUMAN_TODO.md` is authoritative; it also carries H-5 and H-6, which have no numbered gate in this list.)

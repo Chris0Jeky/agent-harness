@@ -380,7 +380,15 @@ with `sensitive_data`: `git push <public-remote>`, `gh repo create --public`.
 
 MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git checkout -- .`,
 `git worktree remove --force` (warn at T3, allow T1–T2); plus plain `git worktree remove`,
-which is allowed below T4/wave because git itself refuses a dirty or locked tree (issue #41).
+which is allowed at T1–T3 (issue #41).
+
+Plain removal is allowed because git refuses a worktree holding tracked modifications or
+untracked files, and because removal leaves the branch behind — **not** because it is
+harmless. Git's clean check (`git status --porcelain --ignore-submodules=none`) does not
+consider gitignored content: it reports a worktree holding `.env`, `local.db`, `vendor.cfg`
+and `node_modules/` as clean, and removal then deletes all of it. Measured on git 2.45.1 and
+pinned by `ignored_worktree_removal_is_destructive` in `smoke_test.py`. Keep no `.env` that
+must outlive its worktree.
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
 (`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`
