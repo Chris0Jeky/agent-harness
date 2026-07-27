@@ -10240,22 +10240,26 @@ def check(
                                 "[worktree-remove-force] T4/wave: git worktree remove --force "
                                 "deletes a worktree git would otherwise refuse to touch, "
                                 "including another agent's uncommitted work. Drop --force and "
-                                "git will verify the tree is clean first.",
+                                "git will at least refuse a dirty or locked tree.",
                             )
                         if tier >= 3 and not relaxed:
                             return (
                                 "ask",
                                 "[worktree-remove-force] T3: git worktree remove --force "
                                 "discards uncommitted work in that worktree. Confirm, or drop "
-                                "--force so git refuses a dirty tree itself.",
+                                "--force so git refuses a dirty or locked tree itself "
+                                "(gitignored files are deleted either way).",
                             )
                     elif strict:
                         return (
                             "deny",
                             "[worktree-remove-tier] T4/wave: worktree removal is gated here "
-                            "because another agent may own that tree. Confirm it with "
-                            "`git -C <path> status --porcelain`, let the owning session remove "
-                            "it, or clear wave_mode once the wave is done.",
+                            "because another agent may own that tree, and git's own clean "
+                            "check ignores gitignored content -- removal still deletes "
+                            ".env-class files, local databases and build trees. Confirm it "
+                            "with `git -C <path> status --porcelain --ignored`, let the "
+                            "owning session remove it, or clear wave_mode once the wave "
+                            "is done.",
                         )
                 elif worktree_action in {"add", "move"}:
                     # add writes its first operand; move writes its second.
