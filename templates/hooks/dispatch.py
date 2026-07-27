@@ -7326,19 +7326,149 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def command_output(argv: list[str], cwd: str, timeout: float = 3) -> str:
+_PROBE_BINARY_CACHE: dict[str, str | None] = {}
+
+# Read-only probes must never prompt, block on an optional lock, or colour their
+# output. A credential helper that opens a dialog inside a 5s hook is a hang, and
+# a hang is the mute denial issue #90 is about.
+_PROBE_ENVIRONMENT = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GCM_INTERACTIVE": "never",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "NO_COLOR": "1",
+}
+
+
+def resolve_probe_binary(name: str) -> str | None:
+    """Resolve a probe binary against PATH only — never the cwd.
+
+    subprocess's implicit Windows resolution (CreateProcess) searches the
+    current directory, so a repo could shadow `git`/`gh` with a planted
+    executable. Explicit resolution against PATH entries alone closes that lane
+    and makes a missing binary a NAMED diagnosis instead of a silent empty probe.
+    """
+    if name in _PROBE_BINARY_CACHE:
+        return _PROBE_BINARY_CACHE[name]
+    windows = os.name == "nt"
+    resolved = None
+    if os.path.dirname(name):
+        # An explicit path keeps its meaning; searching for it would change it.
+        resolved = name if os.path.isfile(name) else None
+        _PROBE_BINARY_CACHE[name] = resolved
+        return resolved
+    extensions = []
+    if windows:
+        extensions = [
+            entry.strip()
+            for entry in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(
+                os.pathsep
+            )
+            if entry.strip()
+        ]
+    declared_extension = os.path.splitext(name)[1]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        base = os.path.join(entry, name)
+        if not windows:
+            candidates = [base]
+        else:
+            candidates = []
+            if declared_extension and any(
+                declared_extension.lower() == extension.lower()
+                for extension in extensions
+            ):
+                candidates.append(base)
+            candidates.extend(base + extension for extension in extensions)
+        for candidate in candidates:
+            if not os.path.isfile(candidate):
+                continue
+            if windows or os.access(candidate, os.X_OK):
+                resolved = candidate
+                break
+        if resolved:
+            break
+    _PROBE_BINARY_CACHE[name] = resolved
+    return resolved
+
+
+def probe_label(argv: list[str]) -> str:
+    """A short human label for a probe, for diagnosis lines humans read."""
+    return " ".join(argv[:4]) if argv else "<empty command>"
+
+
+def note_probe_failure(diagnostics: list[str] | None, message: str) -> None:
+    """Record one probe failure; a caller that passed nothing sees no change."""
+    if isinstance(diagnostics, list):
+        diagnostics.append(message)
+
+
+def probe_stderr_head(stderr: str | None, limit: int = 160) -> str:
+    """The first non-empty stderr line, truncated — the cause in one line."""
+    for line in (stderr or "").splitlines():
+        text = line.strip()
+        if text:
+            return text[:limit]
+    return "no stderr"
+
+
+def command_output(
+    argv: list[str],
+    cwd: str,
+    timeout: float = 3,
+    diagnostics: list[str] | None = None,
+) -> str:
+    """Run a read-only probe, returning stdout and NAMING every failure mode.
+
+    Issue #90: every failure used to collapse into an indistinguishable "" — a
+    quota-exhausted `gh`, a process-spawn failure under machine resource
+    pressure and a genuinely empty answer were the same value, so the
+    sensitive_data push guard denied with a wall that could not say why. When a
+    list is passed as `diagnostics` each failure appends one line to it; the
+    return contract is unchanged (stdout on rc 0, else "").
+    """
+    label = probe_label(argv)
+    if not argv:
+        note_probe_failure(diagnostics, "empty probe command")
+        return ""
+    executable = resolve_probe_binary(argv[0])
+    if executable is None:
+        note_probe_failure(diagnostics, f"{argv[0]}: not found on PATH")
+        return ""
     try:
         proc = subprocess.run(
-            argv,
+            [executable, *argv[1:]],
             cwd=cwd or None,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, **_PROBE_ENVIRONMENT},
+            stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError as exc:
+        note_probe_failure(diagnostics, f"{label}: spawn failed: {exc}")
         return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        note_probe_failure(diagnostics, f"{label}: timed out after {timeout:g}s")
+        return ""
+    except subprocess.SubprocessError as exc:
+        note_probe_failure(
+            diagnostics, f"{label}: probe failed: {exc.__class__.__name__}"
+        )
+        return ""
+    if proc.returncode != 0:
+        note_probe_failure(
+            diagnostics,
+            f"{label}: exit {proc.returncode}: {probe_stderr_head(proc.stderr)}",
+        )
+        return ""
+    output = proc.stdout.strip()
+    if not output:
+        note_probe_failure(diagnostics, f"{label}: exit 0 with empty output")
+    return output
 
 
 _REMOTE_RESOLUTION_BUDGET_SECONDS = 3.5
@@ -7349,18 +7479,34 @@ def command_output_before_deadline(
     argv: list[str],
     cwd: str,
     deadline: float | None,
+    diagnostics: list[str] | None = None,
 ) -> str:
-    """Run a resolver command without overrunning the hook's aggregate budget."""
+    """Run a resolver command without overrunning the hook's aggregate budget.
+
+    `diagnostics` reaches the runner ONLY when it is this module's own
+    `command_output`: an injected runner (tests, `scripts/replay_corpus.py`)
+    keeps its two-argument contract and must never be handed a keyword it does
+    not declare. Budget outcomes are recorded whichever runner is in use.
+    """
+    label = probe_label(argv)
     if deadline is None:
+        if command_runner is command_output:
+            return command_runner(argv, cwd, diagnostics=diagnostics)
         return command_runner(argv, cwd)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
+        note_probe_failure(diagnostics, f"probe budget exhausted before {label}")
         return ""
     if command_runner is command_output:
-        output = command_runner(argv, cwd, timeout=min(3, remaining))
+        output = command_runner(
+            argv, cwd, timeout=min(3, remaining), diagnostics=diagnostics
+        )
     else:
         output = command_runner(argv, cwd)
-    return output if time.monotonic() <= deadline else ""
+    if time.monotonic() > deadline:
+        note_probe_failure(diagnostics, f"{label}: exceeded probe budget")
+        return ""
+    return output
 
 
 def push_remotes(
