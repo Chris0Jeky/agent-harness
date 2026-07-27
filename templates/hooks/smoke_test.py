@@ -409,6 +409,25 @@ def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]
         detached_removal = git("worktree", "remove", detached, cwd=main_repo)
         reachable_after = git("log", "--all", "--format=%H", cwd=main_repo).stdout
 
+        # Issue #123: git's refusal of an UNTRACKED file is itself
+        # configuration -- `status.showUntrackedFiles=no` blinds the clean
+        # check, so the `-c` spelling is `--force` by another name. This leg
+        # measures both halves: the plain refusal the graduation leans on,
+        # and the weakening spelling the floor now gates.
+        weakened = os.path.join(root, "weakened-wt")
+        git("worktree", "add", "--quiet", weakened, "-b", "weakened", cwd=main_repo)
+        with open(os.path.join(weakened, "untracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("unsaved work\n")
+        refusal = git("worktree", "remove", weakened, cwd=main_repo)
+        weakened_removal = git(
+            "-c",
+            "status.showUntrackedFiles=no",
+            "worktree",
+            "remove",
+            weakened,
+            cwd=main_repo,
+        )
+
     return [
         (
             "git's own !force clean check calls an ignored-only tree CLEAN",
@@ -448,6 +467,16 @@ def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]
             "and its unpushed commit leaves `git log --all` -- detached HEADs die with the tree",
             detached_tip in reachable_after.split(),
             False,
+        ),
+        (
+            "git refuses plain removal of a tree holding an UNTRACKED file",
+            refusal.returncode == 0,
+            False,
+        ),
+        (
+            "but -c status.showUntrackedFiles=no blinds that refusal -- force by another spelling",
+            weakened_removal.returncode,
+            0,
         ),
     ]
 
@@ -647,14 +676,23 @@ CASES = [
     ("git checkout -- .", 2, {}, "allow"),
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
-    # `git worktree remove` (issue #41). The PLAIN form is gated by the T4/wave
-    # posture alone (allow T1-T3); `--force` overrides git's refusal on a DIRTY
-    # tree and is a work-loss guard like its siblings above. A LOCKED tree needs
-    # the DOUBLED flag: measured on git 2.45.1, a single `--force` on a locked
-    # tree exits 128 ("use 'remove -f -f' to override or unlock first") and
-    # `-f -f` exits 0. The floor scores `-ff` and `-f -f` exactly as `-f`, so
-    # every overriding spelling lands on that same ladder -- the cases below
-    # pin that, and it is why the text-level distinction costs no verdict.
+    # `git worktree remove` (issues #41/#117/#123). The PLAIN form allows at
+    # EVERY tier including T4/wave (owner ruling 2026-07-27): git itself
+    # refuses a tree with tracked modifications or untracked files, and law
+    # 7's `git switch -c` mandate keeps commits ref-held. `--force` overrides
+    # git's refusal on a DIRTY tree and is a work-loss guard like its siblings
+    # above. A LOCKED tree needs the DOUBLED flag: measured on git 2.45.1, a
+    # single `--force` on a locked tree exits 128 ("use 'remove -f -f' to
+    # override or unlock first") and `-f -f` exits 0. The floor scores `-ff`
+    # and `-f -f` exactly as `-f`, so every overriding spelling lands on that
+    # same ladder -- the cases below pin that. Three LAUNDERED force spellings
+    # ride the same ladder, because an opaque spelling must never score better
+    # than the literal form it might be: a runtime-computed ACTION word
+    # (`$ACT` resplits after expansion and can deliver `remove --force`), a
+    # dynamic option or separator-free operand token (`-$X`, bare `$A`), and
+    # argv-visible config that blinds git's clean check
+    # (`-c status.showUntrackedFiles=no` -- measured, it turns the refusal on
+    # an untracked file into exit 0; the fixture above pins it with real git).
     #
     # The plain form does NOT "destroy nothing" -- an earlier draft of this
     # block said so and was measurably wrong. Git's own pre-removal check,
@@ -663,12 +701,68 @@ CASES = [
     # then deletes all of it (git 2.45.1 -- `ignored_worktree_removal_is_
     # destructive` above pins it with real git). What git does enforce is that
     # tracked modifications and untracked non-ignored files block the removal,
-    # and the BRANCH survives, so committed work is never lost.
+    # and a checked-out BRANCH survives, so work committed on a branch is
+    # never lost (a DETACHED worktree's commits are not so held -- the
+    # fixture's detached leg pins that loss; law 7 is the guard).
     ("git worktree remove ../linked", 1, {}, "allow"),
     ("git worktree remove ../linked", 2, {}, "allow"),
     ("git worktree remove ../linked", 3, {}, "allow"),
-    ("git worktree remove ../linked", 4, {}, "deny"),
-    ("git worktree remove ../linked", 2, {"wave_mode": True}, "deny"),
+    ("git worktree remove ../linked", 4, {}, "allow"),
+    ("git worktree remove ../linked", 2, {"wave_mode": True}, "allow"),
+    # the laundered force spellings, on the explicit-force ladder exactly
+    ("git worktree `printf remove` -f ../wt", 1, {}, "allow"),
+    ("git worktree `printf remove` -f ../wt", 3, {}, "ask"),
+    (
+        "git worktree `printf remove` -f ../wt",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
+    ("git worktree `printf remove` -f ../wt", 4, {}, "deny"),
+    ("git worktree `printf remove` -f ../wt", 2, {"wave_mode": True}, "deny"),
+    ("git worktree $(printf remove) -f ../wt", 4, {}, "deny"),
+    ("git worktree $ACT ../wt", 3, {}, "ask"),
+    ("git worktree ${ACT} ../wt", 4, {}, "deny"),
+    ("git worktree %ACT% ../wt", 4, {}, "deny"),
+    ("git worktree !ACT! ../wt", 3, {}, "ask"),
+    ("git worktree remove -$X ../wt", 3, {}, "ask"),
+    ("git worktree remove -$X ../wt", 4, {}, "deny"),
+    ("git worktree remove $A ../wt", 3, {}, "ask"),
+    ("git worktree remove $A", 4, {}, "deny"),
+    # law 7's own spelling: a dynamic-prefixed PATH COMPOUND cannot expand to
+    # an option word (the /<tail> pins it), so it keeps the plain score
+    ("git worktree remove $WT_PROJECT_DIR/wt41", 3, {}, "allow"),
+    ("git worktree remove $WT_PROJECT_DIR/wt41", 4, {}, "allow"),
+    # after `--` git reads every token as a PATH, so a dynamic one is inert
+    ("git worktree remove -- $A", 3, {}, "allow"),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 1, {}, "allow"),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 3, {}, "ask"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 4, {}, "deny"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        2,
+        {"wave_mode": True},
+        "deny",
+    ),
+    ("git -cSTATUS.SHOWUNTRACKEDFILES=NO worktree remove ../wt", 4, {}, "deny"),
+    (
+        "git --config-env=status.showUntrackedFiles=SUF worktree remove ../wt",
+        3,
+        {},
+        "ask",
+    ),
+    ("git -c status.showUntrackedFiles=$V worktree remove ../wt", 4, {}, "deny"),
+    ("git -c $CFG worktree remove ../wt", 3, {}, "ask"),
+    # values that PRESERVE the clean check, and unrelated keys, stay plain
+    ("git -c status.showUntrackedFiles=all worktree remove ../wt", 4, {}, "allow"),
+    ("git -c status.showUntrackedFiles=normal worktree remove ../wt", 3, {}, "allow"),
+    ("git -c color.ui=false worktree remove ../wt", 4, {}, "allow"),
     ("git worktree remove --force ../linked", 1, {}, "allow"),
     ("git worktree remove --force ../linked", 2, {}, "allow"),
     ("git worktree remove --force ../linked", 3, {}, "ask"),
