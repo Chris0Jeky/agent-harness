@@ -331,6 +331,50 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("inside a sensitive_data root", detail)
 
+    def test_refspec_destination_outside_refs_heads_keeps_the_deny(self):
+        # A valid branch SOURCE can still write a remote tag: `main:refs/tags/v1`
+        # publishes a ref class the ratified condition set excludes.
+        for refspec in ("main:refs/tags/v1", "main:refs/notes/x", "main:refs/*"):
+            allowed, _detail = self.narrowing(["origin", refspec], self.nonsensitive)
+            self.assertFalse(allowed, refspec)
+        # the ordinary branch-to-branch spellings still allow
+        for refspec in ("main", "main:main", "main:refs/heads/other"):
+            allowed, detail = self.narrowing(["origin", refspec], self.nonsensitive)
+            self.assertTrue(allowed, (refspec, detail))
+
+    def test_the_narrowing_is_observed_inside_nested_commands(self):
+        """The 10 recursive `push_narrowing` forwards were entirely unpinned.
+
+        A review mutation that rewired ALL TEN nested forwards to a divergent
+        stub left the full unit suite AND the 2237-case smoke matrix green, so
+        a future edit dropping one would ship silently — and the verdict inside
+        `bash -c` would diverge from the same command typed directly, which is
+        the nesting-dependent behaviour this parameter exists to prevent.
+        """
+        observed = []
+
+        def stub(*_args, **_kwargs):
+            observed.append(1)
+            return False, "nested-stub-reached"
+
+        for command in (
+            f'git -C "{self.nonsensitive}" push origin main',
+            f"bash -c 'git -C \"{self.nonsensitive}\" push origin main'",
+            f"sh -c 'git -C \"{self.nonsensitive}\" push origin main'",
+            f'env FOO=1 git -C "{self.nonsensitive}" push origin main',
+            f'true && git -C "{self.nonsensitive}" push origin main',
+        ):
+            del observed[:]
+            decision, reason = checked(
+                command,
+                self.sensitive_root,
+                remote_resolver=_public_resolver,
+                push_narrowing=stub,
+            )
+            self.assertEqual(decision, "deny", command)
+            self.assertIn("nested-stub-reached", reason, command)
+            self.assertTrue(observed, f"narrowing never reached for: {command}")
+
     def test_unresolvable_cwd_keeps_the_deny(self):
         allowed, detail = self.narrowing(
             ["origin", "main"], os.path.join(self.root, "missing")

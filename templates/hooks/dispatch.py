@@ -8630,17 +8630,27 @@ def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
     """Source side of each explicit refspec; None for any non-plain shape.
 
     Plain means a named source with no force prefix, no deletion (empty
-    source), and no wildcard. The caller decides what a plain source must
-    resolve to.
+    source), and no wildcard, writing to a destination inside refs/heads.
+    The caller decides what a plain source must resolve to.
+
+    The DESTINATION side matters even though this function is named for the
+    source: `main:refs/tags/v1` has a perfectly valid branch source and still
+    creates a remote TAG, a ref class the ratified #48 condition set excludes
+    (PR #132 review). An unqualified destination is left to git, which resolves
+    it under refs/heads for a branch source.
     """
     sources: list[str] = []
     for refspec in refspecs:
         if refspec.startswith("+"):
             return None
-        src, colon, _dst = refspec.partition(":")
+        src, colon, dst = refspec.partition(":")
         if colon and not src:
             return None
         if not src or "*" in src:
+            return None
+        if colon and dst.startswith("refs/") and not dst.startswith("refs/heads/"):
+            return None
+        if "*" in dst:
             return None
         sources.append(src)
     return sources
