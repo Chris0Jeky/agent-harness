@@ -1016,27 +1016,148 @@ def codex_hook_sources_status(
     )
 
 
+def tier_paths(repo: Path) -> list[Path]:
+    """Every tier declaration this repo carries, highest precedence first.
+
+    `.agent-harness/tier.json` is the runtime-neutral home and `.claude/` the
+    legacy one a migrating repo may still carry. Precedence orders the fields
+    that are not comparable (`human_todo`, `budgets`); it never decides the
+    posture — see `merge_tier_declarations`.
+    """
+    return [
+        repo / directory / "tier.json"
+        for directory in (".agent-harness", ".claude")
+        if (repo / directory / "tier.json").is_file()
+    ]
+
+
 def tier_path(repo: Path) -> Path | None:
-    for candidate in (
-        repo / ".agent-harness" / "tier.json",
-        repo / ".claude" / "tier.json",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
+    """The declaration `seed` must refuse to write over, if any exists."""
+    paths = tier_paths(repo)
+    return paths[0] if paths else None
 
 
-def load_tier(repo: Path) -> tuple[Path | None, dict[str, Any]]:
-    path = tier_path(repo)
-    if path is None:
-        return None, {}
+def read_tier_file(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HarnessError(f"invalid tier file {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise HarnessError(f"tier file must contain an object: {path}")
-    return path, data
+    return data
+
+
+# Weakest first: the strictest declaration binds, so a legacy `human-only`
+# merge gate cannot be masked by a newer `free` one.
+AUTHORITY_STRICTNESS = ("free", "gated", "human-only")
+
+
+def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+    """The one posture co-located declarations bind to: the strictest.
+
+    Law 9 and the dispatcher (`dispatch.load_tier`, SPECS §5) agree on the
+    rules, and this mirrors them exactly rather than inventing a second
+    semantics for the auditing tool:
+
+    * the HIGHEST declared tier wins;
+    * tightening flags are ORed, so a stale `.claude/tier.json` carrying
+      `sensitive_data` keeps binding after the new file omits it;
+    * `relaxed_work_loss_guards` is the one RELAXATION, so it applies only
+      when EVERY declaration agrees — a single silent file must not hand a
+      repo a looser git posture than it declared;
+    * `authority.push`/`.merge` take the strictest value declared.
+
+    Reading `.agent-harness/tier.json` with FALLBACK to the legacy file was
+    first-found-wins, so a repo declaring T1 in the new file while a surviving
+    T4 + sensitive_data legacy file sat beside it audited at the WEAKER posture
+    the dispatcher would never grant it (issue #99).
+
+    Fields that express no posture — `name`, `human_todo`, `budgets`,
+    `last_reviewed` — are not comparable, so the highest-precedence
+    declaration that CONTAINS the key supplies it (an explicit `null` is a
+    declaration, not an omission). Each file is still validated on its own by
+    `validate_tier`; this merge is about what binds, not about what is legal.
+    """
+    if not declarations:
+        return {}
+    merged: dict[str, Any] = {}
+    for declaration in reversed(declarations):
+        merged.update(declaration)
+    tiers = [
+        declaration["tier"]
+        for declaration in declarations
+        if declaration.get("tier") in TIER_NAMES
+    ]
+    if tiers:
+        merged["tier"] = max(tiers)
+    merged["flags"] = merge_tier_flags(declarations)
+    authority = merge_tier_authority(declarations)
+    if authority is not None:
+        merged["authority"] = authority
+    return merged
+
+
+def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
+    """OR every tightening flag; require unanimity for the one relaxation."""
+    flag_sets = [
+        declaration.get("flags")
+        for declaration in declarations
+        if isinstance(declaration.get("flags"), dict)
+    ]
+    if not flag_sets:
+        # Nothing mergeable: keep what the highest-precedence file declared so
+        # `validate_tier` still reports the malformed value it reported before.
+        return declarations[0].get("flags")
+    flags: dict[str, Any] = {}
+    for flag_set in flag_sets:
+        for key, value in flag_set.items():
+            if key == "relaxed_work_loss_guards":
+                continue
+            if isinstance(value, bool):
+                flags[key] = bool(flags.get(key)) or value
+            elif key not in flags:
+                flags[key] = value
+    flags["relaxed_work_loss_guards"] = all(
+        bool(flag_set.get("relaxed_work_loss_guards")) for flag_set in flag_sets
+    )
+    return flags
+
+
+def merge_tier_authority(declarations: list[dict[str, Any]]) -> Any:
+    """The strictest push/merge dial any declaration sets, or None."""
+    authorities = [
+        declaration.get("authority")
+        for declaration in declarations
+        if isinstance(declaration.get("authority"), dict)
+    ]
+    if not authorities:
+        return None
+    merged = dict(authorities[-1])
+    for authority in reversed(authorities):
+        for key, value in authority.items():
+            current = merged.get(key)
+            if (
+                value in AUTHORITY_STRICTNESS
+                and current in AUTHORITY_STRICTNESS
+                and AUTHORITY_STRICTNESS.index(value)
+                <= AUTHORITY_STRICTNESS.index(current)
+            ):
+                continue
+            merged[key] = value
+    return merged
+
+
+def tier_declarations(repo: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Read every declaration this repo carries, highest precedence first."""
+    return [(path, read_tier_file(path)) for path in tier_paths(repo)]
+
+
+def load_tier(repo: Path) -> tuple[list[Path], dict[str, Any]]:
+    """(the declaration files, the strictest posture they bind to)."""
+    declarations = tier_declarations(repo)
+    return [path for path, _ in declarations], merge_tier_declarations(
+        [data for _, data in declarations]
+    )
 
 
 def validate_tier(data: dict[str, Any]) -> list[str]:
@@ -2183,15 +2304,26 @@ def audit_repo(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     repo = git_root(path)
-    config_path, tier_data = load_tier(repo)
+    declarations = tier_declarations(repo)
+    tier_data = merge_tier_declarations([data for _, data in declarations])
     issues: list[str] = []
-    if config_path is None:
+    if not declarations:
         issues.append(
             "missing .agent-harness/tier.json (legacy .claude/tier.json also accepted)"
         )
         tier = 1
     else:
-        issues.extend(validate_tier(tier_data))
+        # Validation is PER FILE: the merged posture is deliberately allowed to
+        # combine a tier from one declaration with a name from another, so
+        # validating it would invent contradictions the repo never declared.
+        # The file is named only when there is more than one to blame.
+        for config_path, data in declarations:
+            label = (
+                f"{config_path.relative_to(repo).as_posix()}: "
+                if len(declarations) > 1
+                else ""
+            )
+            issues.extend(f"{label}{issue}" for issue in validate_tier(data))
         tier = tier_data.get("tier") if tier_data.get("tier") in TIER_NAMES else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
@@ -2211,7 +2343,11 @@ def audit_repo(
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
-        "tier_file": str(config_path) if config_path else None,
+        "tier_file": str(declarations[0][0]) if declarations else None,
+        # Every declaration that bound this posture, not just the first found:
+        # a consumer that sees one path cannot tell a single-file repo from one
+        # whose legacy file supplied the tier.
+        "tier_files": [str(config_path) for config_path, _ in declarations],
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
@@ -4533,7 +4669,7 @@ def doctor(args: argparse.Namespace) -> int:
         )
         try:
             reality_repo = git_root(Path(args.repo))
-            _reality_config, reality_tier_data = load_tier(reality_repo)
+            _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
                 if reality_tier_data.get("tier") in TIER_NAMES
@@ -4609,7 +4745,10 @@ def audit_command(
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
-        print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
+        sources = ", ".join(result["tier_files"]) or "missing"
+        if len(result["tier_files"]) > 1:
+            sources += "; strictest binds"
+        print(f"tier: T{result['tier']} ({sources})")
         print(result["git"])
         for issue in result["issues"]:
             print(f"[FAIL] {issue}")

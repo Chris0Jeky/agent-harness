@@ -166,6 +166,12 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 - Read by: dispatcher hook (`tier`, `flags`), Gardener, bootstrapper, CI templates. The
   dispatcher also reads legacy `.claude/tier.json` files so existing estates can migrate
   without a flag day.
+- Two co-located declarations bind to the STRICTEST union, never to the first one found
+  (law 9; `dispatch.load_tier`; `harness.merge_tier_declarations`): highest `tier` wins,
+  tightening flags and the strictest `authority` dial are unioned, and the one relaxation
+  (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. Non-posture fields
+  (`name`, `human_todo`, `budgets`, `last_reviewed`) come from `.agent-harness/tier.json` when
+  it declares them; each file is still validated on its own.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
   the budget script fails if they disagree.

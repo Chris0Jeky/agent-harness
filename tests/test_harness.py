@@ -5239,6 +5239,175 @@ allow_local_binding = true
         self.assertIn("[FAIL] declared vs real", output)
         self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
 
+    def test_doctor_resolves_the_strictest_of_two_tier_declarations(self) -> None:
+        # `doctor --repo` shares audit's resolution path, so it inherited the
+        # same first-found-wins bug (issue #99): the legacy declaration below
+        # is the only one that names a human-action file, and reading just
+        # `.agent-harness/tier.json` reported nothing to check.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        for directory, declaration in (
+            (
+                ".agent-harness",
+                {
+                    "tier": 1,
+                    "name": harness.TIER_NAMES[1],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": False},
+                },
+            ),
+            (
+                ".claude",
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "human-only"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": "HUMAN_TODO.md",
+                },
+            ),
+        ):
+            (repo / directory).mkdir()
+            (repo / directory / "tier.json").write_text(
+                json.dumps(declaration), encoding="utf-8"
+            )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
+
+
+class TierResolutionTests(unittest.TestCase):
+    """Co-located declarations bind to the STRICTEST union, not the first found.
+
+    Law 9 and `dispatch.load_tier` (SPECS §5) specify one resolution; audit read
+    `.agent-harness/tier.json` with FALLBACK to the legacy file, so a repo
+    declaring T1 beside a surviving T4 + sensitive_data legacy file audited at a
+    posture the dispatcher would never grant it (issue #99).
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def declare(self, directory: str, repo: Path | None = None, **fields: object) -> Path:
+        declaration: dict[str, object] = {
+            "tier": 1,
+            "name": harness.TIER_NAMES[1],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        declaration.update(fields)
+        if "tier" in fields and "name" not in fields:
+            declaration["name"] = harness.TIER_NAMES[declaration["tier"]]
+        path = (repo or self.repo) / directory / "tier.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(declaration), encoding="utf-8")
+        return path
+
+    def posture(self) -> dict[str, object]:
+        return harness.load_tier(self.repo)[1]
+
+    def test_agreeing_declarations_bind_what_they_both_say(self) -> None:
+        for directory in (".agent-harness", ".claude"):
+            self.declare(directory, tier=3, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 3)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+        self.assertEqual(len(harness.load_tier(self.repo)[0]), 2)
+
+    def test_the_new_file_binds_when_it_is_the_stricter_one(self) -> None:
+        self.declare(".agent-harness", tier=4, flags={"wave_mode": True})
+        self.declare(".claude", tier=1, flags={"wave_mode": False})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["wave_mode"])
+
+    def test_a_stale_legacy_declaration_cannot_be_masked(self) -> None:
+        # The reported shape: T1 in the new file, T4 + sensitive_data in a
+        # legacy file nobody deleted. First-found-wins audited it as T1.
+        self.declare(".agent-harness", tier=1, flags={"sensitive_data": False})
+        self.declare(".claude", tier=4, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+
+    def test_every_tightening_flag_is_unioned(self) -> None:
+        self.declare(".agent-harness", flags={"sensitive_data": True})
+        self.declare(".claude", flags={"wave_mode": True, "dormant_production": True})
+        self.assertEqual(
+            self.posture()["flags"],
+            {
+                "sensitive_data": True,
+                "wave_mode": True,
+                "dormant_production": True,
+                "relaxed_work_loss_guards": False,
+            },
+        )
+
+    def test_the_work_loss_relaxation_needs_every_declaration_to_agree(self) -> None:
+        self.declare(".agent-harness", flags={"relaxed_work_loss_guards": True})
+        self.declare(".claude", flags={"relaxed_work_loss_guards": False})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Silence is not agreement either: the guard stays on.
+        self.declare(".claude", flags={})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Unanimous, and only then, the declared relaxation applies.
+        self.declare(".claude", flags={"relaxed_work_loss_guards": True})
+        self.assertTrue(self.posture()["flags"]["relaxed_work_loss_guards"])
+
+    def test_a_lone_declaration_binds_on_its_own_from_either_home(self) -> None:
+        for index, directory in enumerate((".agent-harness", ".claude")):
+            with self.subTest(directory=directory):
+                repo = self.repo / f"lone-{index}"
+                declared = self.declare(
+                    directory, repo=repo, tier=3,
+                    flags={"relaxed_work_loss_guards": True},
+                )
+                paths, posture = harness.load_tier(repo)
+                self.assertEqual(posture["tier"], 3)
+                self.assertTrue(posture["flags"]["relaxed_work_loss_guards"])
+                self.assertEqual(paths, [declared])
+
+    def test_no_declaration_binds_nothing(self) -> None:
+        self.assertEqual(harness.load_tier(self.repo), ([], {}))
+        self.assertIsNone(harness.tier_path(self.repo))
+
+    def test_the_strictest_authority_dial_binds(self) -> None:
+        self.declare(".agent-harness", authority={"push": "free", "merge": "free"})
+        self.declare(".claude", authority={"push": "gated", "merge": "human-only"})
+        self.assertEqual(
+            self.posture()["authority"], {"push": "gated", "merge": "human-only"}
+        )
+
+    def test_non_posture_fields_come_from_the_runtime_neutral_file(self) -> None:
+        # `human_todo` is not comparable, so precedence decides it — and an
+        # explicit null is a declaration, not an omission.
+        self.declare(".agent-harness", human_todo="HUMAN_TODO.md")
+        self.declare(".claude", human_todo="TODO-human.md")
+        self.assertEqual(self.posture()["human_todo"], "HUMAN_TODO.md")
+        self.declare(".agent-harness", human_todo=None)
+        self.assertIsNone(self.posture()["human_todo"])
+        # An absent key falls through to the file that does declare one.
+        self.declare(".agent-harness")
+        self.assertEqual(self.posture()["human_todo"], "TODO-human.md")
+
+    def test_a_malformed_declaration_still_raises_with_its_path(self) -> None:
+        path = self.declare(".claude")
+        path.write_text("[]", encoding="utf-8")
+        with self.assertRaises(harness.HarnessError) as caught:
+            harness.load_tier(self.repo)
+        self.assertIn(str(path), str(caught.exception))
+
 
 class FakeCommandRunner:
     """A stand-in resolver: records argv, never spawns a process."""
@@ -5375,6 +5544,57 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("acme/widgets", detail)
         self.assertIn("https://github.com/acme/widgets.git", detail)
         self.assertIn("PUBLIC", detail)
+
+    def test_a_stale_legacy_declaration_still_binds_the_audit(self) -> None:
+        # End-to-end shape of issue #99: the repo declares T1 without the
+        # overlay, a legacy file nobody deleted declares T4 + sensitive_data,
+        # and first-found-wins never even probed the remote.
+        repo = self.make_repo(tier=1, sensitive_data=False)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps(
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "gated"},
+                    "flags": {"sensitive_data": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(result["tier"], 4)
+        self.assertEqual(len(result["tier_files"]), 2)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_two_declarations_name_the_file_each_issue_came_from(self) -> None:
+        repo = self.make_repo()
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps({"tier": 9, "authority": {}, "flags": {}}), encoding="utf-8"
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertTrue(
+            all(
+                issue.startswith(".claude/tier.json: ")
+                for issue in result["issues"]
+                if "tier must be" in issue or "authority." in issue
+            ),
+            result["issues"],
+        )
+        self.assertIn(
+            ".claude/tier.json: tier must be an integer from 0 through 4",
+            result["issues"],
+        )
+        # The valid declaration still binds the tier the invalid one cannot.
+        self.assertEqual(result["tier"], 2)
 
     def test_public_non_origin_remote_is_advisory_not_a_failure(self) -> None:
         # A private fork of a public project: origin private, upstream public.
