@@ -10198,11 +10198,17 @@ def check(
                 #
                 # The plain form therefore stays gated where another agent may
                 # own the tree: allow T1-T3, deny at T4/wave_mode. `--force`
-                # additionally overrides git's refusal on a dirty or LOCKED
-                # tree, which is where uncommitted TRACKED work is lost, so it
-                # carries the full work-loss ladder (allow T1-T2, ask T3, deny
-                # T4/wave, honouring the declared relaxed-git posture exactly
-                # as `reset --hard` and `clean -f` do).
+                # additionally overrides git's refusal on a DIRTY tree, which
+                # is where uncommitted TRACKED work is lost; a LOCKED tree
+                # needs the doubled flag, and git says so itself -- measured on
+                # 2.45.1, a single `--force` on a locked tree exits 128 with
+                # "cannot remove a locked working tree ... use 'remove -f -f'
+                # to override or unlock first", while `-f -f` exits 0. The
+                # force test below scores `-ff`, `-f -f` and `--force --force`
+                # exactly as `-f`, so every overriding spelling carries the
+                # full work-loss ladder (allow T1-T2, ask T3, deny T4/wave,
+                # honouring the declared relaxed-git posture exactly as
+                # `reset --hard` and `clean -f` do).
                 # The previous unconditional deny protected nothing: `rm -rf` and
                 # `Remove-Item -Recurse` are not git commands and never reached
                 # this rule, so a floor-respecting agent could only ever ACCUMULATE

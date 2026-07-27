@@ -593,8 +593,13 @@ CASES = [
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
     # `git worktree remove` (issue #41). The PLAIN form is gated by the T4/wave
-    # posture alone (allow T1-T3); `--force` overrides git's refusal on a dirty
-    # or LOCKED tree and is a work-loss guard like its siblings above.
+    # posture alone (allow T1-T3); `--force` overrides git's refusal on a DIRTY
+    # tree and is a work-loss guard like its siblings above. A LOCKED tree needs
+    # the DOUBLED flag: measured on git 2.45.1, a single `--force` on a locked
+    # tree exits 128 ("use 'remove -f -f' to override or unlock first") and
+    # `-f -f` exits 0. The floor scores `-ff` and `-f -f` exactly as `-f`, so
+    # every overriding spelling lands on that same ladder -- the cases below
+    # pin that, and it is why the text-level distinction costs no verdict.
     #
     # The plain form does NOT "destroy nothing" -- an earlier draft of this
     # block said so and was measurably wrong. Git's own pre-removal check,
