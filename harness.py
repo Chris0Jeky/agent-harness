@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tomllib
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime, time, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
@@ -71,12 +72,239 @@ class HarnessError(RuntimeError):
     """A user-actionable harness failure."""
 
 
+# --- Probe binary resolution -------------------------------------------------
+#
+# Every helper this file spawns — `git`, `gh`, `powershell`, `taskkill` — used to
+# be handed to the operating system as a BARE NAME. On Windows that is a hole:
+# `CreateProcess` searches the calling process's current directory before it
+# reaches PATH, and `audit`/`doctor` are run from, or against, a repository the
+# operator does not fully trust. A repository shipping a `git.exe` therefore got
+# to run it inside the auditor. (Measured, not reasoned about: the shadow is
+# taken whenever `NoDefaultCurrentDirectoryInExePath` is unset, which is every
+# plain PowerShell and cmd session — Git Bash happens to set it, which is why
+# this stayed invisible.)
+#
+# The deny floor closed the identical lane in 1.6.16. This is the harness's own
+# implementation of that contract — the two files may not import each other, so
+# each carries its own readable copy — and it holds four rules:
+#
+#   1. A bare argv[0] is resolved against ABSOLUTE PATH entries only. Never the
+#      cwd; never a relative entry, including the empty one Windows reads as
+#      ".". A name that cannot be resolved is a NAMED failure, not a spawn.
+#   2. A non-re-parsing image (`.EXE`/`.COM`) anywhere on PATH outranks a script
+#      shim (`.CMD`/`.BAT`) everywhere on PATH. This deliberately inverts the
+#      shell's per-directory PATHEXT walk, so a directory early on PATH cannot
+#      turn a plain spawn into a `cmd.exe` one that re-reads the command line.
+#   3. When a shim is the only answer it may still be spawned — a box whose `gh`
+#      is genuinely a `.cmd` must remain auditable — but only with argv that
+#      survives `cmd.exe` re-parsing intact.
+#   4. An argv[0] that already carries a directory keeps its meaning verbatim;
+#      searching for it would change what the caller asked for.
+NON_REPARSING_PROBE_SUFFIXES = frozenset({".exe", ".com"})
+# Windows' own default, used when PATHEXT is absent or empty. Treating an empty
+# PATHEXT as "no suffixes" would leave every probe on that box unresolvable.
+DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+# Two populations of token, two opposite rules.
+#
+# argv[1:] carries text the inspected repository influences — a remote name, a
+# repository slug, a ref — so it gets an ALLOWLIST of the characters those
+# legitimately hold, and anything else is refused.
+#
+# argv[0] is this resolver's own output: an absolute PATH directory chosen by
+# whoever installed the machine. An allowlist there rejects ordinary installs
+# (`Program Files (x86)`, an accented user name) and would make every probe on
+# such a box a permanent UNPROVEN, so it gets a DENYLIST in two parts: the
+# characters `cmd.exe` acts on even inside quotes, and its token delimiters,
+# which split an UNQUOTED command name (`C:\dev\a,b\gh.cmd` runs `C:\dev\a`).
+PROBE_SHIM_FATAL_IMAGE_CHARACTERS = re.compile('[&|<>^"%!\r\n]')
+PROBE_SHIM_SPLITTING_IMAGE_CHARACTERS = re.compile(r"[,;=()]")
+PROBE_SHIM_SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9._:/@~=+\\-]*")
+
+# Keyed by the environment that produced the answer, so an injected PATH never
+# reads a resolution made under a different one.
+_PROBE_BINARY_CACHE: dict[tuple[str, str, str], str | None] = {}
+
+
+def reset_probe_binary_cache() -> None:
+    """Forget every resolution. For tests that plant binaries as they go."""
+    _PROBE_BINARY_CACHE.clear()
+
+
+def probe_environment(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    """The environment a resolution reads; the process's own unless injected."""
+    return os.environ if env is None else env
+
+
+def probe_search_directories(env: Mapping[str, str] | None = None) -> list[str]:
+    """The directories a bare probe name may be resolved from.
+
+    Absolute entries only. A relative entry — `tools`, `.`, or the empty string
+    Windows reads as the current directory — resolves against the cwd, and the
+    cwd is exactly what this resolver exists to keep out of the search.
+    """
+    raw = probe_environment(env).get("PATH", "")
+    return [entry for entry in raw.split(os.pathsep) if entry and os.path.isabs(entry)]
+
+
+def probe_search_suffixes(env: Mapping[str, str] | None = None) -> list[str]:
+    """The suffixes a bare probe name may acquire. None off Windows."""
+    if os.name != "nt":
+        return []
+    raw = probe_environment(env).get("PATHEXT", "") or DEFAULT_WINDOWS_PATHEXT
+    return [entry.strip() for entry in raw.split(os.pathsep) if entry.strip()]
+
+
+def probe_candidate_paths(
+    name: str, directories: list[str], suffixes: list[str]
+) -> list[str]:
+    """The absolute candidates for `name`, in the order they may be tried.
+
+    Two passes, images before shims: every directory is searched for a
+    `.EXE`/`.COM` before any directory is allowed to answer with a `.CMD`/`.BAT`.
+    PATH order is preserved within a pass, so this only ever demotes a shim —
+    it never promotes a directory over one earlier on PATH. Off Windows there
+    are no suffixes and the result is plain PATH order.
+    """
+    if not suffixes:
+        return [os.path.join(directory, name) for directory in directories]
+    images = [
+        suffix for suffix in suffixes if suffix.lower() in NON_REPARSING_PROBE_SUFFIXES
+    ]
+    shims = [
+        suffix
+        for suffix in suffixes
+        if suffix.lower() not in NON_REPARSING_PROBE_SUFFIXES
+    ]
+    declared = os.path.splitext(name)[1].lower()
+    if declared in {suffix.lower() for suffix in suffixes}:
+        # `gh.cmd` names its own suffix, so the verbatim name is a candidate —
+        # but it joins the pass that suffix belongs to, so spelling out a shim
+        # still cannot outrank a real image found further along PATH.
+        target = images if declared in NON_REPARSING_PROBE_SUFFIXES else shims
+        target.insert(0, "")
+    candidates: list[str] = []
+    for pass_suffixes in (images, shims):
+        for directory in directories:
+            stem = os.path.join(directory, name)
+            candidates.extend(stem + suffix for suffix in pass_suffixes)
+    return candidates
+
+
+def probe_candidate_is_runnable(path: str) -> bool:
+    """Whether the operating system would actually execute this candidate."""
+    if not os.path.isfile(path):
+        return False
+    return os.name == "nt" or os.access(path, os.X_OK)
+
+
+def probe_image_reparses(path: str) -> bool:
+    """Whether spawning `path` hands the command line to a re-parsing shell.
+
+    Windows runs a `.CMD`/`.BAT` target through `cmd.exe`, which re-reads the
+    whole line, so `&`, `|` or `>` inside an argument stop being text. A POSIX
+    `#!` script receives its argv as an array and re-parses nothing.
+    """
+    if os.name != "nt":
+        return False
+    return os.path.splitext(path)[1].lower() not in NON_REPARSING_PROBE_SUFFIXES
+
+
+def probe_image_is_quoted(image: str) -> bool:
+    """Whether the spawn will wrap argv[0] in quotes, so cmd.exe sees one token.
+
+    Asked of `subprocess` rather than restated here: the quoting rule belongs to
+    the module that builds the command line, and a second copy of it can drift.
+    """
+    return subprocess.list2cmdline([image]).startswith('"')
+
+
+def probe_shim_hazard(argv: list[str]) -> str:
+    """Name why `argv` must not be re-read by `cmd.exe`, or "" when it is safe.
+
+    The causes are kept apart because they mean different things to whoever
+    reads the diagnosis: a refused argument is repository-influenced text the
+    harness declines to pass on, while a refused image path is the machine's own
+    installation layout, which no repository can change.
+    """
+    if not argv:
+        return "the command is empty"
+    image = argv[0]
+    if PROBE_SHIM_FATAL_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds a cmd.exe metacharacter"
+    if not probe_image_is_quoted(
+        image
+    ) and PROBE_SHIM_SPLITTING_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds an unquoted cmd.exe delimiter"
+    if not all(PROBE_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:]):
+        # Deliberately not echoed: the offending token is repository-influenced
+        # text, and this string is recorded in a finding.
+        return "an argument holds text cmd.exe would re-read as syntax"
+    return ""
+
+
+def resolve_probe_binary(name: str, env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve a probe binary against PATH only — never the cwd, images first.
+
+    Returns the absolute path to spawn, or None when nothing on PATH answers to
+    the name. None is a real answer: the caller reports it, rather than falling
+    back to the implicit resolution this function exists to replace.
+    """
+    if os.path.dirname(name):
+        return name if os.path.isfile(name) else None
+    environment = probe_environment(env)
+    key = (name, environment.get("PATH", ""), environment.get("PATHEXT", ""))
+    if key in _PROBE_BINARY_CACHE:
+        return _PROBE_BINARY_CACHE[key]
+    resolved = None
+    for candidate in probe_candidate_paths(
+        name,
+        probe_search_directories(environment),
+        probe_search_suffixes(environment),
+    ):
+        if probe_candidate_is_runnable(candidate):
+            resolved = candidate
+            break
+    _PROBE_BINARY_CACHE[key] = resolved
+    return resolved
+
+
+def probe_spawn_argv(
+    argv: list[str], env: Mapping[str, str] | None = None
+) -> tuple[list[str], str]:
+    """Rewrite a probe's argv onto a resolved image, or say why it was refused.
+
+    Returns `(spawn argv, failure text)` with exactly one side filled in. Every
+    spawn in this file goes through here; a caller that skips it is back to the
+    implicit, cwd-searching resolution.
+    """
+    if not argv:
+        return [], "empty probe command"
+    executable = resolve_probe_binary(argv[0], env)
+    if executable is None:
+        return [], f"{argv[0]}: no executable of that name on PATH"
+    spawned = [executable, *argv[1:]]
+    if probe_image_reparses(executable):
+        hazard = probe_shim_hazard(spawned)
+        if hazard:
+            return [], (
+                f"{argv[0]}: only a script shim on PATH, and it cannot be "
+                f"spawned safely because {hazard}"
+            )
+    return spawned, ""
+
+
 def run(
     command: list[str], cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
+    spawn_argv, failure = probe_spawn_argv(command)
+    if failure:
+        # 127 is the shell's own "command not found", and the caller already
+        # treats any non-zero return as "this resolver did not answer".
+        return subprocess.CompletedProcess(command, 127, "", failure)
     try:
         return subprocess.run(
-            command, cwd=cwd, capture_output=True, text=True, check=False
+            spawn_argv, cwd=cwd, capture_output=True, text=True, check=False
         )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
@@ -1382,13 +1610,20 @@ def bounded_command_result(
     (POSIX) and the whole tree is killed on timeout (`taskkill /T` on Windows);
     the pipes are then closed without a second blocking read, so the bound
     holds even if a descendant survives.
+
+    argv[0] is resolved against PATH before the spawn (`probe_spawn_argv`).
+    These probes run with `cwd` set to the repository under inspection, and
+    Windows would otherwise let that repository answer to the name `git`.
     """
+    spawn_argv, unresolved = probe_spawn_argv(argv)
+    if unresolved:
+        return False, "", unresolved
     popen_kwargs: dict[str, Any] = {}
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
-            argv,
+            spawn_argv,
             cwd=str(cwd) if cwd is not None else None,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1423,12 +1658,21 @@ def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
     """
     try:
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
-                check=False,
+            # Resolved like every other spawn: this runs with the harness's own
+            # cwd, which for `audit .` is the repository under inspection, and a
+            # planted `taskkill.exe` would be handed a hostile process tree.
+            # An unresolvable taskkill is not fatal — `proc.kill()` below still
+            # reaches the direct child.
+            killer, unresolved = probe_spawn_argv(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)]
             )
+            if not unresolved:
+                subprocess.run(
+                    killer,
+                    capture_output=True,
+                    timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
+                    check=False,
+                )
         else:
             os.killpg(proc.pid, signal.SIGKILL)
     except (OSError, ValueError, subprocess.SubprocessError):
