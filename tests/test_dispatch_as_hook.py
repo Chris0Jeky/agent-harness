@@ -905,6 +905,25 @@ class RestFirstVisibilityTests(unittest.TestCase):
         )
         self.assertEqual(self.status(runner), (False, "approved private destinations"))
         self.assertEqual(len(runner.matching("gh repo view")), 1)
+    def test_the_graphql_lane_pins_the_host_too(self):
+        """The fallback answers whenever REST is mute, so it is the SAME hazard.
+
+        `gh repo view OWNER/REPO` resolves against GH_HOST, which the probe
+        environment does not clear. Pointed at a GitHub Enterprise instance an
+        unpinned fallback can report PRIVATE about a different repository that
+        shares the slug, and the floor then ALLOWS a sensitive_data push to a
+        public github.com remote — fail-open, the class this branch repaired.
+        """
+        runner = RecordingRunner({**self.RESOLUTION, "gh repo view": "PRIVATE"})
+        self.assertEqual(self.status(runner), (False, "approved private destinations"))
+        self.assertEqual(
+            runner.matching("gh repo view"),
+            [
+                "gh repo view github.com/acme/widgets "
+                "--json visibility --jq .visibility"
+            ],
+        )
+
 
     def test_a_null_rest_answer_that_stays_unverified_names_itself(self):
         runner = RecordingRunner({**self.RESOLUTION, "gh api": "null"})

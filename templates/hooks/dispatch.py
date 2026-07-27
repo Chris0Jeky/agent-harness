@@ -8207,7 +8207,10 @@ def github_rest_repo_path(slug: str) -> str:
     `github_repo_slug` returns the bare pair today; the host prefixes are
     stripped so that a caller which ever pins the host in the slug still asks
     `repos/owner/repo` rather than `repos/github.com/owner/repo`. The REST call
-    itself is pinned at the call site with `--hostname github.com`, not here.
+    itself is pinned at the call site with `--hostname github.com`, not here —
+    the GraphQL lane pins the same question as `github.com/<owner>/<repo>`,
+    because `gh repo view` accepts `[HOST/]OWNER/REPO` and resolves a bare pair
+    against GH_HOST (`harness.py:github_visibility` records the same hazard).
 
     The result is interpolated into argv, so validation is an ALLOWLIST and
     every rejection returns "" — the REST lane is then skipped and GraphQL
@@ -8303,9 +8306,13 @@ def public_remote_status(
         # exhausts the GraphQL quota hourly while the REST core quota is barely
         # touched (issue #90). A quota-denied probe returned "" and fail-closed
         # a push to a repository the floor could have proved private.
-        # `--hostname github.com` pins the question to the host the destination
-        # is by construction on; without it an ambient GH_HOST would answer for
-        # a different server entirely.
+        #
+        # BOTH transports pin the host. `gh` resolves an unqualified question
+        # against GH_HOST, so on a machine pointed at a GitHub Enterprise
+        # instance an unpinned probe can answer PRIVATE about a different
+        # repository that happens to share the slug — while the github.com
+        # remote is public. REST pins with `--hostname github.com`; `gh repo
+        # view` takes `[HOST/]OWNER/REPO`, so GraphQL pins in the slug itself.
         visibility = ""
         rest_path = github_rest_repo_path(slug)
         if rest_path:
@@ -8341,7 +8348,7 @@ def public_remote_status(
                     "gh",
                     "repo",
                     "view",
-                    slug,
+                    f"github.com/{slug}",
                     "--json",
                     "visibility",
                     "--jq",
