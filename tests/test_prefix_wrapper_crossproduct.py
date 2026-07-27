@@ -1422,17 +1422,44 @@ _TIME_BUILTIN_OVER_BLOCKS = [
 DOCUMENTED_CASE_OVER_BLOCKS: dict[str, dict] = {}
 
 
-def _case_over_block(payloads, shapes, issue: str, note: str) -> None:
+#: Sentinel for "every posture this payload is swept at".
+_EVERY_POSTURE = None
+
+
+def _case_over_block(payloads, shapes, issue: str, note: str, when=None) -> None:
+    """Record a payload x shape over-block, optionally scoped to some postures.
+
+    `when=None` means every posture the payload is swept at, which is what every
+    entry meant before the parameter existed. `when` is a predicate over
+    `(tier, flags)` for an over-block that rides a GRADUATED ladder rather than
+    applying flat: `git worktree remove ../linked` under `do-block-iex` allows
+    at T1-T2 and gates from T3 up and under `wave_mode` (issue #125). A
+    payload-level entry with no posture dimension can express neither half --
+    recording it flat fails as UNEXPECTEDLY FIXED on the T1/T2 rows, and
+    omitting it fails as a false positive on the rest. Scoping keeps BOTH halves
+    asserted: the in-scope postures must still over-block, and the out-of-scope
+    ones must still allow.
+    """
     for payload in payloads:
         entry = DOCUMENTED_CASE_OVER_BLOCKS.setdefault(
-            payload, {"issue": issue, "note": note, "shapes": set()}
+            payload, {"issue": issue, "note": note, "shapes": {}}
         )
-        entry["shapes"].update(shapes)
+        for shape in shapes:
+            if shape in entry["shapes"] and entry["shapes"][shape] is _EVERY_POSTURE:
+                continue
+            entry["shapes"][shape] = when
 
 
-def case_over_block_shapes(payload: str) -> set:
+def case_over_block_shapes(payload: str, tier=None, flags=None) -> set:
+    """Shapes recorded as over-blocking this payload, at that posture if given."""
     entry = DOCUMENTED_CASE_OVER_BLOCKS.get(payload)
-    return entry["shapes"] if entry else set()
+    if not entry:
+        return set()
+    return {
+        name
+        for name, when in entry["shapes"].items()
+        if when is _EVERY_POSTURE or tier is None or when(tier, flags or {})
+    }
 
 
 _case_over_block(
@@ -1480,12 +1507,23 @@ _DO_BLOCK_CONDITION_OPERAND_OVER_BLOCKS = [
     "git -c status.showUntrackedFiles=normal worktree remove ../wt",
     "git worktree remove ../linked",
 ]
+
+
+#: The over-block rides the work-loss ladder the opaque-operand gate sits on, so it
+#: is posture-scoped rather than flat: allow at T1-T2, ask at T3, deny at T4 and
+#: under `wave_mode`. Scoping asserts both halves -- these postures must keep
+#: over-blocking, and T1/T2-without-wave must keep ALLOWING.
+def _worktree_opaque_ladder(tier: int, flags: dict) -> bool:
+    return tier >= 3 or bool(flags.get("wave_mode"))
+
+
 _case_over_block(
     _DO_BLOCK_CONDITION_OPERAND_OVER_BLOCKS,
     ["do-block-iex"],
     "#125",
     "the do-block's trailing `while ($false)` is read as an operand of the command "
     "inside it, so the opaque-operand scan gates a removal carrying no dynamic token",
+    when=_worktree_opaque_ladder,
 )
 _case_over_block(
     _LAUNCHER_TIER_OVER_BLOCKS,
@@ -2141,7 +2179,7 @@ class FalsePositiveDirectionTests(CrossProductBase):
                 if composed is None:
                     continue
                 got = decide(composed, tier, flags)
-                recorded = shape.name in case_over_block_shapes(command)
+                recorded = shape.name in case_over_block_shapes(command, tier, flags)
                 if got != "allow" and not recorded:
                     failures.append((shape.name, tier, flags, "allow", got, composed))
                 elif got == "allow" and recorded:
