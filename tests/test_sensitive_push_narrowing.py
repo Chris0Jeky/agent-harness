@@ -230,6 +230,107 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("inside a sensitive_data root", detail)
 
+    # --- the PR #132 review round: five bypasses of the ratified conditions ---
+
+    def test_repository_redirecting_git_globals_keep_the_deny(self):
+        """The review's CRITICAL, and a regression against the pre-#48 floor.
+
+        `--work-tree=<decoy>` leaves `rev-parse --show-toplevel` naming the
+        decoy while the git dir, the remote configuration and the OBJECTS all
+        still come from the cwd — so a directory holding nothing but a
+        `sensitive_data: false` declaration attributed a SENSITIVE repository's
+        push to itself. Only `-C <path>` preserves attribution.
+        """
+        for git_globals in (
+            ["--work-tree=" + self.nonsensitive],
+            ["--work-tree", self.nonsensitive],
+            ["--git-dir=" + os.path.join(self.self_sensitive, ".git")],
+            ["-c", "core.worktree=" + self.nonsensitive],
+            ["--namespace=x"],
+            ["--bare"],
+            ["-C"],  # dangling value
+        ):
+            with floor_environment.hermetic_environment(dispatch, None):
+                allowed, detail = dispatch.sensitive_push_narrowing_status(
+                    ["origin", "main"], self.nonsensitive, git_globals
+                )
+            self.assertFalse(allowed, git_globals)
+            self.assertIn("unattributable", detail)
+
+    def test_minus_C_global_still_attributes(self):
+        with floor_environment.hermetic_environment(dispatch, None):
+            allowed, detail = dispatch.sensitive_push_narrowing_status(
+                ["origin", "main"], self.nonsensitive, ["-C", self.nonsensitive]
+            )
+        self.assertTrue(allowed, detail)
+
+    def test_tag_publishing_and_abbreviated_selectors_keep_the_deny(self):
+        # git accepts unambiguous long-option prefixes, so `--al` IS `--all`.
+        for args in (
+            ["--follow-tags", "origin", "main"],
+            ["--al", "origin"],
+            ["--tag", "origin"],
+            ["--branch", "origin"],
+            ["-vd", "origin", "main"],
+        ):
+            allowed, detail = self.narrowing(args, self.nonsensitive)
+            self.assertFalse(allowed, args)
+            self.assertIn("selector", detail)
+
+    def test_destination_must_resolve_to_a_configured_remote(self):
+        # The URL regex is a pre-filter; these spellings escape it, so the
+        # condition is proven by asking the repository instead.
+        for destination in (
+            "git://evil.example/r.git",
+            "rsync://evil.example/r.git",
+            "evil.example:r.git",
+            "ext::sh -c cat",
+            "nosuchremote",
+        ):
+            allowed, detail = self.narrowing([destination, "main"], self.nonsensitive)
+            self.assertFalse(allowed, destination)
+            self.assertIn("configured remote", detail)
+
+    def test_refspec_less_push_inheriting_a_configured_refspec_keeps_the_deny(self):
+        self._git(self.nonsensitive, "config", "remote.origin.push", "refs/*:refs/*")
+        try:
+            for args in (["origin"], []):
+                allowed, detail = self.narrowing(args, self.nonsensitive)
+                self.assertFalse(allowed, args)
+                self.assertIn("configured push refspec", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "remote.origin.push")
+        # and it goes back to allowed once nothing is inherited
+        allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+        self.assertTrue(allowed, detail)
+
+    def test_an_undeclared_sensitive_data_flag_is_not_an_implicit_false(self):
+        implicit = os.path.join(self.root, "implicitflags")
+        self._make_repo(implicit, {"tier": 1, "flags": {}})
+        allowed, detail = self.narrowing(["origin", "main"], implicit)
+        self.assertFalse(allowed)
+        self.assertIn("does not declare sensitive_data", detail)
+
+    def test_linked_worktree_outside_a_sensitive_root_keeps_the_deny(self):
+        """Same repository, opposite verdict, decided only by where the
+        worktree happens to sit — so containment follows the common dir."""
+        # The declaration has to be TRACKED, or the linked worktree has no tier
+        # file and the deny comes from the wrong condition.
+        self._git(self.nested, "add", "-f", ".agent-harness/tier.json")
+        self._git(self.nested, "commit", "-m", "track tier")
+        outside = os.path.join(self.root, "outside-worktree")
+        self._git(self.nested, "worktree", "add", "--detach", outside, "main")
+        self._git(outside, "switch", "-c", "wt-feature")
+        # Guard the test's own premise: the worktree really is outside.
+        self.assertFalse(
+            os.path.normcase(os.path.abspath(outside)).startswith(
+                os.path.normcase(os.path.abspath(self.sensitive_root))
+            )
+        )
+        allowed, detail = self.narrowing(["origin", "wt-feature"], outside)
+        self.assertFalse(allowed)
+        self.assertIn("inside a sensitive_data root", detail)
+
     def test_unresolvable_cwd_keeps_the_deny(self):
         allowed, detail = self.narrowing(
             ["origin", "main"], os.path.join(self.root, "missing")
