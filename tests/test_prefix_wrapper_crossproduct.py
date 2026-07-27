@@ -1505,6 +1505,7 @@ _DO_BLOCK_CONDITION_OPERAND_OVER_BLOCKS = [
     "git -c color.ui=false worktree remove ../wt",
     "git -c status.showUntrackedFiles=all worktree remove ../wt",
     "git -c status.showUntrackedFiles=normal worktree remove ../wt",
+    "git worktree REMOVE ../wt",
     "git worktree remove ../linked",
 ]
 
