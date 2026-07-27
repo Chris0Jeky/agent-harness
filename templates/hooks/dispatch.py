@@ -10253,8 +10253,8 @@ def check(
                                 "ask",
                                 "[worktree-remove-force] T3: git worktree remove --force "
                                 "discards uncommitted work in that worktree. Confirm, or drop "
-                                "--force so git refuses a dirty or locked tree itself "
-                                "(gitignored files are deleted either way).",
+                                "--force so git refuses a dirty or locked tree itself -- but a "
+                                "removal git does allow still deletes gitignored files.",
                             )
                     elif strict:
                         return (
