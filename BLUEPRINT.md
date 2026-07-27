@@ -97,7 +97,19 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 
 **Overlay flags** (orthogonal to tier, set in `tier.json`):
 - `sensitive_data` — adds privacy denies (block pushes to public remotes, `gh repo create --public`)
-  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity.
+  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity. One ratified
+  exemption (issue #48): a push ATTRIBUTABLE to a non-sensitive repository is exempt from the
+  *contextual* overlay a sensitive session root spreads over cross-repo work. Attributable means
+  ALL of: the command's git globals cannot redirect which repository git operates on (only
+  `-C <path>` is tolerated — `--work-tree`/`--git-dir`/`-c core.worktree` make the toplevel name a
+  different repository from the one whose objects are uploaded); the repo's own tier declaration
+  sets `sensitive_data` EXPLICITLY false (an omitted key is silence, not consent); neither that
+  checkout nor the primary checkout behind it — a linked worktree can sit outside — is inside a
+  directory declaring `sensitive_data`; and it ships its own named local branches (or HEAD, or
+  refspec-less with no configured `remote.*.push`) to a destination that RESOLVES to one of its own
+  configured remotes, with no multi-ref, tag-publishing or deletion selector in any spelling git
+  accepts. Each condition is enforced, not asserted: the PR #132 review found four of them
+  bypassable and one of those was an exfiltration path the pre-#48 floor had closed.
 - `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
   guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
   clean main after every wave.
@@ -215,6 +227,10 @@ fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
 - secret-file mutation; with `sensitive_data`: pushes to public remotes, `gh repo create --public`
+  (public pushes carry the issue-#48 attribution exemption — §1 overlay flags — when the pushed repo
+  explicitly declares non-sensitive, is not contained in a sensitive root by either its checkout or
+  its primary one, is not reached through a repository-redirecting git global, and ships its own
+  named branches to a destination resolving to its own configured remote)
 
 **Work-loss guards are tier-dependent, not floor**: `reset --hard`, `clean -fd`,
 `checkout -- .`, `worktree remove --force` are *allowed* at T1–T2 (solo relaxed-git posture —

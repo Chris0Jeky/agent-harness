@@ -54,7 +54,8 @@ jobs:
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
@@ -70,7 +71,8 @@ jobs:
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
@@ -86,7 +88,8 @@ jobs:
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py

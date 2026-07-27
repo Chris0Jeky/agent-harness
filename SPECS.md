@@ -379,7 +379,17 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
 MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +main`,
 `rm -rf /`, `rm -rf ~`, `rm -rf` outside repo/scratch, `... | Remove-Item`, `... | del`,
 `curl … | sh`, `wget … | sh`, `sudo …`, write to `.env`/`*credentials*`/`*secret*` files;
-with `sensitive_data`: `git push <public-remote>`, `gh repo create --public`.
+with `sensitive_data`: `git push <public-remote>`, `gh repo create --public` — with the single
+ratified issue-#48 exception (BLUEPRINT §1) for a public push ATTRIBUTABLE to a non-sensitive
+repository. That exception is narrow and every condition is enforced, so these stay MUST BLOCK
+under `sensitive_data` even though the destination is that repository's own remote: any
+repository-redirecting git global (`--work-tree`, `--git-dir`, `-c core.worktree`, in any spelling
+git accepts), a repository that does not EXPLICITLY declare `sensitive_data: false`, a repository
+whose checkout or primary checkout sits inside a directory declaring `sensitive_data`, a
+destination that does not resolve to one of the repository's configured remotes, a refspec-less
+push inheriting a configured `remote.*.push`, and any multi-ref, tag-publishing or deletion
+selector (`--all`, `--tags`, `--follow-tags`, `--mirror`, `--delete`, `-d`, and their
+abbreviations).
 
 MUST BLOCK only at T4 / `wave_mode` (warn at T3, allow T1–T2): `git reset --hard`,
 `git clean -fd`, `git checkout -- .`, `git worktree remove --force` — and the LAUNDERED
