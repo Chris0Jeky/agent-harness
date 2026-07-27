@@ -645,7 +645,7 @@ class ShimArgvGateTests(unittest.TestCase):
         shims.mkdir()
         (shims / "gh.cmd").write_text("@echo off\r\necho PRIVATE\r\n")
         # The image the unquoted split would resolve to instead.
-        (root / "a.cmd").write_text("@echo off\r\ntype nul > \"%~dp0SPLIT\"\r\n")
+        (root / "a.cmd").write_text('@echo off\r\ntype nul > "%~dp0SPLIT"\r\n')
         dispatch._PROBE_BINARY_CACHE.clear()
         notes: list[str] = []
         with patch.dict(os.environ, {"PATH": str(shims)}, clear=False):
@@ -788,9 +788,7 @@ class ProbeDiagnosticsTests(unittest.TestCase):
         looked for the words "rate limit" — the wall went mute again, which is
         the failure this branch exists to remove.
         """
-        head = dispatch.probe_stderr_head(
-            "error: rate_limit_exceeded_for_installation"
-        )
+        head = dispatch.probe_stderr_head("error: rate_limit_exceeded_for_installation")
         self.assertTrue(head.startswith("rate limit"), head)
 
     def test_an_ordinary_path_survives_readable(self):

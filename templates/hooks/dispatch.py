@@ -7363,7 +7363,7 @@ _NON_REPARSING_EXTENSIONS = frozenset({".exe", ".com"})
 # reasoned about:
 #
 #   * these survive quoting and must never appear at all;
-_SHIM_UNSAFE_IMAGE_CHARACTERS = re.compile("[&|<>^\"%!\r\n]")
+_SHIM_UNSAFE_IMAGE_CHARACTERS = re.compile('[&|<>^"%!\r\n]')
 #   * these are cmd.exe's own token delimiters and its grouping parentheses.
 #     They are literal inside quotes and split the command NAME outside them —
 #     `C:\dev\a,b\gh.cmd` runs `C:\dev\a`. subprocess quotes argv[0] only when
