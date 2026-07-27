@@ -40,7 +40,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.18 (2026-07-27)"
+FLOOR_VERSION = "1.6.19 (2026-07-27)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -10180,8 +10180,15 @@ def check(
                 # `git worktree remove` REFUSES a worktree holding tracked
                 # modifications or untracked (non-ignored) files -- git runs a
                 # check the floor cannot -- and removal leaves the BRANCH
-                # behind, so committed work stays reachable. That is why the
-                # plain form is not an unconditional deny.
+                # behind, so work committed on a branch stays reachable. That
+                # is why the plain form is not an unconditional deny. A
+                # DETACHED worktree earns no such guarantee: its commits are
+                # held only by its own HEAD, git's pre-removal check passes on
+                # a clean detached tree, and the commit leaves `git log --all`
+                # with the removal (measured, and pinned by the detached leg
+                # of `ignored_worktree_removal_is_destructive`) -- which is
+                # why law 7 mandates `git switch -c` before committing in a
+                # worktree.
                 #
                 # It is NOT non-destructive, and an earlier draft of this rule
                 # claimed it was ("the plain form cannot destroy uncommitted
