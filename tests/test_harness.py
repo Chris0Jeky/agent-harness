@@ -5318,7 +5318,9 @@ class TierResolutionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def declare(self, directory: str, repo: Path | None = None, **fields: object) -> Path:
+    def declare(
+        self, directory: str, repo: Path | None = None, **fields: object
+    ) -> Path:
         declaration: dict[str, object] = {
             "tier": 1,
             "name": harness.TIER_NAMES[1],
@@ -5389,7 +5391,9 @@ class TierResolutionTests(unittest.TestCase):
             with self.subTest(directory=directory):
                 repo = self.repo / f"lone-{index}"
                 declared = self.declare(
-                    directory, repo=repo, tier=3,
+                    directory,
+                    repo=repo,
+                    tier=3,
                     flags={"relaxed_work_loss_guards": True},
                 )
                 paths, posture = harness.load_tier(repo)
@@ -5639,6 +5643,184 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("PUBLIC repository upstream/widgets", detail)
         self.assertIn("is not the publishing remote", detail)
         self.assertTrue(result["ok"], result["issues"])
+
+    # --- the visibility probe's transports (issue #106) ------------------------
+
+    def test_the_visibility_probe_asks_rest_before_graphql(self) -> None:
+        # `gh repo view` is the GraphQL lane, whose hourly quota an agent fleet
+        # exhausts while REST core is barely touched. REST answers first, and
+        # a REST verdict spends no GraphQL call at all.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api --hostname github.com repos/acme/widgets": (True, "private"),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(
+            probes,
+            [
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "repos/acme/widgets",
+                    "--jq",
+                    ".visibility",
+                ]
+            ],
+        )
+
+    def test_a_refused_rest_probe_falls_back_to_graphql(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        lanes = [argv[1] for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(lanes, ["api", "repo"])
+        # The evidence names the transport that actually answered.
+        self.assertIn("`gh repo view github.com/acme/widgets", self.details(result))
+
+    def test_a_rest_answer_that_is_not_a_verdict_falls_back_too(self) -> None:
+        # `gh api --jq .visibility` prints a literal `null` at exit 0 when the
+        # field is absent, and "NULL" is truthy: gating the fallback on
+        # emptiness would rebuild the mute wall on the new lane.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api": (True, "null"),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertEqual(
+            [argv[1] for argv in runner.calls if argv[:1] == ["gh"]], ["api", "repo"]
+        )
+
+    def test_an_exhausted_quota_is_named_in_the_unproven_line(self) -> None:
+        # Both lanes refusing used to print the same sentence as an absent
+        # binary: "returned <no output>". The probe's own words name the cause.
+        repo = self.make_repo(sensitive_data=True)
+
+        class RefusingRunner(FakeCommandRunner):
+            """A resolver that reports WHY it failed, as production does."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "gh: API rate limit exceeded for user ID 4210. (HTTP 403)",
+                    )
+                return resolved, output
+
+        runner = RefusingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        detail = self.details(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("unmeasured", detail)
+        self.assertIn("(quota exhausted)", detail)
+        self.assertIn("API rate limit exceeded", detail)
+        # Both transports are named, so the reader knows neither answered.
+        self.assertIn("gh api --hostname github.com repos/acme/widgets", detail)
+        self.assertIn("gh repo view github.com/acme/widgets", detail)
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_credential_in_probe_stderr_never_reaches_a_finding(self) -> None:
+        # `gh` echoes tokens from a misconfigured credential helper and `git`
+        # echoes whole remote URLs, and this text is now quoted into findings
+        # that reach stdout, --json and the doctor detail.
+        repo = self.make_repo(sensitive_data=True)
+
+        class LeakingRunner(FakeCommandRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "error: ghp_0123456789abcdefghijABCDEF authenticating to "
+                        "https://ci-user:s3cr3t-pat@github.com/acme/widgets.git",
+                    )
+                return resolved, output
+
+        runner = LeakingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertNotIn("ghp_0123456789abcdefghijABCDEF", rendered)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("ci-user", rendered)
+        self.assertIn("***", rendered)
+
+    def test_the_rest_route_accepts_only_an_owner_repo_pair(self) -> None:
+        # The path is interpolated into argv, so it is an allowlist and every
+        # rejection skips the REST lane rather than composing a command line.
+        for slug, path in (
+            ("acme/widgets", "acme/widgets"),
+            ("github.com/acme/widgets", "acme/widgets"),
+            ("https://github.com/acme/widgets", "acme/widgets"),
+            ("acme/widgets.js", "acme/widgets.js"),
+            ("_acme-2/-widgets_", "_acme-2/-widgets_"),
+            ("../acme/widgets", ""),
+            ("acme/../widgets", ""),
+            ("acme/widgets/extra", ""),
+            ("acme", ""),
+            ("acme/wid gets", ""),
+            ("acme/wid&gets", ""),
+            ("acme/..", ""),
+            ("acme/$(id)", ""),
+        ):
+            with self.subTest(slug=slug):
+                self.assertEqual(harness.github_rest_repo_path(slug), path)
+
+    def test_a_slug_the_rest_route_rejects_still_reaches_graphql(self) -> None:
+        runner = FakeCommandRunner({"gh repo view": (True, "PRIVATE")})
+        visibility, evidence = harness.github_visibility(
+            "acme/wid gets", Path("."), runner, None
+        )
+        self.assertEqual(visibility, "PRIVATE")
+        self.assertEqual([argv[1] for argv in runner.calls], ["repo"])
+        self.assertIn("gh repo view", evidence)
+
+    def test_a_failed_resolver_keeps_what_it_said(self) -> None:
+        script = "import sys; sys.stderr.write('boom: denied\\n'); sys.exit(1)"
+        resolved, output, failure = harness.bounded_command_result(
+            [sys.executable, "-c", script]
+        )
+        self.assertFalse(resolved)
+        self.assertEqual(output, "")
+        self.assertIn("boom: denied", failure)
+        # The two-element contract every other caller uses is unchanged.
+        self.assertEqual(
+            harness.bounded_command_output([sys.executable, "-c", script]), (False, "")
+        )
+
+    def test_an_absent_probe_binary_is_named_not_silent(self) -> None:
+        resolved, _output, failure = harness.bounded_command_result(
+            ["definitely-not-a-real-binary-agent-harness"]
+        )
+        self.assertFalse(resolved)
+        self.assertIn("definitely-not-a-real-binary-agent-harness", failure)
+        self.assertIn(
+            "could not be started",
+            harness.probe_failure_note(
+                ["definitely-not-a-real-binary-agent-harness"], failure
+            ),
+        )
 
     def test_a_public_origin_still_fails_the_audit(self) -> None:
         repo = self.make_repo(sensitive_data=True)
@@ -6153,8 +6335,13 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
         probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
         self.assertTrue(probes)
+        # Both transports pin the host, each in its own spelling.
         for argv in probes:
-            self.assertTrue(argv[3].startswith("github.com/"), argv)
+            with self.subTest(argv=argv):
+                if argv[1] == "api":
+                    self.assertEqual(argv[2:4], ["--hostname", "github.com"])
+                else:
+                    self.assertTrue(argv[3].startswith("github.com/"), argv)
 
     def test_redaction_keeps_scp_syntax_actionable(self) -> None:
         # `git@github.com:owner/repo` carries a fixed account name, not a
@@ -6212,11 +6399,17 @@ class RealityCheckTests(unittest.TestCase):
         clock = {"now": 0.0}
 
         class OverrunningRunner(FakeCommandRunner):
-            """The visibility probe itself consumes the rest of the budget."""
+            """The visibility probe itself consumes the rest of the budget.
+
+            The burn is charged to the GraphQL lane because that is the one
+            that ANSWERS here: REST is probed first and this fixture has no
+            reply for it, so charging every `gh` call would exhaust the budget
+            before the measurement under test ever ran.
+            """
 
             def __call__(self, argv, cwd=None, **kwargs):
                 answer = super().__call__(argv, cwd, **kwargs)
-                if argv[:1] == ["gh"]:
+                if argv[:2] == ["gh", "repo"]:
                     clock["now"] += 10.0
                 return answer
 
