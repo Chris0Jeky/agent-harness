@@ -224,13 +224,17 @@ them causes merge-gymnastics workarounds), warn at T3, deny at T4 and under `wav
 *declared* (`tier.json` flag `relaxed_work_loss_guards`, per SPECS §2) keeps them allow below
 T4/wave_mode — the flag is ignored where guards are walls.
 
-Plain `worktree remove` sits on a shorter ladder of its own: allow T1–T3, deny at T4 and under
-`wave_mode` (issue #41). Git refuses it on a tree with tracked modifications or untracked
+Plain `worktree remove` allows at EVERY tier, `wave_mode` included (owner ruling 2026-07-27;
+issues #41/#117/#123). Git refuses it on a tree with tracked modifications or untracked
 files and a checked-out branch survives it — but its clean check ignores gitignored content,
 which removal then deletes, so **a `.env` living only in that worktree is gone**; and a
 **detached** worktree's commits are held only by its own HEAD and die with the removal (law
 7's `git switch -c` mandate exists for exactly this). Allowed because git checks the part
-that matters, never because the plain form is harmless.
+that matters, never because the plain form is harmless. What DOES stay on the work-loss
+ladder is every spelling that can carry `--force` or disable git's check without showing it
+in argv: a runtime-computed action word, a dynamic option/separator-free operand token, and
+`-c status.showUntrackedFiles=no`-class config — an opaque spelling never scores better
+than the literal form it might be.
 
 **Never scan commit-message or PR-body text at any tier.** Proven repeatedly to block the
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
