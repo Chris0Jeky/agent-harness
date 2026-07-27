@@ -5948,25 +5948,79 @@ def run_smoke():
             ]
         )
 
-    def mixed_visibility_runner(argv, _cwd):
-        if argv[0] == "git" and "config" in argv:
-            return "no"
-        if argv[0] == "git":
-            return (
-                "https://github.com/example/private.git\n"
-                "https://github.com/example/public.git"
-            )
-        return "PUBLIC" if "example/public" in argv else "PRIVATE"
+    MIXED_PUSHURLS = (
+        "https://github.com/example/private.git\n"
+        "https://github.com/example/public.git"
+    )
+    PRIVATE_PUSHURLS = (
+        "https://github.com/example/private.git\n"
+        "https://github.com/example/private-second.git"
+    )
 
+    def visibility_runner(pushurls, *, rest=False, graphql=False):
+        """A fake `gh` that answers on exactly the transports named.
+
+        Membership (`"example/public" in argv`) used to decide the answer, which
+        silently keyed the charter case to ONE spelling of the visibility probe:
+        under GraphQL the slug is a standalone argv element, under REST it is
+        embedded in `repos/example/public`. When the probe order changed, the
+        stub answered PRIVATE for the PUBLIC remote and this case went green
+        while asserting the fail-OPEN direction. Substring matching is spelling-
+        robust, and `rest`/`graphql` let a case pin the transport it means.
+        """
+
+        def runner(argv, _cwd):
+            if argv[0] == "git" and "config" in argv:
+                return "no"
+            if argv[0] == "git":
+                return pushurls
+            if not (rest if argv[1:2] == ["api"] else graphql):
+                return ""
+            public = any("example/public" in token for token in argv)
+            return "PUBLIC" if public else "PRIVATE"
+
+        return runner
+
+    # The charter case over each transport in turn, not only over whichever one
+    # the floor currently prefers — a matrix that covers the preferred lane
+    # alone stops testing the other the moment the preference changes.
+    for label, lanes in (
+        ("either transport", {"rest": True, "graphql": True}),
+        ("the REST transport alone", {"rest": True}),
+        ("the GraphQL transport alone", {"graphql": True}),
+    ):
+        remote_resolution_cases.append(
+            (
+                f"any public pushurl makes a sensitive destination public over "
+                f"{label}",
+                dispatch_module.public_remote_status(
+                    ["origin", "main"],
+                    HERE,
+                    command_runner=visibility_runner(MIXED_PUSHURLS, **lanes),
+                )[0],
+                True,
+            )
+        )
+        remote_resolution_cases.append(
+            (
+                f"an all-private pushurl set stays approved over {label}",
+                dispatch_module.public_remote_status(
+                    ["origin", "main"],
+                    HERE,
+                    command_runner=visibility_runner(PRIVATE_PUSHURLS, **lanes),
+                ),
+                (False, "approved private destinations"),
+            )
+        )
     remote_resolution_cases.append(
         (
-            "any public pushurl makes a sensitive destination public",
+            "a mute pair of transports still fail-closes",
             dispatch_module.public_remote_status(
                 ["origin", "main"],
                 HERE,
-                command_runner=mixed_visibility_runner,
+                command_runner=visibility_runner(PRIVATE_PUSHURLS),
             )[0],
-            True,
+            None,
         )
     )
     for recursive_command in (
