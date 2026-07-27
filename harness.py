@@ -1204,6 +1204,17 @@ def budget_issues(repo: Path, tier: int) -> list[str]:
         )
     if (repo / "AGENT_MAP.md").is_file():
         checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
+    # The deny-floor ledger declares its own cap and rotation target in its
+    # header (SPECS §3). Unregistered, an overflowing ledger was reported by
+    # nothing at all.
+    if (repo / "FLOOR_LIMITATIONS.md").is_file():
+        checks.append(
+            (
+                repo / "FLOOR_LIMITATIONS.md",
+                120,
+                "rotate to archive/floor-limitations-<year>.md",
+            )
+        )
     for skill in (
         (repo / ".agents" / "skills").glob("*/SKILL.md")
         if (repo / ".agents" / "skills").is_dir()

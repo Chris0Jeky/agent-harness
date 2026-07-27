@@ -379,6 +379,25 @@ class HarnessTests(unittest.TestCase):
         result = harness.audit_repo(repo)
         self.assertTrue(result["ok"], result["issues"])
 
+    def test_budgets_register_the_deny_floor_limitations_ledger(self) -> None:
+        # FLOOR_LIMITATIONS.md declares a 120-line cap and a rotation target in
+        # its own header, but budget_issues registered only CLAUDE.md /
+        # AGENTS.md / AGENT_MAP.md / skills, so an overflowing ledger was
+        # reported by nothing at all (issue #102).
+        repo = Path(self.temp.name) / "budgets"
+        repo.mkdir()
+        ledger = repo / "FLOOR_LIMITATIONS.md"
+        ledger.write_text("bypass family\n" * 120, encoding="utf-8")
+        self.assertEqual(harness.budget_issues(repo, 3), [])
+        ledger.write_text("bypass family\n" * 121, encoding="utf-8")
+        self.assertEqual(
+            harness.budget_issues(repo, 3),
+            [
+                "FLOOR_LIMITATIONS.md: 121>120 lines; "
+                "ROTATE: rotate to archive/floor-limitations-<year>.md"
+            ],
+        )
+
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
         (repo / "AGENTS.md").write_text(

@@ -186,6 +186,7 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 | MEMORY.md index | ≤30 lines / ≤3KB | fold + prune (Gardener) |
 | SKILL.md | ≤80 lines (target 60) | split or demote to doc |
 | AGENT_MAP.md | ≤100 lines | split into `docs/regions/*.md` |
+| FLOOR_LIMITATIONS.md (deny-floor ledger) | ≤120 lines | rotate to `archive/floor-limitations-<year>.md` |
 | directory CLAUDE.md | ≤30 lines | move detail to region map |
 | global CLAUDE.md | ≤130 lines | it's the law layer, not a manual — rotate working-style detail into skills |
 | total standing harness (T3) | ≤500 lines | demote something |
