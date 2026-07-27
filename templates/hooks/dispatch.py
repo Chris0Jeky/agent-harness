@@ -8291,6 +8291,13 @@ def public_remote_status(
     )
     if not remotes:
         return None, detail_with_diagnostics("unresolved push remote", diagnostics)
+    # Both transports draw on ONE aggregate budget, so a mute lane asked once
+    # per remote spends the budget that would have bought the answer. With three
+    # private pushurls and an exhausted REST quota that flipped a verified-private
+    # verdict into an unverified one — a NEW spurious denial in exactly the
+    # scenario this change exists to remove. A lane that came back mute once in
+    # this call is mute for the rest of it.
+    mute_transports: set[str] = set()
     for remote in dict.fromkeys(remotes):
         normalized = remote.lower()
         if normalized.startswith("file://") or re.match(
@@ -8315,7 +8322,7 @@ def public_remote_status(
         # view` takes `[HOST/]OWNER/REPO`, so GraphQL pins in the slug itself.
         visibility = ""
         rest_path = github_rest_repo_path(slug)
-        if rest_path:
+        if rest_path and "rest" not in mute_transports:
             visibility = command_output_before_deadline(
                 command_runner,
                 [
@@ -8331,13 +8338,15 @@ def public_remote_status(
                 deadline,
                 diagnostics,
             ).upper()
-            if visibility and visibility not in _KNOWN_VISIBILITIES:
+            if not visibility:
+                mute_transports.add("rest")
+            elif visibility not in _KNOWN_VISIBILITIES:
                 note_probe_failure(
                     diagnostics,
                     f"gh api repos/{rest_path}: unrecognized visibility "
                     f"{redact_probe_text(visibility[:24])!r}",
                 )
-        if visibility not in _KNOWN_VISIBILITIES:
+        if visibility not in _KNOWN_VISIBILITIES and "graphql" not in mute_transports:
             # `gh api --jq .visibility` prints a literal `null` (exit 0) when the
             # field is absent, and "NULL" is truthy — gating the fallback on
             # emptiness rebuilt issue #90's mute wall on the new lane. Anything
@@ -8358,6 +8367,8 @@ def public_remote_status(
                 deadline,
                 diagnostics,
             ).upper()
+            if not visibility:
+                mute_transports.add("graphql")
         if visibility == "PUBLIC":
             return True, slug
         if visibility not in {"PRIVATE", "INTERNAL"}:

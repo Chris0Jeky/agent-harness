@@ -842,10 +842,14 @@ class RecordingRunner:
         self.responses = responses
         self.default = default
         self.calls: list[str] = []
+        self.observer = None
 
     def __call__(self, argv, cwd):
         command = " ".join(argv)
         self.calls.append(command)
+        if self.observer is not None:
+            # A probe costs wall-clock time; a budget test needs to see it.
+            self.observer()
         for needle, output in self.responses.items():
             if needle in command:
                 return output
@@ -853,6 +857,24 @@ class RecordingRunner:
 
     def matching(self, needle: str) -> list[str]:
         return [call for call in self.calls if needle in call]
+
+
+class SyntheticClock:
+    """A stand-in for `dispatch.time` — only `monotonic`, advanced per probe.
+
+    `dispatch` reads nothing else from `time`, so replacing the module attribute
+    keeps the budget arithmetic deterministic without touching the real clock.
+    """
+
+    def __init__(self, cost: float, start: float = 1000.0):
+        self.now = start
+        self.cost = cost
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def spend(self) -> None:
+        self.now += self.cost
 
 
 class RestFirstVisibilityTests(unittest.TestCase):
@@ -883,6 +905,25 @@ class RestFirstVisibilityTests(unittest.TestCase):
             ["gh api --hostname github.com repos/acme/widgets --jq .visibility"],
         )
 
+    def test_the_graphql_lane_pins_the_host_too(self):
+        """The fallback answers whenever REST is mute, so it is the SAME hazard.
+
+        `gh repo view OWNER/REPO` resolves against GH_HOST, which the probe
+        environment does not clear. Pointed at a GitHub Enterprise instance an
+        unpinned fallback can report PRIVATE about a different repository that
+        shares the slug, and the floor then ALLOWS a sensitive_data push to a
+        public github.com remote — fail-open, the class this branch repaired.
+        """
+        runner = RecordingRunner({**self.RESOLUTION, "gh repo view": "PRIVATE"})
+        self.assertEqual(self.status(runner), (False, "approved private destinations"))
+        self.assertEqual(
+            runner.matching("gh repo view"),
+            [
+                "gh repo view github.com/acme/widgets "
+                "--json visibility --jq .visibility"
+            ],
+        )
+
     def test_a_public_rest_answer_is_still_public(self):
         runner = RecordingRunner({**self.RESOLUTION, "gh api": "public"})
         self.assertEqual(self.status(runner), (True, "acme/widgets"))
@@ -905,25 +946,6 @@ class RestFirstVisibilityTests(unittest.TestCase):
         )
         self.assertEqual(self.status(runner), (False, "approved private destinations"))
         self.assertEqual(len(runner.matching("gh repo view")), 1)
-    def test_the_graphql_lane_pins_the_host_too(self):
-        """The fallback answers whenever REST is mute, so it is the SAME hazard.
-
-        `gh repo view OWNER/REPO` resolves against GH_HOST, which the probe
-        environment does not clear. Pointed at a GitHub Enterprise instance an
-        unpinned fallback can report PRIVATE about a different repository that
-        shares the slug, and the floor then ALLOWS a sensitive_data push to a
-        public github.com remote — fail-open, the class this branch repaired.
-        """
-        runner = RecordingRunner({**self.RESOLUTION, "gh repo view": "PRIVATE"})
-        self.assertEqual(self.status(runner), (False, "approved private destinations"))
-        self.assertEqual(
-            runner.matching("gh repo view"),
-            [
-                "gh repo view github.com/acme/widgets "
-                "--json visibility --jq .visibility"
-            ],
-        )
-
 
     def test_a_null_rest_answer_that_stays_unverified_names_itself(self):
         runner = RecordingRunner({**self.RESOLUTION, "gh api": "null"})
@@ -947,6 +969,64 @@ class RestFirstVisibilityTests(unittest.TestCase):
         """The replay/test contract: injected runners take exactly two args."""
         runner = RecordingRunner({**self.RESOLUTION, "gh api": "private"})
         self.assertEqual(self.status(runner), (False, "approved private destinations"))
+
+
+THREE_PRIVATE_PUSHURLS = "\n".join(
+    f"https://github.com/acme/{name}.git" for name in ("one", "two", "three")
+)
+
+
+class MuteTransportBudgetTests(unittest.TestCase):
+    """A mute transport is asked ONCE per call, not once per remote.
+
+    Both transports draw on one 3.5s budget. Asking a dead lane again for every
+    pushurl spends the budget that would have bought the answer, so a fan-out of
+    private remotes went from a verified `False` to an unverified `None` — a NEW
+    denial, manufactured in exactly the exhausted-transport scenario issue #90
+    is about. Measured with a mute REST lane, 3 pushurls and 0.5s per probe:
+    main `False` (5 probes), preferring REST `None` (7), remembering the mute
+    lane `False` (6). The one remaining probe is irreducible — REST has to be
+    asked once before anything can know it is mute.
+    """
+
+    RESOLUTION = {
+        "git config": "no",
+        "git remote get-url": THREE_PRIVATE_PUSHURLS,
+    }
+
+    def status(self, runner, deadline=None):
+        return dispatch.public_remote_status(
+            ["origin", "main"], "/project", None, runner, deadline
+        )
+
+    def test_a_mute_rest_lane_is_asked_once_for_three_remotes(self):
+        runner = RecordingRunner({**self.RESOLUTION, "gh repo view": "PRIVATE"})
+        self.assertEqual(self.status(runner), (False, "approved private destinations"))
+        self.assertEqual(len(runner.matching("gh api")), 1)
+        self.assertEqual(len(runner.matching("gh repo view")), 3)
+
+    def test_a_mute_rest_lane_no_longer_flips_the_verdict_under_budget(self):
+        """The measured regression, on a synthetic clock: main said `False`."""
+        runner = RecordingRunner({**self.RESOLUTION, "gh repo view": "PRIVATE"})
+        clock = SyntheticClock(cost=0.5)
+        runner.observer = clock.spend
+        with patch.object(dispatch, "time", clock):
+            verdict = self.status(
+                runner, clock.monotonic() + dispatch._REMOTE_RESOLUTION_BUDGET_SECONDS
+            )
+        self.assertEqual(verdict, (False, "approved private destinations"))
+        self.assertEqual(len(runner.calls), 6)
+
+    def test_both_lanes_mute_still_fail_closes(self):
+        """Skipping a dead lane must never invent a verdict it did not get."""
+        runner = RecordingRunner(dict(self.RESOLUTION))
+        self.assertIsNone(self.status(runner)[0])
+
+    def test_a_rest_answer_never_spends_the_graphql_lane(self):
+        runner = RecordingRunner({**self.RESOLUTION, "gh api": "private"})
+        self.assertEqual(self.status(runner), (False, "approved private destinations"))
+        self.assertEqual(len(runner.matching("gh api")), 3)
+        self.assertEqual(runner.matching("gh repo view"), [])
 
 
 class RestPathMappingTests(unittest.TestCase):
