@@ -48,7 +48,12 @@ the remote and the reason. Any credential embedded in a remote URL is redacted b
 reaches a finding.
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
-degrades to `UNPROVEN` and exits 0. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
+degrades to `UNPROVEN` and exits 0. A probe's binary is resolved against absolute `PATH`
+entries only, never the current directory — Windows' `CreateProcess` searches the cwd first,
+and the cwd of an audit is a repository that could otherwise answer to the name `git`
+(issue #112). A `.EXE`/`.COM` anywhere on `PATH` outranks a `.CMD`/`.BAT` shim everywhere on
+it, and a shim is spawned only with arguments that survive `cmd.exe` re-parsing; a name that
+cannot be resolved is a named `UNPROVEN`, never a silent empty answer. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
 tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
 diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
 is a local tracking ref, so currency is proven against the published tip with a bounded
