@@ -780,6 +780,39 @@ class ProbeDiagnosticsTests(unittest.TestCase):
             with self.subTest(stderr=stderr):
                 self.assertTrue(dispatch.probe_stderr_head(stderr).startswith(cause))
 
+    def test_a_cause_survives_the_shape_blind_redaction(self):
+        """Classification reads the RAW line; redaction ran first and ate it.
+
+        `[A-Za-z0-9+/_]{24,}` matched the whole snake_cased error code, so
+        `rate_limit_exceeded_for_installation` became `***` before anything
+        looked for the words "rate limit" — the wall went mute again, which is
+        the failure this branch exists to remove.
+        """
+        head = dispatch.probe_stderr_head(
+            "error: rate_limit_exceeded_for_installation"
+        )
+        self.assertTrue(head.startswith("rate limit"), head)
+
+    def test_an_ordinary_path_survives_readable(self):
+        """A `/` no longer glues path segments into one redactable run."""
+        head = dispatch.probe_stderr_head(
+            "fatal: not a git repository: "
+            "/home/runner/work/agent_harness_checkout/subproject/.git"
+        )
+        self.assertIn("/home/runner/work/agent_harness_checkout/subproject/.git", head)
+        self.assertNotIn("***", head)
+
+    def test_a_credential_bearing_url_is_still_masked(self):
+        """The redaction that matters did not move: only its ORDER did."""
+        head = dispatch.probe_stderr_head(
+            f"fatal: unable to access 'https://alice:{LEAKED_TOKEN}"
+            "@github.com/acme/widgets.git/'"
+        )
+        self.assertNotIn(LEAKED_TOKEN, head)
+        self.assertNotIn("ghp_", head)
+        self.assertNotIn("alice", head)
+        self.assertIn("***", head)
+
     def test_a_rate_limited_403_is_not_classified_as_an_auth_failure(self):
         head = dispatch.probe_stderr_head(
             "HTTP 403: API rate limit exceeded for user ID 1 (https://api.github.com)"

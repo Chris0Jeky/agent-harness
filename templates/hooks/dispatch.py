@@ -7527,12 +7527,16 @@ def resolve_probe_binary(name: str) -> str | None:
 # line reaches `permissionDecisionReason`, which the runtime renders and the
 # transcript stores, so every known credential shape is masked before it is
 # recorded. The trailing pattern is deliberately shape-blind: it catches the
-# token format that has not been invented yet.
+# token format that has not been invented yet. It does NOT span `/`, because a
+# path separator turned `/home/runner/work/agent_harness_checkout/sub/.git` into
+# `***.git` — a wall that names nothing is the failure issue #90 is about, and
+# the three shapes above already mask the credentials git and `gh` actually
+# print.
 _PROBE_SECRET_PATTERNS = (
     re.compile(r"(?<=//)[^/@\s]+(?=@)"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{4,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{4,}"),
-    re.compile(r"[A-Za-z0-9+/_]{24,}={0,2}"),
+    re.compile(r"[A-Za-z0-9+_]{24,}={0,2}"),
 )
 
 # Ordered: a GitHub rate-limit refusal is also an HTTP 403, so it must be
@@ -7596,20 +7600,27 @@ def note_probe_failure(diagnostics: list[str] | None, message: str) -> None:
 
 
 def probe_stderr_head(stderr: str | None, limit: int = 160) -> str:
-    """The first non-empty stderr line: classified, REDACTED, then truncated.
+    """The first non-empty stderr line: classified on the RAW text, then masked.
 
-    Redaction runs before the text is recorded anywhere, not before it is
+    Classification reads the line BEFORE redaction because redaction is
+    deliberately shape-blind and ate the very words that name the cause:
+    `error: rate_limit_exceeded_for_installation` redacted to `error: ***` and
+    then classified as nothing at all. The cause labels are fixed literals, so
+    reading the raw line cannot carry a credential into the output.
+
+    Redaction still runs before the text is RECORDED anywhere, not before it is
     displayed — a diagnostic that has already been appended to a deny reason has
     already been emitted.
     """
-    head = ""
+    raw = ""
     for line in (stderr or "").splitlines():
         if line.strip():
-            head = redact_probe_text(line.strip())
+            raw = line.strip()
             break
-    if not head:
+    if not raw:
         return "no stderr"
-    cause = classify_probe_failure(head)
+    cause = classify_probe_failure(raw)
+    head = redact_probe_text(raw)
     return (f"{cause}: {head}" if cause else head)[:limit]
 
 
