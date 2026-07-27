@@ -226,9 +226,11 @@ T4/wave_mode — the flag is ignored where guards are walls.
 
 Plain `worktree remove` sits on a shorter ladder of its own: allow T1–T3, deny at T4 and under
 `wave_mode` (issue #41). Git refuses it on a tree with tracked modifications or untracked
-files and the branch survives it — but its clean check ignores gitignored content, which
-removal then deletes, so **a `.env` living only in that worktree is gone**. Allowed because
-git checks the part that matters, never because the plain form is harmless.
+files and a checked-out branch survives it — but its clean check ignores gitignored content,
+which removal then deletes, so **a `.env` living only in that worktree is gone**; and a
+**detached** worktree's commits are held only by its own HEAD and die with the removal (law
+7's `git switch -c` mandate exists for exactly this). Allowed because git checks the part
+that matters, never because the plain form is harmless.
 
 **Never scan commit-message or PR-body text at any tier.** Proven repeatedly to block the
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI

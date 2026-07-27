@@ -386,9 +386,12 @@ Plain removal is allowed because git refuses a worktree holding tracked modifica
 untracked files, and because removal leaves the branch behind — **not** because it is
 harmless. Git's clean check (`git status --porcelain --ignore-submodules=none`) does not
 consider gitignored content: it reports a worktree holding `.env`, `local.db`, `vendor.cfg`
-and `node_modules/` as clean, and removal then deletes all of it. Measured on git 2.45.1 and
-pinned by `ignored_worktree_removal_is_destructive` in `smoke_test.py`. Keep no `.env` that
-must outlive its worktree.
+and `node_modules/` as clean, and removal then deletes all of it. The branch guarantee is
+scoped to a worktree that has one: a clean **detached** worktree passes git's pre-removal
+check and its commits — held only by that worktree's HEAD — leave `git log --all` with the
+removal, which is why law 7 mandates `git switch -c` before committing. Both measured on
+git 2.45.1 and pinned by `ignored_worktree_removal_is_destructive` in `smoke_test.py`.
+Keep no `.env` that must outlive its worktree.
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
 (`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`

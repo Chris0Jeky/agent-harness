@@ -392,6 +392,23 @@ def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]
             "rev-parse", "--verify", "--quiet", "refs/heads/linked", cwd=main_repo
         )
 
+        # The branch-survival guarantee is scoped to a worktree that HAS a
+        # branch. A DETACHED worktree's commits are held only by its own HEAD:
+        # git's pre-removal check passes on a clean detached tree, removal
+        # deletes the per-worktree HEAD, and the commit leaves `git log --all`
+        # entirely (PR #116 review finding, reproduced here rather than
+        # restated). This is why law 7 mandates `git switch -c` before
+        # committing in a worktree.
+        detached = os.path.join(root, "detached-wt")
+        git("worktree", "add", "--detach", "--quiet", detached, cwd=main_repo)
+        with open(os.path.join(detached, "only-here.txt"), "w", encoding="utf-8") as fh:
+            fh.write("payload\n")
+        git("add", "only-here.txt", cwd=detached)
+        git("commit", "--quiet", "-m", "held only by this HEAD", cwd=detached)
+        detached_tip = git("rev-parse", "HEAD", cwd=detached).stdout.strip()
+        detached_removal = git("worktree", "remove", detached, cwd=main_repo)
+        reachable_after = git("log", "--all", "--format=%H", cwd=main_repo).stdout
+
     return [
         (
             "git's own !force clean check calls an ignored-only tree CLEAN",
@@ -418,9 +435,19 @@ def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]
             [],
         ),
         (
-            "but the branch survives, so committed work is never lost",
+            "but the BRANCH survives, so work committed on a branch is never lost",
             branch_still_exists.returncode,
             0,
+        ),
+        (
+            "a CLEAN detached worktree passes git's pre-removal check too",
+            detached_removal.returncode,
+            0,
+        ),
+        (
+            "and its unpushed commit leaves `git log --all` -- detached HEADs die with the tree",
+            detached_tip in reachable_after.split(),
+            False,
         ),
     ]
 
