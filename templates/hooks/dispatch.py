@@ -7341,62 +7341,211 @@ _PROBE_ENVIRONMENT = {
 }
 
 
-def resolve_probe_binary(name: str) -> str | None:
-    """Resolve a probe binary against PATH only — never the cwd.
+# Windows `CreateProcess` runs a `.CMD`/`.BAT` target through `cmd.exe`, which
+# RE-PARSES the command line; a `.EXE`/`.COM` is an image and re-parses nothing.
+_NON_REPARSING_EXTENSIONS = frozenset({".exe", ".com"})
 
-    subprocess's implicit Windows resolution (CreateProcess) searches the
-    current directory, so a repo could shadow `git`/`gh` with a planted
-    executable. Explicit resolution against PATH entries alone closes that lane
+# Allowlists, not denylists: the floor cannot enumerate every character
+# `cmd.exe` treats specially across its quoting states, but it can enumerate the
+# ones a repository path, a remote name and a repository slug legitimately hold.
+# argv[0] is the resolver's own output — a PATH directory plus a fixed probe
+# name — so a space in it is expected and safe once subprocess quotes it; every
+# later token can carry repository-controlled text and must mean only itself.
+_SHIM_SAFE_IMAGE_PATH = re.compile(r"[A-Za-z0-9._:/@~=+\\ -]*")
+_SHIM_SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9._:/@~=+\\-]*")
+
+
+def probe_path_directories() -> list[str]:
+    """The PATH entries a probe may be resolved from: absolute ones only.
+
+    A relative entry (including the empty one Windows reads as ".") resolves
+    against the cwd, which is repository-controlled — the lane this resolver
+    exists to close.
+    """
+    return [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and os.path.isabs(entry)
+    ]
+
+
+def probe_path_extensions() -> list[str]:
+    """The extensions a bare probe name may acquire; empty off Windows."""
+    if os.name != "nt":
+        return []
+    return [
+        entry.strip()
+        for entry in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+        if entry.strip()
+    ]
+
+
+def probe_binary_search_order(
+    name: str, directories: list[str], extensions: list[str]
+) -> list[str]:
+    """Candidate paths in the order they may be tried — real images first.
+
+    Every directory is searched for a `.EXE`/`.COM` before ANY directory is
+    allowed to answer with a script shim, which inverts the shell's own
+    per-directory PATHEXT walk on purpose: a directory early on PATH must not be
+    able to turn a plain spawn into a `cmd.exe` one that re-reads argv. Within a
+    pass, PATH order is preserved. Off Windows there are no extensions, so the
+    order is simply PATH order.
+    """
+    if not extensions:
+        return [os.path.join(directory, name) for directory in directories]
+    images = [
+        extension
+        for extension in extensions
+        if extension.lower() in _NON_REPARSING_EXTENSIONS
+    ]
+    shims = [
+        extension
+        for extension in extensions
+        if extension.lower() not in _NON_REPARSING_EXTENSIONS
+    ]
+    declared = os.path.splitext(name)[1].lower()
+    if declared in {extension.lower() for extension in extensions}:
+        # `gh.cmd` names its own extension; try it verbatim, in its own pass.
+        if declared in _NON_REPARSING_EXTENSIONS:
+            images.insert(0, "")
+        else:
+            shims.insert(0, "")
+    order: list[str] = []
+    for pass_extensions in (images, shims):
+        for directory in directories:
+            base = os.path.join(directory, name)
+            order.extend(base + extension for extension in pass_extensions)
+    return order
+
+
+def probe_binary_is_runnable(path: str) -> bool:
+    """A candidate the operating system would actually execute."""
+    if not os.path.isfile(path):
+        return False
+    return os.name == "nt" or os.access(path, os.X_OK)
+
+
+def probe_image_reparses(path: str) -> bool:
+    """True when spawning `path` hands the command line to a re-parsing shell.
+
+    Windows runs a `.CMD`/`.BAT` target through `cmd.exe`, which re-reads the
+    whole command line, so `&`, `|` and `>` inside an argument become commands.
+    A POSIX `#!` script receives its argv as an array and re-parses nothing.
+    """
+    if os.name != "nt":
+        return False
+    return os.path.splitext(path)[1].lower() not in _NON_REPARSING_EXTENSIONS
+
+
+def probe_argv_is_shim_safe(argv: list[str]) -> bool:
+    """True when no token could mean anything to `cmd.exe` but itself."""
+    if not argv:
+        return False
+    if not _SHIM_SAFE_IMAGE_PATH.fullmatch(argv[0]):
+        return False
+    return all(_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:])
+
+
+def resolve_probe_binary(name: str) -> str | None:
+    """Resolve a probe binary against PATH only — never the cwd, images first.
+
+    Two hazards, two rules.
+
+    *The cwd.* subprocess's implicit Windows resolution (CreateProcess) searches
+    the current directory, so a repo could shadow `git`/`gh` with a planted
+    executable. Only absolute PATH entries are searched, which closes that lane
     and makes a missing binary a NAMED diagnosis instead of a silent empty probe.
+
+    *Script shims.* Resolving through PATHEXT is what lets a box whose `gh` is
+    genuinely a `.cmd` be inspected at all (issue #90), but a `.cmd` runs under
+    `cmd.exe`, which re-parses a command line carrying repository-controlled
+    text. So a real image anywhere on PATH beats a shim everywhere on PATH
+    (`probe_binary_search_order`), and when a shim is the only answer
+    `command_output` refuses to spawn it with argv `cmd.exe` could re-read.
     """
     if name in _PROBE_BINARY_CACHE:
         return _PROBE_BINARY_CACHE[name]
-    windows = os.name == "nt"
     resolved = None
     if os.path.dirname(name):
         # An explicit path keeps its meaning; searching for it would change it.
         resolved = name if os.path.isfile(name) else None
-        _PROBE_BINARY_CACHE[name] = resolved
-        return resolved
-    extensions = []
-    if windows:
-        extensions = [
-            entry.strip()
-            for entry in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(
-                os.pathsep
-            )
-            if entry.strip()
-        ]
-    declared_extension = os.path.splitext(name)[1]
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        base = os.path.join(entry, name)
-        if not windows:
-            candidates = [base]
-        else:
-            candidates = []
-            if declared_extension and any(
-                declared_extension.lower() == extension.lower()
-                for extension in extensions
-            ):
-                candidates.append(base)
-            candidates.extend(base + extension for extension in extensions)
-        for candidate in candidates:
-            if not os.path.isfile(candidate):
-                continue
-            if windows or os.access(candidate, os.X_OK):
+    else:
+        for candidate in probe_binary_search_order(
+            name, probe_path_directories(), probe_path_extensions()
+        ):
+            if probe_binary_is_runnable(candidate):
                 resolved = candidate
                 break
-        if resolved:
-            break
     _PROBE_BINARY_CACHE[name] = resolved
     return resolved
 
 
+# git prints the whole remote URL when a lookup fails — credentials included —
+# and `gh` echoes tokens from a misconfigured credential helper. A diagnostic
+# line reaches `permissionDecisionReason`, which the runtime renders and the
+# transcript stores, so every known credential shape is masked before it is
+# recorded. The trailing pattern is deliberately shape-blind: it catches the
+# token format that has not been invented yet.
+_PROBE_SECRET_PATTERNS = (
+    re.compile(r"(?<=//)[^/@\s]+(?=@)"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{4,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{4,}"),
+    re.compile(r"[A-Za-z0-9+/_]{24,}={0,2}"),
+)
+
+# Ordered: a GitHub rate-limit refusal is also an HTTP 403, so it must be
+# recognised before the authentication pattern claims it.
+_PROBE_FAILURE_CAUSES = (
+    (re.compile(r"rate[\s_-]?limit", re.IGNORECASE), "rate limit"),
+    (
+        re.compile(
+            r"\b(401|403)\b|unauthorized|bad credentials|authentication"
+            r"|permission denied|gh auth login|not logged in",
+            re.IGNORECASE,
+        ),
+        "authentication",
+    ),
+    (
+        re.compile(
+            r"\b404\b|not found|could not resolve to a repository", re.IGNORECASE
+        ),
+        "not found",
+    ),
+    (
+        re.compile(
+            r"could not resolve host|connection (refused|reset)|no such host"
+            r"|network is unreachable|temporary failure in name resolution"
+            r"|i/o timeout|tls handshake",
+            re.IGNORECASE,
+        ),
+        "network",
+    ),
+)
+
+
+def redact_probe_text(text: str) -> str:
+    """Mask every credential shape a probe's output is known to carry."""
+    for pattern in _PROBE_SECRET_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
+def classify_probe_failure(text: str) -> str:
+    """Name a probe failure's cause when the text makes it recognisable."""
+    for pattern, cause in _PROBE_FAILURE_CAUSES:
+        if pattern.search(text):
+            return cause
+    return ""
+
+
 def probe_label(argv: list[str]) -> str:
-    """A short human label for a probe, for diagnosis lines humans read."""
-    return " ".join(argv[:4]) if argv else "<empty command>"
+    """A short human label for a probe, for diagnosis lines humans read.
+
+    Redacted like every other emitted text: a probe's argv can carry a remote
+    URL, and a remote URL can carry credentials.
+    """
+    return redact_probe_text(" ".join(argv[:4])) if argv else "<empty command>"
 
 
 def note_probe_failure(diagnostics: list[str] | None, message: str) -> None:
@@ -7406,12 +7555,21 @@ def note_probe_failure(diagnostics: list[str] | None, message: str) -> None:
 
 
 def probe_stderr_head(stderr: str | None, limit: int = 160) -> str:
-    """The first non-empty stderr line, truncated — the cause in one line."""
+    """The first non-empty stderr line: classified, REDACTED, then truncated.
+
+    Redaction runs before the text is recorded anywhere, not before it is
+    displayed — a diagnostic that has already been appended to a deny reason has
+    already been emitted.
+    """
+    head = ""
     for line in (stderr or "").splitlines():
-        text = line.strip()
-        if text:
-            return text[:limit]
-    return "no stderr"
+        if line.strip():
+            head = redact_probe_text(line.strip())
+            break
+    if not head:
+        return "no stderr"
+    cause = classify_probe_failure(head)
+    return (f"{cause}: {head}" if cause else head)[:limit]
 
 
 def command_output(
@@ -7437,9 +7595,20 @@ def command_output(
     if executable is None:
         note_probe_failure(diagnostics, f"{argv[0]}: not found on PATH")
         return ""
+    spawn_argv = [executable, *argv[1:]]
+    if probe_image_reparses(executable) and not probe_argv_is_shim_safe(spawn_argv):
+        # A `.cmd` re-parses argv under `cmd.exe`, and probe argv carries text a
+        # repository controls (a remote name, a repository slug). Refusing NAMES
+        # the cause; spawning would run whatever the metacharacters spell.
+        note_probe_failure(
+            diagnostics,
+            f"{argv[0]}: only a script shim on PATH; "
+            "refusing to spawn with unsafe arguments",
+        )
+        return ""
     try:
         proc = subprocess.run(
-            [executable, *argv[1:]],
+            spawn_argv,
             cwd=cwd or None,
             capture_output=True,
             text=True,
@@ -7471,6 +7640,14 @@ def command_output(
     return output
 
 
+# The identity `command_output_before_deadline` tests a runner against. It must
+# NOT be the module global: `scripts/replay_corpus.py:make_module_offline`
+# rebinds `dispatch.command_output` to its own two-argument stub, so a check
+# against the global answers True for that stub and hands it a `diagnostics=`
+# keyword it never declared. The floor contracts an exception to DENY, so the
+# result was a fail-closed floor whose own measurement instrument could not run.
+_NATIVE_COMMAND_OUTPUT = command_output
+
 _REMOTE_RESOLUTION_BUDGET_SECONDS = 3.5
 
 
@@ -7484,20 +7661,21 @@ def command_output_before_deadline(
     """Run a resolver command without overrunning the hook's aggregate budget.
 
     `diagnostics` reaches the runner ONLY when it is this module's own
-    `command_output`: an injected runner (tests, `scripts/replay_corpus.py`)
-    keeps its two-argument contract and must never be handed a keyword it does
-    not declare. Budget outcomes are recorded whichever runner is in use.
+    `command_output`, compared against the private alias rather than the module
+    global — an injected runner (tests, `scripts/replay_corpus.py`, which
+    rebinds the global) keeps its two-argument contract and must never be handed
+    a keyword it does not declare. Budget outcomes are recorded either way.
     """
     label = probe_label(argv)
     if deadline is None:
-        if command_runner is command_output:
+        if command_runner is _NATIVE_COMMAND_OUTPUT:
             return command_runner(argv, cwd, diagnostics=diagnostics)
         return command_runner(argv, cwd)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         note_probe_failure(diagnostics, f"probe budget exhausted before {label}")
         return ""
-    if command_runner is command_output:
+    if command_runner is _NATIVE_COMMAND_OUTPUT:
         output = command_runner(
             argv, cwd, timeout=min(3, remaining), diagnostics=diagnostics
         )
@@ -7966,21 +8144,35 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+_REST_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+
+
 def github_rest_repo_path(slug: str) -> str:
     """Map a repository slug onto the REST route's `<owner>/<repo>` pair.
 
-    `github_repo_slug` returns the bare pair today, but a caller that pins the
-    host (`github.com/owner/repo`, the spelling that makes `gh repo view`
-    resolve against github.com rather than GH_HOST) must not produce
-    `repos/github.com/owner/repo`. Anything that is not a clean pair returns ""
-    so the REST probe is skipped rather than asking a malformed question.
+    `github_repo_slug` returns the bare pair today; the host prefixes are
+    stripped so that a caller which ever pins the host in the slug still asks
+    `repos/owner/repo` rather than `repos/github.com/owner/repo`. The REST call
+    itself is pinned at the call site with `--hostname github.com`, not here.
+
+    The result is interpolated into argv, so validation is an ALLOWLIST and
+    every rejection returns "" — the REST lane is then skipped and GraphQL
+    answers. Exactly two segments, each of the characters GitHub actually allows
+    in an owner or repository name and never all dots: `../x` must not become
+    `repos/../x`, and `a&b/c` must never reach a command line at all.
     """
     path = slug.strip().strip("/")
     for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
         if path.lower().startswith(prefix):
             path = path[len(prefix) :]
             break
-    return path if re.fullmatch(r"[^/?#\s]+/[^/?#\s]+", path) else ""
+    segments = path.split("/")
+    if len(segments) != 2:
+        return ""
+    for segment in segments:
+        if not _REST_PATH_SEGMENT.fullmatch(segment) or not segment.strip("."):
+            return ""
+    return path
 
 
 def detail_with_diagnostics(base: str, diagnostics: list[str], limit: int = 300) -> str:
@@ -7993,6 +8185,11 @@ def detail_with_diagnostics(base: str, diagnostics: list[str], limit: int = 300)
         return base
     detail = f"{base} — {'; '.join(diagnostics[-3:])}"
     return detail if len(detail) <= limit else detail[: limit - 3] + "..."
+
+
+# The only three answers either transport may give. Anything else — a literal
+# `null`, an error page, a future spelling — is not a verdict.
+_KNOWN_VISIBILITIES = frozenset({"PUBLIC", "PRIVATE", "INTERNAL"})
 
 
 def public_remote_status(
@@ -8052,18 +8249,38 @@ def public_remote_status(
         # exhausts the GraphQL quota hourly while the REST core quota is barely
         # touched (issue #90). A quota-denied probe returned "" and fail-closed
         # a push to a repository the floor could have proved private.
+        # `--hostname github.com` pins the question to the host the destination
+        # is by construction on; without it an ambient GH_HOST would answer for
+        # a different server entirely.
         visibility = ""
         rest_path = github_rest_repo_path(slug)
         if rest_path:
             visibility = command_output_before_deadline(
                 command_runner,
-                ["gh", "api", f"repos/{rest_path}", "--jq", ".visibility"],
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    f"repos/{rest_path}",
+                    "--jq",
+                    ".visibility",
+                ],
                 project_dir,
                 deadline,
                 diagnostics,
             ).upper()
-        if not visibility:
-            # Same question over the other transport, under the same deadline.
+            if visibility and visibility not in _KNOWN_VISIBILITIES:
+                note_probe_failure(
+                    diagnostics,
+                    f"gh api repos/{rest_path}: unrecognized visibility "
+                    f"{redact_probe_text(visibility[:24])!r}",
+                )
+        if visibility not in _KNOWN_VISIBILITIES:
+            # `gh api --jq .visibility` prints a literal `null` (exit 0) when the
+            # field is absent, and "NULL" is truthy — gating the fallback on
+            # emptiness rebuilt issue #90's mute wall on the new lane. Anything
+            # that is not a verdict falls through to the other transport.
             visibility = command_output_before_deadline(
                 command_runner,
                 [
