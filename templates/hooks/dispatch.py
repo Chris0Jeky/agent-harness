@@ -13,10 +13,14 @@ Contract (BLUEPRINT §2, SPECS §5-6):
   allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
   relaxed-git (tier.json flag `relaxed_work_loss_guards`) keeps them allow below T4/wave_mode;
   the flag is IGNORED at T4 and under wave_mode (other agents' work is in the blast radius).
-  Plain `worktree remove` is tier-dependent on its own shorter ladder: allow T1-T3, deny at
-  T4/wave_mode. Git refuses it on a tree with tracked modifications or untracked files, but
-  its clean check IGNORES gitignored content, which removal then deletes (.env-class files,
-  local databases, build trees), so the plain form is gated but never merely harmless.
+  Laundered force spellings ride the same ladder (an opaque spelling never scores better
+  than the literal form it might be): a runtime-computed worktree ACTION word (issue #117),
+  a dynamic option/separator-free operand token in a removal, and argv-visible config that
+  blinds git's clean check (`-c status.showUntrackedFiles=no`, issue #123).
+  Plain `worktree remove` allows at EVERY tier (owner ruling 2026-07-27): git itself refuses
+  a tree with tracked modifications or untracked files, and law 7's `git switch -c` mandate
+  keeps commits ref-held. Its clean check still IGNORES gitignored content, which removal
+  deletes (.env-class files, local databases, build trees) -- allowed, never harmless.
 - NEVER inspects commit-message / PR-body text: quoted strings are stripped before matching.
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
@@ -510,6 +514,24 @@ def has_dynamic_shell_token(token: str) -> bool:
     return bool(re.search(r"\$|%[^%]+%|![^!]+!|`", token)) or (
         _LITERAL_BACKTICK in token
     )
+
+
+def dynamic_token_could_be_an_option(token: str) -> bool:
+    """True when a runtime-computed token could expand to an OPTION word.
+
+    Two shapes qualify: a token that already starts with `-` and carries a
+    substitution (`-$X` may be `-f`), and a bare dynamic token with no path
+    separator (`$A`, `${A}f`, `%X%%Y%` may each be `--force` whole). A
+    dynamic-prefixed compound that contains a separator (`$WT_PROJECT_DIR/wt41`,
+    the spelling law 7 mandates) can only expand to a path-shaped word -- the
+    literal `/<tail>` pins it out of option space -- so it does NOT qualify and
+    keeps the literal form's score.
+    """
+    if not has_dynamic_shell_token(token):
+        return False
+    if token.startswith("-"):
+        return True
+    return "/" not in token and "\\" not in token
 
 
 def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
@@ -5031,6 +5053,65 @@ def git_inline_alias(toks: list[str], subcommand: str) -> str | None:
         if key.lower() == f"alias.{subcommand}".lower():
             result = value
     return result
+
+
+_WORKTREE_CLEAN_CHECK_CONFIG = "status.showuntrackedfiles"
+_WORKTREE_CLEAN_CHECK_SAFE_VALUES = {"normal", "all"}
+
+
+def worktree_removal_clean_check_weakened(
+    git_toks: list[str],
+    inline_configs: dict[str, list[str]],
+    config_env_keys: list[str] | None,
+) -> bool:
+    """True when argv-visible git config can blind removal's clean check.
+
+    Plain `git worktree remove` is graduated on the strength of git's own
+    refusal of a tree holding modified or untracked files, and that refusal
+    reads `status.showUntrackedFiles`: measured on git 2.45.1 (issue #123),
+    `-c status.showUntrackedFiles=no worktree remove` exits 0 on a tree whose
+    untracked file made the unprefixed spelling exit 128. A spelling that
+    weakens the check is therefore force-EQUIVALENT and rides the same
+    work-loss ladder, and an opaque key or value must never score better
+    than the literal weakening form it might be. Only argv is inspected:
+    repository/user configuration doing the same thing is outside the
+    parser's sight line (FLOOR_LIMITATIONS.md, issue #123's remainder).
+    """
+    for key, values in inline_configs.items():
+        if has_dynamic_shell_token(key):
+            return True
+        if key == _WORKTREE_CLEAN_CHECK_CONFIG:
+            for value in values:
+                if (
+                    has_dynamic_shell_token(value)
+                    or value.lower() not in _WORKTREE_CLEAN_CHECK_SAFE_VALUES
+                ):
+                    return True
+    if config_env_keys is None:
+        # Malformed/opaque --config-env syntax anywhere in the command; the
+        # push guard treats this the same way (opaque is never safer).
+        return True
+    for key in config_env_keys:
+        if has_dynamic_shell_token(key) or key.lower() == _WORKTREE_CLEAN_CHECK_CONFIG:
+            return True
+    # `-c` assignments the inline parser could not record: a value token with
+    # no `=` is boolean-true config for a key this parser cannot name when the
+    # token is dynamic -- `-c $CFG` may be the weakening assignment itself.
+    index = 1
+    while index < len(git_toks):
+        token = git_toks[index]
+        value = None
+        if token == "-c" and index + 1 < len(git_toks):
+            value = git_toks[index + 1]
+            index += 2
+        elif token.startswith("-c") and len(token) > 2:
+            value = token[2:]
+            index += 1
+        else:
+            index += 1
+        if value is not None and "=" not in value and has_dynamic_shell_token(value):
+            return True
+    return False
 
 
 def git_inline_configs(toks: list[str]) -> dict[str, list[str]]:
@@ -10177,6 +10258,32 @@ def check(
                         continue
                     worktree_positionals.append(token)
                     index += 1
+                # A runtime-computed ACTION word may expand to `remove --force`
+                # -- `git worktree $ACT wt` resplits after expansion, so one
+                # token can deliver both words (issue #117; the 1.6.16 rule
+                # caught the backtick spelling by accident and #113's correct
+                # positional resolver dropped that coverage). An opaque
+                # spelling must never score better than the literal form it
+                # might be, so the dynamic action word rides the same
+                # work-loss ladder as `remove --force` itself.
+                if worktree_action and has_dynamic_shell_token(worktree_action):
+                    if strict:
+                        return (
+                            "deny",
+                            "[worktree-action-opaque] T4/wave: this worktree "
+                            "action word is computed at run time and may expand "
+                            "to `remove --force`, which is denied here. Spell "
+                            "the action literally.",
+                        )
+                    if tier >= 3 and not relaxed:
+                        return (
+                            "ask",
+                            "[worktree-action-opaque] T3: this worktree action "
+                            "word is computed at run time and may expand to "
+                            "`remove --force`, whose T3 rung is this same "
+                            "confirmation. Spell the action literally to get "
+                            "the literal form's score.",
+                        )
                 # `git worktree remove` REFUSES a worktree holding tracked
                 # modifications or untracked (non-ignored) files -- git runs a
                 # check the floor cannot -- and removal leaves the BRANCH
@@ -10203,9 +10310,23 @@ def check(
                 # written only in that worktree, local databases and build
                 # trees are destroyed with no git copy to restore them from.
                 #
-                # The plain form therefore stays gated where another agent may
-                # own the tree: allow T1-T3, deny at T4/wave_mode. `--force`
-                # additionally overrides git's refusal on a DIRTY tree, which
+                # The plain form allows at EVERY tier, wave_mode included
+                # (owner ruling, 2026-07-27, delegated to this slice): git
+                # itself refuses a tree with tracked modifications or
+                # untracked files, so "the work is committed" is
+                # tool-enforced; law 7 mandates `git switch -c` before
+                # committing, so commits have a surviving ref; the wave-time
+                # failure mode is therefore another agent's SESSION breaking
+                # -- recoverable -- not its work being lost, and a hard deny
+                # is reserved for the irreversible. The known residual losses
+                # are deliberate, bounded, and documented rather than gated:
+                # gitignored content (pinned below), a DETACHED worktree's
+                # commits (issue #122 -- law 7's `switch -c` is the guard;
+                # argv cannot see detached-ness), and a repo/user config that
+                # blinds git's clean check (issue #123's remainder; the
+                # argv-visible spellings of that weakening ARE gated, below).
+                #
+                # `--force` overrides git's refusal on a DIRTY tree, which
                 # is where uncommitted TRACKED work is lost; a LOCKED tree
                 # needs the doubled flag, and git says so itself -- measured on
                 # 2.45.1, a single `--force` on a locked tree exits 128 with
@@ -10215,8 +10336,17 @@ def check(
                 # exactly as `-f`, so every overriding spelling carries the
                 # full work-loss ladder (allow T1-T2, ask T3, deny T4/wave,
                 # honouring the declared relaxed-git posture exactly as
-                # `reset --hard` and `clean -f` do).
-                # The previous unconditional deny protected nothing: `rm -rf` and
+                # `reset --hard` and `clean -f` do). Three LAUNDERED force
+                # spellings ride that same ladder, because an opaque spelling
+                # must never score better than the literal form it might be:
+                # a dynamic option token (`-$X` may be `-f`), a dynamic
+                # operand with no path separator (`$A` may be `--force`
+                # whole; law 7's `$WT_PROJECT_DIR/<name>` compounds keep the
+                # plain score), and argv-visible config that blinds git's
+                # clean check (`-c status.showUntrackedFiles=no`, issue #123
+                # -- measured: it turns the refusal on an untracked file into
+                # exit 0).
+                # The old unconditional deny protected nothing: `rm -rf` and
                 # `Remove-Item -Recurse` are not git commands and never reached
                 # this rule, so a floor-respecting agent could only ever ACCUMULATE
                 # worktrees (29 in this repo when issue #41 was filed).
@@ -10240,6 +10370,7 @@ def check(
                     # `--` ends option parsing, so a worktree literally named `-f`
                     # is an operand, not the force flag (mirrors the checkout guard).
                     remove_options = args[: args.index("--")] if "--" in args else args
+                    force_class = None
                     if any(
                         token == "-f"
                         or token == "--force"
@@ -10247,33 +10378,54 @@ def check(
                         or bool(re.match(r"^-[a-zA-Z]*f", token))  # -f, -ff clusters
                         for token in remove_options
                     ):
+                        force_class = "force"
+                    elif worktree_removal_clean_check_weakened(
+                        git_toks, inline_configs, config_env_keys
+                    ):
+                        force_class = "config"
+                    elif any(
+                        dynamic_token_could_be_an_option(token)
+                        for token in remove_options
+                    ):
+                        force_class = "opaque"
+                    if force_class is not None:
                         if strict:
-                            return (
-                                "deny",
-                                "[worktree-remove-force] T4/wave: git worktree remove --force "
-                                "deletes a worktree git would otherwise refuse to touch, "
-                                "including another agent's uncommitted work. Drop --force and "
-                                "git will at least refuse a dirty or locked tree.",
-                            )
+                            reasons = {
+                                "force": "[worktree-remove-force] T4/wave: git worktree remove "
+                                "--force deletes a worktree git would otherwise refuse to "
+                                "touch, including another agent's uncommitted work. Drop "
+                                "--force and git will at least refuse a dirty or locked tree.",
+                                "config": "[worktree-remove-config] T4/wave: this inline git "
+                                "config can blind the clean check that makes plain removal "
+                                "safe (status.showUntrackedFiles=no makes git delete a tree "
+                                "it would otherwise refuse), which is --force by another "
+                                "spelling. Drop the -c/--config-env, or spell the literal "
+                                "value normal or all.",
+                                "opaque": "[worktree-remove-opaque] T4/wave: a runtime-"
+                                "computed token in this removal may expand to --force, which "
+                                "is denied here. Spell every option and operand literally "
+                                "(a $VAR/<name> path compound keeps the plain score).",
+                            }
+                            return ("deny", reasons[force_class])
                         if tier >= 3 and not relaxed:
-                            return (
-                                "ask",
-                                "[worktree-remove-force] T3: git worktree remove --force "
-                                "discards uncommitted work in that worktree. Confirm, or drop "
-                                "--force so git refuses a dirty or locked tree itself -- but a "
-                                "removal git does allow still deletes gitignored files.",
-                            )
-                    elif strict:
-                        return (
-                            "deny",
-                            "[worktree-remove-tier] T4/wave: worktree removal is gated here "
-                            "because another agent may own that tree, and git's own clean "
-                            "check ignores gitignored content -- removal still deletes "
-                            ".env-class files, local databases and build trees. Confirm it "
-                            "with `git -C <path> status --porcelain --ignored`, let the "
-                            "owning session remove it, or clear wave_mode once the wave "
-                            "is done.",
-                        )
+                            reasons = {
+                                "force": "[worktree-remove-force] T3: git worktree remove "
+                                "--force discards uncommitted work in that worktree. Confirm, "
+                                "or drop --force so git refuses a dirty or locked tree itself "
+                                "-- but a removal git does allow still deletes gitignored "
+                                "files.",
+                                "config": "[worktree-remove-config] T3: this inline git "
+                                "config can blind the clean check that makes plain removal "
+                                "safe (status.showUntrackedFiles=no makes git delete a tree "
+                                "it would otherwise refuse). Confirm, or drop the "
+                                "-c/--config-env, or spell the literal value normal or all.",
+                                "opaque": "[worktree-remove-opaque] T3: a runtime-computed "
+                                "token in this removal may expand to --force, whose T3 rung "
+                                "is this same confirmation. Spell every option and operand "
+                                "literally (a $VAR/<name> path compound keeps the plain "
+                                "score).",
+                            }
+                            return ("ask", reasons[force_class])
                 elif worktree_action in {"add", "move"}:
                     # add writes its first operand; move writes its second.
                     destination_targets = (

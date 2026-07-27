@@ -381,19 +381,29 @@ MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +mai
 `curl … | sh`, `wget … | sh`, `sudo …`, write to `.env`/`*credentials*`/`*secret*` files;
 with `sensitive_data`: `git push <public-remote>`, `gh repo create --public`.
 
-MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git checkout -- .`,
-`git worktree remove --force` (warn at T3, allow T1–T2); plus plain `git worktree remove`,
-which is allowed at T1–T3 (issue #41).
+MUST BLOCK only at T4 / `wave_mode` (warn at T3, allow T1–T2): `git reset --hard`,
+`git clean -fd`, `git checkout -- .`, `git worktree remove --force` — and the LAUNDERED
+force spellings of a worktree removal, which ride the identical ladder because an opaque
+spelling must never score better than the literal form it might be: a runtime-computed
+action word (`git worktree $ACT …`, issue #117 — `[worktree-action-opaque]`), a dynamic
+option or separator-free operand token in a removal (`-$X`, bare `$A` —
+`[worktree-remove-opaque]`; law 7's `$WT_PROJECT_DIR/<name>` compounds keep the plain
+score), and argv-visible config that blinds git's clean check
+(`-c status.showUntrackedFiles=no` and its `--config-env`/opaque twins, issue #123 —
+`[worktree-remove-config]`; literal `normal`/`all` values stay plain).
 
-Plain removal is allowed because git refuses a worktree holding tracked modifications or
-untracked files, and because removal leaves the branch behind — **not** because it is
+Plain `git worktree remove` is allowed at EVERY tier, `wave_mode` included (owner ruling
+2026-07-27, issues #41/#117): git refuses a worktree holding tracked modifications or
+untracked files, and removal leaves a checked-out branch behind — **not** because it is
 harmless. Git's clean check (`git status --porcelain --ignore-submodules=none`) does not
 consider gitignored content: it reports a worktree holding `.env`, `local.db`, `vendor.cfg`
 and `node_modules/` as clean, and removal then deletes all of it. The branch guarantee is
 scoped to a worktree that has one: a clean **detached** worktree passes git's pre-removal
 check and its commits — held only by that worktree's HEAD — leave `git log --all` with the
-removal, which is why law 7 mandates `git switch -c` before committing. Both measured on
-git 2.45.1 and pinned by `ignored_worktree_removal_is_destructive` in `smoke_test.py`.
+removal, which is why law 7 mandates `git switch -c` before committing (issue #122; the
+floor cannot see detached-ness in argv). All measured on git 2.45.1 and pinned by
+`ignored_worktree_removal_is_destructive` in `smoke_test.py`, including the
+`status.showUntrackedFiles=no` blinding of the untracked-file refusal.
 Keep no `.env` that must outlive its worktree.
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
