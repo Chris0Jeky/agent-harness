@@ -8,7 +8,8 @@ Runtime copies are installed through explicit sync commands or repo-owned adapte
 Contract (BLUEPRINT §2, SPECS §5-6):
 - Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
   the project, pipe-to-shell installs, sudo, secret-file mutation, PowerShell pipe-deletes.
-- Work-loss guards (reset --hard, clean -f, checkout -- ., restore .) are tier-dependent:
+- Work-loss guards (reset --hard, clean -f, checkout -- ., restore .,
+  worktree remove --force) are tier-dependent:
   allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
   relaxed-git (tier.json flag `relaxed_work_loss_guards`) keeps them allow below T4/wave_mode;
   the flag is IGNORED at T4 and under wave_mode (other agents' work is in the blast radius).
@@ -10143,30 +10144,87 @@ def check(
                         "Git stash of an opaque or secret-looking path is floor-blocked.",
                     )
             if sub == "worktree":
-                if any(token.lower() == "remove" for token in args):
-                    return "deny", "Git worktree removal is floor-blocked."
-                worktree_action = next(
-                    (token.lower() for token in args if not token.startswith("-")),
-                    "",
-                )
-                if worktree_action in {"add", "move"}:
-                    worktree_positionals = []
-                    seen_action = False
-                    index = 0
-                    while index < len(args):
-                        token = args[index]
-                        if token in _GIT_WORKTREE_VALUE_OPTIONS:
-                            index += 2
-                            continue
-                        if token.startswith("-"):
-                            index += 1
-                            continue
-                        if not seen_action:
-                            seen_action = True  # the action word itself
-                            index += 1
-                            continue
-                        worktree_positionals.append(token)
+                # The action word is resolved BY POSITION, the way
+                # git_subcommand_index resolves the git subcommand itself: skip
+                # options and the values they consume, then take the first bare
+                # token. The old rule matched `remove` ANYWHERE in argv, so
+                # `git worktree add ../remove`, `git worktree add /tmp/remove-me`
+                # and `git worktree lock --reason remove ../wt` were all denied as
+                # removals (issue #41).
+                worktree_action = ""
+                worktree_positionals = []
+                seen_action = False
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token in _GIT_WORKTREE_VALUE_OPTIONS:
+                        index += 2
+                        continue
+                    if token.startswith("-"):
                         index += 1
+                        continue
+                    if not seen_action:
+                        seen_action = True  # the action word itself
+                        worktree_action = token.lower()
+                        index += 1
+                        continue
+                    worktree_positionals.append(token)
+                    index += 1
+                # `git worktree remove` REFUSES a dirty or locked worktree on its
+                # own -- git runs the clean check the floor cannot -- so the plain
+                # form cannot destroy uncommitted work and is allowed below
+                # T4/wave. `--force` is precisely the spelling that overrides that
+                # refusal, so it joins the tier-dependent work-loss guards
+                # (allow T1-T2, ask T3, deny T4/wave, honouring the declared
+                # relaxed-git posture exactly as `reset --hard` and `clean -f` do).
+                # The previous unconditional deny protected nothing: `rm -rf` and
+                # `Remove-Item -Recurse` are not git commands and never reached
+                # this rule, so a floor-respecting agent could only ever ACCUMULATE
+                # worktrees (29 in this repo when issue #41 was filed).
+                #
+                # `prune` is deliberately unguarded: it deletes only the
+                # administrative `.git/worktrees/<id>` metadata of entries whose
+                # working-tree directory is ALREADY gone, and skips any entry whose
+                # directory still exists or that carries a `locked` file. `--expire
+                # <time>` only narrows which of those ALREADY-missing entries are
+                # old enough to drop, so it cannot reach a live worktree either;
+                # `git worktree repair` re-registers anything pruned early.
+                # `list`/`lock`/`unlock`/`repair` are likewise metadata-only.
+                if worktree_action == "remove":
+                    # `--` ends option parsing, so a worktree literally named `-f`
+                    # is an operand, not the force flag (mirrors the checkout guard).
+                    remove_options = args[: args.index("--")] if "--" in args else args
+                    if any(
+                        token == "-f"
+                        or token == "--force"
+                        or git_option_abbreviates(token, "--force", min_prefix=1)
+                        or bool(re.match(r"^-[a-zA-Z]*f", token))  # -f, -ff clusters
+                        for token in remove_options
+                    ):
+                        if strict:
+                            return (
+                                "deny",
+                                "[worktree-remove-force] T4/wave: git worktree remove --force "
+                                "deletes a worktree git would otherwise refuse to touch, "
+                                "including another agent's uncommitted work. Drop --force and "
+                                "git will verify the tree is clean first.",
+                            )
+                        if tier >= 3 and not relaxed:
+                            return (
+                                "ask",
+                                "[worktree-remove-force] T3: git worktree remove --force "
+                                "discards uncommitted work in that worktree. Confirm, or drop "
+                                "--force so git refuses a dirty tree itself.",
+                            )
+                    elif strict:
+                        return (
+                            "deny",
+                            "[worktree-remove-tier] T4/wave: worktree removal is gated here "
+                            "because another agent may own that tree. Confirm it with "
+                            "`git -C <path> status --porcelain`, let the owning session remove "
+                            "it, or clear wave_mode once the wave is done.",
+                        )
+                elif worktree_action in {"add", "move"}:
                     # add writes its first operand; move writes its second.
                     destination_targets = (
                         worktree_positionals
