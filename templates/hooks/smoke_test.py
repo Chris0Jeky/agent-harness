@@ -5609,6 +5609,11 @@ def run_smoke():
             HERE,
             HERE,
             remote_resolver=resolver,
+            # These three rows pin the PRE-narrowing overlay semantics; the
+            # issue-#48 narrowing is stubbed closed so the verdicts cannot
+            # depend on the suite running inside a declared non-sensitive
+            # repository. The narrowing has its own probes further down.
+            push_narrowing=lambda *a, **k: (False, "table-stub"),
         )
         sensitive_remote_cases.append((label, got, expected))
 
@@ -6011,6 +6016,10 @@ def run_smoke():
                 command_runner=forged_public_runner,
             )
         ),
+        # The subject under test is the resolver; the issue-#48 narrowing is
+        # stubbed closed so the verdict cannot depend on where this checkout
+        # sits on disk (the suite runs inside a declared non-sensitive repo).
+        push_narrowing=lambda *a, **k: (False, "stubbed"),
     )
     sensitive_remote_cases.append(
         (
@@ -6177,6 +6186,8 @@ def run_smoke():
                 command_runner=clustered_public_runner,
             )
         ),
+        # Same hermeticity stub as the forged-remote probe above (issue #48).
+        push_narrowing=lambda *a, **k: (False, "stubbed"),
     )
     sensitive_remote_cases.append(
         (
@@ -6210,6 +6221,61 @@ def run_smoke():
                 "deny",
             )
         )
+    # --- issue #48 narrowing: a push attributable to a non-sensitive repo ---
+    narrowing_allow_decision, _reason = dispatch_module.check(
+        "git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+        push_narrowing=lambda *a, **k: (True, "attributed"),
+    )
+    narrowing_deny_decision, narrowing_deny_reason = dispatch_module.check(
+        "git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+        push_narrowing=lambda *a, **k: (False, "condition failed"),
+    )
+    # Real narrowing, deterministic anywhere: the URL verdict is pure argv
+    # analysis and returns before any filesystem or subprocess probe.
+    url_narrowing_decision, url_narrowing_reason = dispatch_module.check(
+        "git push https://github.com/example/public.git main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+    )
+    sensitive_remote_cases.extend(
+        [
+            (
+                "issue-48 attributable push is exempt from the context deny",
+                narrowing_allow_decision,
+                "allow",
+            ),
+            (
+                "issue-48 unmet narrowing keeps the deny",
+                narrowing_deny_decision,
+                "deny",
+            ),
+            (
+                "issue-48 deny names the failed condition",
+                "issue #48 narrowing: condition failed" in narrowing_deny_reason,
+                True,
+            ),
+            (
+                "issue-48 URL destination never narrows (real path)",
+                url_narrowing_decision,
+                "deny",
+            ),
+            (
+                "issue-48 URL deny names the condition",
+                "destination is a URL" in url_narrowing_reason,
+                True,
+            ),
+        ]
+    )
     for label, got, expected in sensitive_remote_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
