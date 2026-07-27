@@ -8510,6 +8510,53 @@ _GIT_PUSH_URLISH_DESTINATION = re.compile(
     r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])"
 )
 
+# Push options that publish refs the branch-attribution check never inspects,
+# or that delete them. `--follow-tags` is here for the same reason as `--tags`.
+_GIT_PUSH_SELECTOR_LONG_OPTIONS = (
+    "--all",
+    "--branches",
+    "--tags",
+    "--follow-tags",
+    "--mirror",
+    "--delete",
+)
+
+
+def git_globals_preserve_attribution(git_globals: list[str] | None) -> bool:
+    """Whether the git globals leave `--show-toplevel` naming the pushed repo.
+
+    `sensitive_push_narrowing_status` attributes a push by asking git for the
+    working tree's toplevel. `--work-tree` decouples that answer from the
+    repository whose refs, remote configuration and OBJECTS a push actually
+    uploads: with `--work-tree=<decoy>`, `--show-toplevel` names the decoy while
+    the git dir still comes from the cwd, so a directory holding nothing but a
+    `sensitive_data: false` tier declaration attributes a SENSITIVE repository's
+    push to itself. `--git-dir`, `--namespace`, `--bare`, `--super-prefix` and
+    any `-c`/`--config-env` setting (`core.worktree`, `core.gitdir`, …) split it
+    the same way.
+
+    This is an ALLOWLIST, not a blocklist: git accepts unambiguous prefixes of
+    every one of those options, so an enumeration of dangerous spellings cannot
+    be complete. Only `-C <path>` is tolerated — it moves the cwd, and every
+    probe in the narrowing inherits the identical globals, so the attributed
+    repository stays the pushed one. Everything else costs the exemption, which
+    is the pre-#132 status quo rather than a new denial.
+    """
+    tokens = list(git_globals or [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-C":
+            if index + 1 >= len(tokens):
+                return False
+            index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            index += 1
+            continue
+        return False
+    return True
+
 
 def git_push_positional_operands(
     args: list[str],
@@ -8518,8 +8565,17 @@ def git_push_positional_operands(
 
     Returns (positionals, option_remote, selector) where `selector` is True for
     any multi-ref or deletion selector (--all/--branches/--tags/--mirror/
-    --delete/-d). Returns None when an abbreviated value option makes the argv
-    unattributable — the same shape push_remotes() answers with [].
+    --delete/-d/--follow-tags). Returns None when an abbreviated value option
+    makes the argv unattributable — the same shape push_remotes() answers with
+    [].
+
+    Selectors are matched through `git_option_abbreviates`, not by literal
+    token: git accepts unambiguous long-option prefixes, so `--al` IS `--all`
+    and `--tag` IS `--tags`. Matching literals let those spellings publish every
+    branch or tag under an allow while the canonical spellings denied (PR #132
+    review). `--follow-tags` joins the set because it publishes annotated tags
+    alongside the branch, and a tag is a ref the branch-attribution check never
+    validates. `-d` is also matched inside a short cluster (`-vd`).
     """
     positionals: list[str] = []
     option_remote = ""
@@ -8541,14 +8597,19 @@ def git_push_positional_operands(
         if arg == "--":
             positionals.extend(args[i + 1 :])
             break
-        _short_flags, short_consumes_next = git_push_short_option_shape(arg)
+        short_flags, short_consumes_next = git_push_short_option_shape(arg)
+        if "d" in short_flags:
+            selector = True
         if short_consumes_next:
             i += 2
             continue
         if arg in value_options:
             i += 2
             continue
-        if arg in {"--all", "--branches", "--tags", "--mirror", "--delete", "-d"}:
+        if any(
+            git_option_abbreviates(arg, selector_option, min_prefix=1)
+            for selector_option in _GIT_PUSH_SELECTOR_LONG_OPTIONS
+        ):
             selector = True
             i += 1
             continue
@@ -8601,14 +8662,19 @@ def sensitive_push_narrowing_status(
     ratified (issue #48, reaffirmed 2026-07-27) allowing exactly that
     attributable shape. Allow only when ALL hold:
 
-      1. the destination is a configured remote NAME of the pushed repository
-         (never a URL or path), or the push is refspec-less to its configured
-         upstream — and no multi-ref/deletion selector is present;
+      0. the command's git globals cannot redirect which repository git
+         operates on, so the toplevel this function reads is the repository
+         whose objects the push uploads (`git_globals_preserve_attribution`);
+      1. the destination resolves to a configured remote of the pushed
+         repository (never a URL or path), or the push is refspec-less and the
+         repository inherits no configured push refspec — and no multi-ref,
+         tag-publishing or deletion selector is present;
       2. every explicit refspec source is a named local branch (refs/heads/*)
          or HEAD — no raw SHAs, tags, wildcards, or remote-tracking refs;
       3. the pushed repository's toplevel carries its OWN tier declaration
-         with sensitive_data false, and no ancestor directory declaring
-         sensitive_data contains that toplevel — the sensitivity being set
+         EXPLICITLY setting sensitive_data false, and no ancestor of either
+         that toplevel or the primary checkout behind it (a linked worktree
+         can sit outside) declares sensitive_data — the sensitivity being set
          aside must be purely contextual, never physical containment.
 
     Any other shape, and any unresolvable probe, returns False and keeps the
@@ -8618,6 +8684,8 @@ def sensitive_push_narrowing_status(
     """
     if deadline is None:
         deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    if not git_globals_preserve_attribution(git_globals):
+        return False, "git globals redirect the repository; push is unattributable"
     parsed = git_push_positional_operands(args)
     if parsed is None:
         return False, "unattributable push argv"
@@ -8638,6 +8706,9 @@ def sensitive_push_narrowing_status(
     if sources is None:
         return False, "refspec is not a plain named source"
     diagnostics: list[str] = []
+    # Attribute FIRST: every probe below asks a question about the pushed
+    # repository, so the repository has to be established before they can mean
+    # anything (and an unresolvable cwd keeps its own named deny).
     toplevel = command_output_before_deadline(
         command_runner,
         ["git", *(git_globals or []), "rev-parse", "--show-toplevel"],
@@ -8649,6 +8720,56 @@ def sensitive_push_narrowing_status(
         return False, detail_with_diagnostics(
             "unresolved pushed repository", diagnostics
         )
+    # The regex above is a cheap pre-filter, not the contract. Git accepts URL
+    # spellings it does not model (git://, rsync://, the scp-like host:path,
+    # ext::), so the documented "configured remote NAME" condition is proven by
+    # ASKING the repository, not by pattern-matching the token (PR #132 review).
+    if destination:
+        configured_remote = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "remote",
+                "get-url",
+                "--push",
+                "--all",
+                destination,
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not configured_remote:
+            return False, detail_with_diagnostics(
+                "destination is not a configured remote of the pushed repository",
+                diagnostics,
+            )
+    # Independent of the destination check: `git push origin` names a remote and
+    # is STILL refspec-less. Keying this off `else` skipped the very shape the
+    # review reported.
+    if not refspecs:
+        # A refspec-less push ships whatever `remote.<name>.push` names, which
+        # no argv token reveals and condition 2 therefore cannot check: a
+        # configured `refs/*:refs/*` exports every ref, and `refs/tags/x` a tag.
+        # The pre-existing bare-push guard only rejects FORCE/delete/mirror/
+        # receive-pack shapes, so a plain multi-ref export reached the exemption
+        # unexamined. Over-approximate across every remote, as that guard does.
+        configured_push_refspecs = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "config",
+                "--get-regexp",
+                r"^remote\..*\.push$",
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if configured_push_refspecs:
+            return False, "a refspec-less push inherits a configured push refspec"
     declaration_present = False
     for authority_dir in (".agent-harness", ".claude"):
         try:
@@ -8662,18 +8783,45 @@ def sensitive_push_narrowing_status(
         pushed_tier = load_tier(toplevel)
     except Exception:
         return False, "the pushed repository's tier declaration is unreadable"
-    if pushed_tier.get("flags", {}).get("sensitive_data"):
+    pushed_flags = pushed_tier.get("flags", {})
+    # The ratification says the repository must DECLARE sensitive_data false.
+    # An omitted key is silence, not a declaration, and silence must not unlock
+    # a security exemption by defaulting to falsy (PR #132 review).
+    if "sensitive_data" not in pushed_flags:
+        return False, "the pushed repository does not declare sensitive_data"
+    if pushed_flags.get("sensitive_data") is not False:
         return False, "the pushed repository itself declares sensitive_data"
-    toplevel_key = os.path.normcase(os.path.abspath(toplevel))
-    for declared in declared_project_dirs(toplevel):
-        if os.path.normcase(os.path.abspath(declared)) == toplevel_key:
-            continue
-        try:
-            declared_tier = load_tier(declared)
-        except Exception:
-            return False, "a containing tier declaration is unreadable"
-        if declared_tier.get("flags", {}).get("sensitive_data"):
-            return False, "the pushed repository sits inside a sensitive_data root"
+    # A LINKED WORKTREE can live outside the repository it belongs to, so the
+    # toplevel alone does not prove where the repository sits: the same repo was
+    # denied from its primary checkout inside a sensitive root and exempted from
+    # a worktree placed outside it. Walk the primary checkout behind the common
+    # directory as well (PR #132 review).
+    containment_roots = [toplevel]
+    common_dir = command_output_before_deadline(
+        command_runner,
+        ["git", *(git_globals or []), "rev-parse", "--git-common-dir"],
+        project_dir,
+        deadline,
+        diagnostics,
+    ).strip()
+    if not common_dir:
+        return False, detail_with_diagnostics(
+            "unresolved repository common directory", diagnostics
+        )
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.join(toplevel, common_dir)
+    containment_roots.append(os.path.dirname(os.path.abspath(common_dir)))
+    root_keys = {os.path.normcase(os.path.abspath(root)) for root in containment_roots}
+    for root in containment_roots:
+        for declared in declared_project_dirs(root):
+            if os.path.normcase(os.path.abspath(declared)) in root_keys:
+                continue
+            try:
+                declared_tier = load_tier(declared)
+            except Exception:
+                return False, "a containing tier declaration is unreadable"
+            if declared_tier.get("flags", {}).get("sensitive_data"):
+                return False, "the pushed repository sits inside a sensitive_data root"
     for src in sources:
         if src == "HEAD":
             continue
