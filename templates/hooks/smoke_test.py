@@ -302,6 +302,101 @@ def powershell_encoded(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
+def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]]:
+    """Pin, with real git, what PLAIN `git worktree remove` actually destroys.
+
+    The floor allows the plain form below T4/wave (issue #41). That allow is
+    justified by what git DOES refuse -- tracked modifications, untracked
+    non-ignored files -- and by the branch surviving. It is NOT justified by
+    the plain form being harmless: it deletes gitignored content outright.
+    An early draft of the rule asserted the opposite ("the PLAIN form destroys
+    nothing"), so this fixture measures the behaviour instead of restating a
+    belief. Returns (label, got, expected) triples in the shape run_smoke()
+    already reports.
+    """
+    ignored = [".env", "local.db", "vendor.cfg", os.path.join("node_modules", "pkg.js")]
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60
+        )
+
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as root:
+        main_repo = os.path.join(root, "main-repo")
+        worktree = os.path.join(root, "linked-wt")
+        os.makedirs(main_repo)
+        git("init", "--quiet", cwd=main_repo)
+        git("config", "user.email", "smoke@example.invalid", cwd=main_repo)
+        git("config", "user.name", "smoke", cwd=main_repo)
+        with open(os.path.join(main_repo, ".gitignore"), "w", encoding="utf-8") as fh:
+            fh.write("local.db\nnode_modules/\nvendor.cfg\n.env\n")
+        git("add", ".gitignore", cwd=main_repo)
+        git("commit", "--quiet", "-m", "init", cwd=main_repo)
+        added = git(
+            "worktree", "add", "--quiet", worktree, "-b", "linked", cwd=main_repo
+        )
+        if added.returncode != 0:
+            return [
+                (
+                    "worktree fixture could not be created: " + added.stderr.strip(),
+                    added.returncode,
+                    0,
+                )
+            ]
+        for relative in ignored:
+            target = os.path.join(worktree, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("payload\n")
+
+        # the EXACT check git runs on the !force path
+        clean_check = git(
+            "status", "--porcelain", "--ignore-submodules=none", cwd=worktree
+        )
+        ignored_listing = git("status", "--porcelain", "--ignored", cwd=worktree)
+        removal = git("worktree", "remove", worktree, cwd=main_repo)
+        survivors = [
+            relative
+            for relative in ignored
+            if os.path.exists(os.path.join(worktree, relative))
+        ]
+        branch_still_exists = git(
+            "rev-parse", "--verify", "--quiet", "refs/heads/linked", cwd=main_repo
+        )
+
+    return [
+        (
+            "git's own !force clean check calls an ignored-only tree CLEAN",
+            clean_check.stdout.strip(),
+            "",
+        ),
+        (
+            "the same tree does hold ignored content",
+            sorted(
+                line.split(" ", 1)[1].strip().replace("\\", "/").rstrip("/")
+                for line in ignored_listing.stdout.splitlines()
+                if line.startswith("!!")
+            ),
+            [".env", "local.db", "node_modules", "vendor.cfg"],
+        ),
+        (
+            "plain `git worktree remove` therefore SUCCEEDS on it",
+            removal.returncode,
+            0,
+        ),
+        (
+            "and DELETES every ignored file -- .env included, unrecoverably",
+            survivors,
+            [],
+        ),
+        (
+            "but the branch survives, so committed work is never lost",
+            branch_still_exists.returncode,
+            0,
+        ),
+    ]
+
+
 CASES = [
     # (command, tier, flags, expected)
     # --- MUST DENY at every tier (the irreversible floor) ---
@@ -497,10 +592,18 @@ CASES = [
     ("git checkout -- .", 2, {}, "allow"),
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
-    # `git worktree remove` (issue #41). Git refuses a dirty or locked worktree
-    # itself, so the PLAIN form destroys nothing and only the T4/wave posture
-    # gates it; `--force` overrides that refusal and is a work-loss guard like
-    # its siblings above.
+    # `git worktree remove` (issue #41). The PLAIN form is gated by the T4/wave
+    # posture alone (allow T1-T3); `--force` overrides git's refusal on a dirty
+    # or LOCKED tree and is a work-loss guard like its siblings above.
+    #
+    # The plain form does NOT "destroy nothing" -- an earlier draft of this
+    # block said so and was measurably wrong. Git's own pre-removal check,
+    # `git status --porcelain --ignore-submodules=none`, calls a worktree
+    # holding `.env`/`local.db`/`vendor.cfg`/`node_modules/` CLEAN, and removal
+    # then deletes all of it (git 2.45.1 -- `ignored_worktree_removal_is_
+    # destructive` above pins it with real git). What git does enforce is that
+    # tracked modifications and untracked non-ignored files block the removal,
+    # and the BRANCH survives, so committed work is never lost.
     ("git worktree remove ../linked", 1, {}, "allow"),
     ("git worktree remove ../linked", 2, {}, "allow"),
     ("git worktree remove ../linked", 3, {}, "allow"),
@@ -3836,19 +3939,25 @@ CASES = [
     ("git worktree add -b feature/x ../wt origin/main", 1, {}, "allow"),
     ("git worktree move old-wt ../renamed-wt", 1, {}, "allow"),
     ("git worktree list", 1, {}, "allow"),
-    # positional blindness (issue #41): `remove` ANYWHERE in argv used to deny,
-    # so creating a worktree at a path merely CONTAINING the word was blocked.
-    # Held at T4 too — the action word is resolved before any tier posture runs.
+    # positional blindness (issue #41). Base 1.6.16 tested `token.lower() ==
+    # "remove"` on every argv token, so ONLY an exact `remove` matched. The two
+    # real regressions were option VALUES — measured deny on base, allow here:
+    ("git worktree add -b remove ../wt", 1, {}, "allow"),
+    ("git worktree lock --reason remove ../wt", 1, {}, "allow"),
+    # These three were ALLOWED on base too (measured): a path merely CONTAINING
+    # the word never equalled it. They are pinning cases, not regressions — they
+    # hold the positional pass to that same verdict, at T4 as well, since the
+    # action word resolves before any tier posture runs.
     ("git worktree add ../remove", 1, {}, "allow"),
     ("git worktree add /tmp/remove-me", 1, {}, "allow"),
     ("git worktree add ../remove", 4, {}, "allow"),
-    ("git worktree add -b remove ../wt", 1, {}, "allow"),
-    ("git worktree lock --reason remove ../wt", 1, {}, "allow"),
     ("git worktree move ../wt ../remove", 1, {}, "allow"),
     # `prune` reached no branch at all before #41; it is now deliberately allowed
     # at every tier. It deletes only `.git/worktrees/<id>` metadata for entries
     # whose directory is ALREADY gone, and `--expire` only narrows which of those
     # already-missing entries are old enough to drop — no live tree is reachable.
+    # It is NOT reversible (`repair` cannot undo it, measured on git 2.45.1) but
+    # it never touches working-tree files, so it stays off the work-loss ladder.
     ("git worktree prune", 1, {}, "allow"),
     ("git worktree prune", 4, {}, "allow"),
     ("git worktree prune -n", 1, {}, "allow"),
@@ -6295,6 +6404,18 @@ def run_smoke():
             failures.append((label, 4, {}, expected, got))
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
+    # The allow on plain `git worktree remove` below T4/wave rests on a claim
+    # about GIT, not about the floor, and the first draft of issue #41 got that
+    # claim backwards ("git refuses a dirty tree, so plain removal destroys
+    # nothing"). Pin the real behaviour with real git so nobody has to take it
+    # on faith again.
+    worktree_reality_cases = ignored_worktree_removal_is_destructive()
+    for label, got, expected in worktree_reality_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 0, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
     total = (
         len(CASES)
         + 1
@@ -6314,6 +6435,7 @@ def run_smoke():
         + len(sensitive_remote_cases)
         + len(remote_resolution_cases)
         + len(runtime_neutral_cases)
+        + len(worktree_reality_cases)
     )
     print(f"\n{total - len(failures)}/{total} passed")
     if failures:
