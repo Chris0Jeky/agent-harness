@@ -378,8 +378,9 @@ MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +mai
 `curl … | sh`, `wget … | sh`, `sudo …`, write to `.env`/`*credentials*`/`*secret*` files;
 with `sensitive_data`: `git push <public-remote>`, `gh repo create --public`.
 
-MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git checkout -- .`
-(warn at T3, allow T1–T2).
+MUST BLOCK only at T4 / `wave_mode`: `git reset --hard`, `git clean -fd`, `git checkout -- .`,
+`git worktree remove --force` (warn at T3, allow T1–T2); plus plain `git worktree remove`,
+which is allowed below T4/wave because git itself refuses a dirty or locked tree (issue #41).
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
 (`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`
