@@ -1464,6 +1464,29 @@ _case_over_block(
     "#21",
     "do-block evaluator composition denies benign payloads allowed bare",
 )
+#: Issue #125, and deliberately NOT filed under #21's evaluator-opacity family: the
+#: deciding input here is the do-block's trailing `while ($false)`, not the `iex`.
+#: Swap the condition to `while (0)` and every one of these allows again; drop the
+#: `iex` and they still deny. Only `do-block-iex` puts its condition AFTER the
+#: command, which is where the trailing-operand scan looks -- `if ($true) { iex X }`
+#: and `while ($false) { iex X }` are unaffected. So the `$false` is read as an
+#: operand of the git command, and `[worktree-remove-opaque]` gates a removal for a
+#: token the user never passed. The T4 verdict is unchanged (these denied at T4 on
+#: 1.6.19 too, via the tier gate the owner ruling removed); the live regression is
+#: T3 allow -> ask. The fix belongs in segmentation, not in the worktree rule.
+_DO_BLOCK_CONDITION_OPERAND_OVER_BLOCKS = [
+    "git -c color.ui=false worktree remove ../wt",
+    "git -c status.showUntrackedFiles=all worktree remove ../wt",
+    "git -c status.showUntrackedFiles=normal worktree remove ../wt",
+    "git worktree remove ../linked",
+]
+_case_over_block(
+    _DO_BLOCK_CONDITION_OPERAND_OVER_BLOCKS,
+    ["do-block-iex"],
+    "#125",
+    "the do-block's trailing `while ($false)` is read as an operand of the command "
+    "inside it, so the opaque-operand scan gates a removal carrying no dynamic token",
+)
 _case_over_block(
     _LAUNCHER_TIER_OVER_BLOCKS,
     ["taskset", "flock", "watch", "wsl", "wsl-exec"],
