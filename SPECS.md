@@ -388,7 +388,10 @@ spelling must never score better than the literal form it might be: a runtime-co
 action word (`git worktree $ACT …`, issue #117 — `[worktree-action-opaque]`), a dynamic
 option or separator-free operand token in a removal (`-$X`, bare `$A` —
 `[worktree-remove-opaque]`; law 7's `$WT_PROJECT_DIR/<name>` compounds keep the plain
-score), and argv-visible config that blinds git's clean check
+score — braced and quoted spellings included, but NOT the Windows `$VAR\<name>` one, whose
+backslash a POSIX lexer eats, costing the token the separator that pins it out of option
+space, so it lands on the ask/deny rung instead: issue #128), and argv-visible config that
+blinds git's clean check
 (`-c status.showUntrackedFiles=no` and its `--config-env`/opaque twins, issue #123 —
 `[worktree-remove-config]`; literal `normal`/`all` values stay plain).
 

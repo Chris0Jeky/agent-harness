@@ -742,6 +742,29 @@ CASES = [
     # an option word (the /<tail> pins it), so it keeps the plain score
     ("git worktree remove $WT_PROJECT_DIR/wt41", 3, {}, "allow"),
     ("git worktree remove $WT_PROJECT_DIR/wt41", 4, {}, "allow"),
+    # ... and so do its BRACED and QUOTED spellings. These gated until the
+    # nameless-sigil exclusion landed: the braced form survives the primary
+    # parse intact, then reaches a sanitized re-parse as a bare `$`, which
+    # carries no separator and so scored as a possible `--force`. A sigil that
+    # names nothing expands to nothing.
+    ("git worktree remove ${WT_PROJECT_DIR}/wt41", 3, {}, "allow"),
+    ("git worktree remove ${WT_PROJECT_DIR}/wt41", 4, {}, "allow"),
+    ('git worktree remove "${WT_PROJECT_DIR}/wt41"', 4, {}, "allow"),
+    ('git worktree remove "$WT_PROJECT_DIR/wt41"', 4, {}, "allow"),
+    ("git worktree remove $env:WT_PROJECT_DIR/wt41", 4, {}, "allow"),
+    # The WINDOWS spelling of the same path is NOT covered, and this pins the
+    # gap rather than hiding it (issue #128): a POSIX lexer eats the backslash,
+    # so `$WT_PROJECT_DIR\wt41` arrives as `$WT_PROJECT_DIRwt41` -- a dynamic
+    # token with no separator left to pin it out of option space. The declared
+    # relaxed-git posture is the unstick, and it works.
+    ("git worktree remove $WT_PROJECT_DIR\\wt41", 3, {}, "ask"),
+    ("git worktree remove $WT_PROJECT_DIR\\wt41", 4, {}, "deny"),
+    (
+        "git worktree remove $WT_PROJECT_DIR\\wt41",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
     # after `--` git reads every token as a PATH, so a dynamic one is inert
     ("git worktree remove -- $A", 3, {}, "allow"),
     ("git -c status.showUntrackedFiles=no worktree remove ../wt", 1, {}, "allow"),

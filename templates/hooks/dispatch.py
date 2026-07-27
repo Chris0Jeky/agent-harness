@@ -526,8 +526,20 @@ def dynamic_token_could_be_an_option(token: str) -> bool:
     the spelling law 7 mandates) can only expand to a path-shaped word -- the
     literal `/<tail>` pins it out of option space -- so it does NOT qualify and
     keeps the literal form's score.
+
+    A NAMELESS sigil expands to nothing and is excluded. `has_dynamic_shell_token`
+    reads a lone `$` as dynamic, and a sanitized re-parse hands exactly that here:
+    `${WT_PROJECT_DIR}/wt41` survives the primary pass intact (separator present ->
+    False), then reaches the second pass as a bare `$`, which carries no separator
+    and so scored as a possible `--force`. Measured on 1.6.20: that gated law 7's
+    OWN braced spelling at T3/T4 while the unbraced one allowed. A substitution
+    needs a name, a brace or a paren after its sigil to reference anything -- `$`,
+    `%%` and `!` alone are literal text and cannot become an option word. `$(`
+    keeps qualifying, because command substitution really can print `--force`.
     """
     if not has_dynamic_shell_token(token):
+        return False
+    if not re.search(r"[0-9A-Za-z_{(]", token):
         return False
     if token.startswith("-"):
         return True
@@ -10404,7 +10416,9 @@ def check(
                                 "opaque": "[worktree-remove-opaque] T4/wave: a runtime-"
                                 "computed token in this removal may expand to --force, which "
                                 "is denied here. Spell every option and operand literally "
-                                "(a $VAR/<name> path compound keeps the plain score).",
+                                "(a $VAR/<name> path compound keeps the plain "
+                                "score; a Windows backslash path does not -- "
+                                "issue #128).",
                             }
                             return ("deny", reasons[force_class])
                         if tier >= 3 and not relaxed:
@@ -10423,7 +10437,7 @@ def check(
                                 "token in this removal may expand to --force, whose T3 rung "
                                 "is this same confirmation. Spell every option and operand "
                                 "literally (a $VAR/<name> path compound keeps the plain "
-                                "score).",
+                                "score; a Windows backslash path does not -- issue #128).",
                             }
                             return ("ask", reasons[force_class])
                 elif worktree_action in {"add", "move"}:
