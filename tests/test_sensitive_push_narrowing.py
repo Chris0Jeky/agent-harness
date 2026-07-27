@@ -331,6 +331,54 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("inside a sensitive_data root", detail)
 
+    def test_a_worktree_cannot_declassify_its_own_sensitive_repository(self):
+        """A repo that declares sensitive_data ITSELF stays denied from any of
+        its worktrees, nested or outside.
+
+        The first fix round built the containment skip-set from BOTH roots, so
+        the primary's own declaration was skipped during the toplevel walk too.
+        For the estate's standard `<primary>/.worktrees/<n>` layout that made a
+        SENSITIVE repository publicly pushable from its worktree while the same
+        push from the primary checkout denied — a new allow, in a fix whose
+        whole safety argument was that it could only remove them. The outside
+        case was never closed at all despite the docstring claiming it.
+
+        No adversary is needed: a branch that flips the repo's own tier.json to
+        false, checked out in a worktree, is enough.
+        """
+        selfsens = os.path.join(self.root, "declassify")
+        self._make_repo(selfsens, {"tier": 3, "flags": {"sensitive_data": True}})
+        for label, path in (
+            ("nested", os.path.join(selfsens, ".worktrees", "w")),
+            ("outside", os.path.join(self.root, "declassify-outside")),
+        ):
+            self._git(selfsens, "worktree", "add", "--detach", path, "main")
+            self._git(path, "switch", "-c", "wt-" + label)
+            # the worktree's ON-DISK declaration claims non-sensitive
+            os.makedirs(os.path.join(path, ".agent-harness"), exist_ok=True)
+            with open(
+                os.path.join(path, ".agent-harness", "tier.json"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump({"tier": 1, "flags": {"sensitive_data": False}}, handle)
+            allowed, detail = self.narrowing(["origin", "wt-" + label], path)
+            self.assertFalse(allowed, f"{label} worktree declassified its repo")
+            self.assertIn("sensitive_data root", detail)
+
+    def test_a_worktree_of_a_non_sensitive_repo_still_allows(self):
+        """The positive control for the case above — the containment fix must
+        not deny every worktree. The #132 fix commits themselves live in a
+        nested worktree, so an over-broad fix could not publish itself."""
+        # TRACK the declaration, as every real estate repo does — otherwise the
+        # worktree has no tier.json on disk and the deny comes from the wrong
+        # condition, making this control pass for a reason it is not testing.
+        self._git(self.nonsensitive, "add", "-f", ".agent-harness/tier.json")
+        self._git(self.nonsensitive, "commit", "-m", "track tier")
+        wt = os.path.join(self.nonsensitive, ".worktrees", "ok")
+        self._git(self.nonsensitive, "worktree", "add", "--detach", wt, "main")
+        self._git(wt, "switch", "-c", "wt-ok")
+        allowed, detail = self.narrowing(["origin", "wt-ok"], wt)
+        self.assertTrue(allowed, detail)
+
     def test_refspec_destination_outside_refs_heads_keeps_the_deny(self):
         # A valid branch SOURCE can still write a remote tag: `main:refs/tags/v1`
         # publishes a ref class the ratified condition set excludes.

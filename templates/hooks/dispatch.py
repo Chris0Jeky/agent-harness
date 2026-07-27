@@ -8821,10 +8821,19 @@ def sensitive_push_narrowing_status(
     if not os.path.isabs(common_dir):
         common_dir = os.path.join(toplevel, common_dir)
     containment_roots.append(os.path.dirname(os.path.abspath(common_dir)))
-    root_keys = {os.path.normcase(os.path.abspath(root)) for root in containment_roots}
+    # Skip ONLY the toplevel, whose declaration condition 3 just validated.
+    # Skipping the primary too — which an earlier revision did, by building the
+    # skip set from BOTH roots — silences the primary's OWN declaration whenever
+    # the worktree is nested inside it (`<primary>/.worktrees/<n>`, this estate's
+    # standard layout). A sensitive repository's worktree then published its
+    # branch to a public remote while the same push from the primary checkout
+    # denied. The primary is a DIFFERENT working tree: its tier.json is a
+    # different file from the worktree's checkout of it, so it must be read, not
+    # assumed (PR #132 fix-diff verification).
+    toplevel_key = os.path.normcase(os.path.abspath(toplevel))
     for root in containment_roots:
         for declared in declared_project_dirs(root):
-            if os.path.normcase(os.path.abspath(declared)) in root_keys:
+            if os.path.normcase(os.path.abspath(declared)) == toplevel_key:
                 continue
             try:
                 declared_tier = load_tier(declared)
