@@ -316,12 +316,40 @@ def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]
     """
     ignored = [".env", "local.db", "vendor.cfg", os.path.join("node_modules", "pkg.js")]
 
-    def git(*args, cwd):
-        return subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60
-        )
-
     with tempfile.TemporaryDirectory(dir=fixture_root()) as root:
+        # This fixture spawns REAL git, so the host's own configuration is an
+        # input to it: `status.showUntrackedFiles=no` empties the ignored
+        # listing and `=all` reports `node_modules/pkg.js` where the assertion
+        # expects `node_modules`, either of which turns the T4-class gate for
+        # every future dispatch.py change red for a reason that has nothing to
+        # do with the floor. Neutralize the user and system config the way
+        # `tests/floor_environment.py` does: point the SELECTORS at an empty
+        # file rather than unsetting them, because unsetting is what re-enables
+        # `$HOME/.gitconfig`. An empty FILE, not os.devnull -- `NUL` is not a
+        # readable config path on Windows. Repository-local config still
+        # applies; this fixture writes all of its own.
+        empty_git_config = os.path.join(root, "empty-gitconfig")
+        with open(empty_git_config, "w", encoding="utf-8"):
+            pass
+        git_environment = {
+            **clean_dispatch_environment(),
+            "GIT_CONFIG_GLOBAL": empty_git_config,
+            "GIT_CONFIG_SYSTEM": empty_git_config,
+            # Belt and braces for git < 2.32, which has no GIT_CONFIG_SYSTEM.
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+        def git(*args, cwd):
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=git_environment,
+            )
+
         main_repo = os.path.join(root, "main-repo")
         worktree = os.path.join(root, "linked-wt")
         os.makedirs(main_repo)
