@@ -60,7 +60,10 @@ ceremony is the bug — file it as an issue and keep working. Declared authority
 6. Questions: batch true blockers into ONE question; otherwise proceed on a named assumption
    ("Assumption: X. Reason: Y. Reversible by Z.").
 7. Worktrees: guard preamble is the first action; `$WT_PROJECT_DIR` paths only; create with
-   `--detach origin/main`, never branch refs; coordinator verifies main is clean after waves.
+   `--detach origin/main`, never branch refs, then `git switch -c <branch>` before committing —
+   a detached worktree's commits are held only by its own HEAD and die with its removal; plain
+   `git worktree remove` only, never `--force`: a refusal means work is still in there;
+   coordinator verifies main is clean after waves.
 8. Structure arrives with the second item. Don't build speculative scaffolding. When a lesson
    recurs, promote it up the enforcement ladder (memory → CLAUDE.md → skill → hook → CI →
    structure) to the cheapest layer that actually enforces it — and prune the old copy.
