@@ -680,7 +680,10 @@ CASES = [
     ("git worktree remove --f ../linked", 4, {}, "deny"),
     ("git worktree remove --fo ../linked", 4, {}, "deny"),
     ("git worktree remove --forc ../linked", 4, {}, "deny"),
+    ("git worktree remove -ff ../linked", 3, {}, "ask"),
     ("git worktree remove -ff ../linked", 4, {}, "deny"),
+    ("git worktree remove --force --force ../linked", 3, {}, "ask"),
+    ("git worktree remove --force --force ../linked", 4, {}, "deny"),
     # `remove -f -f` is the spelling git's OWN error prints for a LOCKED tree
     # ("cannot remove a locked working tree; use 'remove -f -f' to override"),
     # measured on git 2.45.1, so it is the form an agent actually types.
