@@ -5069,6 +5069,8 @@ def git_inline_alias(toks: list[str], subcommand: str) -> str | None:
 
 _WORKTREE_CLEAN_CHECK_CONFIG = "status.showuntrackedfiles"
 _WORKTREE_CLEAN_CHECK_SAFE_VALUES = {"normal", "all"}
+#: Keys that blind the same clean check with NO safe value to allow-list.
+_WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG = {"core.excludesfile"}
 
 
 def worktree_removal_clean_check_weakened(
@@ -5092,6 +5094,13 @@ def worktree_removal_clean_check_weakened(
     for key, values in inline_configs.items():
         if has_dynamic_shell_token(key):
             return True
+        if key in _WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG:
+            # `core.excludesFile` has no safe VALUE the way showUntrackedFiles
+            # does: any file it names can be a catch-all (`*`), which makes git
+            # report every untracked file as ignored and turns the same refusal
+            # into exit 0. Measured on git 2.45.1. So the key gates whatever it
+            # is set to.
+            return True
         if key == _WORKTREE_CLEAN_CHECK_CONFIG:
             for value in values:
                 if (
@@ -5104,24 +5113,47 @@ def worktree_removal_clean_check_weakened(
         # push guard treats this the same way (opaque is never safer).
         return True
     for key in config_env_keys:
-        if has_dynamic_shell_token(key) or key.lower() == _WORKTREE_CLEAN_CHECK_CONFIG:
+        if (
+            has_dynamic_shell_token(key)
+            or key.lower() == _WORKTREE_CLEAN_CHECK_CONFIG
+            or key.lower() in _WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG
+        ):
             return True
-    # `-c` assignments the inline parser could not record: a value token with
-    # no `=` is boolean-true config for a key this parser cannot name when the
-    # token is dynamic -- `-c $CFG` may be the weakening assignment itself.
+    # Any DYNAMIC `-c` argument, read from the raw tokens.
+    #
+    # Two reasons this cannot be narrowed to the watched key, both measured:
+    #
+    # 1. WORD SPLITTING. An unquoted dynamic value resplits after expansion, so
+    #    one `-c` token can deliver a second one: with
+    #    `X='a -c status.showUntrackedFiles=no'`, `git -c foo.bar=$X worktree
+    #    remove wt` runs the weakening assignment under a key this parser reads
+    #    as `foo.bar`. The key being unwatched proves nothing about what runs.
+    # 2. The parsed `inline_configs` view LOWERCASES keys, which destroys the
+    #    uppercase literal-backtick sentinel `has_dynamic_shell_token` looks
+    #    for -- so `git -c "`echo status.showUntrackedFiles`=no" worktree
+    #    remove wt` reads as an inert literal key up there. The raw tokens
+    #    still carry the sentinel, so scanning them here catches it.
+    #
+    # Reading the RAW token is what makes both cases visible, which is why this
+    # loop is not folded into the parsed pass above. A dynamic `-c` on a
+    # destructive removal is unprovable either way, and an opaque spelling must
+    # never score better than the literal weakening form it might be.
     index = 1
     while index < len(git_toks):
         token = git_toks[index]
         value = None
-        if token == "-c" and index + 1 < len(git_toks):
+        if token in ("-c", "--config-env") and index + 1 < len(git_toks):
             value = git_toks[index + 1]
             index += 2
+        elif token.startswith("--config-env="):
+            value = token[len("--config-env=") :]
+            index += 1
         elif token.startswith("-c") and len(token) > 2:
             value = token[2:]
             index += 1
         else:
             index += 1
-        if value is not None and "=" not in value and has_dynamic_shell_token(value):
+        if value is not None and has_dynamic_shell_token(value):
             return True
     return False
 

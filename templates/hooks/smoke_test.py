@@ -791,6 +791,32 @@ CASES = [
     ),
     ("git -c status.showUntrackedFiles=$V worktree remove ../wt", 4, {}, "deny"),
     ("git -c $CFG worktree remove ../wt", 3, {}, "ask"),
+    # A dynamic `-c`/`--config-env` argument gates whatever KEY it names: an
+    # unquoted value resplits after expansion, so `X='a -c
+    # status.showUntrackedFiles=no'` makes `-c foo.bar=$X` run the weakening
+    # assignment under a key this parser reads as `foo.bar`. Reading the RAW
+    # token also recovers the quoted-backtick key, which the parsed view
+    # lowercases into an inert literal.
+    ("git -c foo.bar=$X worktree remove ../wt", 3, {}, "ask"),
+    ("git -c foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    ("git --config-env=foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    ("git --config-env foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    (
+        'git -c "`echo status.showUntrackedFiles`=no" worktree remove ../wt',
+        4,
+        {},
+        "deny",
+    ),
+    ("git -c foo.bar=$X worktree remove ../wt", 2, {"wave_mode": True}, "deny"),
+    # `core.excludesFile` blinds the SAME clean check and has no safe value to
+    # allow-list: any file it names can be a catch-all, which makes git report
+    # every untracked file as ignored (git 2.45.1). The key gates outright.
+    ("git -c core.excludesFile=/tmp/all worktree remove ../wt", 3, {}, "ask"),
+    ("git -c core.excludesFile=/tmp/all worktree remove ../wt", 4, {}, "deny"),
+    ("git -c core.excludesfile=x worktree remove ../wt", 4, {}, "deny"),
+    # ...but only on a REMOVAL. It is an ordinary read-only option elsewhere.
+    ("git -c core.excludesFile=/tmp/all status", 4, {}, "allow"),
+    ("git -c foo.bar=$X status", 4, {}, "allow"),
     # values that PRESERVE the clean check, and unrelated keys, stay plain
     ("git -c status.showUntrackedFiles=all worktree remove ../wt", 4, {}, "allow"),
     ("git -c status.showUntrackedFiles=normal worktree remove ../wt", 3, {}, "allow"),
