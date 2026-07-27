@@ -709,6 +709,7 @@ CASES = [
     ("git worktree remove ../linked", 3, {}, "allow"),
     ("git worktree remove ../linked", 4, {}, "allow"),
     ("git worktree remove ../linked", 2, {"wave_mode": True}, "allow"),
+    ("git worktree remove ../linked", 3, {"wave_mode": True}, "allow"),
     # the laundered force spellings, on the explicit-force ladder exactly
     ("git worktree `printf remove` -f ../wt", 1, {}, "allow"),
     ("git worktree `printf remove` -f ../wt", 3, {}, "ask"),
@@ -725,10 +726,18 @@ CASES = [
     ("git worktree ${ACT} ../wt", 4, {}, "deny"),
     ("git worktree %ACT% ../wt", 4, {}, "deny"),
     ("git worktree !ACT! ../wt", 3, {}, "ask"),
+    ("git worktree $ACT ../wt", 3, {"wave_mode": True}, "deny"),
     ("git worktree remove -$X ../wt", 3, {}, "ask"),
     ("git worktree remove -$X ../wt", 4, {}, "deny"),
+    ("git worktree remove -$X ../wt", 3, {"wave_mode": True}, "deny"),
     ("git worktree remove $A ../wt", 3, {}, "ask"),
     ("git worktree remove $A", 4, {}, "deny"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        3,
+        {"wave_mode": True},
+        "deny",
+    ),
     # law 7's own spelling: a dynamic-prefixed PATH COMPOUND cannot expand to
     # an option word (the /<tail> pins it), so it keeps the plain score
     ("git worktree remove $WT_PROJECT_DIR/wt41", 3, {}, "allow"),
@@ -891,13 +900,16 @@ CASES = [
         {"relaxed_work_loss_guards": True},
         "deny",
     ),
-    # the flag is a WORK-LOSS posture; it never lowers the T4/wave gate on the
-    # plain form either
+    # The plain form carries no T4/wave gate to lower: it allows at every tier
+    # (owner ruling 2026-07-27), so the relaxed-guard flag is a no-op on it in
+    # BOTH directions. This case pins that non-interaction -- it read `deny`
+    # while the plain form was gated at T4, and the gate, not the flag, was
+    # what made it deny.
     (
         "git worktree remove ../linked",
         4,
         {"relaxed_work_loss_guards": True},
-        "deny",
+        "allow",
     ),
     (
         "git reset --hard HEAD~1",
