@@ -497,6 +497,34 @@ CASES = [
     ("git checkout -- .", 2, {}, "allow"),
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
+    # `git worktree remove` (issue #41). Git refuses a dirty or locked worktree
+    # itself, so the PLAIN form destroys nothing and only the T4/wave posture
+    # gates it; `--force` overrides that refusal and is a work-loss guard like
+    # its siblings above.
+    ("git worktree remove ../linked", 1, {}, "allow"),
+    ("git worktree remove ../linked", 2, {}, "allow"),
+    ("git worktree remove ../linked", 3, {}, "allow"),
+    ("git worktree remove ../linked", 4, {}, "deny"),
+    ("git worktree remove ../linked", 2, {"wave_mode": True}, "deny"),
+    ("git worktree remove --force ../linked", 1, {}, "allow"),
+    ("git worktree remove --force ../linked", 2, {}, "allow"),
+    ("git worktree remove --force ../linked", 3, {}, "ask"),
+    ("git worktree remove --force ../linked", 4, {}, "deny"),
+    ("git worktree remove --force ../linked", 2, {"wave_mode": True}, "deny"),
+    # every abbreviation git's own parse-options accepts, plus the `-f` cluster
+    ("git worktree remove -f ../linked", 3, {}, "ask"),
+    ("git worktree remove -f ../linked", 4, {}, "deny"),
+    ("git worktree remove --f ../linked", 4, {}, "deny"),
+    ("git worktree remove --fo ../linked", 4, {}, "deny"),
+    ("git worktree remove --forc ../linked", 4, {}, "deny"),
+    ("git worktree remove -ff ../linked", 4, {}, "deny"),
+    # `remove -f -f` is the spelling git's OWN error prints for a LOCKED tree
+    # ("cannot remove a locked working tree; use 'remove -f -f' to override"),
+    # measured on git 2.45.1, so it is the form an agent actually types.
+    ("git worktree remove -f -f ../locked", 3, {}, "ask"),
+    ("git worktree remove -f -f ../locked", 4, {}, "deny"),
+    # `--` ends option parsing, so this `-f` is the worktree PATH, not the flag
+    ("git worktree remove -- -f", 3, {}, "allow"),
     ("git push --force-with-lease origin feat", 2, {}, "allow"),
     ("git push --force-with-lease origin HEAD:feature/topic", 2, {}, "allow"),
     ("git push --force-with-lease origin HEAD:fix/issue-7", 2, {}, "allow"),
@@ -590,7 +618,27 @@ CASES = [
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git checkout -- .", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git restore .", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    (
+        "git worktree remove --force ../linked",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
     ("git reset --hard HEAD~1", 4, {"relaxed_work_loss_guards": True}, "deny"),
+    (
+        "git worktree remove --force ../linked",
+        4,
+        {"relaxed_work_loss_guards": True},
+        "deny",
+    ),
+    # the flag is a WORK-LOSS posture; it never lowers the T4/wave gate on the
+    # plain form either
+    (
+        "git worktree remove ../linked",
+        4,
+        {"relaxed_work_loss_guards": True},
+        "deny",
+    ),
     (
         "git reset --hard HEAD~1",
         3,
@@ -2143,8 +2191,13 @@ CASES = [
         {},
         "deny",
     ),
-    ("git worktree remove --force /critical/outside", 1, {}, "deny"),
-    ("git worktree remove ../linked", 1, {}, "deny"),
+    # `git worktree remove` was an UNCONDITIONAL deny until issue #41 graduated
+    # it; its tier matrix now lives with the other work-loss guards above. The
+    # path operand is not what made it dangerous: git only ever removes a
+    # REGISTERED worktree of this repository, so an absolute path outside the
+    # project is either such a worktree or an error, never an arbitrary delete.
+    ("git worktree remove --force /critical/outside", 4, {}, "deny"),
+    ("git worktree remove --force /critical/outside", 1, {}, "allow"),
     # --- read-only git plumbing is admitted (issue #34) ---
     ("git merge-base main HEAD", 1, {}, "allow"),
     ("git merge-base --is-ancestor origin/main HEAD", 4, {}, "allow"),
@@ -3783,6 +3836,25 @@ CASES = [
     ("git worktree add -b feature/x ../wt origin/main", 1, {}, "allow"),
     ("git worktree move old-wt ../renamed-wt", 1, {}, "allow"),
     ("git worktree list", 1, {}, "allow"),
+    # positional blindness (issue #41): `remove` ANYWHERE in argv used to deny,
+    # so creating a worktree at a path merely CONTAINING the word was blocked.
+    # Held at T4 too — the action word is resolved before any tier posture runs.
+    ("git worktree add ../remove", 1, {}, "allow"),
+    ("git worktree add /tmp/remove-me", 1, {}, "allow"),
+    ("git worktree add ../remove", 4, {}, "allow"),
+    ("git worktree add -b remove ../wt", 1, {}, "allow"),
+    ("git worktree lock --reason remove ../wt", 1, {}, "allow"),
+    ("git worktree move ../wt ../remove", 1, {}, "allow"),
+    # `prune` reached no branch at all before #41; it is now deliberately allowed
+    # at every tier. It deletes only `.git/worktrees/<id>` metadata for entries
+    # whose directory is ALREADY gone, and `--expire` only narrows which of those
+    # already-missing entries are old enough to drop — no live tree is reachable.
+    ("git worktree prune", 1, {}, "allow"),
+    ("git worktree prune", 4, {}, "allow"),
+    ("git worktree prune -n", 1, {}, "allow"),
+    ("git worktree prune --expire=now", 4, {}, "allow"),
+    ("git worktree prune --expire now", 4, {}, "allow"),
+    ("git worktree repair", 4, {}, "allow"),
     ("git checkout -- src/app.py", 1, {}, "allow"),
     ("git checkout main", 1, {}, "allow"),
     ("git checkout .env", 1, {}, "deny"),

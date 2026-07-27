@@ -217,7 +217,8 @@ fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor
 - secret-file mutation; with `sensitive_data`: pushes to public remotes, `gh repo create --public`
 
 **Work-loss guards are tier-dependent, not floor**: `reset --hard`, `clean -fd`,
-`checkout -- .` are *allowed* at T1–T2 (solo relaxed-git posture — wealthlens proved blocking
+`checkout -- .`, `worktree remove --force` are *allowed* at T1–T2 (solo relaxed-git posture —
+wealthlens proved blocking
 them causes merge-gymnastics workarounds), warn at T3, deny at T4 and under `wave_mode`
 (another agent's work is then in the blast radius). A T3 repo whose relaxed posture is
 *declared* (`tier.json` flag `relaxed_work_loss_guards`, per SPECS §2) keeps them allow below

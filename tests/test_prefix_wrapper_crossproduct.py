@@ -1362,8 +1362,16 @@ _DO_BLOCK_EXTRA_OVER_BLOCKS = [
     "git stash push -- src/app.py",
     "git stash push src/app.py",
     "git stash show --stat",
+    # Every benign `git worktree add`/`move` payload lands here: measured on
+    # origin/main, `do { iex 'git worktree add ../wt-plain' } while ($false)`
+    # already denied with the opaque-destination reason, so the #41 payloads
+    # below inherit a hole that predates them rather than opening one.
     "git worktree add --force ../safe-worktree",
     "git worktree add -b feature/x ../wt origin/main",
+    "git worktree add -b remove ../wt",
+    "git worktree add ../remove",
+    "git worktree add /tmp/remove-me",
+    "git worktree move ../wt ../remove",
     "git worktree move old-wt ../renamed-wt",
     "install -m 644 server.pem /etc/ssl/certs/",
     "install -m 755 app /usr/local/bin/app",
