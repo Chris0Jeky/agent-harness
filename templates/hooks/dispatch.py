@@ -7345,13 +7345,31 @@ _PROBE_ENVIRONMENT = {
 # RE-PARSES the command line; a `.EXE`/`.COM` is an image and re-parses nothing.
 _NON_REPARSING_EXTENSIONS = frozenset({".exe", ".com"})
 
-# Allowlists, not denylists: the floor cannot enumerate every character
+# Two populations, two rules.
+#
+# argv[1:] can carry repository-controlled text — a remote name, a repository
+# slug — so it gets an ALLOWLIST: the floor cannot enumerate every character
 # `cmd.exe` treats specially across its quoting states, but it can enumerate the
-# ones a repository path, a remote name and a repository slug legitimately hold.
-# argv[0] is the resolver's own output — a PATH directory plus a fixed probe
-# name — so a space in it is expected and safe once subprocess quotes it; every
-# later token can carry repository-controlled text and must mean only itself.
-_SHIM_SAFE_IMAGE_PATH = re.compile(r"[A-Za-z0-9._:/@~=+\\ -]*")
+# ones a remote name and a repository slug legitimately hold, and every other
+# token is refused.
+#
+# argv[0] is the resolver's own output: an absolute PATH directory plus a fixed
+# probe name, chosen by whoever installed the machine and NOT by the repository.
+# An allowlist there refused ordinary Windows installs — `Program Files (x86)`,
+# an accented or CJK user name, a directory holding `[]` — and on such a box
+# every visibility probe is refused, so a sensitive_data push denies with
+# exactly the mute wall issue #90 is about, permanently. So argv[0] gets a
+# DENYLIST, in two parts, measured against a real `.cmd` spawn rather than
+# reasoned about:
+#
+#   * these survive quoting and must never appear at all;
+_SHIM_UNSAFE_IMAGE_CHARACTERS = re.compile("[&|<>^\"%!\r\n]")
+#   * these are cmd.exe's own token delimiters and its grouping parentheses.
+#     They are literal inside quotes and split the command NAME outside them —
+#     `C:\dev\a,b\gh.cmd` runs `C:\dev\a`. subprocess quotes argv[0] only when
+#     it holds whitespace, which is why `C:\Program Files (x86)\gh.cmd` works
+#     while `C:\tools(x86)\gh.cmd` does not.
+_SHIM_UNQUOTED_IMAGE_DELIMITERS = re.compile(r"[,;=()]")
 _SHIM_SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9._:/@~=+\\-]*")
 
 
@@ -7438,13 +7456,36 @@ def probe_image_reparses(path: str) -> bool:
     return os.path.splitext(path)[1].lower() not in _NON_REPARSING_EXTENSIONS
 
 
-def probe_argv_is_shim_safe(argv: list[str]) -> bool:
-    """True when no token could mean anything to `cmd.exe` but itself."""
+def probe_image_is_quoted(image: str) -> bool:
+    """True when the spawn wraps argv[0] in quotes, so cmd.exe sees one token.
+
+    Asked of `subprocess` itself rather than restated here: the quoting rule
+    belongs to the module that builds the command line, and a copy of it would
+    be a second source of truth that can drift.
+    """
+    return subprocess.list2cmdline([image]).startswith('"')
+
+
+def probe_argv_shim_hazard(argv: list[str]) -> str:
+    """Name why `argv` must not be re-read by `cmd.exe`, or "" when it is safe.
+
+    The causes are reported apart because they mean different things to whoever
+    reads the diagnostic: a refused argument is repository-controlled text the
+    floor declines to pass on, while a refused image path is the machine's own
+    installation layout and no repository can change it.
+    """
     if not argv:
-        return False
-    if not _SHIM_SAFE_IMAGE_PATH.fullmatch(argv[0]):
-        return False
-    return all(_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:])
+        return "empty command"
+    image = argv[0]
+    if _SHIM_UNSAFE_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds a cmd.exe metacharacter"
+    if not probe_image_is_quoted(image) and _SHIM_UNQUOTED_IMAGE_DELIMITERS.search(
+        image
+    ):
+        return "its resolved path holds an unquoted cmd.exe delimiter"
+    if not all(_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:]):
+        return "unsafe arguments"
+    return ""
 
 
 def resolve_probe_binary(name: str) -> str | None:
@@ -7596,14 +7637,16 @@ def command_output(
         note_probe_failure(diagnostics, f"{argv[0]}: not found on PATH")
         return ""
     spawn_argv = [executable, *argv[1:]]
-    if probe_image_reparses(executable) and not probe_argv_is_shim_safe(spawn_argv):
+    hazard = (
+        probe_argv_shim_hazard(spawn_argv) if probe_image_reparses(executable) else ""
+    )
+    if hazard:
         # A `.cmd` re-parses argv under `cmd.exe`, and probe argv carries text a
         # repository controls (a remote name, a repository slug). Refusing NAMES
         # the cause; spawning would run whatever the metacharacters spell.
         note_probe_failure(
             diagnostics,
-            f"{argv[0]}: only a script shim on PATH; "
-            "refusing to spawn with unsafe arguments",
+            f"{argv[0]}: only a script shim on PATH; refusing to spawn: {hazard}",
         )
         return ""
     try:

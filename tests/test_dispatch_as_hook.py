@@ -449,7 +449,56 @@ class ShimArgvGateTests(unittest.TestCase):
             [r"C:\Program Files\GitHub CLI\gh.cmd", "api"],
         ):
             with self.subTest(argv=argv):
-                self.assertTrue(dispatch.probe_argv_is_shim_safe(argv))
+                self.assertEqual(dispatch.probe_argv_shim_hazard(argv), "")
+
+    def test_an_ordinary_windows_install_path_is_not_a_hazard(self):
+        """argv[0] is the machine's layout, not the repository's text.
+
+        An allowlist on argv[0] refused every one of these, and on such a box
+        every visibility probe is refused and every sensitive_data push denies:
+        issue #90's wall, made permanent by the fix for it.
+        """
+        for image in (
+            r"C:\Program Files (x86)\GitHub CLI\gh.cmd",
+            "C:\\Users\\Jekyt\u00e9\\bin\\gh.cmd",
+            "C:\\Users\\\u5f20\u4f1f\\scoop\\shims\\gh.cmd",
+            r"C:\tools[stable]\gh.cmd",
+            r"C:\Users\dev'name\bin\gh.cmd",
+            r"C:\opt\{shims}\gh.cmd",
+            r"C:\opt\a+b\gh.cmd",
+            r"C:\opt\a#b$c\gh.cmd",
+        ):
+            with self.subTest(image=image):
+                self.assertEqual(
+                    dispatch.probe_argv_shim_hazard([image, "api", "repos/acme/w"]), ""
+                )
+
+    def test_a_delimiter_is_a_hazard_only_while_argv0_is_unquoted(self):
+        """Measured against a real `.cmd` spawn, not reasoned about.
+
+        cmd.exe splits an UNQUOTED command name on `,`, `;`, `=` and `(`, so
+        `C:\\dev\\a,b\\gh.cmd` runs `C:\\dev\\a` and the probe answers about
+        nothing. subprocess quotes argv[0] only when it holds whitespace, which
+        is exactly why `Program Files (x86)` works and `tools(x86)` does not.
+        """
+        for image in (
+            r"C:\dev\a,b\gh.cmd",
+            r"C:\dev\a;b\gh.cmd",
+            r"C:\dev\a=b\gh.cmd",
+            r"C:\tools(x86)\gh.cmd",
+        ):
+            with self.subTest(image=image):
+                self.assertEqual(
+                    dispatch.probe_argv_shim_hazard([image, "api"]),
+                    "its resolved path holds an unquoted cmd.exe delimiter",
+                )
+        for image in (
+            r"C:\dev\a, b\gh.cmd",
+            r"C:\Program Files (x86)\gh.cmd",
+        ):
+            with self.subTest(image=image):
+                self.assertTrue(dispatch.probe_image_is_quoted(image))
+                self.assertEqual(dispatch.probe_argv_shim_hazard([image, "api"]), "")
 
     def test_every_cmd_metacharacter_is_refused(self):
         for token in (
@@ -468,13 +517,31 @@ class ShimArgvGateTests(unittest.TestCase):
             "a,b",
         ):
             with self.subTest(token=token):
-                self.assertFalse(
-                    dispatch.probe_argv_is_shim_safe(["gh.cmd", "api", token])
+                self.assertEqual(
+                    dispatch.probe_argv_shim_hazard(["gh.cmd", "api", token]),
+                    "unsafe arguments",
                 )
 
-    def test_an_image_path_metacharacter_is_refused_too(self):
-        self.assertFalse(dispatch.probe_argv_is_shim_safe([r"C:\a&b\gh.cmd", "api"]))
-        self.assertFalse(dispatch.probe_argv_is_shim_safe([]))
+    def test_an_image_path_metacharacter_is_refused_with_its_own_cause(self):
+        """The denylist on argv[0]: only what reaches `cmd.exe` unquoted."""
+        for image in (
+            r"C:\a&b\gh.cmd",
+            r"C:\a|b\gh.cmd",
+            r"C:\a<b\gh.cmd",
+            r"C:\a>b\gh.cmd",
+            r"C:\a^b\gh.cmd",
+            'C:\\a"b\\gh.cmd',
+            r"C:\%TEMP%\gh.cmd",
+            r"C:\a!b\gh.cmd",
+            "C:\\a\rb\\gh.cmd",
+            "C:\\a\nb\\gh.cmd",
+        ):
+            with self.subTest(image=image):
+                self.assertEqual(
+                    dispatch.probe_argv_shim_hazard([image, "api"]),
+                    "its resolved path holds a cmd.exe metacharacter",
+                )
+        self.assertEqual(dispatch.probe_argv_shim_hazard([]), "empty command")
 
     @unittest.skipUnless(os.name == "nt", "only Windows re-parses a shim's argv")
     def test_a_shim_extension_is_classified_as_re_parsing(self):
@@ -518,6 +585,76 @@ class ShimArgvGateTests(unittest.TestCase):
             )
         self.assertEqual(output, "private")
         self.assertEqual(notes, [])
+
+    def probe_from_directory(self, name: str):
+        """Plant a working `gh.cmd` in `name` and probe with PATH set to it."""
+        root = Path(tempfile.mkdtemp(prefix="floor-probe-image-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        shims = root / name
+        shims.mkdir(parents=True)
+        (shims / "gh.cmd").write_text("@echo off\r\necho PRIVATE\r\n")
+        dispatch._PROBE_BINARY_CACHE.clear()
+        notes: list[str] = []
+        with patch.dict(os.environ, {"PATH": str(shims)}, clear=False):
+            output = dispatch.command_output(
+                ["gh", "api", "repos/acme/widgets", "--jq", ".visibility"],
+                str(root),
+                diagnostics=notes,
+            )
+        return output, notes
+
+    @unittest.skipUnless(os.name == "nt", "only Windows re-parses a shim's argv")
+    def test_an_ordinary_windows_install_directory_still_probes(self):
+        """The paths a real Windows box hands the resolver, end to end.
+
+        These are not exotic: `Program Files (x86)` is where an MSI puts `gh`,
+        and the shim directory the suite itself uses lives under the user's
+        profile — so an accented or CJK user name breaks the tests too.
+        """
+        for name in (
+            "Program Files (x86)",
+            "Jekyt\u00e9",
+            "\u5f20\u4f1f",
+            "tools[stable]",
+            "plus+dir",
+            "brace{x}",
+        ):
+            with self.subTest(name=name):
+                output, notes = self.probe_from_directory(name)
+                self.assertEqual(output, "PRIVATE", notes)
+                self.assertEqual(notes, [])
+
+    @unittest.skipUnless(os.name == "nt", "only Windows re-parses a shim's argv")
+    def test_a_metacharacter_in_the_image_path_names_argv0_as_the_cause(self):
+        """The diagnostic must not blame arguments that were clean."""
+        for name in ("a&b", "pct%dir", "with,comma", "paren(x86)"):
+            with self.subTest(name=name):
+                output, notes = self.probe_from_directory(name)
+                self.assertEqual(output, "")
+                self.assertEqual(len(notes), 1)
+                self.assertIn("only a script shim on PATH", notes[0])
+                self.assertIn("its resolved path holds", notes[0])
+                self.assertNotIn("unsafe arguments", notes[0])
+
+    @unittest.skipUnless(os.name == "nt", "only Windows re-parses a shim's argv")
+    def test_a_refused_image_path_never_executes_a_neighbouring_program(self):
+        """`C:\\dev\\a,b\\gh.cmd` unquoted would have cmd.exe run `C:\\dev\\a`."""
+        root = Path(tempfile.mkdtemp(prefix="floor-probe-split-name-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        shims = root / "a,b"
+        shims.mkdir()
+        (shims / "gh.cmd").write_text("@echo off\r\necho PRIVATE\r\n")
+        # The image the unquoted split would resolve to instead.
+        (root / "a.cmd").write_text("@echo off\r\ntype nul > \"%~dp0SPLIT\"\r\n")
+        dispatch._PROBE_BINARY_CACHE.clear()
+        notes: list[str] = []
+        with patch.dict(os.environ, {"PATH": str(shims)}, clear=False):
+            output = dispatch.command_output(
+                ["gh", "api", "repos/acme/widgets"], str(root), diagnostics=notes
+            )
+        self.assertEqual(output, "")
+        self.assertFalse((root / "SPLIT").exists(), "the split command ran")
+        self.assertIn("unquoted cmd.exe delimiter", notes[0])
 
 
 class ProbeDiagnosticsTests(unittest.TestCase):
