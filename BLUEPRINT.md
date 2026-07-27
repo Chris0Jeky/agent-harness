@@ -97,7 +97,11 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 
 **Overlay flags** (orthogonal to tier, set in `tier.json`):
 - `sensitive_data` — adds privacy denies (block pushes to public remotes, `gh repo create --public`)
-  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity.
+  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity. One ratified
+  exemption (issue #48): a push ATTRIBUTABLE to a non-sensitive repository — that repo declares its
+  own tier with `sensitive_data: false`, is not physically inside a sensitive root, and pushes its
+  own named local branches (or HEAD, or refspec-less) to a configured remote NAME — is exempt from
+  the *contextual* overlay a sensitive session root spreads over cross-repo work.
 - `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
   guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
   clean main after every wave.
@@ -215,6 +219,8 @@ fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor
 - force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
 - secret-file mutation; with `sensitive_data`: pushes to public remotes, `gh repo create --public`
+  (public pushes carry the issue-#48 attribution exemption — §1 overlay flags — when the pushed
+  repo itself declares non-sensitive and ships its own named branches to its own configured remote)
 
 **Work-loss guards are tier-dependent, not floor**: `reset --hard`, `clean -fd`,
 `checkout -- .`, `worktree remove --force` are *allowed* at T1–T2 (solo relaxed-git posture —

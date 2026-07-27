@@ -20,6 +20,14 @@ to `archive/floor-limitations-<year>.md` (laws 3/4).
 - **Detached-worktree state behind a plain removal** — whether the target of `git worktree remove <path>` holds a detached HEAD (whose commits die with the tree) is repository state, not argv; the graduated allow leans on law 7's `git switch -c` mandate as the guard, and the loss is measured and pinned by the fixture's detached leg rather than gated (#122).
 - **Repository/user config that blinds the removal clean check** — `status.showUntrackedFiles=no` set in repo-local, user, or system configuration disables the untracked-file refusal that plain `worktree remove`'s allow leans on, invisibly to argv. A catch-all `core.excludesFile` blinds the identical check the same way. The argv-visible spellings are gated on the work-loss ladder (1.6.20): both keys, every `-c`/`--config-env` form, and **any dynamic `-c`/`--config-env` argument whatever key it names** — an unquoted value resplits after expansion, so an unwatched key proves nothing about what git actually runs. The ambient-config remainder is this line (#123). Scoped deliberately narrowly: under the feature freeze a limitation line is how this repo declines a fix, so one that over-states the limit ships a fixable gap as a documented non-fix.
 
+- **Object provenance behind an attributed sensitive-root push** — the issue-#48 narrowing lets a
+  repository declaring `sensitive_data: false` push its own named local branches to its own
+  configured remote even when the session root is sensitive. Whether those branch objects were
+  first fetched from somewhere else is repository state, not argv: a branch deliberately created
+  from foreign objects rides the exemption. The ratification accepted this residual — the floor
+  attributes names, it does not audit provenance (#48; pinned as allowed by
+  `tests/test_sensitive_push_narrowing.py`).
+
 ## Wrapper, launcher, and interpreter laundering
 
 - **Wrapper / launcher and uninspectable-file laundering (the standing catch-all)** — the argv-only floor models a bounded set of command wrappers and file-writing tools, so charter-irreversible commands relaunched via unmodelled launchers (`screen -dm`, `firejail`, `parallel`, `tmux new-session`, `at`, `script -qc`, `expect -c`), via unmodelled writers, or via `xargs -a <file>` (a mutating operand supplied by a file or stdin, never visible in argv) are not seen — `source` and `bash <file>` forms instead FAIL CLOSED as opaque shell input — and canonical forms still block (#9; #5's residual `xargs`/stdin case is this line).
