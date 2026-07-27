@@ -379,6 +379,25 @@ class HarnessTests(unittest.TestCase):
         result = harness.audit_repo(repo)
         self.assertTrue(result["ok"], result["issues"])
 
+    def test_budgets_register_the_deny_floor_limitations_ledger(self) -> None:
+        # FLOOR_LIMITATIONS.md declares a 120-line cap and a rotation target in
+        # its own header, but budget_issues registered only CLAUDE.md /
+        # AGENTS.md / AGENT_MAP.md / skills, so an overflowing ledger was
+        # reported by nothing at all (issue #102).
+        repo = Path(self.temp.name) / "budgets"
+        repo.mkdir()
+        ledger = repo / "FLOOR_LIMITATIONS.md"
+        ledger.write_text("bypass family\n" * 120, encoding="utf-8")
+        self.assertEqual(harness.budget_issues(repo, 3), [])
+        ledger.write_text("bypass family\n" * 121, encoding="utf-8")
+        self.assertEqual(
+            harness.budget_issues(repo, 3),
+            [
+                "FLOOR_LIMITATIONS.md: 121>120 lines; "
+                "ROTATE: rotate to archive/floor-limitations-<year>.md"
+            ],
+        )
+
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
         (repo / "AGENTS.md").write_text(
@@ -5239,6 +5258,179 @@ allow_local_binding = true
         self.assertIn("[FAIL] declared vs real", output)
         self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
 
+    def test_doctor_resolves_the_strictest_of_two_tier_declarations(self) -> None:
+        # `doctor --repo` shares audit's resolution path, so it inherited the
+        # same first-found-wins bug (issue #99): the legacy declaration below
+        # is the only one that names a human-action file, and reading just
+        # `.agent-harness/tier.json` reported nothing to check.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        for directory, declaration in (
+            (
+                ".agent-harness",
+                {
+                    "tier": 1,
+                    "name": harness.TIER_NAMES[1],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": False},
+                },
+            ),
+            (
+                ".claude",
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "human-only"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": "HUMAN_TODO.md",
+                },
+            ),
+        ):
+            (repo / directory).mkdir()
+            (repo / directory / "tier.json").write_text(
+                json.dumps(declaration), encoding="utf-8"
+            )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
+
+
+class TierResolutionTests(unittest.TestCase):
+    """Co-located declarations bind to the STRICTEST union, not the first found.
+
+    Law 9 and `dispatch.load_tier` (SPECS §5) specify one resolution; audit read
+    `.agent-harness/tier.json` with FALLBACK to the legacy file, so a repo
+    declaring T1 beside a surviving T4 + sensitive_data legacy file audited at a
+    posture the dispatcher would never grant it (issue #99).
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def declare(
+        self, directory: str, repo: Path | None = None, **fields: object
+    ) -> Path:
+        declaration: dict[str, object] = {
+            "tier": 1,
+            "name": harness.TIER_NAMES[1],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        declaration.update(fields)
+        if "tier" in fields and "name" not in fields:
+            declaration["name"] = harness.TIER_NAMES[declaration["tier"]]
+        path = (repo or self.repo) / directory / "tier.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(declaration), encoding="utf-8")
+        return path
+
+    def posture(self) -> dict[str, object]:
+        return harness.load_tier(self.repo)[1]
+
+    def test_agreeing_declarations_bind_what_they_both_say(self) -> None:
+        for directory in (".agent-harness", ".claude"):
+            self.declare(directory, tier=3, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 3)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+        self.assertEqual(len(harness.load_tier(self.repo)[0]), 2)
+
+    def test_the_new_file_binds_when_it_is_the_stricter_one(self) -> None:
+        self.declare(".agent-harness", tier=4, flags={"wave_mode": True})
+        self.declare(".claude", tier=1, flags={"wave_mode": False})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["wave_mode"])
+
+    def test_a_stale_legacy_declaration_cannot_be_masked(self) -> None:
+        # The reported shape: T1 in the new file, T4 + sensitive_data in a
+        # legacy file nobody deleted. First-found-wins audited it as T1.
+        self.declare(".agent-harness", tier=1, flags={"sensitive_data": False})
+        self.declare(".claude", tier=4, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+
+    def test_every_tightening_flag_is_unioned(self) -> None:
+        self.declare(".agent-harness", flags={"sensitive_data": True})
+        self.declare(".claude", flags={"wave_mode": True, "dormant_production": True})
+        self.assertEqual(
+            self.posture()["flags"],
+            {
+                "sensitive_data": True,
+                "wave_mode": True,
+                "dormant_production": True,
+                "relaxed_work_loss_guards": False,
+            },
+        )
+
+    def test_the_work_loss_relaxation_needs_every_declaration_to_agree(self) -> None:
+        self.declare(".agent-harness", flags={"relaxed_work_loss_guards": True})
+        self.declare(".claude", flags={"relaxed_work_loss_guards": False})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Silence is not agreement either: the guard stays on.
+        self.declare(".claude", flags={})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Unanimous, and only then, the declared relaxation applies.
+        self.declare(".claude", flags={"relaxed_work_loss_guards": True})
+        self.assertTrue(self.posture()["flags"]["relaxed_work_loss_guards"])
+
+    def test_a_lone_declaration_binds_on_its_own_from_either_home(self) -> None:
+        for index, directory in enumerate((".agent-harness", ".claude")):
+            with self.subTest(directory=directory):
+                repo = self.repo / f"lone-{index}"
+                declared = self.declare(
+                    directory,
+                    repo=repo,
+                    tier=3,
+                    flags={"relaxed_work_loss_guards": True},
+                )
+                paths, posture = harness.load_tier(repo)
+                self.assertEqual(posture["tier"], 3)
+                self.assertTrue(posture["flags"]["relaxed_work_loss_guards"])
+                self.assertEqual(paths, [declared])
+
+    def test_no_declaration_binds_nothing(self) -> None:
+        self.assertEqual(harness.load_tier(self.repo), ([], {}))
+        self.assertIsNone(harness.tier_path(self.repo))
+
+    def test_the_strictest_authority_dial_binds(self) -> None:
+        self.declare(".agent-harness", authority={"push": "free", "merge": "free"})
+        self.declare(".claude", authority={"push": "gated", "merge": "human-only"})
+        self.assertEqual(
+            self.posture()["authority"], {"push": "gated", "merge": "human-only"}
+        )
+
+    def test_non_posture_fields_come_from_the_runtime_neutral_file(self) -> None:
+        # `human_todo` is not comparable, so precedence decides it — and an
+        # explicit null is a declaration, not an omission.
+        self.declare(".agent-harness", human_todo="HUMAN_TODO.md")
+        self.declare(".claude", human_todo="TODO-human.md")
+        self.assertEqual(self.posture()["human_todo"], "HUMAN_TODO.md")
+        self.declare(".agent-harness", human_todo=None)
+        self.assertIsNone(self.posture()["human_todo"])
+        # An absent key falls through to the file that does declare one.
+        self.declare(".agent-harness")
+        self.assertEqual(self.posture()["human_todo"], "TODO-human.md")
+
+    def test_a_malformed_declaration_still_raises_with_its_path(self) -> None:
+        path = self.declare(".claude")
+        path.write_text("[]", encoding="utf-8")
+        with self.assertRaises(harness.HarnessError) as caught:
+            harness.load_tier(self.repo)
+        self.assertIn(str(path), str(caught.exception))
+
 
 class FakeCommandRunner:
     """A stand-in resolver: records argv, never spawns a process."""
@@ -5376,6 +5568,57 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("https://github.com/acme/widgets.git", detail)
         self.assertIn("PUBLIC", detail)
 
+    def test_a_stale_legacy_declaration_still_binds_the_audit(self) -> None:
+        # End-to-end shape of issue #99: the repo declares T1 without the
+        # overlay, a legacy file nobody deleted declares T4 + sensitive_data,
+        # and first-found-wins never even probed the remote.
+        repo = self.make_repo(tier=1, sensitive_data=False)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps(
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "gated"},
+                    "flags": {"sensitive_data": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(result["tier"], 4)
+        self.assertEqual(len(result["tier_files"]), 2)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_two_declarations_name_the_file_each_issue_came_from(self) -> None:
+        repo = self.make_repo()
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps({"tier": 9, "authority": {}, "flags": {}}), encoding="utf-8"
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertTrue(
+            all(
+                issue.startswith(".claude/tier.json: ")
+                for issue in result["issues"]
+                if "tier must be" in issue or "authority." in issue
+            ),
+            result["issues"],
+        )
+        self.assertIn(
+            ".claude/tier.json: tier must be an integer from 0 through 4",
+            result["issues"],
+        )
+        # The valid declaration still binds the tier the invalid one cannot.
+        self.assertEqual(result["tier"], 2)
+
     def test_public_non_origin_remote_is_advisory_not_a_failure(self) -> None:
         # A private fork of a public project: origin private, upstream public.
         # The exposure check must still say it loudly without failing a repo
@@ -5400,6 +5643,184 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("PUBLIC repository upstream/widgets", detail)
         self.assertIn("is not the publishing remote", detail)
         self.assertTrue(result["ok"], result["issues"])
+
+    # --- the visibility probe's transports (issue #106) ------------------------
+
+    def test_the_visibility_probe_asks_rest_before_graphql(self) -> None:
+        # `gh repo view` is the GraphQL lane, whose hourly quota an agent fleet
+        # exhausts while REST core is barely touched. REST answers first, and
+        # a REST verdict spends no GraphQL call at all.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api --hostname github.com repos/acme/widgets": (True, "private"),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(
+            probes,
+            [
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "repos/acme/widgets",
+                    "--jq",
+                    ".visibility",
+                ]
+            ],
+        )
+
+    def test_a_refused_rest_probe_falls_back_to_graphql(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        lanes = [argv[1] for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(lanes, ["api", "repo"])
+        # The evidence names the transport that actually answered.
+        self.assertIn("`gh repo view github.com/acme/widgets", self.details(result))
+
+    def test_a_rest_answer_that_is_not_a_verdict_falls_back_too(self) -> None:
+        # `gh api --jq .visibility` prints a literal `null` at exit 0 when the
+        # field is absent, and "NULL" is truthy: gating the fallback on
+        # emptiness would rebuild the mute wall on the new lane.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api": (True, "null"),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertEqual(
+            [argv[1] for argv in runner.calls if argv[:1] == ["gh"]], ["api", "repo"]
+        )
+
+    def test_an_exhausted_quota_is_named_in_the_unproven_line(self) -> None:
+        # Both lanes refusing used to print the same sentence as an absent
+        # binary: "returned <no output>". The probe's own words name the cause.
+        repo = self.make_repo(sensitive_data=True)
+
+        class RefusingRunner(FakeCommandRunner):
+            """A resolver that reports WHY it failed, as production does."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "gh: API rate limit exceeded for user ID 4210. (HTTP 403)",
+                    )
+                return resolved, output
+
+        runner = RefusingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        detail = self.details(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("unmeasured", detail)
+        self.assertIn("(quota exhausted)", detail)
+        self.assertIn("API rate limit exceeded", detail)
+        # Both transports are named, so the reader knows neither answered.
+        self.assertIn("gh api --hostname github.com repos/acme/widgets", detail)
+        self.assertIn("gh repo view github.com/acme/widgets", detail)
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_credential_in_probe_stderr_never_reaches_a_finding(self) -> None:
+        # `gh` echoes tokens from a misconfigured credential helper and `git`
+        # echoes whole remote URLs, and this text is now quoted into findings
+        # that reach stdout, --json and the doctor detail.
+        repo = self.make_repo(sensitive_data=True)
+
+        class LeakingRunner(FakeCommandRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "error: ghp_0123456789abcdefghijABCDEF authenticating to "
+                        "https://ci-user:s3cr3t-pat@github.com/acme/widgets.git",
+                    )
+                return resolved, output
+
+        runner = LeakingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertNotIn("ghp_0123456789abcdefghijABCDEF", rendered)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("ci-user", rendered)
+        self.assertIn("***", rendered)
+
+    def test_the_rest_route_accepts_only_an_owner_repo_pair(self) -> None:
+        # The path is interpolated into argv, so it is an allowlist and every
+        # rejection skips the REST lane rather than composing a command line.
+        for slug, path in (
+            ("acme/widgets", "acme/widgets"),
+            ("github.com/acme/widgets", "acme/widgets"),
+            ("https://github.com/acme/widgets", "acme/widgets"),
+            ("acme/widgets.js", "acme/widgets.js"),
+            ("_acme-2/-widgets_", "_acme-2/-widgets_"),
+            ("../acme/widgets", ""),
+            ("acme/../widgets", ""),
+            ("acme/widgets/extra", ""),
+            ("acme", ""),
+            ("acme/wid gets", ""),
+            ("acme/wid&gets", ""),
+            ("acme/..", ""),
+            ("acme/$(id)", ""),
+        ):
+            with self.subTest(slug=slug):
+                self.assertEqual(harness.github_rest_repo_path(slug), path)
+
+    def test_a_slug_the_rest_route_rejects_still_reaches_graphql(self) -> None:
+        runner = FakeCommandRunner({"gh repo view": (True, "PRIVATE")})
+        visibility, evidence = harness.github_visibility(
+            "acme/wid gets", Path("."), runner, None
+        )
+        self.assertEqual(visibility, "PRIVATE")
+        self.assertEqual([argv[1] for argv in runner.calls], ["repo"])
+        self.assertIn("gh repo view", evidence)
+
+    def test_a_failed_resolver_keeps_what_it_said(self) -> None:
+        script = "import sys; sys.stderr.write('boom: denied\\n'); sys.exit(1)"
+        resolved, output, failure = harness.bounded_command_result(
+            [sys.executable, "-c", script]
+        )
+        self.assertFalse(resolved)
+        self.assertEqual(output, "")
+        self.assertIn("boom: denied", failure)
+        # The two-element contract every other caller uses is unchanged.
+        self.assertEqual(
+            harness.bounded_command_output([sys.executable, "-c", script]), (False, "")
+        )
+
+    def test_an_absent_probe_binary_is_named_not_silent(self) -> None:
+        resolved, _output, failure = harness.bounded_command_result(
+            ["definitely-not-a-real-binary-agent-harness"]
+        )
+        self.assertFalse(resolved)
+        self.assertIn("definitely-not-a-real-binary-agent-harness", failure)
+        self.assertIn(
+            "could not be started",
+            harness.probe_failure_note(
+                ["definitely-not-a-real-binary-agent-harness"], failure
+            ),
+        )
 
     def test_a_public_origin_still_fails_the_audit(self) -> None:
         repo = self.make_repo(sensitive_data=True)
@@ -5914,8 +6335,13 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
         probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
         self.assertTrue(probes)
+        # Both transports pin the host, each in its own spelling.
         for argv in probes:
-            self.assertTrue(argv[3].startswith("github.com/"), argv)
+            with self.subTest(argv=argv):
+                if argv[1] == "api":
+                    self.assertEqual(argv[2:4], ["--hostname", "github.com"])
+                else:
+                    self.assertTrue(argv[3].startswith("github.com/"), argv)
 
     def test_redaction_keeps_scp_syntax_actionable(self) -> None:
         # `git@github.com:owner/repo` carries a fixed account name, not a
@@ -5973,11 +6399,17 @@ class RealityCheckTests(unittest.TestCase):
         clock = {"now": 0.0}
 
         class OverrunningRunner(FakeCommandRunner):
-            """The visibility probe itself consumes the rest of the budget."""
+            """The visibility probe itself consumes the rest of the budget.
+
+            The burn is charged to the GraphQL lane because that is the one
+            that ANSWERS here: REST is probed first and this fixture has no
+            reply for it, so charging every `gh` call would exhaust the budget
+            before the measurement under test ever ran.
+            """
 
             def __call__(self, argv, cwd=None, **kwargs):
                 answer = super().__call__(argv, cwd, **kwargs)
-                if argv[:1] == ["gh"]:
+                if argv[:2] == ["gh", "repo"]:
                     clock["now"] += 10.0
                 return answer
 

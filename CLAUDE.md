@@ -50,8 +50,10 @@ py_compile) or they are silently unlinted.
 Two Python artifacts, both deliberately dependency-free (stdlib only):
 
 **`harness.py`** — single-file CLI with four subcommands:
-- `audit` — validates a repo's tier declaration, doc line budgets (CLAUDE.md is capped per
-  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths.
+- `audit` — validates every tier declaration a repo carries (`.agent-harness/tier.json` and a
+  legacy `.claude/tier.json` bind to the STRICTEST union, exactly as the dispatcher resolves
+  them), doc line budgets (CLAUDE.md is capped per tier: T3 = 150 lines), and scans
+  `SCAN_PATHS` files for stale hard-coded user-profile paths.
   It also runs the **reality checks** (`reality_findings`): declared `sensitive_data` vs each
   remote's real host visibility, vendored floor bytes (`hooks/` or `.claude/hooks/`) vs the
   canonical template, and declared `human_todo` vs a file that exists. `MISMATCH` fails;
@@ -79,7 +81,7 @@ intentionally conservative: reject anything it cannot prove safe.
 
 **`templates/hooks/dispatch.py`** — the canonical shared Claude/Codex deny floor (~8.5k lines).
 Invoked as a PreToolUse hook with `--event pre --runtime claude|codex`; reads the repo's tier
-from `.agent-harness/tier.json` (falling back to `.claude/`) and emits the runtime-appropriate
+from `.agent-harness/tier.json` (strictest of it and legacy `.claude/`) and emits the
 allow/ask/deny JSON. Contract (docstring + BLUEPRINT §2, SPECS §5-6):
 - Blocks only the irreversible at every tier (force-push, rm -rf outside project, pipe-to-shell
   installs, sudo, secret-file mutation); work-loss guards are tier-dependent

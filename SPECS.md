@@ -166,6 +166,12 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 - Read by: dispatcher hook (`tier`, `flags`), Gardener, bootstrapper, CI templates. The
   dispatcher also reads legacy `.claude/tier.json` files so existing estates can migrate
   without a flag day.
+- Two co-located declarations bind to the STRICTEST union, never to the first one found
+  (law 9; `dispatch.load_tier`; `harness.merge_tier_declarations`): highest `tier` wins,
+  tightening flags and the strictest `authority` dial are unioned, and the one relaxation
+  (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. Non-posture fields
+  (`name`, `human_todo`, `budgets`, `last_reviewed`) come from `.agent-harness/tier.json` when
+  it declares them; each file is still validated on its own.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
   the budget script fails if they disagree.
@@ -180,6 +186,7 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 | MEMORY.md index | ≤30 lines / ≤3KB | fold + prune (Gardener) |
 | SKILL.md | ≤80 lines (target 60) | split or demote to doc |
 | AGENT_MAP.md | ≤100 lines | split into `docs/regions/*.md` |
+| FLOOR_LIMITATIONS.md (deny-floor ledger) | ≤120 lines | rotate to `archive/floor-limitations-<year>.md` |
 | directory CLAUDE.md | ≤30 lines | move detail to region map |
 | global CLAUDE.md | ≤130 lines | it's the law layer, not a manual — rotate working-style detail into skills |
 | total standing harness (T3) | ≤500 lines | demote something |

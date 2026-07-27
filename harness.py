@@ -1016,27 +1016,148 @@ def codex_hook_sources_status(
     )
 
 
+def tier_paths(repo: Path) -> list[Path]:
+    """Every tier declaration this repo carries, highest precedence first.
+
+    `.agent-harness/tier.json` is the runtime-neutral home and `.claude/` the
+    legacy one a migrating repo may still carry. Precedence orders the fields
+    that are not comparable (`human_todo`, `budgets`); it never decides the
+    posture — see `merge_tier_declarations`.
+    """
+    return [
+        repo / directory / "tier.json"
+        for directory in (".agent-harness", ".claude")
+        if (repo / directory / "tier.json").is_file()
+    ]
+
+
 def tier_path(repo: Path) -> Path | None:
-    for candidate in (
-        repo / ".agent-harness" / "tier.json",
-        repo / ".claude" / "tier.json",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
+    """The declaration `seed` must refuse to write over, if any exists."""
+    paths = tier_paths(repo)
+    return paths[0] if paths else None
 
 
-def load_tier(repo: Path) -> tuple[Path | None, dict[str, Any]]:
-    path = tier_path(repo)
-    if path is None:
-        return None, {}
+def read_tier_file(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HarnessError(f"invalid tier file {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise HarnessError(f"tier file must contain an object: {path}")
-    return path, data
+    return data
+
+
+# Weakest first: the strictest declaration binds, so a legacy `human-only`
+# merge gate cannot be masked by a newer `free` one.
+AUTHORITY_STRICTNESS = ("free", "gated", "human-only")
+
+
+def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+    """The one posture co-located declarations bind to: the strictest.
+
+    Law 9 and the dispatcher (`dispatch.load_tier`, SPECS §5) agree on the
+    rules, and this mirrors them exactly rather than inventing a second
+    semantics for the auditing tool:
+
+    * the HIGHEST declared tier wins;
+    * tightening flags are ORed, so a stale `.claude/tier.json` carrying
+      `sensitive_data` keeps binding after the new file omits it;
+    * `relaxed_work_loss_guards` is the one RELAXATION, so it applies only
+      when EVERY declaration agrees — a single silent file must not hand a
+      repo a looser git posture than it declared;
+    * `authority.push`/`.merge` take the strictest value declared.
+
+    Reading `.agent-harness/tier.json` with FALLBACK to the legacy file was
+    first-found-wins, so a repo declaring T1 in the new file while a surviving
+    T4 + sensitive_data legacy file sat beside it audited at the WEAKER posture
+    the dispatcher would never grant it (issue #99).
+
+    Fields that express no posture — `name`, `human_todo`, `budgets`,
+    `last_reviewed` — are not comparable, so the highest-precedence
+    declaration that CONTAINS the key supplies it (an explicit `null` is a
+    declaration, not an omission). Each file is still validated on its own by
+    `validate_tier`; this merge is about what binds, not about what is legal.
+    """
+    if not declarations:
+        return {}
+    merged: dict[str, Any] = {}
+    for declaration in reversed(declarations):
+        merged.update(declaration)
+    tiers = [
+        declaration["tier"]
+        for declaration in declarations
+        if declaration.get("tier") in TIER_NAMES
+    ]
+    if tiers:
+        merged["tier"] = max(tiers)
+    merged["flags"] = merge_tier_flags(declarations)
+    authority = merge_tier_authority(declarations)
+    if authority is not None:
+        merged["authority"] = authority
+    return merged
+
+
+def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
+    """OR every tightening flag; require unanimity for the one relaxation."""
+    flag_sets = [
+        declaration.get("flags")
+        for declaration in declarations
+        if isinstance(declaration.get("flags"), dict)
+    ]
+    if not flag_sets:
+        # Nothing mergeable: keep what the highest-precedence file declared so
+        # `validate_tier` still reports the malformed value it reported before.
+        return declarations[0].get("flags")
+    flags: dict[str, Any] = {}
+    for flag_set in flag_sets:
+        for key, value in flag_set.items():
+            if key == "relaxed_work_loss_guards":
+                continue
+            if isinstance(value, bool):
+                flags[key] = bool(flags.get(key)) or value
+            elif key not in flags:
+                flags[key] = value
+    flags["relaxed_work_loss_guards"] = all(
+        bool(flag_set.get("relaxed_work_loss_guards")) for flag_set in flag_sets
+    )
+    return flags
+
+
+def merge_tier_authority(declarations: list[dict[str, Any]]) -> Any:
+    """The strictest push/merge dial any declaration sets, or None."""
+    authorities = [
+        declaration.get("authority")
+        for declaration in declarations
+        if isinstance(declaration.get("authority"), dict)
+    ]
+    if not authorities:
+        return None
+    merged = dict(authorities[-1])
+    for authority in reversed(authorities):
+        for key, value in authority.items():
+            current = merged.get(key)
+            if (
+                value in AUTHORITY_STRICTNESS
+                and current in AUTHORITY_STRICTNESS
+                and AUTHORITY_STRICTNESS.index(value)
+                <= AUTHORITY_STRICTNESS.index(current)
+            ):
+                continue
+            merged[key] = value
+    return merged
+
+
+def tier_declarations(repo: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Read every declaration this repo carries, highest precedence first."""
+    return [(path, read_tier_file(path)) for path in tier_paths(repo)]
+
+
+def load_tier(repo: Path) -> tuple[list[Path], dict[str, Any]]:
+    """(the declaration files, the strictest posture they bind to)."""
+    declarations = tier_declarations(repo)
+    return [path for path, _ in declarations], merge_tier_declarations(
+        [data for _, data in declarations]
+    )
 
 
 def validate_tier(data: dict[str, Any]) -> list[str]:
@@ -1083,6 +1204,17 @@ def budget_issues(repo: Path, tier: int) -> list[str]:
         )
     if (repo / "AGENT_MAP.md").is_file():
         checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
+    # The deny-floor ledger declares its own cap and rotation target in its
+    # header (SPECS §3). Unregistered, an overflowing ledger was reported by
+    # nothing at all.
+    if (repo / "FLOOR_LIMITATIONS.md").is_file():
+        checks.append(
+            (
+                repo / "FLOOR_LIMITATIONS.md",
+                120,
+                "rotate to archive/floor-limitations-<year>.md",
+            )
+        )
     for skill in (
         (repo / ".agents" / "skills").glob("*/SKILL.md")
         if (repo / ".agents" / "skills").is_dir()
@@ -1214,7 +1346,24 @@ def bounded_command_output(
     cwd: Path | None = None,
     timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
+    """`bounded_command_result` for the callers that need no failure text."""
+    resolved, stdout, _failure = bounded_command_result(argv, cwd, timeout)
+    return resolved, stdout
+
+
+def bounded_command_result(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str, str]:
     """Run one read-only resolver under a hard timeout; never raise.
+
+    Returns `(resolved, stdout, failure text)`. The third element is what a
+    failed probe SAID — its stderr, or why it never started — so an UNPROVEN
+    finding can name its own cause (a `gh` GraphQL quota refusal, an expired
+    credential) instead of being mute. It is never a substitute for
+    `resolved`: a resolver that answers leaves it empty.
+
 
     Decoding is explicit and tolerant. Under `text=True` alone, a resolver that
     emits bytes the platform locale cannot decode — a non-UTF-8 configured
@@ -1248,17 +1397,21 @@ def bounded_command_output(
             errors="replace",
             **popen_kwargs,
         )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False, ""
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # The resolver never ran: an absent `gh` is a NAMED diagnosis here and
+        # an indistinguishable empty answer without it.
+        return False, "", f"{argv[0]} could not be started: {exc}"
     try:
-        stdout, _stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         terminate_process_tree(proc)
-        return False, ""
-    except (OSError, ValueError, UnicodeError):
+        return False, "", f"{argv[0]} did not answer within {timeout:.1f}s"
+    except (OSError, ValueError, UnicodeError) as exc:
         terminate_process_tree(proc)
-        return False, ""
-    return proc.returncode == 0, (stdout or "").strip()
+        return False, "", f"{argv[0]} could not be read: {exc}"
+    if proc.returncode == 0:
+        return True, (stdout or "").strip(), ""
+    return False, (stdout or "").strip(), (stderr or "").strip()
 
 
 def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
@@ -1342,14 +1495,36 @@ def local_only_command_output(
     reports as UNPROVEN — the audit stays honest about what it did not
     measure instead of pretending an unmeasured remote is fine.
     """
+    resolved, stdout, _failure = local_only_command_result(argv, cwd, timeout)
+    return resolved, stdout
+
+
+def local_only_command_result(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str, str]:
+    """`local_only_command_output`, keeping the reason it refused."""
     if command_reaches_the_network(argv):
-        return False, ""
-    return bounded_command_output(argv, cwd, timeout)
+        return False, "", f"--offline refused the network resolver `{argv[0]}`"
+    return bounded_command_result(argv, cwd, timeout)
 
 
 # The runners that accept a `timeout`, and so can be clamped to what is left of
 # the aggregate budget. A test's fake runner is deliberately not one of them.
-CLAMPABLE_COMMAND_RUNNERS = (bounded_command_output, local_only_command_output)
+CLAMPABLE_COMMAND_RUNNERS = (
+    bounded_command_output,
+    local_only_command_output,
+    bounded_command_result,
+    local_only_command_result,
+)
+# The failure-text twin of each production runner. A probe that needs to NAME
+# why it failed is routed through the twin; an injected fake runner has none
+# and keeps its two-element contract.
+COMMAND_RESULT_RUNNERS = {
+    bounded_command_output: bounded_command_result,
+    local_only_command_output: local_only_command_result,
+}
 
 
 def output_before_deadline(
@@ -1358,6 +1533,19 @@ def output_before_deadline(
     cwd: Path | None,
     deadline: float | None,
 ) -> tuple[bool, str]:
+    """`result_before_deadline` for callers that report no failure text."""
+    resolved, output, _failure = result_before_deadline(
+        command_runner, argv, cwd, deadline
+    )
+    return resolved, output
+
+
+def result_before_deadline(
+    command_runner: Any,
+    argv: list[str],
+    cwd: Path | None,
+    deadline: float | None,
+) -> tuple[bool, str, str]:
     """Run a resolver without overrunning the audit's aggregate budget.
 
     The clock is read ONCE, before the call: an exhausted budget starts no new
@@ -1367,22 +1555,38 @@ def output_before_deadline(
     must not delay a tool call, but an audit has no latency contract, and
     throwing away a measurement that already proved a remote PUBLIC would turn
     the exact finding this exists to make into an UNPROVEN.
+
+    Returns `(resolved, stdout, failure text)`. A runner that answers with the
+    two-element contract — every injected fake — simply reports no failure
+    text; the production runners are swapped for the twin that keeps it.
     """
+    runner = COMMAND_RESULT_RUNNERS.get(command_runner, command_runner)
     if deadline is None:
-        return command_runner(argv, cwd)
+        return normalized_command_result(runner(argv, cwd))
     remaining = deadline - monotonic()
     if remaining <= 0:
-        return False, ""
+        return False, "", "the probe budget expired before this command ran"
     # Every production runner takes the clamp, not just the network one:
     # `--offline` still shells out to local git, and a `status`/`ls-files`/
     # `rev-list` on a network-mounted checkout can be slow enough to overrun
     # the advertised aggregate budget with its own 3s default. A test's fake
     # runner takes no timeout, so it is called with the plain signature.
-    if command_runner in CLAMPABLE_COMMAND_RUNNERS:
-        return command_runner(
-            argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
+    if runner in CLAMPABLE_COMMAND_RUNNERS:
+        return normalized_command_result(
+            runner(argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining))
         )
-    return command_runner(argv, cwd)
+    return normalized_command_result(runner(argv, cwd))
+
+
+def normalized_command_result(result: Any) -> tuple[bool, str, str]:
+    """Accept either runner contract: `(resolved, stdout[, failure text])`."""
+    values = tuple(result)
+    if len(values) == 3:
+        resolved, stdout, failure = values
+    else:
+        resolved, stdout = values
+        failure = ""
+    return bool(resolved), stdout, failure
 
 
 def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
@@ -1416,6 +1620,79 @@ def redact_remote_url(url: str) -> str:
     if len(parts) == 1:
         return redacted
     return f"{parts[0]}{parts[1]}<redacted>"
+
+
+# A probe's own output is not a URL this module composed: `git` echoes whole
+# remotes on failure and `gh` echoes tokens from a misconfigured credential
+# helper, so every known credential shape is masked before the text is stored
+# in a finding. The last pattern is deliberately shape-blind — it catches the
+# token format that has not been invented yet.
+_PROBE_SECRET_PATTERNS = (
+    re.compile(r"(?<=//)[^/@\s]+(?=@)"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{4,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{4,}"),
+    re.compile(r"[A-Za-z0-9+/_]{24,}={0,2}"),
+)
+# Ordered: GitHub answers an exhausted quota with an HTTP 403, so the rate
+# limit must be recognized before the authentication pattern claims it.
+_PROBE_FAILURE_CAUSES = (
+    (re.compile(r"rate[\s_-]?limit", re.IGNORECASE), "quota exhausted"),
+    (
+        re.compile(
+            r"\b(401|403)\b|unauthorized|bad credentials|authentication"
+            r"|gh auth login|not logged in",
+            re.IGNORECASE,
+        ),
+        "authentication",
+    ),
+    (re.compile(r"\b404\b|not found", re.IGNORECASE), "not found"),
+    (
+        re.compile(
+            r"could not resolve host|connection (refused|reset)|no such host"
+            r"|network is unreachable|i/o timeout|tls handshake|did not answer",
+            re.IGNORECASE,
+        ),
+        "network",
+    ),
+)
+
+
+def redact_probe_text(text: str) -> str:
+    """Mask every credential shape a probe's own output is known to carry."""
+    for pattern in _PROBE_SECRET_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
+def classify_probe_failure(text: str) -> str:
+    """Name a probe failure's cause when the text makes it recognizable."""
+    for pattern, cause in _PROBE_FAILURE_CAUSES:
+        if pattern.search(text):
+            return cause
+    return ""
+
+
+def probe_failure_note(argv: list[str], failure: str, limit: int = 160) -> str:
+    """One line naming what a probe was and what it said when it failed.
+
+    An UNPROVEN visibility line used to report only that `gh` "returned <no
+    output>", which is the same sentence for an exhausted GraphQL quota, an
+    expired token and an absent binary (issue #106 / #90). Quoting the probe's
+    own words names the cause; redaction runs BEFORE the text is stored,
+    because every finding reaches stdout, `--json` and the `doctor` detail.
+    """
+    label = redact_probe_text(" ".join(argv))
+    head = ""
+    for line in failure.splitlines():
+        if line.strip():
+            head = redact_probe_text(line.strip())
+            break
+    if len(head) > limit:
+        head = head[: limit - 3] + "..."
+    if not head:
+        return f"`{label}` did not answer"
+    cause = classify_probe_failure(head)
+    return f"`{label}` failed{f' ({cause})' if cause else ''}: {head}"
 
 
 def github_repo_slug(remote: str) -> str:
@@ -1599,20 +1876,80 @@ def publishing_remote_endpoints(
     return sorted(entries, key=lambda entry: not entry[2])
 
 
+# The only three answers either transport may give. Anything else — a literal
+# `null`, an error page, a spelling GitHub has not shipped yet — is not a
+# verdict, and must fall through to the other lane rather than be believed.
+KNOWN_VISIBILITIES = frozenset({"PUBLIC", "PRIVATE", "INTERNAL"})
+_REST_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def github_rest_repo_path(slug: str) -> str:
+    """Map a repository slug onto the REST route's `owner/repo` pair.
+
+    The result is interpolated into argv, so validation is an ALLOWLIST and
+    every rejection returns "" — the REST lane is skipped and GraphQL answers.
+    Exactly two segments, each of the characters GitHub allows in an owner or
+    repository name and never all dots: `../x` must not become `repos/../x`,
+    and `a&b/c` must never reach a command line at all. The host is pinned at
+    the call site with `--hostname github.com`, not here.
+    """
+    path = slug.strip().strip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if path.lower().startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    segments = path.split("/")
+    if len(segments) != 2:
+        return ""
+    for segment in segments:
+        if not _REST_PATH_SEGMENT.fullmatch(segment) or not segment.strip("."):
+            return ""
+    return path
+
+
 def github_visibility(
     slug: str, repo: Path, command_runner: Any, deadline: float | None
-) -> str:
-    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked.
+) -> tuple[str, str]:
+    """(PUBLIC/PRIVATE/INTERNAL or "", the evidence or the failures).
 
-    The slug is pinned to `github.com/`. `gh repo view` accepts
-    `[HOST/]OWNER/REPO` and resolves a bare `OWNER/REPO` against `GH_HOST` or
-    the default authenticated host, so on a machine pointed at a GitHub
+    REST first. `gh repo view` is a GraphQL call, and an agent fleet exhausts
+    the hourly GraphQL quota while the REST core quota is barely touched
+    (measured 2026-07-27: GraphQL 0 remaining, REST 4925/5000, same answer in
+    0.49s) — so every audit of a `sensitive_data` repo printed UNPROVEN for a
+    remote that was verifiably private one REST call away (issue #106, the
+    floor's #90). GraphQL stays as the fallback: it is the lane that works
+    where `gh api` is unavailable or the REST shape changes.
+
+    Both lanes pin the host. `gh` resolves a bare `OWNER/REPO` against `GH_HOST`
+    or the default authenticated host, so on a machine pointed at a GitHub
     Enterprise instance the probe could answer PRIVATE about an entirely
-    different repository that happens to share the slug — while the
-    github.com remote this finding is about is public.
+    different repository that happens to share the slug — while the github.com
+    remote this finding is about is public.
+
+    When nothing answers, the second element carries what the probes SAID, so
+    the UNPROVEN line names quota exhaustion instead of being mute.
     """
-    resolved, output = output_before_deadline(
-        command_runner,
+    diagnostics: list[str] = []
+    lanes: list[list[str]] = []
+    rest_path = github_rest_repo_path(slug)
+    if rest_path:
+        lanes.append(
+            [
+                "gh",
+                "api",
+                "--hostname",
+                "github.com",
+                f"repos/{rest_path}",
+                "--jq",
+                ".visibility",
+            ]
+        )
+    else:
+        diagnostics.append(
+            f"the REST lane was skipped: {redact_probe_text(slug)!r} is not an "
+            "owner/repo pair"
+        )
+    lanes.append(
         [
             "gh",
             "repo",
@@ -1622,11 +1959,23 @@ def github_visibility(
             "visibility",
             "--jq",
             ".visibility",
-        ],
-        repo,
-        deadline,
+        ]
     )
-    return output.strip().upper() if resolved else ""
+    for argv in lanes:
+        resolved, output, failure = result_before_deadline(
+            command_runner, argv, repo, deadline
+        )
+        visibility = output.strip().upper()
+        if resolved and visibility in KNOWN_VISIBILITIES:
+            return visibility, f"`{' '.join(argv)}` -> {visibility}"
+        if resolved:
+            answer = redact_probe_text(visibility[:24]) or "<no output>"
+            diagnostics.append(
+                f"`{' '.join(argv)}` answered {answer!r}, which is not a visibility"
+            )
+        else:
+            diagnostics.append(probe_failure_note(argv, failure))
+    return "", "; ".join(diagnostics)
 
 
 def privacy_claim_findings(repo: Path) -> list[dict[str, str]]:
@@ -1732,7 +2081,7 @@ def sensitive_data_findings(
                 )
             )
             continue
-        visibility = github_visibility(slug, repo, command_runner, deadline)
+        visibility, evidence = github_visibility(slug, repo, command_runner, deadline)
         if visibility == "PUBLIC":
             # A public endpoint work is actually PUSHED to is the exposure this
             # check exists to catch. Anything else — the upstream of a private
@@ -1746,11 +2095,10 @@ def sensitive_data_findings(
                     REALITY_MISMATCH if publishes else REALITY_ADVISORY,
                     f"flags.sensitive_data is declared true but remote {name} "
                     f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
-                    f"`gh repo view {slug} --json visibility` -> PUBLIC"
-                    + (f"; {note}" if note else ""),
+                    f"{evidence}" + (f"; {note}" if note else ""),
                 )
             )
-        elif visibility in {"PRIVATE", "INTERNAL"}:
+        elif visibility in KNOWN_VISIBILITIES:
             findings.append(
                 reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")
             )
@@ -1759,9 +2107,8 @@ def sensitive_data_findings(
                 reality_finding(
                     check,
                     REALITY_UNPROVEN,
-                    f"{name} {slug}: `gh repo view` returned "
-                    f"{visibility or '<no output>'}; visibility is unmeasured "
-                    "(offline, unauthenticated, or gh is absent)",
+                    f"{name} {slug}: visibility is unmeasured (offline, "
+                    f"unauthenticated, rate-limited, or gh is absent) — {evidence}",
                 )
             )
     return findings
@@ -2183,15 +2530,26 @@ def audit_repo(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     repo = git_root(path)
-    config_path, tier_data = load_tier(repo)
+    declarations = tier_declarations(repo)
+    tier_data = merge_tier_declarations([data for _, data in declarations])
     issues: list[str] = []
-    if config_path is None:
+    if not declarations:
         issues.append(
             "missing .agent-harness/tier.json (legacy .claude/tier.json also accepted)"
         )
         tier = 1
     else:
-        issues.extend(validate_tier(tier_data))
+        # Validation is PER FILE: the merged posture is deliberately allowed to
+        # combine a tier from one declaration with a name from another, so
+        # validating it would invent contradictions the repo never declared.
+        # The file is named only when there is more than one to blame.
+        for config_path, data in declarations:
+            label = (
+                f"{config_path.relative_to(repo).as_posix()}: "
+                if len(declarations) > 1
+                else ""
+            )
+            issues.extend(f"{label}{issue}" for issue in validate_tier(data))
         tier = tier_data.get("tier") if tier_data.get("tier") in TIER_NAMES else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
@@ -2211,7 +2569,11 @@ def audit_repo(
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
-        "tier_file": str(config_path) if config_path else None,
+        "tier_file": str(declarations[0][0]) if declarations else None,
+        # Every declaration that bound this posture, not just the first found:
+        # a consumer that sees one path cannot tell a single-file repo from one
+        # whose legacy file supplied the tier.
+        "tier_files": [str(config_path) for config_path, _ in declarations],
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
@@ -4533,7 +4895,7 @@ def doctor(args: argparse.Namespace) -> int:
         )
         try:
             reality_repo = git_root(Path(args.repo))
-            _reality_config, reality_tier_data = load_tier(reality_repo)
+            _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
                 if reality_tier_data.get("tier") in TIER_NAMES
@@ -4609,7 +4971,10 @@ def audit_command(
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
-        print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
+        sources = ", ".join(result["tier_files"]) or "missing"
+        if len(result["tier_files"]) > 1:
+            sources += "; strictest binds"
+        print(f"tier: T{result['tier']} ({sources})")
         print(result["git"])
         for issue in result["issues"]:
             print(f"[FAIL] {issue}")
