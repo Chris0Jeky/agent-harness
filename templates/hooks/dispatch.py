@@ -7515,6 +7515,7 @@ def push_remotes(
     git_globals: list[str] | None = None,
     command_runner=command_output,
     deadline: float | None = None,
+    diagnostics: list[str] | None = None,
 ) -> list[str]:
     """Resolve every effective destination URL for a git push."""
     remote = ""
@@ -7571,6 +7572,7 @@ def push_remotes(
         ],
         project_dir,
         deadline,
+        diagnostics,
     )
     return [line.strip() for line in output.splitlines() if line.strip()]
 
@@ -7964,6 +7966,35 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+def github_rest_repo_path(slug: str) -> str:
+    """Map a repository slug onto the REST route's `<owner>/<repo>` pair.
+
+    `github_repo_slug` returns the bare pair today, but a caller that pins the
+    host (`github.com/owner/repo`, the spelling that makes `gh repo view`
+    resolve against github.com rather than GH_HOST) must not produce
+    `repos/github.com/owner/repo`. Anything that is not a clean pair returns ""
+    so the REST probe is skipped rather than asking a malformed question.
+    """
+    path = slug.strip().strip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if path.lower().startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    return path if re.fullmatch(r"[^/?#\s]+/[^/?#\s]+", path) else ""
+
+
+def detail_with_diagnostics(base: str, diagnostics: list[str], limit: int = 300) -> str:
+    """Suffix the probe failures that caused an unverifiable remote onto `base`.
+
+    The caller interpolates this into "could not verify push remote privacy
+    (...)", so the wall names its own cause instead of being mute (issue #90).
+    """
+    if not diagnostics:
+        return base
+    detail = f"{base} — {'; '.join(diagnostics[-3:])}"
+    return detail if len(detail) <= limit else detail[: limit - 3] + "..."
+
+
 def public_remote_status(
     args: list[str],
     project_dir: str,
@@ -7974,6 +8005,7 @@ def public_remote_status(
     """Classify every push destination; unknown is fail-closed to the caller."""
     if deadline is None:
         deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    diagnostics: list[str] = []
     recurse_mode = git_push_recurse_mode(args)
     if recurse_mode is None:
         recurse_mode = command_output_before_deadline(
@@ -7989,18 +8021,22 @@ def public_remote_status(
             ],
             project_dir,
             deadline,
+            diagnostics,
         ).lower()
     if recurse_mode not in {"no", "check"}:
-        return None, "unverified recursive-submodule push destinations"
+        return None, detail_with_diagnostics(
+            "unverified recursive-submodule push destinations", diagnostics
+        )
     remotes = push_remotes(
         args,
         project_dir,
         git_globals,
         command_runner,
         deadline,
+        diagnostics,
     )
     if not remotes:
-        return None, "unresolved push remote"
+        return None, detail_with_diagnostics("unresolved push remote", diagnostics)
     for remote in dict.fromkeys(remotes):
         normalized = remote.lower()
         if normalized.startswith("file://") or re.match(
@@ -8009,26 +8045,45 @@ def public_remote_status(
             continue
         slug = github_repo_slug(remote)
         if not slug:
-            return None, "unverified non-GitHub destination"
-        visibility = command_output_before_deadline(
-            command_runner,
-            [
-                "gh",
-                "repo",
-                "view",
-                slug,
-                "--json",
-                "visibility",
-                "--jq",
-                ".visibility",
-            ],
-            project_dir,
-            deadline,
-        ).upper()
+            return None, detail_with_diagnostics(
+                "unverified non-GitHub destination", diagnostics
+            )
+        # REST first: `gh repo view` is a GraphQL call, and an agent fleet
+        # exhausts the GraphQL quota hourly while the REST core quota is barely
+        # touched (issue #90). A quota-denied probe returned "" and fail-closed
+        # a push to a repository the floor could have proved private.
+        visibility = ""
+        rest_path = github_rest_repo_path(slug)
+        if rest_path:
+            visibility = command_output_before_deadline(
+                command_runner,
+                ["gh", "api", f"repos/{rest_path}", "--jq", ".visibility"],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).upper()
+        if not visibility:
+            # Same question over the other transport, under the same deadline.
+            visibility = command_output_before_deadline(
+                command_runner,
+                [
+                    "gh",
+                    "repo",
+                    "view",
+                    slug,
+                    "--json",
+                    "visibility",
+                    "--jq",
+                    ".visibility",
+                ],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).upper()
         if visibility == "PUBLIC":
             return True, slug
         if visibility not in {"PRIVATE", "INTERNAL"}:
-            return None, slug
+            return None, detail_with_diagnostics(slug, diagnostics)
     return False, "approved private destinations"
 
 
