@@ -722,6 +722,20 @@ CASES = [
     ("git worktree `printf remove` -f ../wt", 4, {}, "deny"),
     ("git worktree `printf remove` -f ../wt", 2, {"wave_mode": True}, "deny"),
     ("git worktree $(printf remove) -f ../wt", 4, {}, "deny"),
+    # DOUBLE-QUOTED backtick action word. This allowed at every tier until the
+    # opacity test moved to the pre-case-folding token: `_LITERAL_BACKTICK` is
+    # an UPPERCASE sentinel that `token.lower()` destroyed, so the action read
+    # as inert literal text and the command bypassed the
+    # [worktree-remove-force] CHARTER deny, not merely the opacity gate. Its
+    # unquoted and single-quoted twins above never lost the sentinel.
+    ('git worktree "`echo remove`" --force wt', 3, {}, "ask"),
+    ('git worktree "`echo remove`" --force wt', 4, {}, "deny"),
+    ('git worktree "`echo remove`" --force wt', 2, {"wave_mode": True}, "deny"),
+    ('git worktree "`echo remove`" ../wt', 4, {}, "deny"),
+    ('git worktree "$ACT" --force wt', 4, {}, "deny"),
+    # the folded form still does literal action matching, case-insensitively
+    ("git worktree REMOVE ../wt", 4, {}, "allow"),
+    ("git worktree Remove --force ../wt", 4, {}, "deny"),
     ("git worktree $ACT ../wt", 3, {}, "ask"),
     ("git worktree ${ACT} ../wt", 4, {}, "deny"),
     ("git worktree %ACT% ../wt", 4, {}, "deny"),

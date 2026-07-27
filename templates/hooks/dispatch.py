@@ -10284,6 +10284,18 @@ def check(
                 # removals (issue #41). Measured on 1.6.16, `git worktree add
                 # ../remove` and `git worktree add /tmp/remove-me` were ALLOWED.
                 worktree_action = ""
+                # The action word BEFORE case folding. `_LITERAL_BACKTICK` is
+                # an UPPERCASE sentinel standing in for a quote-masked
+                # backtick, so `token.lower()` destroys it and a double-quoted
+                # `git worktree "`echo remove`" --force wt` read as an inert
+                # literal action -- allowing at T4 and wave_mode, which
+                # bypasses the [worktree-remove-force] charter deny, not just
+                # the opacity gate. The unquoted and single-quoted spellings
+                # never lost the sentinel and always denied. Opacity is tested
+                # against this raw form; the folded one still does the literal
+                # `remove`/`add`/`move` matching, which is genuinely
+                # case-insensitive.
+                worktree_action_raw = ""
                 worktree_positionals = []
                 seen_action = False
                 index = 0
@@ -10297,6 +10309,7 @@ def check(
                         continue
                     if not seen_action:
                         seen_action = True  # the action word itself
+                        worktree_action_raw = token
                         worktree_action = token.lower()
                         index += 1
                         continue
@@ -10310,7 +10323,7 @@ def check(
                 # spelling must never score better than the literal form it
                 # might be, so the dynamic action word rides the same
                 # work-loss ladder as `remove --force` itself.
-                if worktree_action and has_dynamic_shell_token(worktree_action):
+                if worktree_action_raw and has_dynamic_shell_token(worktree_action_raw):
                     if strict:
                         return (
                             "deny",
