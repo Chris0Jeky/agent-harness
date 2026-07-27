@@ -13,6 +13,10 @@ Contract (BLUEPRINT §2, SPECS §5-6):
   allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
   relaxed-git (tier.json flag `relaxed_work_loss_guards`) keeps them allow below T4/wave_mode;
   the flag is IGNORED at T4 and under wave_mode (other agents' work is in the blast radius).
+  Plain `worktree remove` is tier-dependent on its own shorter ladder: allow T1-T3, deny at
+  T4/wave_mode. Git refuses it on a tree with tracked modifications or untracked files, but
+  its clean check IGNORES gitignored content, which removal then deletes (.env-class files,
+  local databases, build trees), so the plain form is gated but never merely harmless.
 - NEVER inspects commit-message / PR-body text: quoted strings are stripped before matching.
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
@@ -36,7 +40,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.17 (2026-07-27)"
+FLOOR_VERSION = "1.6.18 (2026-07-27)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -10147,10 +10151,13 @@ def check(
                 # The action word is resolved BY POSITION, the way
                 # git_subcommand_index resolves the git subcommand itself: skip
                 # options and the values they consume, then take the first bare
-                # token. The old rule matched `remove` ANYWHERE in argv, so
-                # `git worktree add ../remove`, `git worktree add /tmp/remove-me`
-                # and `git worktree lock --reason remove ../wt` were all denied as
-                # removals (issue #41).
+                # token. The old rule tested `token.lower() == "remove"` against
+                # every argv token, so only an EXACT `remove` matched -- a path
+                # merely CONTAINING the word never did. The real casualties were
+                # option VALUES: `git worktree add -b remove ../wt` and
+                # `git worktree lock --reason remove ../wt` were denied as
+                # removals (issue #41). Measured on 1.6.16, `git worktree add
+                # ../remove` and `git worktree add /tmp/remove-me` were ALLOWED.
                 worktree_action = ""
                 worktree_positionals = []
                 seen_action = False
@@ -10170,13 +10177,38 @@ def check(
                         continue
                     worktree_positionals.append(token)
                     index += 1
-                # `git worktree remove` REFUSES a dirty or locked worktree on its
-                # own -- git runs the clean check the floor cannot -- so the plain
-                # form cannot destroy uncommitted work and is allowed below
-                # T4/wave. `--force` is precisely the spelling that overrides that
-                # refusal, so it joins the tier-dependent work-loss guards
-                # (allow T1-T2, ask T3, deny T4/wave, honouring the declared
-                # relaxed-git posture exactly as `reset --hard` and `clean -f` do).
+                # `git worktree remove` REFUSES a worktree holding tracked
+                # modifications or untracked (non-ignored) files -- git runs a
+                # check the floor cannot -- and removal leaves the BRANCH
+                # behind, so committed work stays reachable. That is why the
+                # plain form is not an unconditional deny.
+                #
+                # It is NOT non-destructive, and an earlier draft of this rule
+                # claimed it was ("the plain form cannot destroy uncommitted
+                # work"). Measured on git 2.45.1, and pinned with real git by
+                # `ignored_worktree_removal_is_destructive` in smoke_test.py:
+                # the !force path runs `git status --porcelain
+                # --ignore-submodules=none`, which reports a worktree holding
+                # `.env`, `local.db`, `vendor.cfg` and `node_modules/pkg.js` as
+                # CLEAN, and removal then calls the ignore-UNAWARE
+                # `remove_dir_recursively()` and deletes all four. Git's clean
+                # check does not consider gitignored content, so a `.env`
+                # written only in that worktree, local databases and build
+                # trees are destroyed with no git copy to restore them from.
+                #
+                # The plain form therefore stays gated where another agent may
+                # own the tree: allow T1-T3, deny at T4/wave_mode. `--force`
+                # additionally overrides git's refusal on a DIRTY tree, which
+                # is where uncommitted TRACKED work is lost; a LOCKED tree
+                # needs the doubled flag, and git says so itself -- measured on
+                # 2.45.1, a single `--force` on a locked tree exits 128 with
+                # "cannot remove a locked working tree ... use 'remove -f -f'
+                # to override or unlock first", while `-f -f` exits 0. The
+                # force test below scores `-ff`, `-f -f` and `--force --force`
+                # exactly as `-f`, so every overriding spelling carries the
+                # full work-loss ladder (allow T1-T2, ask T3, deny T4/wave,
+                # honouring the declared relaxed-git posture exactly as
+                # `reset --hard` and `clean -f` do).
                 # The previous unconditional deny protected nothing: `rm -rf` and
                 # `Remove-Item -Recurse` are not git commands and never reached
                 # this rule, so a floor-respecting agent could only ever ACCUMULATE
@@ -10187,8 +10219,15 @@ def check(
                 # working-tree directory is ALREADY gone, and skips any entry whose
                 # directory still exists or that carries a `locked` file. `--expire
                 # <time>` only narrows which of those ALREADY-missing entries are
-                # old enough to drop, so it cannot reach a live worktree either;
-                # `git worktree repair` re-registers anything pruned early.
+                # old enough to drop, so it cannot reach a live worktree either.
+                # Working-tree FILES always survive a prune. What it destroys is
+                # that administrative directory -- index (staged changes), HEAD,
+                # ORIG_HEAD, reflogs, per-worktree refs, in-progress
+                # rebase/merge state -- and that is NOT reversible: measured on
+                # git 2.45.1, `git worktree repair` on a worktree pruned while
+                # it was renamed away exits 1 with "unable to locate
+                # repository", because re-registration needs the
+                # `.git/worktrees/<id>` directory prune has just deleted.
                 # `list`/`lock`/`unlock`/`repair` are likewise metadata-only.
                 if worktree_action == "remove":
                     # `--` ends option parsing, so a worktree literally named `-f`
@@ -10207,22 +10246,26 @@ def check(
                                 "[worktree-remove-force] T4/wave: git worktree remove --force "
                                 "deletes a worktree git would otherwise refuse to touch, "
                                 "including another agent's uncommitted work. Drop --force and "
-                                "git will verify the tree is clean first.",
+                                "git will at least refuse a dirty or locked tree.",
                             )
                         if tier >= 3 and not relaxed:
                             return (
                                 "ask",
                                 "[worktree-remove-force] T3: git worktree remove --force "
                                 "discards uncommitted work in that worktree. Confirm, or drop "
-                                "--force so git refuses a dirty tree itself.",
+                                "--force so git refuses a dirty or locked tree itself -- but a "
+                                "removal git does allow still deletes gitignored files.",
                             )
                     elif strict:
                         return (
                             "deny",
                             "[worktree-remove-tier] T4/wave: worktree removal is gated here "
-                            "because another agent may own that tree. Confirm it with "
-                            "`git -C <path> status --porcelain`, let the owning session remove "
-                            "it, or clear wave_mode once the wave is done.",
+                            "because another agent may own that tree, and git's own clean "
+                            "check ignores gitignored content -- removal still deletes "
+                            ".env-class files, local databases and build trees. Confirm it "
+                            "with `git -C <path> status --porcelain --ignored`, let the "
+                            "owning session remove it, or clear wave_mode once the wave "
+                            "is done.",
                         )
                 elif worktree_action in {"add", "move"}:
                     # add writes its first operand; move writes its second.
