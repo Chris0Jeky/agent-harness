@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.15 (2026-07-26)"
+FLOOR_VERSION = "1.6.16 (2026-07-27)"
 
 # --- helpers ---------------------------------------------------------------
 
