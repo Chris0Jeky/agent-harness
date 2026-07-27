@@ -5810,13 +5810,17 @@ class RealityCheckTests(unittest.TestCase):
         )
 
     def test_an_absent_probe_binary_is_named_not_silent(self) -> None:
+        # Since issue #112 an absent probe is diagnosed by the PATH resolver
+        # rather than by the failed spawn, so the wording is the resolver's.
+        # The contract this test guards is unchanged: never a silent empty
+        # probe, and the name the caller asked for appears in the diagnosis.
         resolved, _output, failure = harness.bounded_command_result(
             ["definitely-not-a-real-binary-agent-harness"]
         )
         self.assertFalse(resolved)
         self.assertIn("definitely-not-a-real-binary-agent-harness", failure)
         self.assertIn(
-            "could not be started",
+            "no executable of that name on PATH",
             harness.probe_failure_note(
                 ["definitely-not-a-real-binary-agent-harness"], failure
             ),
