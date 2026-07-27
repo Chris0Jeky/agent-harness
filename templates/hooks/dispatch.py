@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.20 (2026-07-27)"
+FLOOR_VERSION = "1.6.21 (2026-07-27)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8506,6 +8506,194 @@ def public_remote_status(
     return False, "approved private destinations"
 
 
+_GIT_PUSH_URLISH_DESTINATION = re.compile(
+    r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])"
+)
+
+
+def git_push_positional_operands(
+    args: list[str],
+) -> tuple[list[str], str, bool] | None:
+    """Positional operands of a git push, its --repo value, and selector facts.
+
+    Returns (positionals, option_remote, selector) where `selector` is True for
+    any multi-ref or deletion selector (--all/--branches/--tags/--mirror/
+    --delete/-d). Returns None when an abbreviated value option makes the argv
+    unattributable — the same shape push_remotes() answers with [].
+    """
+    positionals: list[str] = []
+    option_remote = ""
+    selector = False
+    value_options = (_GIT_PUSH_VALUE_LONG_OPTIONS - {"--repo"}) | {"-o"}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if abbreviated_git_push_value_option(arg):
+            return None
+        if arg == "--repo":
+            option_remote = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+            continue
+        if arg.startswith("--repo="):
+            option_remote = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        _short_flags, short_consumes_next = git_push_short_option_shape(arg)
+        if short_consumes_next:
+            i += 2
+            continue
+        if arg in value_options:
+            i += 2
+            continue
+        if arg in {"--all", "--branches", "--tags", "--mirror", "--delete", "-d"}:
+            selector = True
+            i += 1
+            continue
+        if arg.startswith(("--exec=", "--receive-pack=", "--push-option=")) or (
+            arg.startswith("-o") and len(arg) > 2
+        ):
+            i += 1
+            continue
+        if not arg.startswith("-") or arg == "-":
+            positionals.append(arg)
+            i += 1
+            continue
+        i += 1
+    return positionals, option_remote, selector
+
+
+def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
+    """Source side of each explicit refspec; None for any non-plain shape.
+
+    Plain means a named source with no force prefix, no deletion (empty
+    source), and no wildcard. The caller decides what a plain source must
+    resolve to.
+    """
+    sources: list[str] = []
+    for refspec in refspecs:
+        if refspec.startswith("+"):
+            return None
+        src, colon, _dst = refspec.partition(":")
+        if colon and not src:
+            return None
+        if not src or "*" in src:
+            return None
+        sources.append(src)
+    return sources
+
+
+def sensitive_push_narrowing_status(
+    args: list[str],
+    project_dir: str,
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+    deadline: float | None = None,
+) -> tuple[bool, str]:
+    """Issue #48's ratified narrowing: attribute a push to a non-sensitive repo.
+
+    The sensitive_data overlay is a CONTEXT property — `load_tier` unions the
+    cwd and CLAUDE_PROJECT_DIR chains, so a session rooted in a sensitive repo
+    carries the overlay into every push, including a different, non-sensitive
+    repository's own branches going to that repository's own remote. The owner
+    ratified (issue #48, reaffirmed 2026-07-27) allowing exactly that
+    attributable shape. Allow only when ALL hold:
+
+      1. the destination is a configured remote NAME of the pushed repository
+         (never a URL or path), or the push is refspec-less to its configured
+         upstream — and no multi-ref/deletion selector is present;
+      2. every explicit refspec source is a named local branch (refs/heads/*)
+         or HEAD — no raw SHAs, tags, wildcards, or remote-tracking refs;
+      3. the pushed repository's toplevel carries its OWN tier declaration
+         with sensitive_data false, and no ancestor directory declaring
+         sensitive_data contains that toplevel — the sensitivity being set
+         aside must be purely contextual, never physical containment.
+
+    Any other shape, and any unresolvable probe, returns False and keeps the
+    context deny. Residual accepted by the ratification (FLOOR_LIMITATIONS.md):
+    a local branch can be created from fetched foreign objects — the floor is
+    a tripwire, not a provenance auditor.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    parsed = git_push_positional_operands(args)
+    if parsed is None:
+        return False, "unattributable push argv"
+    positionals, option_remote, selector = parsed
+    if selector:
+        return False, "multi-ref or deletion selector"
+    # Positional wins over --repo, mirroring push_remotes and git itself
+    # ("if both are specified, the command-line argument takes precedence").
+    if positionals:
+        destination = positionals[0]
+        refspecs = positionals[1:]
+    else:
+        destination = option_remote
+        refspecs = []
+    if destination and _GIT_PUSH_URLISH_DESTINATION.match(destination):
+        return False, "destination is a URL, not a configured remote name"
+    sources = git_push_refspec_sources(refspecs)
+    if sources is None:
+        return False, "refspec is not a plain named source"
+    diagnostics: list[str] = []
+    toplevel = command_output_before_deadline(
+        command_runner,
+        ["git", *(git_globals or []), "rev-parse", "--show-toplevel"],
+        project_dir,
+        deadline,
+        diagnostics,
+    ).strip()
+    if not toplevel:
+        return False, detail_with_diagnostics(
+            "unresolved pushed repository", diagnostics
+        )
+    declaration_present = False
+    for authority_dir in (".agent-harness", ".claude"):
+        try:
+            os.lstat(os.path.join(toplevel, authority_dir, "tier.json"))
+        except OSError:
+            continue
+        declaration_present = True
+    if not declaration_present:
+        return False, "the pushed repository declares no tier"
+    try:
+        pushed_tier = load_tier(toplevel)
+    except Exception:
+        return False, "the pushed repository's tier declaration is unreadable"
+    if pushed_tier.get("flags", {}).get("sensitive_data"):
+        return False, "the pushed repository itself declares sensitive_data"
+    toplevel_key = os.path.normcase(os.path.abspath(toplevel))
+    for declared in declared_project_dirs(toplevel):
+        if os.path.normcase(os.path.abspath(declared)) == toplevel_key:
+            continue
+        try:
+            declared_tier = load_tier(declared)
+        except Exception:
+            return False, "a containing tier declaration is unreadable"
+        if declared_tier.get("flags", {}).get("sensitive_data"):
+            return False, "the pushed repository sits inside a sensitive_data root"
+    for src in sources:
+        if src == "HEAD":
+            continue
+        if src.startswith("refs/") and not src.startswith("refs/heads/"):
+            return False, "refspec source is outside refs/heads"
+        ref_name = src if src.startswith("refs/heads/") else f"refs/heads/{src}"
+        verified = command_output_before_deadline(
+            command_runner,
+            ["git", *(git_globals or []), "show-ref", "--verify", ref_name],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not verified:
+            return False, detail_with_diagnostics(
+                f"refspec source {src!r} is not a local branch", diagnostics
+            )
+    return True, toplevel
+
+
 def read_tier_file(path: str) -> dict:
     """Read and strictly validate one tier declaration."""
     with open(path, encoding="utf-8") as fh:
@@ -8889,6 +9077,7 @@ def check(
     _cwd_uncertain: bool = False,
     _cwd_changed: bool = False,
     remote_resolver=public_remote_status,
+    push_narrowing=sensitive_push_narrowing_status,
     _remote_cache: dict | None = None,
     _remote_deadline: float | None = None,
     _git_repository_environment: frozenset[str] | None = None,
@@ -8938,6 +9127,7 @@ def check(
             _cwd_uncertain,
             _cwd_changed,
             remote_resolver,
+            push_narrowing,
             _remote_cache,
             _remote_deadline,
             frozenset(repository_environment_seed),
@@ -9056,6 +9246,7 @@ def check(
             cwd_uncertain,
             cwd_changed,
             remote_resolver,
+            push_narrowing,
             _remote_cache,
             _remote_deadline,
             frozenset(effective_git_repository_environment),
@@ -9356,6 +9547,7 @@ def check(
                         cwd_uncertain,
                         cwd_changed,
                         remote_resolver,
+                        push_narrowing,
                         _remote_cache,
                         _remote_deadline,
                         frozenset(effective_git_repository_environment),
@@ -9479,6 +9671,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
@@ -9516,6 +9709,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
@@ -9539,6 +9733,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
@@ -9697,6 +9892,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
@@ -9716,6 +9912,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
@@ -9958,6 +10155,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
@@ -10621,6 +10819,7 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
@@ -11033,10 +11232,31 @@ def check(
                             )
                     is_public, remote = _remote_cache[resolver_key]
                     if is_public is True:
-                        return (
-                            "deny",
-                            f"sensitive_data repo: refusing a push to public remote {remote}.",
+                        # Issue #48 (ratified; owner reaffirmed 2026-07-27): a
+                        # push attributable to a non-sensitive repository — its
+                        # own named branches to its own configured remote — is
+                        # exempt from the CONTEXT overlay. Everything else
+                        # keeps the deny, with the failed condition named.
+                        narrowing_key = (
+                            "issue48-narrowing",
+                            tuple(args),
+                            current_cwd,
+                            tuple(git_toks[1:subcommand_index]),
                         )
+                        if narrowing_key not in _remote_cache:
+                            _remote_cache[narrowing_key] = push_narrowing(
+                                args,
+                                current_cwd,
+                                git_toks[1:subcommand_index],
+                                deadline=_remote_deadline,
+                            )
+                        narrowed, narrowing_detail = _remote_cache[narrowing_key]
+                        if not narrowed:
+                            return (
+                                "deny",
+                                f"sensitive_data repo: refusing a push to public remote {remote} "
+                                f"(issue #48 narrowing: {narrowing_detail}).",
+                            )
                     if is_public is None:
                         return (
                             "deny",
