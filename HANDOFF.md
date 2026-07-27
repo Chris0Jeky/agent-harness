@@ -1,6 +1,7 @@
 # agent-harness — session handoff (2026-07-25 → 26)
 
-Floor **1.6.5 → 1.6.12 on `main`**, seven PRs merged, one open. The theme: the floor was blocking
+Floor **1.6.5 → 1.6.12 on `main`**, seven PRs merged, one open *(that one — PR #71 — merged
+2026-07-26T23:53Z, taking the floor to 1.6.15; see its section)*. The theme: the floor was blocking
 real work at a measured 12% while a five-character prefix disarmed it. This session closed the
 bypass, cut false positives, and built the gate that makes both directions a CI property.
 
@@ -16,7 +17,14 @@ bypass, cut false positives, and built the gate that makes both directions a CI 
 | #72 | `audit` verifies declarations against **reality** (a `sensitive_data` repo on a public remote now fails loudly); dropped the unread `model_routing` field. | #60 #47 |
 | #61 | Model-routing docs retargeted to the current standard; the runnable `--model haiku` removed. | #50 |
 
-## Open: PR #71 — the cross-product gate (#63)
+## PR #71 — the cross-product gate (#63)
+
+**Update 2026-07-27: MERGED** 2026-07-26T23:53Z as `21485bc` (merge commit; the floor rode
+along to **1.6.15** — 1.6.13/1.6.14 were consumed on the branch). One debt survived the merge:
+no triage of the 13 connector threads is visible after the last review activity that day
+(00:54Z), so the single owed pass is now tracked as
+[#104](https://github.com/Chris0Jeky/agent-harness/issues/104) instead of being dropped. The
+section below is retained as written, for history.
 
 The structural fix behind every bypass this repo has had. It crosses the ~1,071-case deny corpus
 with 102 prefix/wrapper shapes and asserts **both** directions — charter denies survive every
@@ -97,11 +105,13 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
    `~/.codex/backups/20260726T195246Z` — and three shared skills in `~/.agents/skills`, whose
    backups live under `~/.agents/skills/.harness-backups/20260726T195246Z`). HUMAN_TODO H-1
    carries the evidence; the tick is yours.
-2. **Re-trust and canary the deployed bytes** — STILL OPEN (the one verification gate left;
-   H-4 stays an ongoing manual chore): fresh Codex
-   session per repo in its exact CWD, `/hooks` shows the expected adapter, then the allow/deny
-   canary on BOTH runtimes — the Claude-side hook has live DENY evidence (two `[floor 1.6.12]`
-   banners on 2026-07-26), but no deliberate ALLOW canary has run anywhere.
+2. **Re-trust and canary the deployed bytes** — STILL OPEN, Codex side (H-4 stays an ongoing
+   manual chore): fresh Codex session per repo in its exact CWD, `/hooks` shows the expected
+   adapter, then both canary legs on that runtime. The Claude side is now DONE: a deliberate
+   ALLOW+DENY canary pair ran 2026-07-27 against the deployed 1.6.12 bytes (benign `git status`
+   executed; a force-push probe at a non-repo directory denied with the `[floor 1.6.12]`
+   banner), on top of the two mid-session denies of 2026-07-26. Note canonical `main` is now
+   floor 1.6.15 (PR #71) — the redeploy and a re-canary ride the #90 fix.
 3. **`~/.claude` pushes** — **DONE**: `e42e211` and the follow-on memory commit are on pushed
    `main`; `settings.json` stayed uncommitted by design. See HUMAN_TODO H-3 for the
    branch-rule-bypass note that push surfaced.
@@ -109,9 +119,10 @@ ask channel. Two bugs to fix in the same slice: the match is positional-blind (`
 
 ## What was NOT verified
 
-- Live hook execution is limited to two observed Claude-side denies on 2026-07-26
-  (`[floor 1.6.12]` banners, mid-session — not a scripted canary). No Codex-side live
-  execution at all; every other floor result is from calling `check()` in-process or from CI.
+- Live hook execution: the Claude side now has a deliberate ALLOW+DENY canary pair
+  (2026-07-27, against deployed 1.6.12) plus the two mid-session denies of 2026-07-26. Still
+  NO Codex-side live execution at all; every other floor result is from calling `check()`
+  in-process or from CI.
 - The corpus replay for #53 showed **0 newly blocked / 1 newly allowed** across 91,300 unique
   commands — but the corpus contains no command using the shapes #53 changed most, so that zero
   is *unmeasured*, not *safe*. #70 and #71 had no replay at their final heads.
