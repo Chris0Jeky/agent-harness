@@ -143,6 +143,16 @@ class SchemaContractTests(unittest.TestCase):
             lambda: validate_charter_cases([VALID_CASE, VALID_CASE]),
         )
 
+    def test_event_and_case_corpora_must_not_be_empty(self) -> None:
+        self.assert_validation_error(
+            "CommandEvent corpus: expected at least one record",
+            lambda: validate_command_events([]),
+        )
+        self.assert_validation_error(
+            "CharterCase corpus: expected at least one record",
+            lambda: validate_charter_cases([]),
+        )
+
     def test_schema_documents_are_strict_and_loadable(self) -> None:
         schema_dir = Path(__file__).parents[2] / "schemas"
         expected = {

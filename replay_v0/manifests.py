@@ -80,6 +80,13 @@ def _require_count(value: object, label: str) -> int:
     return value
 
 
+def _require_positive_count(value: object, label: str) -> int:
+    count = _require_count(value, label)
+    if count == 0:
+        raise ManifestError(f"{label}: expected a positive integer")
+    return count
+
+
 def _require_relative_path(value: object, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ManifestError(f"{label}: expected a relative POSIX path")
@@ -117,7 +124,9 @@ def validate_corpus_manifest(value: object) -> dict[str, Any]:
             f"CorpusManifest.schema_version: expected {CORPUS_MANIFEST_VERSION!r}"
         )
     corpus_id = _require_portable_id(manifest["corpus_id"], "CorpusManifest.corpus_id")
-    event_count = _require_count(manifest["event_count"], "CorpusManifest.event_count")
+    event_count = _require_positive_count(
+        manifest["event_count"], "CorpusManifest.event_count"
+    )
     raw_files = manifest["files"]
     if not isinstance(raw_files, list) or not raw_files:
         raise ManifestError("CorpusManifest.files: expected a non-empty array")
@@ -158,6 +167,9 @@ def build_corpus_manifest(
 
     if isinstance(files, (str, bytes)):
         raise ManifestError("CorpusManifest.files: expected a sequence of paths")
+    event_count = _require_positive_count(
+        event_count, "CorpusManifest.event_count"
+    )
     base = Path(base_directory)
     entries: list[dict[str, str]] = []
     for index, raw_path in enumerate(files):
@@ -246,7 +258,7 @@ def _validate_run_corpus(value: object) -> dict[str, object]:
         "manifest_sha256": _require_sha256(
             corpus["manifest_sha256"], "RunManifest.corpus.manifest_sha256"
         ),
-        "event_count": _require_count(
+        "event_count": _require_positive_count(
             corpus["event_count"], "RunManifest.corpus.event_count"
         ),
     }

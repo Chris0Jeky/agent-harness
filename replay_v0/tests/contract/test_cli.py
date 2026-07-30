@@ -189,6 +189,36 @@ for index, event in enumerate(events):
             self.assertEqual(2, exit_code)
             self.assertFalse(output.exists())
 
+    def test_exit_two_rejects_an_empty_corpus_before_loading_policies(self) -> None:
+        with self.fixture("same") as (directory, corpus, recording, candidate):
+            (corpus / "events.jsonl").write_bytes(b"")
+            (corpus / "cases.jsonl").write_bytes(b"")
+            empty_sha256 = hashlib.sha256(b"").hexdigest()
+            manifest = {
+                "schema_version": "corpus-manifest.v1",
+                "corpus_id": "empty-v0",
+                "event_count": 0,
+                "files": [
+                    {"path": "events.jsonl", "sha256": empty_sha256},
+                    {"path": "cases.jsonl", "sha256": empty_sha256},
+                ],
+            }
+            (corpus / "corpus-manifest.json").write_bytes(
+                manifest_json_bytes(manifest)
+            )
+            output = directory / "empty-report"
+            with mock.patch(
+                "replay_v0.cli._load_policy_source",
+                side_effect=AssertionError("policy source loaded"),
+            ) as load_policy:
+                exit_code = main(
+                    self.replay_args(corpus, recording, candidate, output)
+                )
+
+            self.assertEqual(2, exit_code)
+            load_policy.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_invalid_recording_is_rejected_before_process_execution(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):
             invalid = [{**BASELINE[0], "effect": "warn"}, BASELINE[1]]

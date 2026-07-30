@@ -36,6 +36,29 @@ FAIL_ON = ["newly-allowed", "newly-indeterminate"]
 
 
 class CorpusManifestTests(unittest.TestCase):
+    def test_corpus_event_count_must_be_positive(self) -> None:
+        manifest = {
+            "schema_version": "corpus-manifest.v1",
+            "corpus_id": "empty-v0",
+            "event_count": 0,
+            "files": [{"path": "events.jsonl", "sha256": "a" * 64}],
+        }
+        with self.assertRaisesRegex(ManifestError, "expected a positive integer"):
+            validate_corpus_manifest(manifest)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "events.jsonl").write_bytes(b"")
+            with self.assertRaisesRegex(
+                ManifestError, "expected a positive integer"
+            ):
+                build_corpus_manifest(
+                    corpus_id="empty-v0",
+                    event_count=0,
+                    base_directory=directory,
+                    files=["events.jsonl"],
+                )
+
     def test_build_and_load_validate_every_exact_file_digest(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -121,6 +144,16 @@ class RunManifestTests(unittest.TestCase):
         second = self.build("2030-01-01T00:00:00Z")
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertNotEqual(first["generated_at"], second["generated_at"])
+
+    def test_run_manifest_corpus_event_count_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ManifestError, "expected a positive integer"):
+            build_run_manifest(
+                generated_at="2026-07-30T12:00:00Z",
+                baseline=BASELINE,
+                candidate=CANDIDATE,
+                corpus={**CORPUS, "event_count": 0},
+                fail_on=FAIL_ON,
+            )
 
     def test_run_id_changes_with_each_semantic_input_class(self) -> None:
         original = self.build()

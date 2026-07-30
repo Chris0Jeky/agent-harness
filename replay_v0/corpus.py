@@ -195,15 +195,23 @@ def _validate_unique_records(
 def validate_command_events(values: Iterable[object]) -> list[dict[str, Any]]:
     """Validate an ordered corpus and enforce unique event ids."""
 
-    return _validate_unique_records(
+    records = _validate_unique_records(
         values, validate_command_event, "CommandEvent corpus"
     )
+    if not records:
+        raise ValidationError("CommandEvent corpus: expected at least one record")
+    return records
 
 
 def validate_charter_cases(values: Iterable[object]) -> list[dict[str, Any]]:
     """Validate ordered charter metadata and enforce unique event ids."""
 
-    return _validate_unique_records(values, validate_charter_case, "CharterCase corpus")
+    records = _validate_unique_records(
+        values, validate_charter_case, "CharterCase corpus"
+    )
+    if not records:
+        raise ValidationError("CharterCase corpus: expected at least one record")
+    return records
 
 
 def validate_policy_decisions(values: Iterable[object]) -> list[dict[str, Any]]:
