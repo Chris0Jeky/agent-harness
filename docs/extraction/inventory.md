@@ -82,8 +82,10 @@ Task 10's allowlisted public bundle must exclude:
 
 - The live GitHub repository is public even though `AGENT_HARNESS_OPERATIONS.md` calls it private.
   Treat every tracked artifact as public; H-12 owns the visibility decision.
-- `CLAUDE_CONFIG_OPERATIONS.md` and `REPLAY_TOOL_PRODUCT.md` are absent from the searched repository,
-  history, and local authority locations. H-9 owns their authoritative locations.
+- At the recorded base, `CLAUDE_CONFIG_OPERATIONS.md` and `REPLAY_TOOL_PRODUCT.md` were absent from
+  the searched repository, history, and local authority locations. Subsequent `main` commit
+  `a35ff70` added `REPLAY_TOOL_PRODUCT.md`; `CLAUDE_CONFIG_OPERATIONS.md` remains absent, and H-9
+  owns that remaining authority gap.
 - Ruff and Black are pinned in `requirements-dev.txt`; CI uses `unittest`. Pytest is installed on
   this machine but is not an approved repository dependency. H-10 owns the Task 3 command-contract
   choice.

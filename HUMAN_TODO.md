@@ -25,10 +25,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   tag name `floor-v1-final` and target `02bd14cfe094f9b6af85b966de481ff3f45264cf`, then create and
   push the annotated tag with the human-review-only command block if both are correct. Agents must
   not create or push this tag.
-- [ ] **H-9** — Supply the authoritative locations of `CLAUDE_CONFIG_OPERATIONS.md` and
-  `REPLAY_TOOL_PRODUCT.md`, or commit them where the operations contract expects them. They are
-  absent from this repository, its history, and the searched local authority locations, so public
-  naming/licensing/launch and cross-repository continuation decisions remain unverified.
+- [ ] **H-9** — Supply the authoritative location of `CLAUDE_CONFIG_OPERATIONS.md`, or commit it
+  where the operations contract expects it. `REPLAY_TOOL_PRODUCT.md` was added to `main` in
+  `a35ff70` and now governs public replay naming, licensing, launch, and continuation decisions.
+  Cross-repository autonomy, evidence handling, and owner-supervision policy remain unverified
+  until the still-missing Claude-config operations brief is supplied.
 - [ ] **H-10** — Choose the v0 test-command contract before Task 3: approve adding Pytest to
   `requirements-dev.txt`, or approve an owner-reviewed amendment of
   `AGENT_HARNESS_OPERATIONS.md` to use the repository's existing `unittest` runner. Ruff is already

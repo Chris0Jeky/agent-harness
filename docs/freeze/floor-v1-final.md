@@ -134,6 +134,10 @@ work can remain fail-closed under the repository/global rules. Cross-repository 
 naming, licensing, launch, and continuation decisions remain unverified until the owner supplies
 the authoritative paths.
 
+Subsequent `main` commit `a35ff70` added `REPLAY_TOOL_PRODUCT.md`, resolving the replay product
+authority. `CLAUDE_CONFIG_OPERATIONS.md` remains absent, so cross-repository autonomy, evidence
+handling, and owner-supervision policy stay fail-closed under H-9.
+
 ## Repository visibility mismatch
 
 `AGENT_HARNESS_OPERATIONS.md` describes this as an existing private repository. A live GitHub API
