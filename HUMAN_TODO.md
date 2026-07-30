@@ -40,6 +40,15 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `Chris0Jeky/agent-harness` as public on 2026-07-30. Confirm that public visibility is intentional
   or change it through the owner-controlled settings path. Until then, agents treat every commit as
   public and publish no private replay output, transcript-derived command, or extraction bundle.
+- [ ] **H-13** — Review the charter-v0 extraction inputs before any public copy or release. Confirm
+  all four checklist points: (1) the 50 cases are intentionally scoped to 20 synthetic dangerous
+  strings, 20 synthetic non-executing near-misses, and 10 re-authored historical/opaque shapes;
+  (2) no command, path, host, repository, or identifier is private; (3)
+  `legacy-decisions.jsonl` is correctly described as a **synthetic freeze-candidate expectation**,
+  not output captured from the legacy dispatcher; and (4) the proposed public extraction allowlist
+  contains only the reviewed replay-v0 implementation, schemas, fixtures, corpus, tests, and
+  approved documentation. Leave the extraction bundle local and unpublished until all four are
+  confirmed.
 
 ## Changelog
 
@@ -92,3 +101,6 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   tag review, missing governing-document locations, the Pytest-versus-`unittest` contract, and the
   launch/budget assumption, plus the document-versus-live repository visibility mismatch. Task 1
   recorded the freeze evidence without creating a tag or changing the legacy dispatcher.
+- 2026-07-30 — Added H-13 as the single owner-review checklist for the privacy-safe charter corpus,
+  its explicitly synthetic freeze-candidate recording, and the eventual public extraction
+  allowlist. No public copy or release was authorized by generating the local inputs.
