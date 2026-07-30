@@ -22,7 +22,9 @@ Owner: Cristian Tcaci
 
 - **DEFERRED BP-PRE-01:** `CharterReplay` or its final-name equivalent has a clean public `v0.1.0` release and satisfies the portfolio-completion criteria in `REPLAY_TOOL_PRODUCT.md`.
 - **DEFERRED BP-PRE-02:** The confirmed continuation review has occurred on or after 2026-09-30, or the owner has explicitly waived that date after recording why the blueprint has higher priority.
-- **DEFERRED BP-PRE-03:** `claude-config` maintenance-only mode has been explicitly lifted by the owner.
+- **SATISFIED BP-PRE-03:** The owner explicitly lifted `claude-config` maintenance-only mode on
+  2026-07-30. This satisfies only BP-PRE-03 and does not unlock blueprint implementation while any
+  other precondition remains unsatisfied.
 - **DEFERRED BP-PRE-04:** At least two candidate components have each solved the same problem class in at least two distinct repositories or contexts.
 - **DEFERRED BP-PRE-05:** Each candidate has measured or directly reviewed net benefit, a bounded trigger, a removal condition, and no unresolved private-data dependency.
 - **DEFERRED BP-PRE-06:** At least one manual Gardener cycle and one manual promotion review have produced a useful owner-approved outcome without automatic installation.

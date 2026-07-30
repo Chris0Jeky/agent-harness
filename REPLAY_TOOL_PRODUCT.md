@@ -1,12 +1,14 @@
 Purpose: Authoritative product, repository, launch, release, distribution, and continuation brief for the public decision-replay tool.
-Status: ACTIVE under the owner-confirmed 2026-08-16 launch date and 24-hour total cap; public release still requires owner confirmation.
+Status: ACTIVE for immediate dependency-ordered work under the owner-confirmed 24-hour total cap;
+public release still requires owner confirmation.
 Authority relationship: This document wins for the public replay product, clean-repository decision, working name, README, release, outreach, and continuation gate; `AGENT_HARNESS_OPERATIONS.md` wins for replay-kernel technical contracts and `CLAUDE_CONFIG_OPERATIONS.md` wins for owner-supervision policy.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
 # Decision register
 
-- **DECISION RP-001:** The owner confirmed the launch deadline of **2026-08-16**.
+- **DECISION RP-001:** The owner removed the calendar launch deadline. An otherwise unblocked task
+  may start immediately in dependency order.
 - **DECISION RP-002:** The owner confirmed the hard launch budget of **24 focused hours**, split as 13 hours under `AGENT_HARNESS_OPERATIONS.md` and 11 hours under this document.
 - **DECISION RP-003:** The owner confirmed the continuation review date of **2026-09-30**.
 - **OPEN RP-004:** Select the final repository, Python package, and CLI name. `CharterReplay` / `charter-replay` is the working recommendation.
@@ -40,7 +42,8 @@ Owner: Cristian Tcaci
 
 - **DECISION:** The primary user is a developer or maintainer changing a command guard, hook, or policy who needs a reproducible before/after decision report.
 - **DECISION:** The primary portfolio outcome is a credible engineering case study backed by executable proof.
-- **DECISION:** External product adoption is conditional and is evaluated separately on 2026-09-30 if that date is confirmed.
+- **DECISION:** External product adoption is conditional and is evaluated separately at the
+  confirmed continuation review on 2026-09-30.
 - **CONSTRAINT:** The product is described as decision replay, not agent replay, environment replay, command execution, sandboxing, or complete safety enforcement.
 - **CONSTRAINT:** The public core implements exactly the technical contract in `AGENT_HARNESS_OPERATIONS.md`; this document does not redefine the event or decision schemas.
 
@@ -224,7 +227,7 @@ charter-replay/
 
 ## Product continuation
 
-- **OPEN:** Review date is 2026-09-30.
+- **DECISION:** The continuation review remains 2026-09-30; it does not delay v0 implementation.
 - **DECISION:** Continue expanding the public product only if at least one strong signal exists:
   - One external guard maintainer uses, links, contributes to, or requests the workflow.
   - Three unaffiliated users successfully run it and provide concrete policy or corpus feedback.
@@ -280,11 +283,14 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 - **CONSTRAINT:** `privacy-scan` checks tracked files and built artifacts for forbidden owner paths, private repository names, credential patterns, and files outside the extraction allowlist; it does not upload repository content.
 - **CONSTRAINT:** CI has read-only repository permissions unless a separately reviewed release job requires more.
 
-# Calendar and budget allocation
+# Sequence and budget allocation
 
-- **DECISION:** The owner confirmed launch by 2026-08-16.
+- **DECISION:** No calendar date delays an otherwise unblocked task; work proceeds immediately in
+  dependency order.
 - **DECISION:** The first ten tasks below have a combined maximum of **11 hours**. Together with the 13-hour extraction allocation, they exhaust the 24-hour cap.
-- **CONSTRAINT:** At 24 cumulative hours, agents stop, report the completed subset, and route omitted polish to the deferred backlog. The deadline does not authorise overtime or scope expansion.
+- **CONSTRAINT:** At 24 cumulative hours, agents stop, report the completed subset, and route
+  omitted polish to the deferred backlog. Immediate start does not authorise overtime or scope
+  expansion.
 
 # First 10 tasks
 
@@ -292,7 +298,8 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-10 to 2026-08-12
+- **Sequence:** Start immediately after the agent-harness extraction PR closes and the owner clears
+  the clean-repository and final-identity gates.
 - **Objective:** Create a local clean repository using the provisional `charter-replay` name and add only root governance files.
 - **Paths touched:** New repository root, `REPLAY_TOOL_PRODUCT.md`, `.gitignore`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** `git log` begins with clean public-intent history; no file from private Git history is imported; `HUMAN_TODO.md` contains final name, visibility, licence, and remote-creation actions.
@@ -304,7 +311,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-12 to 2026-08-13
+- **Sequence:** Start after Task 1 and exact-bundle provenance review.
 - **Objective:** Copy the approved v0 bundle, place it under `src/charter_replay`, and create the minimal package metadata.
 - **Paths touched:** `src/charter_replay/`, `tests/`, `corpora/`, `examples/legacy-baseline/`, `examples/candidate-policy/`, `pyproject.toml`, `tools/product_gate.py`.
 - **Acceptance criteria:** Only manifest-listed files are copied; import succeeds; provisional CLI help works; no runtime dependency is added; provenance is recorded in the initial commit message or `docs/extraction-provenance.md`; a small standard-library `product_gate.py` exposes `self-test`, `readme`, `public-docs`, `demo`, `privacy`, `outreach`, `release`, and `release-handoff` checks without becoming a general framework.
@@ -316,7 +323,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-13 to 2026-08-14
+- **Sequence:** Start after Task 2 and final package/install identity selection.
 - **Objective:** Implement the exact first-screen README specification and a concise limitations-first continuation.
 - **Paths touched:** `README.md`, static placeholder path for the demo GIF.
 - **Acceptance criteria:** The first screen contains one purpose line, one GIF placeholder, one install command block, one replay command block, and one limitation statement; no architecture diagram or feature matrix precedes them.
@@ -328,7 +335,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-13 to 2026-08-14
+- **Sequence:** Start after Task 2; provenance work may run alongside Task 3.
 - **Objective:** Prepare `SECURITY.md`, `CONTRIBUTING.md`, provenance evidence, and the owner licence decision item.
 - **Paths touched:** `SECURITY.md`, `CONTRIBUTING.md`, `docs/licence-provenance.md`, `HUMAN_TODO.md`; `LICENSE` only after owner selection.
 - **Acceptance criteria:** Both documents meet their contracts; provenance lists every extracted source path and prior licence; no unsupported contact or SLA is invented.
@@ -340,7 +347,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-14
+- **Sequence:** Start after Tasks 3 and 4 establish the public documentation boundary.
 - **Objective:** Produce the 60–90 second storyboard asset showing a configured regression and generated report.
 - **Paths touched:** `docs/assets/demo.cast` or source recording, `docs/assets/demo.gif`, `README.md`.
 - **Acceptance criteria:** The demo follows the five storyboard steps; all paths and commands are fictional; it shows exit `1`; no unrelated terminal content is visible; the GIF remains legible at README width.
@@ -352,7 +359,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-14 to 2026-08-15
+- **Sequence:** Start after the source, documentation, and demo inputs are stable.
 - **Objective:** Implement least-privilege CI and produce a locally installable release candidate without publishing it.
 - **Paths touched:** `.github/workflows/ci.yml`, optional owner-reviewed release workflow, `pyproject.toml`, `CHANGELOG.md`.
 - **Acceptance criteria:** Required checks are present; workflow permissions default to read-only; wheel and source archive build; clean-environment install and README replay succeed.
@@ -364,7 +371,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-15
+- **Sequence:** Start after executable proof exists; it may proceed alongside Task 8.
 - **Objective:** Turn the existing retrospective into a concise public postmortem linked to executable proof.
 - **Paths touched:** `docs/postmortem.md`, `docs/launch-note.md`, README link.
 - **Acceptance criteria:** The postmortem states the original hypothesis, measured 12–14% false-positive/friction result if supported by retained evidence, review-fix loop, architecture correction, preserved assets, decision-replay boundary, and explicit limitations; every quantitative claim has an internal evidence reference.
@@ -376,7 +383,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-15 to 2026-08-16
+- **Sequence:** Start after Task 2 when pinned, licence-compatible source material is available.
 - **Objective:** Add a thin example that compares pinned DCG decision recordings or an owner-approved local shim without changing core code.
 - **Paths touched:** `examples/dcg/README.md`, `examples/dcg/decisions-*.jsonl`, manifests, `examples/dcg/report/`, optional `examples/dcg/shim.py`.
 - **Acceptance criteria:** The example names the pinned source version, unsupported cases, digests, exact replay command, and neutral findings; CI reproduces it from recordings without installing DCG.
@@ -388,7 +395,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-16
+- **Sequence:** Start after the release candidate and launch evidence are stable.
 - **Objective:** Draft one tailored message for each named target and one public launch post, without sending any message.
 - **Paths touched:** `docs/outreach/01-dcg.md` through `05-governance-toolkit.md`, `docs/outreach/public-launch.md`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** Each direct message contains one report, one command, one limitation, and one specific question; the public post links the postmortem, demo, and repository; no message claims endorsement.
@@ -400,10 +407,12 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-16
-- **Objective:** Present one owner-review packet for name, licence, remote, tag, publication, outreach, and the 2026-09-30 continuation review.
+- **Sequence:** Start after Tasks 1 through 9 are complete or factually parked.
+- **Objective:** Present one owner-review packet for name, licence, remote, tag, publication,
+  outreach, and the 2026-09-30 continuation review.
 - **Paths touched:** `docs/release-handoff-v0.1.0.md`, `docs/continuation-review.md`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** All quality-gate outputs and reproduction commands are linked; cumulative hours are recorded; every human-only release action is explicit; continuation criteria are prefilled without fabricated results.
 - **Verify:** `python tools/product_gate.py release-handoff docs/release-handoff-v0.1.0.md docs/continuation-review.md && git status --short`
 - **Out of scope:** Public push, tag, PyPI publication, outreach sending, changing continuation criteria after results are known, or consuming more than the remaining hour budget.
-- **Stop condition:** Halt at the owner-review boundary. No public action occurs until the owner resolves RP-001 through RP-005 and approves the release packet.
+- **Stop condition:** Halt at the owner-review boundary. No public action occurs until the owner
+  resolves RP-004 and RP-005 and approves the release packet.

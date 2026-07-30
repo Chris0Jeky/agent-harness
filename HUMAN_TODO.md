@@ -43,9 +43,10 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `requirements-dev.txt` and the declared Pytest commands remain required compatibility gates.
   The existing dependency-free `unittest` lanes are also approved as authoritative repository CI
   lanes. `AGENT_HARNESS_OPERATIONS.md` and CI record and exercise both roles.
-- [x] **H-11** — **OWNER DECISION 2026-07-30.** Confirmed the documented 2026-08-16 launch date,
-  24-hour total cap, 13-hour extraction allocation, 11-hour public-product allocation, and
-  2026-09-30 continuation review date.
+- [x] **H-11** — **OWNER DECISION 2026-07-30, AMENDED 2026-07-30.** The owner removed the
+  calendar launch deadline and lifted maintenance-only mode so otherwise authorised work can start
+  immediately in dependency order. The 24-hour total cap, 13-hour extraction allocation, 11-hour
+  public-product allocation, and 2026-09-30 continuation review remain unchanged.
 - [x] **H-12** — **OWNER DECISION 2026-07-30.** `Chris0Jeky/agent-harness` remains public for now.
   A later move to private visibility is optional and non-urgent; until live host state changes,
   every tracked artifact is treated as immediately public and private replay inputs stay local.
@@ -56,6 +57,9 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
 ## Changelog
 
+- 2026-07-30 — H-11 amended on the owner's explicit in-session direction: the calendar launch
+  deadline and maintenance-only mode were retired; dependency-ordered work may start immediately
+  under the unchanged budget, review, privacy, and owner-action gates.
 - 2026-07-26 — File created and declared in `tier.json`; the repo had `human_todo: null`, so law 5
   had no file to surface. Seeded with the four gates left open by the floor 1.6.5 → 1.6.12 session.
 - 2026-07-26 — H-1/H-2 order corrected: deploying after canarying meant the canary exercised the

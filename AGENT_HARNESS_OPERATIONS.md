@@ -10,7 +10,9 @@ Owner: Cristian Tcaci
 - **DECISION AH-002:** The current dispatcher, replay, fixture, and test paths are confirmed by `docs/extraction/inventory.md`; no legacy path was moved.
 - **DECISION AH-003:** The existing dependency-free `unittest` lanes are authoritative for this repository. Pytest 9.0.3 is also owner-approved as a development dependency and compatibility runner for the declared Pytest commands.
 - **OPEN AH-004:** Confirm whether the legacy dispatcher can execute in a clean isolated environment. The public baseline does not depend on this answer because recorded decisions are first-class.
-- **DECISION AH-005:** The owner confirmed the 2026-08-16 launch date, 24-hour total cap, and 13-hour allocation for this document; `REPLAY_TOOL_PRODUCT.md` owns the remaining 11 hours.
+- **DECISION AH-005:** The owner removed the calendar launch deadline. Work proceeds immediately
+  in dependency order under the unchanged 24-hour total cap: 13 hours for this document and the
+  remaining 11 hours for `REPLAY_TOOL_PRODUCT.md`.
 
 # Authority and operating decision
 
@@ -292,9 +294,10 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 - **CONSTRAINT:** Required CI checks before merging extraction work are `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
 - **CONSTRAINT:** `replay-fast` and `replay-tests` use the authoritative dependency-free `unittest` lanes. `operations-contract` installs the approved development requirements and proves the declared Pytest commands remain compatible.
 
-# Calendar and budget allocation
+# Sequence and budget allocation
 
-- **DECISION:** The owner confirmed the 2026-08-16 launch date and 24-hour total cap on 2026-07-30.
+- **DECISION:** No calendar date delays an otherwise unblocked task; work proceeds immediately in
+  dependency order under the owner-confirmed 24-hour total cap.
 - **DECISION:** These ten tasks have a combined maximum of **13 hours**. `REPLAY_TOOL_PRODUCT.md` owns the remaining **11 hours**.
 - **CONSTRAINT:** When the cumulative logged time reaches 13 hours, the agent stops extraction work and presents the completed subset. Deferred polish does not consume the public-product allocation without owner approval.
 
@@ -304,7 +307,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-07-30 to 2026-08-02
+- **Sequence:** Start first.
 - **Objective:** Produce the freeze record and identify the exact commit proposed for `floor-v1-final` without creating or pushing the tag.
 - **Paths touched:** `docs/freeze/floor-v1-final.md`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** The record contains commit SHA, dispatcher path, line count, known test command, environment assumptions, known limitation references, and a copy-paste tag command marked human-review-only.
@@ -316,7 +319,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-07-30 to 2026-08-02
+- **Sequence:** Start after Task 1 identifies the freeze candidate.
 - **Objective:** Identify existing replay code, tests, corpora, and legacy decision outputs that can seed v0.
 - **Paths touched:** `docs/extraction/inventory.md`; no source moves.
 - **Acceptance criteria:** Every candidate asset has current path, purpose, private-data risk, keep/rewrite/drop decision, and estimated extraction effort; a recorded baseline gap is explicit.
@@ -328,7 +331,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-03 to 2026-08-04
+- **Sequence:** Start after Task 2 confirms the extractable schema paths.
 - **Objective:** Implement the three minimal schemas: `CommandEvent`, `PolicyDecision`, and charter case.
 - **Paths touched:** `replay_v0/schemas/`, `replay_v0/corpus.py`, `replay_v0/tests/contract/`.
 - **Acceptance criteria:** Valid fixtures pass; missing required identity fields, extra event fields, invalid effects, and invalid timestamps fail with deterministic messages.
@@ -340,7 +343,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-04 to 2026-08-05
+- **Sequence:** Start after Task 3 fixes the decision schema.
 - **Objective:** Load a decision JSONL file by `event_id` and return `indeterminate` for missing records without executing a policy.
 - **Paths touched:** `replay_v0/policy_sources.py`, `replay_v0/fixtures/recorded/`, `replay_v0/tests/unit/test_recorded_source.py`.
 - **Acceptance criteria:** Complete, missing, duplicate, malformed, and mismatched recordings are covered; no legacy import occurs.
@@ -352,7 +355,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-05 to 2026-08-06
+- **Sequence:** Start after Task 3 fixes the event and decision schemas.
 - **Objective:** Implement shell-free JSONL stdin/stdout policy execution with timeout and missing-decision handling.
 - **Paths touched:** `replay_v0/policy_sources.py`, `replay_v0/tests/fixtures/process_policies/`, `replay_v0/tests/contract/test_process_source.py`.
 - **Acceptance criteria:** Ordered success, stderr diagnostics, non-zero exit, timeout, malformed output, duplicate event id, and partial output are deterministic; missing decisions become `indeterminate`.
@@ -364,7 +367,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-06
+- **Sequence:** Start after Tasks 4 and 5 define both policy-source identities.
 - **Objective:** Generate and validate corpus and run manifests using SHA-256.
 - **Paths touched:** `replay_v0/digests.py`, `replay_v0/manifests.py`, manifest fixtures, tests.
 - **Acceptance criteria:** Byte changes invalidate the digest; `run_id` is stable for identical inputs; absolute paths and host data are absent.
@@ -376,7 +379,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-07 to 2026-08-08
+- **Sequence:** Start after Tasks 3, 4, and 5 provide validated decisions.
 - **Objective:** Compare baseline and candidate decisions and emit the complete machine-readable report.
 - **Paths touched:** `replay_v0/compare.py`, `replay_v0/reports.py`, `replay_v0/tests/unit/test_compare.py`, golden JSON fixtures.
 - **Acceptance criteria:** All five diff classes are covered; ordering follows the corpus; reasons are preserved; the report states decision replay limitations.
@@ -388,7 +391,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-08 to 2026-08-09
+- **Sequence:** Start after Tasks 6 and 7 fix manifests and comparison semantics.
 - **Objective:** Provide one reproducible command that writes JSON, Markdown, and run manifest and exits under the defined contract.
 - **Paths touched:** `replay_v0/cli.py`, `replay_v0/reports.py`, CLI tests, Markdown golden fixtures.
 - **Acceptance criteria:** Exit codes `0`–`3` are covered; `--fail-on` accepts only the three supported classes; the report prints a reproduction command; reports are written before exit `1`.
@@ -400,7 +403,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 2 hours
-- **Calendar slot:** 2026-08-10 to 2026-08-12
+- **Sequence:** Start after the validators and both policy sources are complete.
 - **Objective:** Build the small reviewed charter corpus and a matching synthetic or redacted legacy-decision recording.
 - **Paths touched:** `replay_v0/corpora/charter/events.jsonl`, `cases.jsonl`, `corpus-manifest.json`, `replay_v0/fixtures/legacy-decisions.jsonl`, recording manifest.
 - **Acceptance criteria:** Approximately 20 dangerous, 20 benign, and 10 historical/opaque cases; unique ids; valid schemas; exact digests; no private identifiers; owner-review checklist generated.
@@ -412,7 +415,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-12 to 2026-08-13
+- **Sequence:** Start after Tasks 1 through 9 are complete.
 - **Objective:** Run the full v0 fast gate twice and create an allowlisted source bundle for the clean public repository.
 - **Paths touched:** `replay_v0/tests/test_determinism.py`, `docs/extraction/public-v0-manifest.json`, generated local bundle under an ignored path.
 - **Acceptance criteria:** Two runs produce identical semantic JSON and `run_id`; fast lane remains under 60 seconds; the manifest lists only v0 source, schemas, synthetic corpus, tests, and approved documentation.

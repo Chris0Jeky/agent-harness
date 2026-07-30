@@ -1,12 +1,14 @@
 Purpose: Authoritative operating contract for high-autonomy agent work in the private `claude-config` repository.
-Status: ACTIVE; maintenance-only launch-window mode is owner-confirmed through 2026-08-16.
+Status: ACTIVE; the owner lifted maintenance-only mode and approved immediate,
+dependency-ordered work under named task contracts.
 Authority relationship: This document wins for private `claude-config` operations, cross-repository autonomy, failure-ledger, promotion-review, and private/public-boundary policy; the other three operating documents win only in their named repository domains.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
 # Decision register
 
-- **DECISION CC-001:** The owner confirmed that the maintenance-only launch window ends on **2026-08-16**.
+- **DECISION CC-001:** The owner lifted maintenance-only mode and removed its calendar end date.
+  An otherwise authorised task may start immediately in dependency order.
 - **DECISION CC-002:** The owner confirmed that the shared launch budget is **24 focused hours across `agent-harness` extraction and the public replay repository**, not a separate 24-hour allowance for this repository.
 - **OPEN CC-003:** Confirm the repository's currently supported Python versions and existing test/lint entry points. Until confirmed, agents must not install or replace tooling merely to satisfy the proposed quality-gate interface.
 - **DECISION CC-004:** The owner placed this canonical policy document at the root of the currently public `agent-harness` repository in commit `6d6e22e`. The policy prose is public, but the document remains excluded from the replay-v0 extraction allowlist and does not authorize exporting private Claude-config data.
@@ -19,21 +21,28 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** The earlier strategic repositioning, technical design, learning-system blueprint, and research documents are background evidence only. They do not authorise implementation work when this file says that work is deferred or out of scope.
 - **CONSTRAINT:** Every new policy statement must have exactly one canonical source path and one `policy/catalog.yaml` entry. Summaries elsewhere must link to that source and may not paraphrase the rule as a second normative statement.
 
-# Launch-window operating mode
+# Active operating mode
 
-- **DECISION:** Until the confirmed launch date, `claude-config` is in **maintenance-only mode**.
-- **CONSTRAINT:** Allowed work is limited to fixing a demonstrated breakage, preserving an existing working workflow, removing a concrete contradiction, recording evidence, supporting the replay-tool launch, or completing a task explicitly listed in this document.
-- **CONSTRAINT:** The following construction is forbidden during the launch window: a promotion engine, scheduled Gardener, telemetry expansion, fictional estate, public plugin packaging, new agent platform, new policy compiler, new cross-runtime adapter framework, or automated skill creation.
-- **CONSTRAINT:** An agent that discovers work outside the allowed set must append a backlog proposal to `HUMAN_TODO.md` with an evidence trigger. It must not implement the proposal.
+- **DECISION:** `claude-config` is no longer in maintenance-only mode. Tasks whose own authority,
+  dependencies, and stop conditions are satisfied may start immediately.
+- **CONSTRAINT:** Removing the date gate does not waive budgets, review requirements, repository
+  authority, private/public boundaries, or a task's named evidence and owner-approval triggers.
+- **CONSTRAINT:** A promotion engine, scheduled Gardener, telemetry expansion, fictional estate,
+  public plugin packaging, new agent platform, new policy compiler, new cross-runtime adapter
+  framework, and automated skill creation remain unavailable until their own named trigger and
+  explicit owner approval exist. Absence of a date is not approval.
+- **CONSTRAINT:** An agent that discovers work without a satisfied task contract appends a backlog
+  proposal to `HUMAN_TODO.md` with an evidence trigger; it does not infer authorisation.
 - **DEFERRED:** Scheduled Gardener operation unlocks only after three useful manual cycles, no consecutive unmerged proposals, a tested kill switch, and explicit owner approval.
 - **DEFERRED:** Telemetry expansion unlocks only when a named operational question cannot be answered from the minimal telemetry set and the owner approves the additional field before collection.
 - **DEFERRED:** Public extraction work unlocks only under the preconditions in `BLUEPRINT_PLUGIN_PRODUCT.md`.
 
 # Non-Goals
 
-- **CONSTRAINT:** This repository is not a public product during the launch window.
+- **CONSTRAINT:** This private operations repository is not itself a public product.
 - **CONSTRAINT:** This repository does not autonomously rewrite its own instructions, skills, hooks, policies, or memory.
-- **CONSTRAINT:** This repository does not schedule recurring agent work during the launch window.
+- **CONSTRAINT:** This repository does not schedule recurring agent work until the named scheduling
+  trigger and explicit owner approval are satisfied.
 - **CONSTRAINT:** This repository does not collect prompts, source text, raw commands, credentials, private URLs, repository names, or transcripts as default telemetry.
 - **CONSTRAINT:** This repository does not duplicate enforcement already provided by a sandbox, repository permission, protected branch, CI gate, or deployment environment.
 - **CONSTRAINT:** A recurring failure is not evidence that a skill is the correct intervention.
@@ -176,7 +185,8 @@ policies:
 
 # Gardener operating procedure
 
-- **DECISION:** During the launch window, the Gardener runs only as a manual, read-only report.
+- **DECISION:** Until its separate scheduling trigger and owner approval are satisfied, the
+  Gardener runs only as a manual, read-only report.
 - **CONSTRAINT:** The canonical kill switch is the existing repository mechanism if one exists. Otherwise, use the sentinel file `private/control/GARDENER_DISABLED`.
 - **CONSTRAINT:** When the kill switch exists, every Gardener entry point must exit without mutation and return exit code `78`.
 - **CONSTRAINT:** A manual run may read the redacted ledger, skill-usage summaries, policy catalogue, and `HUMAN_TODO.md`; it may produce a report under `private/reports/gardener/`; it may not edit policy or implementation files.
@@ -189,7 +199,8 @@ python tools/gardener.py report --read-only --output private/reports/gardener/la
 - **CONSTRAINT:** If the existing implementation uses another command, preserve it and document the exact command in `policy/catalog.yaml`; do not add a second entry point merely to match this example.
 - **CONSTRAINT:** The Gardener must report missing inputs explicitly. An empty ledger is not reported as evidence of zero failures.
 - **DEFERRED:** Proposal branches unlock after one useful read-only run and explicit owner approval.
-- **DEFERRED:** Scheduling unlocks only under the trigger in the launch-window section.
+- **DEFERRED:** Scheduling unlocks only after three useful manual cycles, no consecutive unmerged
+  proposals, a tested kill switch, and explicit owner approval.
 
 # Minimal telemetry
 
@@ -212,7 +223,8 @@ python tools/gardener.py report --read-only --output private/reports/gardener/la
 
 - **CONSTRAINT:** No prompts, source text, raw commands, paths, repository names, model reasoning, or credentials are collected.
 - **CONSTRAINT:** Missing data remains missing; agents must not infer zero.
-- **CONSTRAINT:** No telemetry field may be added during the launch window. A requested field becomes a `HUMAN_TODO.md` proposal naming the operational question it would answer.
+- **CONSTRAINT:** No telemetry field may be added without a named operational question and explicit
+  owner approval. A request becomes a `HUMAN_TODO.md` proposal before collection.
 
 # Private/public boundary
 
@@ -274,16 +286,20 @@ python tools/repo_gate.py test
 - **Out of scope:** Rewriting existing policies, moving instruction files, or resolving policy contradictions not required by the fast gate.
 - **Stop condition:** Halt when two existing files both claim canonical ownership of the same rule; record the conflict in `HUMAN_TODO.md` for owner selection.
 
-## Task 3 — Enforce maintenance-only launch mode
+## Task 3 — Retire the superseded maintenance-only control
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Objective:** Add a machine-readable launch-window record and a fast-gate check that rejects forbidden construction paths during the assumed window.
-- **Paths touched:** `private/control/LAUNCH_WINDOW.yaml` or the repository's existing equivalent, `tools/repo_gate.py`, `.gitignore` only if the control file is private.
-- **Acceptance criteria:** The record names the assumed end date, maintenance-only status, and prohibited work classes; the gate detects an explicitly seeded forbidden-path fixture.
+- **Objective:** Reconcile the live private repository so no date-driven maintenance-only control
+  blocks an otherwise authorised task.
+- **Paths touched:** The existing operating-mode control, `tools/repo_gate.py`, and its focused tests;
+  do not create a second control file.
+- **Acceptance criteria:** No calendar date or maintenance-only status remains executable; the fast
+  gate still enforces budgets, private/public boundaries, and named task-specific locks.
 - **Verify:** `python tools/repo_gate.py fast`
 - **Out of scope:** Scheduling, branch protection changes, or enforcement outside local/CI checks.
-- **Stop condition:** Halt if the date or budget is not owner-confirmed before the file would become normative; leave CC-001/CC-002 open instead.
+- **Stop condition:** Halt if retiring the stale control would weaken an irreversible safety or
+  privacy boundary rather than only removing the superseded date gate.
 
 ## Task 4 — Validate information placement and one-home policy
 
@@ -351,13 +367,18 @@ python tools/repo_gate.py test
 - **Out of scope:** Fictional estate, plugin files, copying skills, rewriting history, or secret-scanning the whole private repository for publication.
 - **Stop condition:** Halt if any agent proposes adding a source path before the blueprint preconditions and owner unlock exist.
 
-## Task 10 — Produce the launch-window closeout record
+## Task 10 — Produce the operating-mode review record
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Objective:** On or after the confirmed launch date, record whether maintenance-only mode should remain, lift, or be extended.
-- **Paths touched:** `private/reports/launch-window-closeout-2026-08-16.md`, `HUMAN_TODO.md`, and the launch-window control file only after owner review.
-- **Acceptance criteria:** The report lists work performed, hours spent, unresolved breakages, telemetry changes, Gardener result, and a clear owner decision field; no status change occurs automatically.
-- **Verify:** `python tools/repo_gate.py fast && python -c "from pathlib import Path; assert Path('private/reports/launch-window-closeout-2026-08-16.md').is_file()"`
+- **Objective:** After the preceding tasks, record work performed, budget consumed, unresolved
+  breakages, remaining named unlock triggers, and the already-recorded immediate-start decision.
+- **Paths touched:** `private/reports/operating-mode-review.md`, `HUMAN_TODO.md`, and the existing
+  operating-mode control only when reconciliation is still required.
+- **Acceptance criteria:** The report lists work performed, hours spent, unresolved breakages,
+  telemetry changes, Gardener result, and remaining human-only decisions without recreating a date
+  gate.
+- **Verify:** `python tools/repo_gate.py fast && python -c "from pathlib import Path; assert Path('private/reports/operating-mode-review.md').is_file()"`
 - **Out of scope:** Starting blueprint extraction, enabling scheduling, or expanding telemetry as part of the closeout.
-- **Stop condition:** Halt before changing maintenance-only status until the owner records an explicit decision.
+- **Stop condition:** Halt before expanding any separately deferred system whose own trigger and
+  owner approval are still absent.
