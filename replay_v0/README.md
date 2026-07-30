@@ -1,0 +1,57 @@
+# Replay v0
+
+Replay v0 compares two policy-decision streams for a small, privacy-safe command corpus. It is a
+deterministic comparison tool, not a live command interceptor, policy-authoring framework, safety
+proof, or benchmark.
+
+The checked-in charter has 50 inert command strings: 20 synthetic catastrophe-boundary cases, 20
+synthetic non-executing near-misses, and 10 fully re-authored historical/opaque shapes. The runner
+never executes those command strings. Classification comes only from validated baseline and
+candidate `PolicyDecision` effects keyed by `event_id`.
+
+## Quick start
+
+Validate the exact-byte corpus manifest:
+
+```text
+python -m replay_v0.cli validate --corpus replay_v0/corpora/charter
+```
+
+Run the clean reference comparison:
+
+```text
+python -m replay_v0.cli replay --baseline recorded:replay_v0/fixtures/legacy-decisions.jsonl --candidate process:python,replay_v0/tests/fixtures/process_policies/reference_candidate.py --corpus replay_v0/corpora/charter/events.jsonl --output .local/replay-proof
+```
+
+The command writes `run-manifest.json`, `report.json`, and `report.md`. Exit `0` means the configured
+gate passed, `1` means a configured change class was present, `2` means an input or exact-byte
+binding was invalid, and `3` means a policy process failed after a reportable comparison could be
+formed.
+
+Run the dependency-free test lane with:
+
+```text
+python -m unittest discover -s replay_v0/tests -v
+```
+
+## Baseline truth
+
+Despite its compatibility filename, `fixtures/legacy-decisions.jsonl` is a synthetic
+freeze-candidate expectation for the curated charter. It was not captured by executing the private
+legacy dispatcher, and it does not prove the proposed `floor-v1-final` tag exists or has owner
+approval. Its sidecar policy ID and every decision reason preserve that distinction.
+
+The reference candidate is equally narrow: it maps the 50 reviewed fixture event IDs to expected
+effects. It does not parse command text or reproduce the frozen dispatcher.
+
+## Reproducibility and limits
+
+Corpus and recorded-source manifests bind exact bytes with SHA-256. A run ID binds the runner
+version, both policy-source identities, the corpus-manifest digest, and gate configuration. Process
+identity includes the executable bytes, normalized invocation, policy bytes, fixed environment,
+and policy-parent working-directory contract without writing absolute paths to the run manifest.
+
+Reports describe changes between decisions. They never claim that an original command was safe,
+unsafe, executed, or reproduced. The checked-in reference and test lane performs no network access
+and never imports or runs the legacy dispatcher. A caller-supplied `process:` policy is an
+unsandboxed program and may use the network or filesystem unless the caller isolates it.

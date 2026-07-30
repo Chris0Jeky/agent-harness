@@ -18,12 +18,11 @@ DECISION_REPLAY_LIMITATION = (
 def build_json_report(
     comparison: ComparisonResult,
     run_manifest: dict[str, Any],
-    reproduction_command: str,
     *,
     baseline_failures: tuple[SourceFailure, ...] = (),
     candidate_failures: tuple[SourceFailure, ...] = (),
 ) -> dict[str, Any]:
-    """Build the complete JSON source of truth for a replay run."""
+    """Build the path-independent JSON source of truth for a replay run."""
 
     fail_on = list(run_manifest["fail_on"])
     triggered = [name for name in fail_on if comparison.counts[name] > 0]
@@ -48,7 +47,6 @@ def build_json_report(
             "candidate": dict(run_manifest["candidate"]),
         },
         "corpus": dict(run_manifest["corpus"]),
-        "reproduction_command": reproduction_command,
         "limitations": [DECISION_REPLAY_LIMITATION],
         "source_failures": source_failures,
         "results": [result.as_dict() for result in comparison.results],
@@ -76,8 +74,8 @@ def _table_cell(value: object) -> str:
     )
 
 
-def render_markdown_report(report: dict[str, Any]) -> str:
-    """Render a compact report whose opening records all operational identity."""
+def render_markdown_report(report: dict[str, Any], *, reproduction_command: str) -> str:
+    """Render a compact report with literal invocation details for operators."""
 
     counts = report["counts"]
     gate = report["gate"]
@@ -106,7 +104,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         ),
         "Reproduce:",
         "",
-        f"    {report['reproduction_command']}",
+        f"    {reproduction_command}",
         "",
         "## Event results",
         "",

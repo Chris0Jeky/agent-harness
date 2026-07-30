@@ -156,6 +156,7 @@ for index, event in enumerate(events):
             self.assertEqual("pass", report["gate"]["status"])
             self.assertEqual("1970-01-01T00:00:00Z", report["generated_at"])
             self.assertEqual(2, report["counts"]["unchanged"])
+            self.assertNotIn("reproduction_command", report)
             self.assertTrue((output / "report.md").is_file())
             self.assertTrue((output / "run-manifest.json").is_file())
 
@@ -172,13 +173,10 @@ for index, event in enumerate(events):
             self.assertEqual(1, exit_code)
             self.assertEqual("fail", report["gate"]["status"])
             self.assertEqual(["newly-allowed"], report["gate"]["triggered"])
-            self.assertIn(
-                "python -m replay_v0.cli replay", report["reproduction_command"]
-            )
-            self.assertIn(
-                report["reproduction_command"],
-                (output / "report.md").read_text(encoding="utf-8"),
-            )
+            self.assertNotIn("reproduction_command", report)
+            markdown = (output / "report.md").read_text(encoding="utf-8")
+            self.assertIn("python -m replay_v0.cli replay", markdown)
+            self.assertIn(str(output), markdown)
             self.assertTrue((output / "run-manifest.json").is_file())
 
     def test_exit_two_rejects_a_digest_mismatch_without_policy_execution(self) -> None:

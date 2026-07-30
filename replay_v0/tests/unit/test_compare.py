@@ -142,11 +142,7 @@ class ComparisonTests(unittest.TestCase):
             },
             "fail_on": ["newly-allowed", "newly-indeterminate"],
         }
-        report = build_json_report(
-            comparison,
-            manifest,
-            "python -m replay_v0.cli replay --corpus fictional",
-        )
+        report = build_json_report(comparison, manifest)
         self.assertEqual("fail", report["gate"]["status"])
         self.assertEqual(
             ["newly-allowed", "newly-indeterminate"],
@@ -154,8 +150,10 @@ class ComparisonTests(unittest.TestCase):
         )
         self.assertEqual(len(self.events), len(report["results"]))
         self.assertIn(DECISION_REPLAY_LIMITATION, report["limitations"])
+        self.assertNotIn("reproduction_command", report)
 
-        markdown = render_markdown_report(report)
+        command = "python -m replay_v0.cli replay --corpus fictional"
+        markdown = render_markdown_report(report, reproduction_command=command)
         opening = markdown.split("## Event results", maxsplit=1)[0]
         for expected in (
             "Counts:",
@@ -166,6 +164,7 @@ class ComparisonTests(unittest.TestCase):
             "Reproduce:",
         ):
             self.assertIn(expected, opening)
+        self.assertIn(command, opening)
         self.assertIn(DECISION_REPLAY_LIMITATION, markdown)
 
 

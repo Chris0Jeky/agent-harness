@@ -372,10 +372,10 @@ def _run_replay(args: argparse.Namespace) -> int:
     report = build_json_report(
         comparison,
         run_manifest,
-        _reproduction_command(args),
         baseline_failures=baseline_result.failures,
         candidate_failures=candidate_result.failures,
     )
+    reproduction_command = _reproduction_command(args)
 
     output = Path(args.output)
     try:
@@ -383,7 +383,9 @@ def _run_replay(args: argparse.Namespace) -> int:
         write_manifest(output / "run-manifest.json", run_manifest)
         (output / "report.json").write_bytes(report_json_bytes(report))
         (output / "report.md").write_bytes(
-            render_markdown_report(report).encode("utf-8")
+            render_markdown_report(
+                report, reproduction_command=reproduction_command
+            ).encode("utf-8")
         )
     except OSError as exc:
         print(f"replay output failed: {exc}", file=sys.stderr)
