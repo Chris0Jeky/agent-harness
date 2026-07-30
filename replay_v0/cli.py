@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sys
 from typing import Any
 
@@ -18,7 +19,7 @@ from replay_v0.corpus import (
     validate_charter_cases,
     validate_command_events,
 )
-from replay_v0.digests import sha256_bytes, sha256_file
+from replay_v0.digests import canonical_json_bytes, sha256_bytes, sha256_file
 from replay_v0.manifests import (
     ManifestError,
     build_run_manifest,
@@ -44,6 +45,14 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v1"
+PROCESS_ENVIRONMENT = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONHASHSEED": "0",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONUTF8": "1",
+}
 
 
 class ReplayInputError(ValueError):
@@ -207,12 +216,45 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     policy_path = Path(argv[-1])
     if not policy_path.is_file():
         raise ReplayInputError("process source must end in a readable policy file")
+    if argv[0] in {"python", "python3"}:
+        executable_path = Path(sys.executable)
+    else:
+        resolved_executable = shutil.which(argv[0])
+        executable_path = (
+            Path(resolved_executable) if resolved_executable else Path(argv[0])
+        )
+    if not executable_path.is_file():
+        raise ReplayInputError("process executable could not be resolved to a file")
     try:
         policy_digest = sha256_file(policy_path)
+        executable_digest = sha256_file(executable_path)
     except OSError as exc:
-        raise ReplayInputError("process policy file could not be read") from exc
+        raise ReplayInputError(
+            "process executable or policy file could not be read"
+        ) from exc
+    normalized_identity = {
+        "schema_version": PROCESS_IDENTITY_VERSION,
+        "executable": {
+            "name": executable_path.name,
+            "sha256": executable_digest,
+        },
+        "arguments": argv[1:-1],
+        "policy": {"name": policy_path.name, "sha256": policy_digest},
+        "environment": PROCESS_ENVIRONMENT,
+        "working_directory": "policy-parent",
+    }
+    execution_argv = [
+        str(executable_path.resolve()),
+        *argv[1:-1],
+        policy_path.name,
+    ]
     try:
-        source = ProcessDecisionSource(argv, timeout_seconds=timeout)
+        source = ProcessDecisionSource(
+            execution_argv, timeout_seconds=timeout
+        ).with_runtime(
+            cwd=policy_path.resolve().parent,
+            environment=PROCESS_ENVIRONMENT,
+        )
     except ValueError as exc:
         raise ReplayInputError(str(exc)) from exc
     return LoadedPolicySource(
@@ -221,7 +263,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         identity={
             "kind": "process",
             "id": policy_path.stem,
-            "sha256": policy_digest,
+            "sha256": sha256_bytes(canonical_json_bytes(normalized_identity)),
         },
     )
 

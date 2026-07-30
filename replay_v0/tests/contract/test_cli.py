@@ -10,8 +10,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from replay_v0.cli import main
-from replay_v0.manifests import build_corpus_manifest, manifest_json_bytes
+from replay_v0.cli import _load_process_source, main
+from replay_v0.manifests import (
+    build_corpus_manifest,
+    build_run_manifest,
+    manifest_json_bytes,
+)
 
 EVENTS = [
     {
@@ -229,6 +233,44 @@ for index, event in enumerate(events):
             with self.assertRaises(SystemExit) as raised:
                 main(args)
             self.assertEqual(2, raised.exception.code)
+
+    def test_process_executable_and_invocation_are_bound_without_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "candidate.py"
+            policy.write_text("pass\n", encoding="utf-8", newline="\n")
+            first_executable = directory / "first.exe"
+            second_executable = directory / "second.exe"
+            first_executable.write_bytes(b"first synthetic executable")
+            second_executable.write_bytes(b"second synthetic executable")
+            first = _load_process_source(f"{first_executable},{policy}", 1.0)
+            second = _load_process_source(f"{second_executable},{policy}", 1.0)
+            with_flag = _load_process_source(
+                f"{first_executable},--isolated,{policy}", 1.0
+            )
+
+        self.assertNotEqual(first.identity["sha256"], second.identity["sha256"])
+        self.assertNotEqual(first.identity["sha256"], with_flag.identity["sha256"])
+        self.assertEqual({"kind", "id", "sha256"}, set(first.identity))
+        self.assertNotIn(raw_directory, json.dumps(first.identity))
+
+        common = {
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "baseline",
+                "sha256": "1" * 64,
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "manifest_sha256": "2" * 64,
+                "event_count": 1,
+            },
+            "fail_on": ["newly-allowed"],
+        }
+        first_manifest = build_run_manifest(candidate=first.identity, **common)
+        second_manifest = build_run_manifest(candidate=second.identity, **common)
+        self.assertNotEqual(first_manifest["run_id"], second_manifest["run_id"])
 
     def test_validate_accepts_directory_and_rejects_changed_bytes(self) -> None:
         with self.fixture("same") as (_, corpus, _recording, _candidate):

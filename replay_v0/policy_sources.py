@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -371,6 +371,25 @@ class ProcessDecisionSource:
             raise ValueError("process timeout must be a finite positive number")
         self.argv = tuple(argv)
         self.timeout_seconds = float(timeout_seconds)
+        self.cwd: str | None = None
+        self.environment: dict[str, str] | None = None
+
+    def with_runtime(
+        self,
+        *,
+        cwd: str | Path,
+        environment: Mapping[str, str],
+    ) -> ProcessDecisionSource:
+        """Bind a deterministic CLI runtime without expanding the process contract."""
+
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()
+        ):
+            raise ValueError("process environment must contain only string pairs")
+        self.cwd = str(cwd)
+        self.environment = dict(environment)
+        return self
 
     def evaluate(self, event_values: list[object]) -> PolicySourceResult:
         events = validate_command_events(event_values)
@@ -388,6 +407,8 @@ class ProcessDecisionSource:
                 timeout=self.timeout_seconds,
                 check=False,
                 shell=False,
+                cwd=self.cwd,
+                env=self.environment,
             )
         except subprocess.TimeoutExpired:
             failure = SourceFailure(
