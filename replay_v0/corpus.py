@@ -195,3 +195,11 @@ def validate_charter_cases(values: Iterable[object]) -> list[dict[str, Any]]:
     """Validate ordered charter metadata and enforce unique event ids."""
 
     return _validate_unique_records(values, validate_charter_case, "CharterCase corpus")
+
+
+def validate_policy_decisions(values: Iterable[object]) -> list[dict[str, Any]]:
+    """Validate ordered policy decisions and enforce unique event ids."""
+
+    return _validate_unique_records(
+        values, validate_policy_decision, "PolicyDecision stream"
+    )
