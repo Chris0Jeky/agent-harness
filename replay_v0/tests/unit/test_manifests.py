@@ -49,9 +49,7 @@ class CorpusManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
             (directory / "events.jsonl").write_bytes(b"")
-            with self.assertRaisesRegex(
-                ManifestError, "expected a positive integer"
-            ):
+            with self.assertRaisesRegex(ManifestError, "expected a positive integer"):
                 build_corpus_manifest(
                     corpus_id="empty-v0",
                     event_count=0,

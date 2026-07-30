@@ -9,7 +9,9 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 from typing import Any
 
 from replay_v0.corpus import (
@@ -65,6 +67,61 @@ class PolicySourceResult:
     @property
     def is_valid(self) -> bool:
         return not self.failures
+
+
+def _cleanup_snapshot_root(root: Path) -> SourceFailure | None:
+    try:
+        shutil.rmtree(root)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return SourceFailure(
+            "process-snapshot-cleanup-failed",
+            "The private policy process snapshot could not be removed.",
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class _ProcessInputSnapshot:
+    """Private execution paths that contain the exact bound process inputs."""
+
+    root: Path
+    argv: tuple[str, ...]
+    cwd: str
+    executable_sha256: str
+    executable_bits: str
+    policy_sha256: str
+    policy_tree_sha256: str
+
+    def verification_failure(self) -> SourceFailure | None:
+        executable = Path(self.argv[0])
+        policy_tree = Path(self.cwd)
+        policy = policy_tree / self.argv[-1]
+        try:
+            actual_executable = sha256_file(executable)
+            actual_executable_bits = executable_bits(executable)
+            actual_policy = sha256_file(policy)
+            actual_tree = sha256_tree(policy_tree)
+        except OSError:
+            return SourceFailure(
+                "process-snapshot-changed",
+                "The private policy process snapshot became unavailable.",
+            )
+        if (
+            actual_executable != self.executable_sha256
+            or actual_executable_bits != self.executable_bits
+            or actual_policy != self.policy_sha256
+            or actual_tree != self.policy_tree_sha256
+        ):
+            return SourceFailure(
+                "process-snapshot-changed",
+                "The private policy process snapshot changed after capture.",
+            )
+        return None
+
+    def cleanup(self) -> SourceFailure | None:
+        return _cleanup_snapshot_root(self.root)
 
 
 @dataclass(frozen=True)
@@ -392,7 +449,7 @@ class ProcessDecisionSource:
         self.cwd: str | None = None
         self.environment: dict[str, str] | None = None
         self.executable_binding: tuple[Path, str, str] | None = None
-        self.policy_tree_binding: tuple[Path, str] | None = None
+        self.policy_tree_binding: tuple[Path, str, str] | None = None
 
     def with_runtime(
         self,
@@ -418,12 +475,15 @@ class ProcessDecisionSource:
         executable_sha256: str,
         executable_bits: str,
         policy_tree_path: str | Path,
+        policy_sha256: str,
         policy_tree_sha256: str,
     ) -> ProcessDecisionSource:
-        """Bind the executable and policy tree revalidated before process start."""
+        """Bind the executable and policy tree copied into a validated snapshot."""
 
-        if not _SHA256.fullmatch(executable_sha256) or not _SHA256.fullmatch(
-            policy_tree_sha256
+        if (
+            not _SHA256.fullmatch(executable_sha256)
+            or not _SHA256.fullmatch(policy_sha256)
+            or not _SHA256.fullmatch(policy_tree_sha256)
         ):
             raise ValueError("process input bindings require lowercase SHA-256 digests")
         if not re.fullmatch(r"[01]{3}", executable_bits):
@@ -433,67 +493,152 @@ class ProcessDecisionSource:
             executable_sha256,
             executable_bits,
         )
-        self.policy_tree_binding = (Path(policy_tree_path), policy_tree_sha256)
+        self.policy_tree_binding = (
+            Path(policy_tree_path),
+            policy_sha256,
+            policy_tree_sha256,
+        )
         return self
 
-    def _input_binding_failure(
+    @staticmethod
+    def _snapshot_failure(
+        events: list[dict[str, Any]],
+        *,
+        code: str,
+        message: str,
+        snapshot_root: Path | None = None,
+    ) -> PolicySourceResult:
+        failure = SourceFailure(code, message)
+        result = _all_indeterminate(events, failure, "Process")
+        if snapshot_root is None:
+            return result
+        cleanup_failure = _cleanup_snapshot_root(snapshot_root)
+        if cleanup_failure is None:
+            return result
+        return PolicySourceResult(
+            result.decisions,
+            result.failures + (cleanup_failure,),
+            result.diagnostics,
+        )
+
+    def _prepare_input_snapshot(
         self, events: list[dict[str, Any]]
-    ) -> PolicySourceResult | None:
+    ) -> _ProcessInputSnapshot | PolicySourceResult | None:
         if self.executable_binding is None and self.policy_tree_binding is None:
             return None
-        if self.executable_binding is None or self.policy_tree_binding is None:
-            failure = SourceFailure(
-                "process-input-binding-invalid",
-                "Policy process input bindings are incomplete.",
+        if (
+            self.executable_binding is None
+            or self.policy_tree_binding is None
+            or self.cwd is None
+            or len(self.argv) < 2
+            or Path(self.argv[-1]).name != self.argv[-1]
+        ):
+            return self._snapshot_failure(
+                events,
+                code="process-input-binding-invalid",
+                message="Policy process input bindings are incomplete.",
             )
-            return _all_indeterminate(events, failure, "Process")
 
         executable_path, expected_executable, expected_executable_bits = (
             self.executable_binding
         )
-        policy_tree_path, expected_tree = self.policy_tree_binding
+        policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
         try:
-            actual_executable = sha256_file(executable_path)
-            actual_executable_bits = executable_bits(executable_path)
-            actual_tree = sha256_tree(policy_tree_path)
+            snapshot_root = Path(tempfile.mkdtemp(prefix="replay-process-inputs-"))
         except OSError:
-            failure = SourceFailure(
-                "process-input-changed",
-                "Bound policy process inputs became unavailable before execution.",
+            return self._snapshot_failure(
+                events,
+                code="process-snapshot-unavailable",
+                message="A private policy process snapshot could not be created.",
             )
-            return _all_indeterminate(events, failure, "Process")
+
+        snapshot_executable = snapshot_root / "executable" / executable_path.name
+        snapshot_policy_tree = snapshot_root / "policy"
+        snapshot_policy = snapshot_policy_tree / self.argv[-1]
+        try:
+            snapshot_executable.parent.mkdir()
+            shutil.copy2(executable_path, snapshot_executable)
+            for companion in executable_path.parent.iterdir():
+                companion_name = companion.name.lower()
+                if (
+                    companion != executable_path
+                    and companion.is_file()
+                    and (
+                        companion.suffix.lower() in {".dll", ".dylib", ".so"}
+                        or ".so." in companion_name
+                    )
+                ):
+                    shutil.copy2(
+                        companion,
+                        snapshot_executable.parent / companion.name,
+                    )
+            shutil.copytree(policy_tree_path, snapshot_policy_tree)
+            actual_executable = sha256_file(snapshot_executable)
+            actual_executable_bits = executable_bits(snapshot_executable)
+            actual_policy = sha256_file(snapshot_policy)
+            actual_tree = sha256_tree(snapshot_policy_tree)
+        except (OSError, shutil.Error):
+            return self._snapshot_failure(
+                events,
+                code="process-input-changed",
+                message=(
+                    "Bound policy process inputs became unavailable while their "
+                    "private snapshot was created."
+                ),
+                snapshot_root=snapshot_root,
+            )
         if (
-            actual_executable != expected_executable
+            not snapshot_policy.is_file()
+            or actual_executable != expected_executable
             or actual_executable_bits != expected_executable_bits
+            or actual_policy != expected_policy
             or actual_tree != expected_tree
         ):
-            failure = SourceFailure(
-                "process-input-changed",
-                "Bound policy process inputs changed before execution.",
+            return self._snapshot_failure(
+                events,
+                code="process-input-changed",
+                message=(
+                    "Bound policy process inputs changed before their private "
+                    "snapshot was complete."
+                ),
+                snapshot_root=snapshot_root,
             )
-            return _all_indeterminate(events, failure, "Process")
-        return None
 
-    def evaluate(self, event_values: list[object]) -> PolicySourceResult:
-        events = validate_command_events(event_values)
-        binding_failure = self._input_binding_failure(events)
-        if binding_failure is not None:
-            return binding_failure
+        return _ProcessInputSnapshot(
+            root=snapshot_root,
+            argv=(
+                str(snapshot_executable),
+                *self.argv[1:-1],
+                self.argv[-1],
+            ),
+            cwd=str(snapshot_policy_tree),
+            executable_sha256=expected_executable,
+            executable_bits=expected_executable_bits,
+            policy_sha256=expected_policy,
+            policy_tree_sha256=expected_tree,
+        )
+
+    def _evaluate_runtime(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        argv: Sequence[str],
+        cwd: str | None,
+    ) -> PolicySourceResult:
         input_bytes = "".join(
             f"{json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n"
             for event in events
         ).encode("utf-8")
-
         try:
             completed = subprocess.run(
-                list(self.argv),
+                list(argv),
                 input=input_bytes,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=self.timeout_seconds,
                 check=False,
                 shell=False,
-                cwd=self.cwd,
+                cwd=cwd,
                 env=self.environment,
             )
         except subprocess.TimeoutExpired:
@@ -540,4 +685,48 @@ class ProcessDecisionSource:
             require_order=True,
             initial_failures=failures,
             diagnostics=diagnostics,
+        )
+
+    def evaluate(self, event_values: list[object]) -> PolicySourceResult:
+        events = validate_command_events(event_values)
+        snapshot_or_failure = self._prepare_input_snapshot(events)
+        if isinstance(snapshot_or_failure, PolicySourceResult):
+            return snapshot_or_failure
+        snapshot = snapshot_or_failure
+        argv = self.argv if snapshot is None else snapshot.argv
+        cwd = self.cwd if snapshot is None else snapshot.cwd
+        snapshot_failure = None if snapshot is None else snapshot.verification_failure()
+        if snapshot_failure is not None:
+            result = _all_indeterminate(events, snapshot_failure, "Process")
+        else:
+            try:
+                result = self._evaluate_runtime(events, argv=argv, cwd=cwd)
+            except BaseException:
+                if snapshot is not None:
+                    snapshot.cleanup()
+                raise
+        if snapshot is None:
+            return result
+        post_execution_failure = (
+            None if snapshot_failure is not None else snapshot.verification_failure()
+        )
+        if post_execution_failure is not None:
+            invalidated = _all_indeterminate(
+                events,
+                post_execution_failure,
+                "Process",
+                diagnostics=result.diagnostics,
+            )
+            result = PolicySourceResult(
+                invalidated.decisions,
+                result.failures + invalidated.failures,
+                invalidated.diagnostics,
+            )
+        cleanup_failure = snapshot.cleanup()
+        if cleanup_failure is None:
+            return result
+        return PolicySourceResult(
+            result.decisions,
+            result.failures + (cleanup_failure,),
+            result.diagnostics,
         )

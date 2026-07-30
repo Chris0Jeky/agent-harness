@@ -53,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v3"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v4"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -238,20 +238,26 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         )
     if not executable_path.is_file():
         raise ReplayInputError("process executable could not be resolved to a file")
+    bound_executable_path = executable_path.resolve()
     try:
         policy_digest = sha256_file(policy_path)
         policy_tree_digest = sha256_tree(lexical_policy_path.parent)
-        executable_digest = sha256_file(executable_path)
-        executable_mode = executable_bits(executable_path)
+        executable_digest = sha256_file(bound_executable_path)
+        executable_mode = executable_bits(bound_executable_path)
     except OSError as exc:
         raise ReplayInputError(
             "process executable or policy file could not be read"
         ) from exc
+    runtime_environment = dict(PROCESS_ENVIRONMENT)
+    normalized_environment = dict(PROCESS_ENVIRONMENT)
+    if bound_executable_path == Path(sys.executable).resolve():
+        runtime_environment["PYTHONHOME"] = sys.base_prefix
+        normalized_environment["PYTHONHOME"] = "host-python-base-prefix"
     normalized_identity = {
         "schema_version": PROCESS_IDENTITY_VERSION,
         "executable": {
             "executable_bits": executable_mode,
-            "name": executable_path.name,
+            "name": bound_executable_path.name,
             "sha256": executable_digest,
         },
         "arguments": argv[1:-1],
@@ -260,11 +266,12 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             "sha256": policy_digest,
             "parent_tree_sha256": policy_tree_digest,
         },
-        "environment": PROCESS_ENVIRONMENT,
-        "working_directory": "policy-parent",
+        "environment": normalized_environment,
+        "execution_inputs": "private-validated-snapshot",
+        "working_directory": "snapshot-policy-parent",
     }
     execution_argv = [
-        str(executable_path.resolve()),
+        str(bound_executable_path),
         *argv[1:-1],
         lexical_policy_path.name,
     ]
@@ -273,13 +280,14 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             ProcessDecisionSource(execution_argv, timeout_seconds=timeout)
             .with_runtime(
                 cwd=lexical_policy_path.parent,
-                environment=PROCESS_ENVIRONMENT,
+                environment=runtime_environment,
             )
             .with_input_binding(
-                executable_path=executable_path.resolve(),
+                executable_path=bound_executable_path,
                 executable_sha256=executable_digest,
                 executable_bits=executable_mode,
                 policy_tree_path=lexical_policy_path.parent,
+                policy_sha256=policy_digest,
                 policy_tree_sha256=policy_tree_digest,
             )
         )

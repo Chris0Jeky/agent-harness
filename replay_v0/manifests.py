@@ -167,9 +167,7 @@ def build_corpus_manifest(
 
     if isinstance(files, (str, bytes)):
         raise ManifestError("CorpusManifest.files: expected a sequence of paths")
-    event_count = _require_positive_count(
-        event_count, "CorpusManifest.event_count"
-    )
+    event_count = _require_positive_count(event_count, "CorpusManifest.event_count")
     base = Path(base_directory)
     entries: list[dict[str, str]] = []
     for index, raw_path in enumerate(files):

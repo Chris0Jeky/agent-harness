@@ -152,6 +152,8 @@ class SchemaContractTests(unittest.TestCase):
             "CharterCase corpus: expected at least one record",
             lambda: validate_charter_cases([]),
         )
+        self.assertEqual([VALID_EVENT], validate_command_events([VALID_EVENT]))
+        self.assertEqual([VALID_CASE], validate_charter_cases([VALID_CASE]))
 
     def test_schema_documents_are_strict_and_loadable(self) -> None:
         schema_dir = Path(__file__).parents[2] / "schemas"

@@ -57,14 +57,30 @@ effects. It does not parse command text or reproduce the frozen dispatcher.
 
 Corpus and recorded-source manifests bind exact bytes with SHA-256. A run ID binds the runner
 version, both policy-source identities, the corpus-manifest digest, and gate configuration. Process
-identity includes the executable bytes and execute-bit tuple, normalized invocation, entry-policy
+identity v4 includes the executable bytes and execute-bit tuple, normalized invocation, entry-policy
 bytes, the relative names, exact regular-file bytes, and owner/group/other execute-bit tuples for
 the policy-parent root and entries, configured timeout, fixed environment, and policy-parent
-working-directory contract without writing absolute paths to the run manifest. The executable and
-policy-parent tree are revalidated immediately before execution;
-if either changed or became unreadable, the process does not run and its decisions become
-`indeterminate`. External installed dependencies, files outside that tree, network responses, and
-host metadata are not bound; callers that depend on them must isolate and record that environment.
+working-directory contract without writing absolute paths to the run manifest. Immediately before
+each process runs, the runner copies the bound executable and complete policy-parent tree into a
+private temporary snapshot, verifies that the snapshot's entry-policy bytes, executable bytes and
+mode, and complete tree digest exactly match the identity before and after execution, and launches
+only the snapshot paths.
+Changing or removing an original path after snapshot preparation therefore cannot change what the
+process opens. A mismatch or unavailable input produces `indeterminate`; a cleanup failure is also
+a source failure. Corpus and run manifests require at least one event, so an empty or truncated
+corpus cannot produce a vacuous pass.
+
+The snapshot is reproducibility containment, not an operating-system sandbox. A hostile process
+running as the same OS user may still be able to discover or rewrite temporary storage, and policy
+behavior after process start remains outside the snapshot guarantee. Pre/post verification catches
+ordinary snapshot drift but is not an atomic defence against a same-user mutate-and-restore attack.
+A generic executable must be
+relocatable enough to run from the snapshot; adjacent loader libraries are copied as unbound
+runtime dependencies, and Python uses its host base prefix for its unbound standard library. If the
+captured executable cannot start, replay fails closed instead of falling back to the original path.
+External installed dependencies, files outside the policy tree, network responses, and host
+metadata remain outside the portable identity; callers that depend on them must isolate and record
+that environment.
 
 The three report artifacts are fully staged before publication. Replacing an existing report set
 uses rollback: a publication error restores the prior complete set instead of leaving a new

@@ -7,6 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
+from replay_v0.corpus import ValidationError
 from replay_v0.policy_sources import ProcessDecisionSource
 
 EVENTS = [
@@ -182,6 +183,24 @@ class ProcessSourceTests(unittest.TestCase):
             ProcessDecisionSource(f"{sys.executable} {FIXTURE} success")
         with self.assertRaises(ValueError):
             ProcessDecisionSource([sys.executable], timeout_seconds=0)
+
+    def test_empty_events_fail_before_snapshot_or_process_execution(self) -> None:
+        source = ProcessDecisionSource([sys.executable])
+        with mock.patch.object(
+            source,
+            "_prepare_input_snapshot",
+            side_effect=AssertionError("snapshot prepared"),
+        ) as prepare_snapshot, mock.patch(
+            "replay_v0.policy_sources.subprocess.run",
+            side_effect=AssertionError("process executed"),
+        ) as process_run:
+            with self.assertRaisesRegex(
+                ValidationError, "CommandEvent corpus: expected at least one record"
+            ):
+                source.evaluate([])
+
+        prepare_snapshot.assert_not_called()
+        process_run.assert_not_called()
 
     @staticmethod
     def effects(result) -> list[str]:

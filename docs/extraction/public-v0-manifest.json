@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "979b4ae1e587fe7ee9c01d1d5bfe67d4ef8c22b270f24dc6c134f97692c1a1a3"
+      "sha256": "ead3a9aea19478430f28147b1e87ec20ffbc31240183600d8855184e6206506e"
     },
     {
       "path": "replay_v0/compare.py",
@@ -43,7 +43,7 @@
     {
       "path": "replay_v0/corpus.py",
       "kind": "source",
-      "sha256": "cbcd93079edd2f1a85ad0457d85d849b51eec59c2049bd2930a147bbe2ddb82c"
+      "sha256": "822c242ba82c2826cdee5eb15ca5fc67566a98038aab96a29083dba167909a09"
     },
     {
       "path": "replay_v0/digests.py",
@@ -73,17 +73,17 @@
     {
       "path": "replay_v0/manifests.py",
       "kind": "source",
-      "sha256": "74399b0e4a4b06aa2652e49da735cef065fdbf5d391e2059bd86b39bd333f613"
+      "sha256": "467761b51011a37c8814478a550ea4454ece6a9fa95bfcaf49128c2f4676b5ee"
     },
     {
       "path": "replay_v0/policy_sources.py",
       "kind": "source",
-      "sha256": "1425a97975e93a282f43fe981a63016081fac9d0cb1dc360a53689eaaa314cab"
+      "sha256": "93163b995222b0140336d4b9728c0e3af16056ba2d31f2c592d5c6080fe3f42b"
     },
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "3759c56ef91aa92471908fba433d79b32ce6fbc978386ba9d74ad5a61f82cf51"
+      "sha256": "9de8aa55697751799693b456d7328d17a8c81725cb5a34332b6f3bccc84db004"
     },
     {
       "path": "replay_v0/reports.py",
@@ -128,17 +128,17 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "3e0ff42164058687cd30e311fabc44c35ba97f67e2a96297fd68d29b84667704"
+      "sha256": "122868c80e51e5940157b29de08957e18245bb5021730e851a084ff812e9d756"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "9edc914954912f9d4ef5fff08d731a482a8dad1fe543442e1065f2c203f7d313"
+      "sha256": "a8a57bbfbeaa42d7166f64a66954b89a0f3ab5cc23577918795042ebd146bdee"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
       "kind": "test",
-      "sha256": "6f1594602901fcf3ab100a73c5c22aecff04bdbf71f0e75c41138036c710731d"
+      "sha256": "4d6465d07b2e8c957f6fa943e13d4a7993563ba6b1a21f17f66f5ab94431fc0d"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
@@ -173,7 +173,7 @@
     {
       "path": "replay_v0/tests/unit/test_manifests.py",
       "kind": "test",
-      "sha256": "f41ebdef7a53373ed67c1f95473d293447ca645dcdefc64724de2c102a6eab5c"
+      "sha256": "76371d0fb2e7cc9d8928e455282070dd06ad673e3e6bfdf29e974c90d26c1ae6"
     },
     {
       "path": "replay_v0/tests/unit/test_recorded_source.py",

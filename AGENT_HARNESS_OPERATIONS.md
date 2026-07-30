@@ -104,9 +104,14 @@ Owner: Cristian Tcaci
   execute-bit tuples for the policy-parent root and entries. Installed dependencies, files outside
   that tree, network responses, and host metadata remain outside the portable identity, so callers
   that depend on them must isolate and record that environment.
-- **CONSTRAINT:** The bound executable and policy-parent tree are revalidated immediately before
-  process start. A change or read failure yields `indeterminate` decisions and exit `3`; the runner
-  does not execute bytes that differ from the recorded identity.
+- **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
+  policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
+  executable, mode, and complete-tree digests against process identity v4 before and after
+  execution, and launches only the snapshot paths. Original-path drift, snapshot drift, or a copy
+  mismatch yields `indeterminate` decisions and exit `3`; cleanup failure is also source-failed.
+  The snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
+  mutate-and-restore process, and a non-relocatable executable fails closed rather than falling
+  back to its original path.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash
@@ -178,6 +183,8 @@ python -m replay_v0.cli replay \
 ```
 
 - **CONSTRAINT:** Digests cover the exact committed bytes. Line-ending changes therefore require a manifest update.
+- **CONSTRAINT:** `event_count` is positive. Empty event or case collections are input-invalid and
+  cannot create an all-zero passing comparison.
 - **CONSTRAINT:** The runner validates all listed digests before invoking any policy source.
 
 ## Run manifest

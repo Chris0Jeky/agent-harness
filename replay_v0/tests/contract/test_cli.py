@@ -7,17 +7,21 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
+import replay_v0.policy_sources as policy_sources
 from replay_v0.cli import _load_process_source, main
 from replay_v0.manifests import (
     build_corpus_manifest,
     build_run_manifest,
     manifest_json_bytes,
 )
+from replay_v0.policy_sources import PolicySourceResult, SourceFailure
 
 EVENTS = [
     {
@@ -203,17 +207,39 @@ for index, event in enumerate(events):
                     {"path": "cases.jsonl", "sha256": empty_sha256},
                 ],
             }
-            (corpus / "corpus-manifest.json").write_bytes(
-                manifest_json_bytes(manifest)
-            )
+            (corpus / "corpus-manifest.json").write_bytes(manifest_json_bytes(manifest))
             output = directory / "empty-report"
             with mock.patch(
                 "replay_v0.cli._load_policy_source",
                 side_effect=AssertionError("policy source loaded"),
             ) as load_policy:
-                exit_code = main(
-                    self.replay_args(corpus, recording, candidate, output)
-                )
+                exit_code = main(self.replay_args(corpus, recording, candidate, output))
+
+            self.assertEqual(2, exit_code)
+            load_policy.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_exit_two_rejects_empty_records_under_a_positive_manifest(self) -> None:
+        with self.fixture("same") as (directory, corpus, recording, candidate):
+            (corpus / "events.jsonl").write_bytes(b"")
+            (corpus / "cases.jsonl").write_bytes(b"")
+            empty_sha256 = hashlib.sha256(b"").hexdigest()
+            manifest = {
+                "schema_version": "corpus-manifest.v1",
+                "corpus_id": "truncated-v0",
+                "event_count": 1,
+                "files": [
+                    {"path": "events.jsonl", "sha256": empty_sha256},
+                    {"path": "cases.jsonl", "sha256": empty_sha256},
+                ],
+            }
+            (corpus / "corpus-manifest.json").write_bytes(manifest_json_bytes(manifest))
+            output = directory / "truncated-report"
+            with mock.patch(
+                "replay_v0.cli._load_policy_source",
+                side_effect=AssertionError("policy source loaded"),
+            ) as load_policy:
+                exit_code = main(self.replay_args(corpus, recording, candidate, output))
 
             self.assertEqual(2, exit_code)
             load_policy.assert_not_called()
@@ -542,6 +568,158 @@ for index, event in enumerate(events):
         self.assertEqual(
             ["indeterminate", "indeterminate"],
             [decision["effect"] for decision in result.decisions],
+        )
+
+    def test_process_snapshot_runs_bound_inputs_after_original_tree_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "rules.py"
+            policy.write_text(
+                "import json\n"
+                "import sys\n"
+                "from rules import EFFECT\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                '    print(json.dumps({"schema_version": "policy-decision.v1", '
+                '"event_id": event["event_id"], "effect": EFFECT, '
+                '"reason": "Snapshotted sibling rule."}))\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            helper.write_text('EFFECT = "deny"\n', encoding="utf-8", newline="\n")
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_prepare = loaded.source._prepare_input_snapshot
+            original_evaluate = loaded.source._evaluate_runtime
+            snapshot_roots: list[Path] = []
+            begin_mutation = threading.Event()
+            mutation_complete = threading.Event()
+
+            def remember_snapshot(events):
+                snapshot = original_prepare(events)
+                self.assertIsNotNone(snapshot)
+                self.assertNotIsInstance(snapshot, PolicySourceResult)
+                snapshot_roots.append(snapshot.root)
+                return snapshot
+
+            def mutate_original() -> None:
+                begin_mutation.wait()
+                helper.write_text('EFFECT = "allow"\n', encoding="utf-8", newline="\n")
+                mutation_complete.set()
+
+            def mutate_before_real_launch(events, *, argv, cwd):
+                begin_mutation.set()
+                self.assertTrue(mutation_complete.wait(timeout=5.0))
+                return original_evaluate(events, argv=argv, cwd=cwd)
+
+            writer = threading.Thread(target=mutate_original)
+            writer.start()
+
+            with mock.patch.object(
+                loaded.source,
+                "_prepare_input_snapshot",
+                side_effect=remember_snapshot,
+            ), mock.patch.object(
+                loaded.source,
+                "_evaluate_runtime",
+                side_effect=mutate_before_real_launch,
+            ), mock.patch(
+                "replay_v0.policy_sources.subprocess.run", wraps=subprocess.run
+            ) as process_run:
+                result = loaded.source.evaluate(EVENTS)
+            writer.join(timeout=5.0)
+            self.assertFalse(writer.is_alive())
+
+            launched_argv = process_run.call_args.args[0]
+            launched_cwd = Path(process_run.call_args.kwargs["cwd"])
+
+        self.assertEqual(
+            ["deny", "deny"], [decision["effect"] for decision in result.decisions]
+        )
+        self.assertEqual(1, len(snapshot_roots))
+        self.assertEqual(
+            snapshot_roots[0] / "executable" / Path(loaded.source.argv[0]).name,
+            Path(launched_argv[0]),
+        )
+        self.assertEqual(snapshot_roots[0] / "policy", launched_cwd)
+        self.assertNotEqual(Path(sys.executable), Path(launched_argv[0]))
+        self.assertFalse(snapshot_roots[0].exists())
+        self.assertNotIn(str(snapshot_roots[0]), json.dumps(loaded.identity))
+        self.assertNotIn(str(snapshot_roots[0]), json.dumps(result.diagnostics))
+        self.assertNotIn(
+            str(snapshot_roots[0]), json.dumps(result.failures, default=str)
+        )
+
+    def test_process_snapshot_cleanup_failure_is_a_source_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_cleanup = policy_sources._ProcessInputSnapshot.cleanup
+
+            def clean_then_report_failure(snapshot):
+                original_cleanup(snapshot)
+                return SourceFailure(
+                    "process-snapshot-cleanup-failed",
+                    "Synthetic cleanup failure.",
+                )
+
+            with mock.patch.object(
+                policy_sources._ProcessInputSnapshot,
+                "cleanup",
+                autospec=True,
+                side_effect=clean_then_report_failure,
+            ):
+                result = loaded.source.evaluate(EVENTS)
+
+        self.assertIn(
+            "process-snapshot-cleanup-failed",
+            [failure.code for failure in result.failures],
+        )
+
+    def test_process_snapshot_change_during_launch_invalidates_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "rules.py"
+            policy.write_text(
+                "import json\n"
+                "import sys\n"
+                "from rules import EFFECT\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                '    print(json.dumps({"schema_version": "policy-decision.v1", '
+                '"event_id": event["event_id"], "effect": EFFECT, '
+                '"reason": "Mutable snapshot probe."}))\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            helper.write_text('EFFECT = "deny"\n', encoding="utf-8", newline="\n")
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_evaluate = loaded.source._evaluate_runtime
+
+            def mutate_snapshot_then_run(events, *, argv, cwd):
+                (Path(cwd) / "rules.py").write_text(
+                    'EFFECT = "allow"\n', encoding="utf-8", newline="\n"
+                )
+                return original_evaluate(events, argv=argv, cwd=cwd)
+
+            with mock.patch.object(
+                loaded.source,
+                "_evaluate_runtime",
+                side_effect=mutate_snapshot_then_run,
+            ):
+                result = loaded.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
+        self.assertIn(
+            "process-snapshot-changed", [failure.code for failure in result.failures]
         )
 
     def test_process_policy_symlink_keeps_supplied_parent_and_name(self) -> None:
