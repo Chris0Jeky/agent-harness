@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "a0d115f16df15f16b7426f778c831827306f98c0ee724e3d8d4e41639fedc70e"
+      "sha256": "ee4db66e20a0b57ef7d56e068c76f63ec44843ad05f79699d511e336c3139d8e"
     },
     {
       "path": "replay_v0/compare.py",
@@ -78,12 +78,12 @@
     {
       "path": "replay_v0/policy_sources.py",
       "kind": "source",
-      "sha256": "84df8a295c6b1f4b17717dcafadc0cf808e1719590720d9183fde64a5ec9de9c"
+      "sha256": "0ca26ea10d9a3b5e66abdf831719e61497f733f10edb61d8553debd0a902672d"
     },
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "8aa68a15f1ffca2cef033f533124e9043c392670f684d1d3e6c5d07509566900"
+      "sha256": "bc8f8e4e2b93c14cde9bc8eaabaa07190bbe4ee4e0e6979fa574402287d4cf50"
     },
     {
       "path": "replay_v0/reports.py",
@@ -128,7 +128,7 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "f1e05f68df48423241ca30314d41928338c20b7df189acf3c831870d8a3fcd6d"
+      "sha256": "029a77517642998c710e211b277b6c326a88b26353da0e08785e8a378819edfa"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",

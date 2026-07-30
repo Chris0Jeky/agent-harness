@@ -19,6 +19,7 @@ from replay_v0.corpus import (
     validate_command_events,
     validate_policy_decision,
 )
+from replay_v0.digests import sha256_file, sha256_tree
 
 RECORDED_MANIFEST_VERSION = "recorded-policy-manifest.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -390,6 +391,8 @@ class ProcessDecisionSource:
         self.timeout_seconds = float(timeout_seconds)
         self.cwd: str | None = None
         self.environment: dict[str, str] | None = None
+        self.executable_binding: tuple[Path, str] | None = None
+        self.policy_tree_binding: tuple[Path, str] | None = None
 
     def with_runtime(
         self,
@@ -408,8 +411,60 @@ class ProcessDecisionSource:
         self.environment = dict(environment)
         return self
 
+    def with_input_binding(
+        self,
+        *,
+        executable_path: str | Path,
+        executable_sha256: str,
+        policy_tree_path: str | Path,
+        policy_tree_sha256: str,
+    ) -> ProcessDecisionSource:
+        """Bind the executable and policy tree revalidated before process start."""
+
+        if not _SHA256.fullmatch(executable_sha256) or not _SHA256.fullmatch(
+            policy_tree_sha256
+        ):
+            raise ValueError("process input bindings require lowercase SHA-256 digests")
+        self.executable_binding = (Path(executable_path), executable_sha256)
+        self.policy_tree_binding = (Path(policy_tree_path), policy_tree_sha256)
+        return self
+
+    def _input_binding_failure(
+        self, events: list[dict[str, Any]]
+    ) -> PolicySourceResult | None:
+        if self.executable_binding is None and self.policy_tree_binding is None:
+            return None
+        if self.executable_binding is None or self.policy_tree_binding is None:
+            failure = SourceFailure(
+                "process-input-binding-invalid",
+                "Policy process input bindings are incomplete.",
+            )
+            return _all_indeterminate(events, failure, "Process")
+
+        executable_path, expected_executable = self.executable_binding
+        policy_tree_path, expected_tree = self.policy_tree_binding
+        try:
+            actual_executable = sha256_file(executable_path)
+            actual_tree = sha256_tree(policy_tree_path)
+        except OSError:
+            failure = SourceFailure(
+                "process-input-changed",
+                "Bound policy process inputs became unavailable before execution.",
+            )
+            return _all_indeterminate(events, failure, "Process")
+        if actual_executable != expected_executable or actual_tree != expected_tree:
+            failure = SourceFailure(
+                "process-input-changed",
+                "Bound policy process inputs changed before execution.",
+            )
+            return _all_indeterminate(events, failure, "Process")
+        return None
+
     def evaluate(self, event_values: list[object]) -> PolicySourceResult:
         events = validate_command_events(event_values)
+        binding_failure = self._input_binding_failure(events)
+        if binding_failure is not None:
+            return binding_failure
         input_bytes = "".join(
             f"{json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n"
             for event in events

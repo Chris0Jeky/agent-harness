@@ -11,6 +11,7 @@ from pathlib import Path
 import shlex
 import shutil
 import sys
+import tempfile
 from typing import Any
 
 from replay_v0.compare import ComparisonError, compare_decisions
@@ -30,7 +31,7 @@ from replay_v0.manifests import (
     ManifestError,
     build_run_manifest,
     load_corpus_manifest,
-    write_manifest,
+    manifest_json_bytes,
 )
 from replay_v0.policy_sources import (
     PolicySourceResult,
@@ -265,11 +266,18 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         lexical_policy_path.name,
     ]
     try:
-        source = ProcessDecisionSource(
-            execution_argv, timeout_seconds=timeout
-        ).with_runtime(
-            cwd=lexical_policy_path.parent,
-            environment=PROCESS_ENVIRONMENT,
+        source = (
+            ProcessDecisionSource(execution_argv, timeout_seconds=timeout)
+            .with_runtime(
+                cwd=lexical_policy_path.parent,
+                environment=PROCESS_ENVIRONMENT,
+            )
+            .with_input_binding(
+                executable_path=executable_path.resolve(),
+                executable_sha256=executable_digest,
+                policy_tree_path=lexical_policy_path.parent,
+                policy_tree_sha256=policy_tree_digest,
+            )
         )
     except ValueError as exc:
         raise ReplayInputError(str(exc)) from exc
@@ -346,6 +354,71 @@ def _run_validate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _publish_report_set(
+    output: Path,
+    *,
+    run_manifest_bytes: bytes,
+    report_bytes: bytes,
+    markdown_bytes: bytes,
+) -> None:
+    """Stage and transactionally replace the three report artifacts."""
+
+    artifacts = (
+        ("run-manifest.json", run_manifest_bytes),
+        ("report.json", report_bytes),
+        ("report.md", markdown_bytes),
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".replay-output-", dir=output.parent))
+    staged = staging_root / "staged"
+    previous = staging_root / "previous"
+    preserve_staging = False
+    try:
+        staged.mkdir()
+        previous.mkdir()
+        for name, content in artifacts:
+            (staged / name).write_bytes(content)
+
+        output.mkdir(exist_ok=True)
+        moved_previous: list[str] = []
+        published: list[str] = []
+        try:
+            for name, _content in artifacts:
+                target = output / name
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise OSError(f"output artifact {name!r} is not a regular file")
+                if target.exists():
+                    target.replace(previous / name)
+                    moved_previous.append(name)
+            for name, _content in artifacts:
+                (staged / name).replace(output / name)
+                published.append(name)
+        except OSError as publish_error:
+            rollback_errors: list[OSError] = []
+            for name in reversed(published):
+                try:
+                    (output / name).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            for name in reversed(moved_previous):
+                try:
+                    (previous / name).replace(output / name)
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            if rollback_errors:
+                preserve_staging = True
+                raise OSError(
+                    "report publication failed and rollback was incomplete; "
+                    "recovery files were retained"
+                ) from publish_error
+            raise
+    finally:
+        if not preserve_staging:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+
 def _run_replay(args: argparse.Namespace) -> int:
     corpus = _load_charter_corpus(args.corpus)
     baseline = _load_policy_source(args.baseline, args.timeout)
@@ -396,13 +469,13 @@ def _run_replay(args: argparse.Namespace) -> int:
 
     output = Path(args.output)
     try:
-        output.mkdir(parents=True, exist_ok=True)
-        write_manifest(output / "run-manifest.json", run_manifest)
-        (output / "report.json").write_bytes(report_json_bytes(report))
-        (output / "report.md").write_bytes(
-            render_markdown_report(
+        _publish_report_set(
+            output,
+            run_manifest_bytes=manifest_json_bytes(run_manifest),
+            report_bytes=report_json_bytes(report),
+            markdown_bytes=render_markdown_report(
                 report, reproduction_command=reproduction_command
-            ).encode("utf-8")
+            ).encode("utf-8"),
         )
     except OSError as exc:
         print(f"replay output failed: {exc}", file=sys.stderr)

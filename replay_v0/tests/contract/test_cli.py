@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -224,6 +225,39 @@ for index, event in enumerate(events):
             self.assertTrue((output / "report.md").is_file())
             self.assertTrue((output / "run-manifest.json").is_file())
 
+    def test_output_publication_failure_restores_the_previous_report_set(self) -> None:
+        with self.fixture("same") as (directory, corpus, recording, candidate):
+            output = directory / "existing-report"
+            output.mkdir()
+            previous = {
+                "run-manifest.json": b'{"old":"manifest"}\n',
+                "report.json": b'{"old":"report"}\n',
+                "report.md": b"old report\n",
+            }
+            for name, content in previous.items():
+                (output / name).write_bytes(content)
+
+            original_replace = Path.replace
+
+            def reject_locked_report(path, target):
+                if path == output / "report.json":
+                    raise PermissionError("synthetic locked report")
+                return original_replace(path, target)
+
+            stderr = io.StringIO()
+            with mock.patch.object(
+                Path, "replace", autospec=True, side_effect=reject_locked_report
+            ), redirect_stderr(stderr):
+                exit_code = main(self.replay_args(corpus, recording, candidate, output))
+
+            self.assertEqual(3, exit_code)
+            self.assertIn("replay output failed", stderr.getvalue())
+            self.assertEqual(
+                previous,
+                {name: (output / name).read_bytes() for name in previous},
+            )
+            self.assertFalse(list(directory.glob(".replay-output-*")))
+
     def test_timeout_changes_process_identity_and_run_id(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):
             normal_output = directory / "normal-report"
@@ -355,6 +389,37 @@ for index, event in enumerate(events):
         denied_manifest = build_run_manifest(candidate=denied.identity, **common)
         allowed_manifest = build_run_manifest(candidate=allowed.identity, **common)
         self.assertNotEqual(denied_manifest["run_id"], allowed_manifest["run_id"])
+
+    def test_process_policy_tree_is_revalidated_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "rules.py"
+            policy.write_text(
+                "import json\n"
+                "import sys\n"
+                "from rules import EFFECT\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                '    print(json.dumps({"schema_version": "policy-decision.v1", '
+                '"event_id": event["event_id"], "effect": EFFECT, '
+                '"reason": "Sibling rule."}))\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            helper.write_text('EFFECT = "deny"\n', encoding="utf-8", newline="\n")
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+
+            helper.write_text('EFFECT = "allow"\n', encoding="utf-8", newline="\n")
+            result = loaded.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["process-input-changed"],
+            [failure.code for failure in result.failures],
+        )
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
 
     def test_process_policy_symlink_keeps_supplied_parent_and_name(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:

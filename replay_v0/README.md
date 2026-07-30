@@ -60,8 +60,15 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 identity includes the executable bytes, normalized invocation, entry-policy bytes, the relative
 names and exact regular-file bytes in the policy-parent tree, configured timeout, fixed
 environment, and policy-parent working-directory contract without writing absolute paths to the
-run manifest. External installed dependencies, files outside that tree, network responses, and
+run manifest. The executable and policy-parent tree are revalidated immediately before execution;
+if either changed or became unreadable, the process does not run and its decisions become
+`indeterminate`. External installed dependencies, files outside that tree, network responses, and
 host metadata are not bound; callers that depend on them must isolate and record that environment.
+
+The three report artifacts are fully staged before publication. Replacing an existing report set
+uses rollback: a publication error restores the prior complete set instead of leaving a new
+manifest beside old results. This is an in-process failure guarantee, not an operating-system crash
+transaction; callers still own durable artifact storage.
 
 Reports describe changes between decisions. They never claim that an original command was safe,
 unsafe, executed, or reproduced. The checked-in reference and test lane performs no network access

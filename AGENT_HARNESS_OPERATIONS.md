@@ -100,6 +100,9 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
 - **CONSTRAINT:** Process identity binds the entry-policy bytes plus the relative names and exact regular-file bytes in its policy-parent tree. Installed dependencies, files outside that tree, network responses, and host metadata remain outside the portable identity, so callers that depend on them must isolate and record that environment.
+- **CONSTRAINT:** The bound executable and policy-parent tree are revalidated immediately before
+  process start. A change or read failure yields `indeterminate` decisions and exit `3`; the runner
+  does not execute bytes that differ from the recorded identity.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash
@@ -206,6 +209,9 @@ python -m replay_v0.cli replay \
 - **CONSTRAINT:** The Markdown report begins with counts, gate result, policy identities, corpus identity, and the exact reproduction command.
 - **CONSTRAINT:** The JSON report contains every event result and remains the machine-readable source of truth.
 - **CONSTRAINT:** The report may describe a change; it may not claim that the original command was safe, executed, or reproduced.
+- **CONSTRAINT:** The manifest and both reports are staged as one publication set. If replacing an
+  existing artifact fails, the previous complete set is restored. This covers handled in-process
+  publication errors, not power loss or operating-system crashes.
 
 ## Exit codes
 
