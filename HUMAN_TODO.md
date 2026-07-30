@@ -45,15 +45,17 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   lanes. `AGENT_HARNESS_OPERATIONS.md` and CI record and exercise both roles.
 - [x] **H-11** — **OWNER DECISION 2026-07-30, AMENDED 2026-07-30.** The owner removed the
   calendar launch deadline and lifted maintenance-only mode so otherwise authorised work can start
-  immediately in dependency order. The 24-hour total cap, 13-hour extraction allocation, 11-hour
-  public-product allocation, and 2026-09-30 continuation review remain unchanged.
+  immediately in dependency order. The 13-hour extraction plus 11-hour public-product allocation
+  and 2026-09-30 continuation review remain as historical programme accounting; they are not a
+  global cap or launch trigger for the wider workbench mission.
 - [x] **H-12** — **OWNER DECISION 2026-07-30.** `Chris0Jeky/agent-harness` remains public for now.
   A later move to private visibility is optional and non-urgent; until live host state changes,
   every tracked artifact is treated as immediately public and private replay inputs stay local.
 - [x] **H-13** — **OWNER APPROVAL 2026-07-30.** Approved all four charter-v0 checklist points:
   the 20/20/10 composition, privacy-safe fictional/redacted content, the explicitly synthetic
   freeze-candidate baseline, and the replay-only 35-file extraction allowlist. This approves the
-  manifest contents; clean-repository creation, name, licence, and release remain separate gates.
+  manifest as internal reproducibility/privacy evidence. Clean-repository creation, name, licence,
+  and release are deferred to AH-10 and are not the next owner question.
 
 ## Changelog
 

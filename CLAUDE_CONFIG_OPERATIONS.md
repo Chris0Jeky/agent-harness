@@ -1,7 +1,10 @@
 Purpose: Authoritative operating contract for high-autonomy agent work in the private `claude-config` repository.
 Status: ACTIVE; the owner lifted maintenance-only mode and approved immediate,
 dependency-ordered work under named task contracts.
-Authority relationship: This document wins for private `claude-config` operations, cross-repository autonomy, failure-ledger, promotion-review, and private/public-boundary policy; the other three operating documents win only in their named repository domains.
+Authority relationship: This document wins for private `claude-config` operations,
+cross-repository autonomy, failure-ledger, promotion-review, and private/public-boundary policy.
+`AGENT_HARNESS_AGENT_BRIEF.md` wins for the current `agent-harness` workbench mission; this file
+cannot defer that repository's Doctor, estate, adapter, measurement, or bounded-guard roadmap.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
@@ -9,7 +12,9 @@ Owner: Cristian Tcaci
 
 - **DECISION CC-001:** The owner lifted maintenance-only mode and removed its calendar end date.
   An otherwise authorised task may start immediately in dependency order.
-- **DECISION CC-002:** The owner confirmed that the shared launch budget is **24 focused hours across `agent-harness` extraction and the public replay repository**, not a separate 24-hour allowance for this repository.
+- **DECISION CC-002:** The former replay launch programme recorded **24 focused hours** across
+  replay extraction and a possible public repository. That is historical accounting, not a cap on
+  the wider `agent-harness` workbench or a separate allowance for this repository.
 - **OPEN CC-003:** Confirm the repository's currently supported Python versions and existing test/lint entry points. Until confirmed, agents must not install or replace tooling merely to satisfy the proposed quality-gate interface.
 - **DECISION CC-004:** The owner placed this canonical policy document at the root of the currently public `agent-harness` repository in commit `6d6e22e`. The policy prose is public, but the document remains excluded from the replay-v0 extraction allowlist and does not authorize exporting private Claude-config data.
 - **OPEN CC-005:** Confirm whether the existing Gardener already has a kill switch. If it does, preserve the existing mechanism and record it in `policy/catalog.yaml`; do not add a second switch.
@@ -18,7 +23,9 @@ Owner: Cristian Tcaci
 
 - **DECISION:** This file is the sole authoritative home for the owner's cross-repository agent-autonomy classes, mandatory-review classes, `HUMAN_TODO.md` routing, failure-ledger schema, manual promotion-review procedure, and private/public allowlist principle.
 - **CONSTRAINT:** `AGENT_HARNESS_OPERATIONS.md`, `REPLAY_TOOL_PRODUCT.md`, and `BLUEPRINT_PLUGIN_PRODUCT.md` must link to the relevant section here rather than restating these policies.
-- **CONSTRAINT:** The earlier strategic repositioning, technical design, learning-system blueprint, and research documents are background evidence only. They do not authorise implementation work when this file says that work is deferred or out of scope.
+- **CONSTRAINT:** Earlier strategic repositioning, technical design, learning-system blueprint,
+  and research documents are background evidence only. `AGENT_HARNESS_AGENT_BRIEF.md` is not in
+  that class: it is the active repository mission for `agent-harness`.
 - **CONSTRAINT:** Every new policy statement must have exactly one canonical source path and one `policy/catalog.yaml` entry. Summaries elsewhere must link to that source and may not paraphrase the rule as a second normative statement.
 
 # Active operating mode
@@ -27,10 +34,11 @@ Owner: Cristian Tcaci
   dependencies, and stop conditions are satisfied may start immediately.
 - **CONSTRAINT:** Removing the date gate does not waive budgets, review requirements, repository
   authority, private/public boundaries, or a task's named evidence and owner-approval triggers.
-- **CONSTRAINT:** A promotion engine, scheduled Gardener, telemetry expansion, fictional estate,
-  public plugin packaging, new agent platform, new policy compiler, new cross-runtime adapter
-  framework, and automated skill creation remain unavailable until their own named trigger and
-  explicit owner approval exist. Absence of a date is not approval.
+- **CONSTRAINT:** A private Claude-config promotion engine, scheduled Gardener, telemetry
+  expansion, fictional estate, public plugin packaging, new agent platform, new policy compiler,
+  speculative cross-runtime adapter framework, and automated skill creation remain unavailable
+  until their own named trigger and explicit owner approval exist. This does not defer bounded,
+  evidence-driven Doctor, estate, adapter, or measurement slices inside `agent-harness`.
 - **CONSTRAINT:** An agent that discovers work without a satisfied task contract appends a backlog
   proposal to `HUMAN_TODO.md` with an evidence trigger; it does not infer authorisation.
 - **DEFERRED:** Scheduled Gardener operation unlocks only after three useful manual cycles, no consecutive unmerged proposals, a tested kill switch, and explicit owner approval.

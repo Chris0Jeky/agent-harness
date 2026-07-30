@@ -1,6 +1,6 @@
-Purpose: Authoritative freeze, extraction, and replay-kernel contract for the existing public `agent-harness` repository.
-Status: ACTIVE for freeze and extraction only; universal-parser feature development is stopped.
-Authority relationship: This document wins for the legacy dispatcher freeze, source-asset extraction, and replay-kernel technical contracts; `CLAUDE_CONFIG_OPERATIONS.md` wins for autonomy and evidence handling, while `REPLAY_TOOL_PRODUCT.md` wins for public naming, release, launch, and continuation decisions.
+Purpose: Authoritative legacy-freeze and replay-v0 technical contract inside the active public `agent-harness` workbench.
+Status: ACTIVE for the legacy freeze and the internal replay Policy Lab only; universal-parser feature expansion remains stopped.
+Authority relationship: `AGENT_HARNESS_AGENT_BRIEF.md` wins for repository mission and roadmap. This document wins only for the legacy dispatcher freeze, replay-v0 contracts, and the historical extraction record. `CLAUDE_CONFIG_OPERATIONS.md` wins for private Claude-config autonomy and evidence handling. `REPLAY_TOOL_PRODUCT.md` is a deferred AH-10 product brief, not an active launch instruction.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
@@ -10,18 +10,24 @@ Owner: Cristian Tcaci
 - **DECISION AH-002:** The current dispatcher, replay, fixture, and test paths are confirmed by `docs/extraction/inventory.md`; no legacy path was moved.
 - **DECISION AH-003:** The existing dependency-free `unittest` lanes are authoritative for this repository. Pytest 9.0.3 is also owner-approved as a development dependency and compatibility runner for the declared Pytest commands.
 - **OPEN AH-004:** Confirm whether the legacy dispatcher can execute in a clean isolated environment. The public baseline does not depend on this answer because recorded decisions are first-class.
-- **DECISION AH-005:** The owner removed the calendar launch deadline. Work proceeds immediately
-  in dependency order under the unchanged 24-hour total cap: 13 hours for this document and the
-  remaining 11 hours for `REPLAY_TOOL_PRODUCT.md`.
+- **DECISION AH-005:** The owner removed the calendar launch deadline. The original 13-hour replay
+  extraction allocation plus 11-hour public-product allocation is retained as historical
+  accounting for that programme. It is not a cap on the wider workbench mission.
 
 # Authority and operating decision
 
-- **DECISION:** The existing repository becomes a frozen evidence source and extraction workspace, not the public product repository.
+- **DECISION:** `agent-harness` is an active agent-operations workbench. `replay_v0` is its internal
+  Policy Lab and evidence centre, not the repository's entire mission.
 - **DECISION:** `Chris0Jeky/agent-harness` remains public for now. Every tracked artifact is treated as immediately public; a future visibility change must be verified from live host state and does not relax the private-input boundary.
 - **DECISION:** The legacy dispatcher is preserved at a reviewed commit and immutable tag; it is not rewritten, reformatted, or expanded to support new command shapes.
-- **DECISION:** The only active implementation scope is the decision-replay kernel defined below and the minimum extraction support needed to move it into the clean public repository.
+- **DECISION:** This document's implementation scope is the decision-replay kernel defined below.
+  Doctor v2, Pattern Guard v2, estate operations, adapters, measurement, and Claude-config
+  integration remain active workbench roadmap domains under `AGENT_HARNESS_AGENT_BRIEF.md`.
+- **DECISION:** No clean public replay repository is created now. Public extraction is deferred to
+  AH-10, after internal stability and demonstrated demand.
 - **CONSTRAINT:** Cross-repository autonomy, mandatory owner review, `HUMAN_TODO.md`, failure-ledger schema, and manual promotion policy are defined only in `CLAUDE_CONFIG_OPERATIONS.md`; agents must apply those rules by reference.
-- **CONSTRAINT:** Any discovered work outside this contract becomes a backlog proposal with an evidence trigger. It must not be implemented in this repository.
+- **CONSTRAINT:** Work outside this replay contract follows the workbench roadmap and active-plan
+  limits; this file does not defer or authorise it.
 - **CONSTRAINT:** A green legacy test suite does not reopen universal-parser development.
 
 # Freeze contract
@@ -31,7 +37,7 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** After the tag, the legacy dispatcher path is read-only except for a security-critical preservation fix explicitly approved by the owner.
 - **CONSTRAINT:** New bypasses, false positives, and environment incompatibilities are recorded as evidence or corpus candidates; they are not automatically fixed in the legacy parser.
 - **CONSTRAINT:** The freeze record must contain the commit SHA, dispatcher path, line count, test command, known environment assumptions, known false-positive families, known false-negative families, and the location of recorded decisions.
-- **CONSTRAINT:** The public replay repository must not require the legacy code, its private configuration, or its machine environment at runtime.
+- **CONSTRAINT:** Any future public extraction must not require the legacy code, its private configuration, or its machine environment at runtime.
 
 # V0 product boundary
 
@@ -233,14 +239,16 @@ python -m replay_v0.cli replay \
 - **CONSTRAINT:** No universal shell parsing, recursive wrapper interpretation, variable expansion, repository-state inference, or network probes.
 - **CONSTRAINT:** No generic `ToolEvent`, file-edit event, MCP event, GitHub event, cloud event, or agent trajectory replay.
 - **CONSTRAINT:** No policy DSL, YAML rule compiler, rule precedence engine, risk profiles, approval workflow, or authorisation context.
-- **CONSTRAINT:** No Configuration Doctor, telemetry platform, failure clustering, promotion engine, blueprint plugin, fictional estate, or scheduler.
+- **CONSTRAINT:** Replay v0 itself contains no Configuration Doctor, telemetry platform, failure
+  clustering, promotion engine, blueprint plugin, fictional estate, or scheduler. This module
+  boundary does not abandon the separate Doctor, estate, adapter, or measurement roadmap domains.
 - **CONSTRAINT:** No academic benchmark claim, leaderboard, or broad safety claim.
 - **CONSTRAINT:** No external integration in core v0. The DCG compatibility demonstration belongs to `REPLAY_TOOL_PRODUCT.md` as an example shim.
 - **CONSTRAINT:** No new legacy-parser feature or broad refactor.
 
-# Repository layout for extraction work
+# Repository layout for the internal Policy Lab
 
-- **DECISION:** The existing extraction workspace uses this bounded shape, adapted to existing paths where necessary. Because this repository is public, private inputs and generated private outputs remain local and ignored:
+- **DECISION:** The internal Policy Lab uses this bounded shape, adapted to existing paths where necessary. Because this repository is public, private inputs and generated private outputs remain local and ignored:
 
 ```text
 agent-harness/
@@ -264,7 +272,9 @@ agent-harness/
 ```
 
 - **CONSTRAINT:** Do not move the legacy implementation merely to match this diagram if doing so risks history, imports, or tests. A reference path is acceptable.
-- **CONSTRAINT:** Only files approved by the extraction manifest are copied into the clean public repository.
+- **CONSTRAINT:** The completed extraction manifest is retained as reproducibility and privacy
+  evidence. If AH-10 later authorises a clean public repository, only manifest-approved files may
+  be considered for copying and must be re-reviewed against then-current source bytes.
 
 # Autonomy, evidence, and stop policy
 
@@ -295,12 +305,15 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 - **CONSTRAINT:** Required CI checks before merging extraction work are `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
 - **CONSTRAINT:** `replay-fast` and `replay-tests` use the authoritative dependency-free `unittest` lanes. `operations-contract` installs the approved development requirements and proves the declared Pytest commands remain compatible.
 
-# Sequence and budget allocation
+# Historical replay-v0 task accounting
 
-- **DECISION:** No calendar date delays an otherwise unblocked task; work proceeds immediately in
-  dependency order under the owner-confirmed 24-hour total cap.
-- **DECISION:** These ten tasks have a combined maximum of **13 hours**. `REPLAY_TOOL_PRODUCT.md` owns the remaining **11 hours**.
-- **CONSTRAINT:** When the cumulative logged time reaches 13 hours, the agent stops extraction work and presents the completed subset. Deferred polish does not consume the public-product allocation without owner approval.
+- **DECISION:** The ten tasks below record the completed replay-v0 extraction plan and its original
+  **13-hour** allocation; `REPLAY_TOOL_PRODUCT.md` recorded a separate **11-hour** public-product
+  allocation.
+- **CONSTRAINT:** The combined 13+11/24-hour figure remains historical programme accounting. It
+  does not cap AH-1 through AH-10 or make public extraction the next workstream.
+- **CONSTRAINT:** The task list is preserved as implementation provenance, not as authority to
+  create a clean repository or launch a public product.
 
 # First 10 tasks
 
@@ -412,12 +425,13 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 - **Out of scope:** Bulk conversion of the old test suite, live transcript ingestion, benchmark claims, or adding cases merely to increase count.
 - **Stop condition:** Halt when a case cannot be sanitised without changing the relevant command structure; keep it private and replace it with a synthetic case.
 
-## Task 10 — Prove determinism and create the extraction bundle
+## Task 10 — Prove determinism and create the internal extraction proof
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
 - **Sequence:** Start after Tasks 1 through 9 are complete.
-- **Objective:** Run the full v0 fast gate twice and create an allowlisted source bundle for the clean public repository.
+- **Objective:** Run the full v0 fast gate twice and create an allowlisted local source bundle as
+  deterministic extraction and privacy evidence.
 - **Paths touched:** `replay_v0/tests/test_determinism.py`, `docs/extraction/public-v0-manifest.json`, generated local bundle under an ignored path.
 - **Acceptance criteria:** Two runs produce identical semantic JSON and `run_id`; fast lane remains under 60 seconds; the manifest lists only v0 source, schemas, synthetic corpus, tests, and approved documentation.
 - **Verify:** `python -m pytest -q replay_v0/tests && python -m replay_v0.cli replay --baseline recorded:replay_v0/fixtures/legacy-decisions.jsonl --candidate process:python,replay_v0/tests/fixtures/process_policies/reference_candidate.py --corpus replay_v0/corpora/charter/events.jsonl --output .local/replay-proof`

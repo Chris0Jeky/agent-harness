@@ -1,29 +1,42 @@
-Purpose: Authoritative product, repository, launch, release, distribution, and continuation brief for the public decision-replay tool.
-Status: ACTIVE for immediate dependency-ordered work under the owner-confirmed 24-hour total cap;
-public release still requires owner confirmation.
-Authority relationship: This document wins for the public replay product, clean-repository decision, working name, README, release, outreach, and continuation gate; `AGENT_HARNESS_OPERATIONS.md` wins for replay-kernel technical contracts and `CLAUDE_CONFIG_OPERATIONS.md` wins for owner-supervision policy.
+Purpose: Preserved candidate product brief for a possible future public decision-replay extraction.
+Status: DEFERRED under AH-10. Do not create a clean repository, launch a product, choose a final
+name or licence, publish, or send outreach from this document.
+Authority relationship: `AGENT_HARNESS_AGENT_BRIEF.md` wins for current repository mission and
+defers public extraction until internal stability and demonstrated demand. If AH-10 is later
+unlocked, this document supplies candidate product requirements; `AGENT_HARNESS_OPERATIONS.md`
+still wins for replay-kernel contracts and `CLAUDE_CONFIG_OPERATIONS.md` for owner supervision.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
 # Decision register
 
-- **DECISION RP-001:** The owner removed the calendar launch deadline. An otherwise unblocked task
-  may start immediately in dependency order.
-- **DECISION RP-002:** The owner confirmed the hard launch budget of **24 focused hours**, split as 13 hours under `AGENT_HARNESS_OPERATIONS.md` and 11 hours under this document.
-- **DECISION RP-003:** The owner confirmed the continuation review date of **2026-09-30**.
-- **OPEN RP-004:** Select the final repository, Python package, and CLI name. `CharterReplay` / `charter-replay` is the working recommendation.
-- **OPEN RP-005:** Select the licence after provenance review. The recommendation is Apache-2.0 when all extracted code is owner-controlled and compatible; otherwise preserve the most restrictive compatible existing licence and record the reason.
+- **HISTORICAL RP-001:** The owner removed the former calendar launch deadline.
+- **HISTORICAL RP-002:** The original public-product programme recorded **24 focused hours**:
+  13 hours for replay extraction and 11 hours for this product brief. That accounting is not a
+  global workbench cap.
+- **HISTORICAL RP-003:** A 2026-09-30 continuation review was recorded for the former launch plan;
+  the date does not trigger extraction.
+- **DEFERRED RP-004:** Final repository, package, and CLI naming is an AH-10 decision, not the next
+  owner question. `CharterReplay` / `charter-replay` remains only a candidate.
+- **DEFERRED RP-005:** Licensing is an AH-10 decision after provenance review, not the next owner
+  question. No licence recommendation authorises a change.
 
-# Repository decision
+# Deferred repository design
 
-- **DECISION:** The public replay product is a **clean new repository**, not a public release branch inside the existing `agent-harness` repository.
+- **DEFERRED:** A future public replay product may use a **clean new repository** rather than a
+  public release branch inside `agent-harness`; AH-10 must re-evaluate and explicitly approve that
+  choice. Do not create it now.
 - **DECISION:** The clean repository receives only the allowlisted replay kernel, schemas, synthetic/redacted charter corpus, deterministic tests, product documentation, and examples.
 - **CONSTRAINT:** The clean repository receives no legacy dispatcher source, private configuration, private corpus, raw history, machine paths, client/project identity, or private Git history.
-- **CONSTRAINT:** The existing `agent-harness` repository remains the evidence archive, frozen baseline source, postmortem source, and extraction workspace.
-- **DECISION:** This separation is chosen because the public product must install and reproduce its report without the 12,000-line legacy environment, and because selective copying is safer and easier to explain than history rewriting.
+- **CONSTRAINT:** `agent-harness` remains the active workbench. Its internal replay module is the
+  Policy Lab and evidence centre alongside Doctor, estate, adapter, measurement, and bounded-guard
+  domains.
+- **DEFERRED:** If extraction is later approved, clean copying remains the candidate because an
+  independent product should not require the legacy environment and history rewriting is not an
+  acceptable shortcut.
 - **CONSTRAINT:** Repository creation, visibility selection, public push, package-name reservation, and release publication require owner review under `CLAUDE_CONFIG_OPERATIONS.md#autonomy-boundary`.
 
-# Candidate names
+# Deferred candidate names
 
 | Candidate | Classification | Decision rationale |
 |---|---|---|
@@ -32,7 +45,8 @@ Owner: Cristian Tcaci
 | `CommandPolicyReplay` / `command-policy-replay` | **OPEN alternative** | Technically explicit and honest, but long for a repository, package, and CLI command. |
 
 - **CONSTRAINT:** Before public creation, the owner must recheck GitHub, PyPI, package-manager, and basic web-name availability. Search findings are time-sensitive and are not a reservation.
-- **CONSTRAINT:** The implementation uses `charter_replay` as the provisional import package and `charter-replay` as the provisional CLI until RP-004 is resolved.
+- **CONSTRAINT:** The current internal module remains `replay_v0`. The provisional public names
+  below apply only if AH-10 later unlocks extraction.
 
 # Product definition
 
@@ -249,7 +263,7 @@ charter-replay/
 | Hazard taxonomy | Two policies cannot be compared meaningfully using simple case labels |
 | Metamorphic tests | A real normalisation variation causes a regression |
 | Policy DSL | Repeated code-based rules demonstrate a stable common grammar |
-| Configuration Doctor | External users repeatedly cannot determine which configuration is active |
+| Public Configuration Doctor package | Internal Doctor v2 is stable and external users repeatedly cannot determine which configuration is active |
 | Live runtime adapter | Users ask to move from offline comparison to interception |
 | Public Claude-config blueprint | At least two components prove useful across multiple repositories |
 | Promotion Engine | Several manual promotion decisions reveal a repeatable workflow |
@@ -283,23 +297,25 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 - **CONSTRAINT:** `privacy-scan` checks tracked files and built artifacts for forbidden owner paths, private repository names, credential patterns, and files outside the extraction allowlist; it does not upload repository content.
 - **CONSTRAINT:** CI has read-only repository permissions unless a separately reviewed release job requires more.
 
-# Sequence and budget allocation
+# Historical public-product allocation
 
-- **DECISION:** No calendar date delays an otherwise unblocked task; work proceeds immediately in
-  dependency order.
-- **DECISION:** The first ten tasks below have a combined maximum of **11 hours**. Together with the 13-hour extraction allocation, they exhaust the 24-hour cap.
-- **CONSTRAINT:** At 24 cumulative hours, agents stop, report the completed subset, and route
-  omitted polish to the deferred backlog. Immediate start does not authorise overtime or scope
-  expansion.
+- **HISTORICAL:** The ten tasks below carried an **11-hour** allocation in the former public launch
+  plan. Together with the 13-hour replay extraction allocation, that produced the historical
+  24-hour figure.
+- **CONSTRAINT:** No task below is active. The figure neither caps the wider workbench mission nor
+  authorises clean-repository creation, naming, licensing, release, or outreach.
 
-# First 10 tasks
+# Deferred AH-10 task candidates
+
+- **CONSTRAINT:** Every task below is locked until AH-10 records internal stability,
+  demonstrated demand, duplicate-search results, current provenance/privacy evidence, and the
+  required owner decisions. Listing a task is not authorisation.
 
 ## Task 1 — Create the clean local repository and reserve the working identity
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Sequence:** Start immediately after the agent-harness extraction PR closes and the owner clears
-  the clean-repository and final-identity gates.
+- **Sequence:** Deferred until AH-10 is explicitly unlocked; PR #140 closing does not unlock it.
 - **Objective:** Create a local clean repository using the provisional `charter-replay` name and add only root governance files.
 - **Paths touched:** New repository root, `REPLAY_TOOL_PRODUCT.md`, `.gitignore`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** `git log` begins with clean public-intent history; no file from private Git history is imported; `HUMAN_TODO.md` contains final name, visibility, licence, and remote-creation actions.

@@ -1,6 +1,9 @@
 Purpose: Locked operating brief for a future public blueprint plugin extracted from proven private `claude-config` components.
 Status: DEFERRED AND LOCKED; no implementation task is authorised until every precondition in this document is satisfied and the owner records an explicit unlock.
-Authority relationship: This document wins only for blueprint-plugin unlock conditions, extraction allowlist format, fictional-estate scope, and candidate evidence; `CLAUDE_CONFIG_OPERATIONS.md` wins for private operation and supervision, and `REPLAY_TOOL_PRODUCT.md` wins for the current public-product effort.
+Authority relationship: This document wins only for blueprint-plugin unlock conditions,
+extraction allowlist format, fictional-estate scope, and candidate evidence;
+`CLAUDE_CONFIG_OPERATIONS.md` wins for private operation and supervision. The replay public-product
+brief is deferred under AH-10 and does not weaken this document's conjunctive unlock.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
@@ -16,7 +19,8 @@ Owner: Cristian Tcaci
 
 - **CONSTRAINT:** Any agent starting implementation, extraction, fictional-estate construction, repository creation, packaging, or publication before every precondition below holds is out of policy.
 - **CONSTRAINT:** An out-of-policy attempt must stop immediately, append a redacted failure record using `CLAUDE_CONFIG_OPERATIONS.md#failure-and-friction-ledger`, and route the proposed work to `HUMAN_TODO.md`.
-- **CONSTRAINT:** Planning or polishing this product is not a substitute for completing the replay-tool launch and continuation review.
+- **CONSTRAINT:** Planning or polishing this product is not a substitute for the active
+`agent-harness` workbench mission. No replay launch or date independently unlocks it.
 
 # Preconditions: all must hold
 
