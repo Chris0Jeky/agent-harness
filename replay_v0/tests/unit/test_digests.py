@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -44,6 +45,24 @@ class DigestTests(unittest.TestCase):
                 self.assertEqual(original, sha256_tree(second))
                 (first / "rules.py").write_bytes(b'EFFECT = "allow"\n')
                 self.assertNotEqual(original, sha256_tree(first))
+
+    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
+    def test_tree_digest_binds_file_and_directory_executable_bits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            helper = root / "helper"
+            helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+            os.chmod(root, 0o755)
+            os.chmod(helper, 0o644)
+            original = sha256_tree(root)
+
+            os.chmod(helper, 0o754)
+            executable_file = sha256_tree(root)
+            os.chmod(root, 0o750)
+            executable_directory = sha256_tree(root)
+
+        self.assertNotEqual(original, executable_file)
+        self.assertNotEqual(executable_file, executable_directory)
 
 
 if __name__ == "__main__":

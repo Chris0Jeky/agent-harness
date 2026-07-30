@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -389,6 +390,98 @@ for index, event in enumerate(events):
         denied_manifest = build_run_manifest(candidate=denied.identity, **common)
         allowed_manifest = build_run_manifest(candidate=allowed.identity, **common)
         self.assertNotEqual(denied_manifest["run_id"], allowed_manifest["run_id"])
+
+    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
+    def test_process_helper_executable_bits_change_identity_and_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "helper"
+            policy.write_text("pass\n", encoding="utf-8", newline="\n")
+            helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+            os.chmod(helper, 0o644)
+            non_executable = _load_process_source(f"{sys.executable},{policy}", 5.0)
+
+            os.chmod(helper, 0o755)
+            executable = _load_process_source(f"{sys.executable},{policy}", 5.0)
+
+        self.assertNotEqual(
+            non_executable.identity["sha256"], executable.identity["sha256"]
+        )
+        common = {
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "baseline",
+                "sha256": "1" * 64,
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "manifest_sha256": "2" * 64,
+                "event_count": len(EVENTS),
+            },
+            "fail_on": ["newly-allowed"],
+        }
+        non_executable_manifest = build_run_manifest(
+            candidate=non_executable.identity, **common
+        )
+        executable_manifest = build_run_manifest(
+            candidate=executable.identity, **common
+        )
+        self.assertNotEqual(
+            non_executable_manifest["run_id"], executable_manifest["run_id"]
+        )
+
+    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
+    def test_process_executable_bits_change_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            executable_directory = directory / "bin"
+            policy_directory = directory / "policy"
+            executable_directory.mkdir()
+            policy_directory.mkdir()
+            executable = executable_directory / "python-copy"
+            policy = policy_directory / "policy.py"
+            shutil.copy2(sys.executable, executable)
+            policy.write_text("pass\n", encoding="utf-8", newline="\n")
+            os.chmod(executable, 0o755)
+            executable_identity = _load_process_source(
+                f"{executable},{policy}", 5.0
+            ).identity
+
+            os.chmod(executable, 0o644)
+            non_executable_identity = _load_process_source(
+                f"{executable},{policy}", 5.0
+            ).identity
+
+        self.assertNotEqual(
+            executable_identity["sha256"], non_executable_identity["sha256"]
+        )
+
+    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
+    def test_process_helper_mode_is_revalidated_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "helper"
+            policy.write_text("pass\n", encoding="utf-8", newline="\n")
+            helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+            os.chmod(helper, 0o644)
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+
+            os.chmod(helper, 0o755)
+            with mock.patch("replay_v0.policy_sources.subprocess.run") as process_run:
+                result = loaded.source.evaluate(EVENTS)
+
+        process_run.assert_not_called()
+        self.assertEqual(
+            ["process-input-changed"],
+            [failure.code for failure in result.failures],
+        )
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
 
     def test_process_policy_tree_is_revalidated_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:

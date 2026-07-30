@@ -57,10 +57,11 @@ effects. It does not parse command text or reproduce the frozen dispatcher.
 
 Corpus and recorded-source manifests bind exact bytes with SHA-256. A run ID binds the runner
 version, both policy-source identities, the corpus-manifest digest, and gate configuration. Process
-identity includes the executable bytes, normalized invocation, entry-policy bytes, the relative
-names and exact regular-file bytes in the policy-parent tree, configured timeout, fixed
-environment, and policy-parent working-directory contract without writing absolute paths to the
-run manifest. The executable and policy-parent tree are revalidated immediately before execution;
+identity includes the executable bytes and execute-bit tuple, normalized invocation, entry-policy
+bytes, the relative names, exact regular-file bytes, and owner/group/other execute-bit tuples for
+the policy-parent root and entries, configured timeout, fixed environment, and policy-parent
+working-directory contract without writing absolute paths to the run manifest. The executable and
+policy-parent tree are revalidated immediately before execution;
 if either changed or became unreadable, the process does not run and its decisions become
 `indeterminate`. External installed dependencies, files outside that tree, network responses, and
 host metadata are not bound; callers that depend on them must isolate and record that environment.

@@ -99,7 +99,11 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
-- **CONSTRAINT:** Process identity binds the entry-policy bytes plus the relative names and exact regular-file bytes in its policy-parent tree. Installed dependencies, files outside that tree, network responses, and host metadata remain outside the portable identity, so callers that depend on them must isolate and record that environment.
+- **CONSTRAINT:** Process identity binds the executable bytes and execute-bit tuple, the
+  entry-policy bytes, plus the relative names, exact regular-file bytes, and owner/group/other
+  execute-bit tuples for the policy-parent root and entries. Installed dependencies, files outside
+  that tree, network responses, and host metadata remain outside the portable identity, so callers
+  that depend on them must isolate and record that environment.
 - **CONSTRAINT:** The bound executable and policy-parent tree are revalidated immediately before
   process start. A change or read failure yields `indeterminate` decisions and exit `3`; the runner
   does not execute bytes that differ from the recorded identity.

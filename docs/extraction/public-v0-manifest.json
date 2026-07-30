@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "ee4db66e20a0b57ef7d56e068c76f63ec44843ad05f79699d511e336c3139d8e"
+      "sha256": "979b4ae1e587fe7ee9c01d1d5bfe67d4ef8c22b270f24dc6c134f97692c1a1a3"
     },
     {
       "path": "replay_v0/compare.py",
@@ -48,7 +48,7 @@
     {
       "path": "replay_v0/digests.py",
       "kind": "source",
-      "sha256": "7a9cdd797e34216db24c96f17f5c19b7d4b397e3719427cfc3abc4e57246b492"
+      "sha256": "217cce0361f7fc27524bc9864348513fc0c2a97717a13ea47731e3e61644185d"
     },
     {
       "path": "replay_v0/fixtures/legacy-decisions.jsonl",
@@ -78,12 +78,12 @@
     {
       "path": "replay_v0/policy_sources.py",
       "kind": "source",
-      "sha256": "0ca26ea10d9a3b5e66abdf831719e61497f733f10edb61d8553debd0a902672d"
+      "sha256": "1425a97975e93a282f43fe981a63016081fac9d0cb1dc360a53689eaaa314cab"
     },
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "bc8f8e4e2b93c14cde9bc8eaabaa07190bbe4ee4e0e6979fa574402287d4cf50"
+      "sha256": "3759c56ef91aa92471908fba433d79b32ce6fbc978386ba9d74ad5a61f82cf51"
     },
     {
       "path": "replay_v0/reports.py",
@@ -128,7 +128,7 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "029a77517642998c710e211b277b6c326a88b26353da0e08785e8a378819edfa"
+      "sha256": "3e0ff42164058687cd30e311fabc44c35ba97f67e2a96297fd68d29b84667704"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
@@ -168,7 +168,7 @@
     {
       "path": "replay_v0/tests/unit/test_digests.py",
       "kind": "test",
-      "sha256": "264e0109362cf79d53b1c914aae90adb0188ad7f1a62056db198d1fc132fa8ad"
+      "sha256": "70afb4a48d7c5b931afb98ee1ad0b303c9847e5f84c2b8af9a74185564491502"
     },
     {
       "path": "replay_v0/tests/unit/test_manifests.py",

@@ -19,7 +19,7 @@ from replay_v0.corpus import (
     validate_command_events,
     validate_policy_decision,
 )
-from replay_v0.digests import sha256_file, sha256_tree
+from replay_v0.digests import executable_bits, sha256_file, sha256_tree
 
 RECORDED_MANIFEST_VERSION = "recorded-policy-manifest.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -391,7 +391,7 @@ class ProcessDecisionSource:
         self.timeout_seconds = float(timeout_seconds)
         self.cwd: str | None = None
         self.environment: dict[str, str] | None = None
-        self.executable_binding: tuple[Path, str] | None = None
+        self.executable_binding: tuple[Path, str, str] | None = None
         self.policy_tree_binding: tuple[Path, str] | None = None
 
     def with_runtime(
@@ -416,6 +416,7 @@ class ProcessDecisionSource:
         *,
         executable_path: str | Path,
         executable_sha256: str,
+        executable_bits: str,
         policy_tree_path: str | Path,
         policy_tree_sha256: str,
     ) -> ProcessDecisionSource:
@@ -425,7 +426,13 @@ class ProcessDecisionSource:
             policy_tree_sha256
         ):
             raise ValueError("process input bindings require lowercase SHA-256 digests")
-        self.executable_binding = (Path(executable_path), executable_sha256)
+        if not re.fullmatch(r"[01]{3}", executable_bits):
+            raise ValueError("process executable binding requires three execute bits")
+        self.executable_binding = (
+            Path(executable_path),
+            executable_sha256,
+            executable_bits,
+        )
         self.policy_tree_binding = (Path(policy_tree_path), policy_tree_sha256)
         return self
 
@@ -441,10 +448,13 @@ class ProcessDecisionSource:
             )
             return _all_indeterminate(events, failure, "Process")
 
-        executable_path, expected_executable = self.executable_binding
+        executable_path, expected_executable, expected_executable_bits = (
+            self.executable_binding
+        )
         policy_tree_path, expected_tree = self.policy_tree_binding
         try:
             actual_executable = sha256_file(executable_path)
+            actual_executable_bits = executable_bits(executable_path)
             actual_tree = sha256_tree(policy_tree_path)
         except OSError:
             failure = SourceFailure(
@@ -452,7 +462,11 @@ class ProcessDecisionSource:
                 "Bound policy process inputs became unavailable before execution.",
             )
             return _all_indeterminate(events, failure, "Process")
-        if actual_executable != expected_executable or actual_tree != expected_tree:
+        if (
+            actual_executable != expected_executable
+            or actual_executable_bits != expected_executable_bits
+            or actual_tree != expected_tree
+        ):
             failure = SourceFailure(
                 "process-input-changed",
                 "Bound policy process inputs changed before execution.",

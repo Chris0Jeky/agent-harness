@@ -23,6 +23,7 @@ from replay_v0.corpus import (
 )
 from replay_v0.digests import (
     canonical_json_bytes,
+    executable_bits,
     sha256_bytes,
     sha256_file,
     sha256_tree,
@@ -52,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v2"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v3"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -241,6 +242,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         policy_digest = sha256_file(policy_path)
         policy_tree_digest = sha256_tree(lexical_policy_path.parent)
         executable_digest = sha256_file(executable_path)
+        executable_mode = executable_bits(executable_path)
     except OSError as exc:
         raise ReplayInputError(
             "process executable or policy file could not be read"
@@ -248,6 +250,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     normalized_identity = {
         "schema_version": PROCESS_IDENTITY_VERSION,
         "executable": {
+            "executable_bits": executable_mode,
             "name": executable_path.name,
             "sha256": executable_digest,
         },
@@ -275,6 +278,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             .with_input_binding(
                 executable_path=executable_path.resolve(),
                 executable_sha256=executable_digest,
+                executable_bits=executable_mode,
                 policy_tree_path=lexical_policy_path.parent,
                 policy_tree_sha256=policy_tree_digest,
             )
