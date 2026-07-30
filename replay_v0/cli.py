@@ -216,6 +216,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     policy_path = Path(argv[-1])
     if not policy_path.is_file():
         raise ReplayInputError("process source must end in a readable policy file")
+    lexical_policy_path = policy_path.absolute()
     if argv[0] in {"python", "python3"}:
         executable_path = Path(sys.executable)
     else:
@@ -239,30 +240,31 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             "sha256": executable_digest,
         },
         "arguments": argv[1:-1],
-        "policy": {"name": policy_path.name, "sha256": policy_digest},
+        "policy": {"name": lexical_policy_path.name, "sha256": policy_digest},
         "environment": PROCESS_ENVIRONMENT,
         "working_directory": "policy-parent",
     }
     execution_argv = [
         str(executable_path.resolve()),
         *argv[1:-1],
-        policy_path.name,
+        lexical_policy_path.name,
     ]
     try:
         source = ProcessDecisionSource(
             execution_argv, timeout_seconds=timeout
         ).with_runtime(
-            cwd=policy_path.resolve().parent,
+            cwd=lexical_policy_path.parent,
             environment=PROCESS_ENVIRONMENT,
         )
     except ValueError as exc:
         raise ReplayInputError(str(exc)) from exc
+    normalized_identity["timeout_seconds"] = source.timeout_seconds
     return LoadedPolicySource(
         kind="process",
         source=source,
         identity={
             "kind": "process",
-            "id": policy_path.stem,
+            "id": lexical_policy_path.stem,
             "sha256": sha256_bytes(canonical_json_bytes(normalized_identity)),
         },
     )

@@ -224,6 +224,32 @@ for index, event in enumerate(events):
             self.assertTrue((output / "report.md").is_file())
             self.assertTrue((output / "run-manifest.json").is_file())
 
+    def test_timeout_changes_process_identity_and_run_id(self) -> None:
+        with self.fixture("same") as (directory, corpus, recording, candidate):
+            normal_output = directory / "normal-report"
+            normal_exit = main(
+                self.replay_args(corpus, recording, candidate, normal_output)
+            )
+            timeout_output = directory / "timeout-report"
+            timeout_args = self.replay_args(
+                corpus, recording, candidate, timeout_output
+            )
+            timeout_args.extend(["--timeout", "0.000001"])
+            timeout_exit = main(timeout_args)
+
+            normal_report = json.loads(
+                (normal_output / "report.json").read_text(encoding="utf-8")
+            )
+            timeout_report = json.loads(
+                (timeout_output / "report.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(0, normal_exit)
+        self.assertEqual(3, timeout_exit)
+        self.assertEqual("pass", normal_report["gate"]["status"])
+        self.assertEqual("error", timeout_report["gate"]["status"])
+        self.assertNotEqual(normal_report["run_id"], timeout_report["run_id"])
+
     def test_fail_on_accepts_only_the_three_supported_classes(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):
             args = self.replay_args(corpus, recording, candidate, directory / "report")
@@ -246,9 +272,15 @@ for index, event in enumerate(events):
             with_flag = _load_process_source(
                 f"{first_executable},--isolated,{policy}", 1.0
             )
+            with_longer_timeout = _load_process_source(
+                f"{first_executable},{policy}", 2.0
+            )
 
         self.assertNotEqual(first.identity["sha256"], second.identity["sha256"])
         self.assertNotEqual(first.identity["sha256"], with_flag.identity["sha256"])
+        self.assertNotEqual(
+            first.identity["sha256"], with_longer_timeout.identity["sha256"]
+        )
         self.assertEqual({"kind", "id", "sha256"}, set(first.identity))
         self.assertNotIn(raw_directory, json.dumps(first.identity))
 
@@ -268,7 +300,57 @@ for index, event in enumerate(events):
         }
         first_manifest = build_run_manifest(candidate=first.identity, **common)
         second_manifest = build_run_manifest(candidate=second.identity, **common)
+        longer_timeout_manifest = build_run_manifest(
+            candidate=with_longer_timeout.identity, **common
+        )
         self.assertNotEqual(first_manifest["run_id"], second_manifest["run_id"])
+        self.assertNotEqual(first_manifest["run_id"], longer_timeout_manifest["run_id"])
+
+    def test_process_policy_symlink_keeps_supplied_parent_and_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            target_parent = directory / "target"
+            supplied_parent = directory / "supplied"
+            target_parent.mkdir()
+            supplied_parent.mkdir()
+            target = target_parent / "real.py"
+            target.write_text("pass\n", encoding="utf-8", newline="\n")
+            supplied = supplied_parent / "selected.py"
+            try:
+                supplied.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            loaded = _load_process_source(f"{sys.executable},{supplied}", 1.0)
+
+        self.assertEqual(str(supplied_parent.absolute()), loaded.source.cwd)
+        self.assertEqual("selected.py", loaded.source.argv[-1])
+
+    def test_process_policy_runtime_uses_lexical_path_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            target_parent = directory / "target"
+            supplied_parent = directory / "supplied"
+            target_parent.mkdir()
+            supplied_parent.mkdir()
+            target = target_parent / "real.py"
+            supplied = supplied_parent / "selected.py"
+            target.write_text("pass\n", encoding="utf-8", newline="\n")
+            supplied.write_text("pass\n", encoding="utf-8", newline="\n")
+            original_resolve = Path.resolve
+
+            def redirected_resolve(path, *args, **kwargs):
+                if path == supplied:
+                    return target
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(
+                Path, "resolve", autospec=True, side_effect=redirected_resolve
+            ):
+                loaded = _load_process_source(f"{sys.executable},{supplied}", 1.0)
+
+        self.assertEqual(str(supplied_parent.absolute()), loaded.source.cwd)
+        self.assertEqual("selected.py", loaded.source.argv[-1])
 
     def test_validate_accepts_directory_and_rejects_changed_bytes(self) -> None:
         with self.fixture("same") as (_, corpus, _recording, _candidate):

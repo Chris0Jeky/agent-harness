@@ -24,6 +24,19 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
+class _DuplicateJsonKeyError(ValueError):
+    """A JSON object repeated a member name and is structurally ambiguous."""
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
 @dataclass(frozen=True)
 class SourceFailure:
     """One machine-readable reason a policy result is not fully trustworthy."""
@@ -179,8 +192,8 @@ def _evaluate_decision_lines(
 
     for line_number, line in enumerate(lines, start=1):
         try:
-            raw_value = json.loads(line)
-        except json.JSONDecodeError:
+            raw_value = json.loads(line, object_pairs_hook=_unique_json_object)
+        except (json.JSONDecodeError, _DuplicateJsonKeyError):
             failures.append(
                 SourceFailure(
                     f"{code_prefix}-json-invalid",
@@ -291,12 +304,15 @@ class RecordedDecisionSource:
 
         try:
             manifest_bytes = self.manifest_path.read_bytes()
-            manifest_value = json.loads(manifest_bytes.decode("utf-8"))
+            manifest_value = json.loads(
+                manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
             manifest = validate_recorded_manifest(manifest_value)
         except (
             OSError,
             UnicodeDecodeError,
             json.JSONDecodeError,
+            _DuplicateJsonKeyError,
             ValidationError,
         ) as exc:
             failure = SourceFailure(

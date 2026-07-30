@@ -79,6 +79,31 @@ class ProcessSourceTests(unittest.TestCase):
             self.failure_codes(result),
         )
 
+    def test_duplicate_json_key_is_invalid_and_fails_closed(self) -> None:
+        line = (
+            '{"schema_version":"policy-decision.v1",'
+            '"event_id":"git-force-main-001","effect":"allow",'
+            '"effect":"deny","reason":"ambiguous"}\n'
+        )
+        completed = subprocess.CompletedProcess(
+            args=[sys.executable], returncode=0, stdout=line.encode(), stderr=b""
+        )
+        source = ProcessDecisionSource([sys.executable])
+        with mock.patch(
+            "replay_v0.policy_sources.subprocess.run", return_value=completed
+        ):
+            result = source.evaluate(EVENTS)
+
+        self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
+        self.assertEqual(
+            [
+                "process-json-invalid",
+                "process-missing-event",
+                "process-missing-event",
+            ],
+            self.failure_codes(result),
+        )
+
     def test_duplicate_event_is_untrustworthy(self) -> None:
         result = self.evaluate("duplicate")
         self.assertEqual(["indeterminate", "allow"], self.effects(result))

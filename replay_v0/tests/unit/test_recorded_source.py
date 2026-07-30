@@ -102,6 +102,20 @@ class RecordedSourceTests(unittest.TestCase):
             self.failure_codes(result),
         )
 
+    def test_duplicate_json_key_is_invalid_and_fails_closed(self) -> None:
+        duplicate_effect = (
+            '{"schema_version":"policy-decision.v1",'
+            '"event_id":"git-force-main-001","effect":"allow",'
+            '"effect":"deny","reason":"ambiguous"}'
+        )
+        with self.recording([duplicate_effect, DECISIONS[1]]) as path:
+            result = RecordedDecisionSource(path).evaluate(EVENTS)
+        self.assertEqual(["indeterminate", "allow"], self.effects(result))
+        self.assertEqual(
+            ["recording-json-invalid", "recording-missing-event"],
+            self.failure_codes(result),
+        )
+
     def test_invalid_schema_record_becomes_indeterminate(self) -> None:
         invalid = {**DECISIONS[0], "effect": "warn"}
         with self.recording([invalid, DECISIONS[1]]) as path:
