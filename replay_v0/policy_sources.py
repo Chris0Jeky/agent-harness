@@ -15,6 +15,7 @@ from typing import Any
 from replay_v0.corpus import (
     POLICY_DECISION_VERSION,
     ValidationError,
+    split_jsonl_records,
     validate_command_events,
     validate_policy_decision,
 )
@@ -346,7 +347,7 @@ class RecordedDecisionSource:
             return _all_indeterminate(events, failure, "Recorded")
 
         try:
-            lines = decision_bytes.decode("utf-8").splitlines()
+            lines = split_jsonl_records(decision_bytes.decode("utf-8"))
         except UnicodeDecodeError:
             failure = SourceFailure(
                 "recording-utf8-invalid",
@@ -443,7 +444,7 @@ class ProcessDecisionSource:
             completed.stderr.decode("utf-8", errors="replace").splitlines()
         )
         try:
-            lines = completed.stdout.decode("utf-8").splitlines()
+            lines = split_jsonl_records(completed.stdout.decode("utf-8"))
         except UnicodeDecodeError:
             failure = SourceFailure(
                 "process-stdout-utf8-invalid",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -103,6 +104,63 @@ class ProcessSourceTests(unittest.TestCase):
             ],
             self.failure_codes(result),
         )
+
+    def test_non_lf_record_separator_is_invalid_and_fails_closed(self) -> None:
+        decisions = [
+            {
+                "schema_version": "policy-decision.v1",
+                "event_id": event["event_id"],
+                "effect": effect,
+                "reason": "Synthetic separator test.",
+            }
+            for event, effect in zip(EVENTS, ("deny", "allow"), strict=True)
+        ]
+        stdout = "\v".join(
+            json.dumps(value, sort_keys=True, separators=(",", ":"))
+            for value in decisions
+        ).encode("utf-8")
+        completed = subprocess.CompletedProcess(
+            args=[sys.executable], returncode=0, stdout=stdout, stderr=b""
+        )
+        source = ProcessDecisionSource([sys.executable])
+        with mock.patch(
+            "replay_v0.policy_sources.subprocess.run", return_value=completed
+        ):
+            result = source.evaluate(EVENTS)
+
+        self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
+        self.assertEqual(
+            [
+                "process-json-invalid",
+                "process-missing-event",
+                "process-missing-event",
+            ],
+            self.failure_codes(result),
+        )
+
+    def test_unicode_line_separator_inside_reason_remains_one_record(self) -> None:
+        decision = {
+            "schema_version": "policy-decision.v1",
+            "event_id": EVENTS[0]["event_id"],
+            "effect": "deny",
+            "reason": "first\u2028second",
+        }
+        completed = subprocess.CompletedProcess(
+            args=[sys.executable],
+            returncode=0,
+            stdout=(
+                json.dumps(decision, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+        source = ProcessDecisionSource([sys.executable])
+        with mock.patch(
+            "replay_v0.policy_sources.subprocess.run", return_value=completed
+        ):
+            result = source.evaluate(EVENTS[:1])
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual("first\u2028second", result.decisions[0]["reason"])
 
     def test_duplicate_event_is_untrustworthy(self) -> None:
         result = self.evaluate("duplicate")

@@ -5,7 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from replay_v0.digests import canonical_json_bytes, sha256_bytes, sha256_file
+from replay_v0.digests import (
+    canonical_json_bytes,
+    sha256_bytes,
+    sha256_file,
+    sha256_tree,
+)
 
 
 class DigestTests(unittest.TestCase):
@@ -24,6 +29,21 @@ class DigestTests(unittest.TestCase):
         right = canonical_json_bytes({"a": [1, "two"], "b": 2})
         self.assertEqual(left, right)
         self.assertEqual(sha256_bytes(left), sha256_bytes(right))
+
+    def test_tree_digest_binds_relative_names_and_exact_file_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as first_raw_directory:
+            with tempfile.TemporaryDirectory() as second_raw_directory:
+                first = Path(first_raw_directory)
+                second = Path(second_raw_directory)
+                for root in (first, second):
+                    (root / "empty").mkdir()
+                    (root / "policy.py").write_bytes(b"import rules\n")
+                    (root / "rules.py").write_bytes(b'EFFECT = "deny"\n')
+
+                original = sha256_tree(first)
+                self.assertEqual(original, sha256_tree(second))
+                (first / "rules.py").write_bytes(b'EFFECT = "allow"\n')
+                self.assertNotEqual(original, sha256_tree(first))
 
 
 if __name__ == "__main__":

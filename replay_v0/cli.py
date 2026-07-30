@@ -16,10 +16,16 @@ from typing import Any
 from replay_v0.compare import ComparisonError, compare_decisions
 from replay_v0.corpus import (
     ValidationError,
+    split_jsonl_records,
     validate_charter_cases,
     validate_command_events,
 )
-from replay_v0.digests import canonical_json_bytes, sha256_bytes, sha256_file
+from replay_v0.digests import (
+    canonical_json_bytes,
+    sha256_bytes,
+    sha256_file,
+    sha256_tree,
+)
 from replay_v0.manifests import (
     ManifestError,
     build_run_manifest,
@@ -45,7 +51,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v1"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v2"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -124,7 +130,7 @@ def _read_jsonl(path: Path, label: str) -> list[object]:
     except (OSError, UnicodeDecodeError) as exc:
         raise ReplayInputError(f"{label} is not readable UTF-8") from exc
     records: list[object] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(split_jsonl_records(text), start=1):
         try:
             records.append(json.loads(line, object_pairs_hook=_unique_json_object))
         except json.JSONDecodeError as exc:
@@ -140,7 +146,11 @@ def _resolve_manifest_path(value: str) -> Path:
         return path / "corpus-manifest.json"
     if path.name == "corpus-manifest.json":
         return path
-    return path.parent / "corpus-manifest.json"
+    if path.name == "events.jsonl":
+        return path.parent / "corpus-manifest.json"
+    raise ReplayInputError(
+        "corpus must name its directory, corpus-manifest.json, or bound events.jsonl"
+    )
 
 
 def _load_charter_corpus(value: str) -> LoadedCharterCorpus:
@@ -191,7 +201,7 @@ def _load_recorded_source(raw_path: str) -> LoadedPolicySource:
     if sha256_bytes(decision_bytes) != manifest.decisions_sha256:
         raise ReplayInputError("recorded source does not match its sidecar digest")
     try:
-        line_count = len(decision_bytes.decode("utf-8").splitlines())
+        line_count = len(split_jsonl_records(decision_bytes.decode("utf-8")))
     except UnicodeDecodeError as exc:
         raise ReplayInputError("recorded source is not valid UTF-8") from exc
     if line_count != manifest.decision_count:
@@ -228,6 +238,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         raise ReplayInputError("process executable could not be resolved to a file")
     try:
         policy_digest = sha256_file(policy_path)
+        policy_tree_digest = sha256_tree(lexical_policy_path.parent)
         executable_digest = sha256_file(executable_path)
     except OSError as exc:
         raise ReplayInputError(
@@ -240,7 +251,11 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             "sha256": executable_digest,
         },
         "arguments": argv[1:-1],
-        "policy": {"name": lexical_policy_path.name, "sha256": policy_digest},
+        "policy": {
+            "name": lexical_policy_path.name,
+            "sha256": policy_digest,
+            "parent_tree_sha256": policy_tree_digest,
+        },
         "environment": PROCESS_ENVIRONMENT,
         "working_directory": "policy-parent",
     }

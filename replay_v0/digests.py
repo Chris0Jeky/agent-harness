@@ -24,6 +24,44 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_tree(path: str | Path) -> str:
+    """Hash a directory's relative entry names and exact regular-file bytes."""
+
+    root = Path(path)
+    if not root.is_dir() or root.is_symlink():
+        raise OSError("tree digest root must be a readable directory")
+
+    entries: list[dict[str, str]] = []
+    for entry in root.rglob("*"):
+        relative_path = entry.relative_to(root).as_posix()
+        if entry.is_symlink():
+            if not entry.is_file():
+                raise OSError(
+                    "tree digest does not support directory or broken symlinks"
+                )
+            entries.append(
+                {
+                    "kind": "file",
+                    "path": relative_path,
+                    "sha256": sha256_file(entry),
+                }
+            )
+        elif entry.is_dir():
+            entries.append({"kind": "directory", "path": relative_path})
+        elif entry.is_file():
+            entries.append(
+                {
+                    "kind": "file",
+                    "path": relative_path,
+                    "sha256": sha256_file(entry),
+                }
+            )
+        else:
+            raise OSError("tree digest supports only directories and regular files")
+    entries.sort(key=lambda item: item["path"])
+    return sha256_bytes(canonical_json_bytes(entries))
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     """Encode a JSON value deterministically for semantic identity derivation."""
 

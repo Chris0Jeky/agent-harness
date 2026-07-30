@@ -93,6 +93,7 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
+- **CONSTRAINT:** Process identity binds the entry-policy bytes plus the relative names and exact regular-file bytes in its policy-parent tree. Installed dependencies, files outside that tree, network responses, and host metadata remain outside the portable identity, so callers that depend on them must isolate and record that environment.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash

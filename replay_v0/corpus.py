@@ -24,6 +24,15 @@ class ValidationError(ValueError):
     """A replay record failed its versioned contract."""
 
 
+def split_jsonl_records(text: str) -> list[str]:
+    """Split JSONL only on LF, dropping at most one conventional final delimiter."""
+
+    records = text.split("\n")
+    if records and records[-1] == "":
+        records.pop()
+    return records
+
+
 def _require_object(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValidationError(f"{label}: expected a JSON object with string keys")

@@ -306,6 +306,56 @@ for index, event in enumerate(events):
         self.assertNotEqual(first_manifest["run_id"], second_manifest["run_id"])
         self.assertNotEqual(first_manifest["run_id"], longer_timeout_manifest["run_id"])
 
+    def test_process_policy_parent_tree_changes_identity_and_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "rules.py"
+            policy.write_text(
+                "import json\n"
+                "import sys\n"
+                "from rules import EFFECT\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                '    print(json.dumps({"schema_version": "policy-decision.v1", '
+                '"event_id": event["event_id"], "effect": EFFECT, '
+                '"reason": "Sibling rule."}))\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            helper.write_text('EFFECT = "deny"\n', encoding="utf-8", newline="\n")
+            denied = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            denied_result = denied.source.evaluate(EVENTS)
+
+            helper.write_text('EFFECT = "allow"\n', encoding="utf-8", newline="\n")
+            allowed = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            allowed_result = allowed.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["deny", "deny"], [row["effect"] for row in denied_result.decisions]
+        )
+        self.assertEqual(
+            ["allow", "allow"], [row["effect"] for row in allowed_result.decisions]
+        )
+        self.assertNotEqual(denied.identity["sha256"], allowed.identity["sha256"])
+
+        common = {
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "baseline",
+                "sha256": "1" * 64,
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "manifest_sha256": "2" * 64,
+                "event_count": len(EVENTS),
+            },
+            "fail_on": ["newly-allowed"],
+        }
+        denied_manifest = build_run_manifest(candidate=denied.identity, **common)
+        allowed_manifest = build_run_manifest(candidate=allowed.identity, **common)
+        self.assertNotEqual(denied_manifest["run_id"], allowed_manifest["run_id"])
+
     def test_process_policy_symlink_keeps_supplied_parent_and_name(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -355,7 +405,39 @@ for index, event in enumerate(events):
     def test_validate_accepts_directory_and_rejects_changed_bytes(self) -> None:
         with self.fixture("same") as (_, corpus, _recording, _candidate):
             self.assertEqual(0, main(["validate", "--corpus", str(corpus)]))
+            self.assertEqual(
+                0,
+                main(["validate", "--corpus", str(corpus / "corpus-manifest.json")]),
+            )
+            self.assertEqual(
+                0, main(["validate", "--corpus", str(corpus / "events.jsonl")])
+            )
+            self.assertEqual(
+                2, main(["validate", "--corpus", str(corpus / "cases.jsonl")])
+            )
+            self.assertEqual(
+                2, main(["validate", "--corpus", str(corpus / "missing.jsonl")])
+            )
             (corpus / "cases.jsonl").write_bytes(b"changed\n")
+            self.assertEqual(2, main(["validate", "--corpus", str(corpus)]))
+
+    def test_validate_rejects_non_lf_jsonl_with_matching_manifest(self) -> None:
+        with self.fixture("same") as (_, corpus, _recording, _candidate):
+            event_bytes = "\v".join(
+                json.dumps(value, sort_keys=True, separators=(",", ":"))
+                for value in EVENTS
+            ).encode("utf-8")
+            (corpus / "events.jsonl").write_bytes(event_bytes)
+            corpus_manifest = build_corpus_manifest(
+                corpus_id="charter-v0.1",
+                event_count=len(EVENTS),
+                base_directory=corpus,
+                files=["events.jsonl", "cases.jsonl"],
+            )
+            (corpus / "corpus-manifest.json").write_bytes(
+                manifest_json_bytes(corpus_manifest)
+            )
+
             self.assertEqual(2, main(["validate", "--corpus", str(corpus)]))
 
 

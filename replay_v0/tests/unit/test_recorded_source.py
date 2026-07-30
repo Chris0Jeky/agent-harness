@@ -116,6 +116,24 @@ class RecordedSourceTests(unittest.TestCase):
             self.failure_codes(result),
         )
 
+    def test_non_lf_record_separator_fails_closed(self) -> None:
+        with self.recording(DECISIONS) as path:
+            content = "\v".join(
+                json.dumps(value, sort_keys=True, separators=(",", ":"))
+                for value in DECISIONS
+            ).encode("utf-8")
+            path.write_bytes(content)
+            manifest_path = Path(f"{path}.manifest.json")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["decisions_sha256"] = hashlib.sha256(content).hexdigest()
+            manifest_path.write_text(
+                json.dumps(manifest), encoding="utf-8", newline="\n"
+            )
+            result = RecordedDecisionSource(path).evaluate(EVENTS)
+
+        self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
+        self.assertEqual(["recording-count-mismatch"], self.failure_codes(result))
+
     def test_invalid_schema_record_becomes_indeterminate(self) -> None:
         invalid = {**DECISIONS[0], "effect": "warn"}
         with self.recording([invalid, DECISIONS[1]]) as path:
