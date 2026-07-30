@@ -1,20 +1,21 @@
-Purpose: Authoritative freeze, extraction, and replay-kernel contract for the existing private `agent-harness` repository.
+Purpose: Authoritative freeze, extraction, and replay-kernel contract for the existing public `agent-harness` repository.
 Status: ACTIVE for freeze and extraction only; universal-parser feature development is stopped.
 Authority relationship: This document wins for the legacy dispatcher freeze, source-asset extraction, and replay-kernel technical contracts; `CLAUDE_CONFIG_OPERATIONS.md` wins for autonomy and evidence handling, while `REPLAY_TOOL_PRODUCT.md` wins for public naming, release, launch, and continuation decisions.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
-# OPEN items
+# Decision register
 
-- **OPEN AH-001:** Confirm the exact immutable legacy tag name. This document recommends `floor-v1-final`.
-- **OPEN AH-002:** Confirm the current paths of the legacy dispatcher, replay script, corpus fixtures, and test suites. The paths in this document are target paths and must be adapted without moving unrelated files.
-- **OPEN AH-003:** Confirm the existing repository test and lint commands. Agents must preserve current tooling and must not add a dependency without owner review.
+- **DECISION AH-001:** The immutable legacy tag is `floor-v1-final`; it was owner-approved, created, and pushed on 2026-07-30 at `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
+- **DECISION AH-002:** The current dispatcher, replay, fixture, and test paths are confirmed by `docs/extraction/inventory.md`; no legacy path was moved.
+- **DECISION AH-003:** The existing dependency-free `unittest` lanes are authoritative for this repository. Pytest 9.0.3 is also owner-approved as a development dependency and compatibility runner for the declared Pytest commands.
 - **OPEN AH-004:** Confirm whether the legacy dispatcher can execute in a clean isolated environment. The public baseline does not depend on this answer because recorded decisions are first-class.
-- **OPEN AH-005:** Confirm the launch calendar and 13-hour allocation for the tasks in this document. `REPLAY_TOOL_PRODUCT.md` owns the overall assumed 2026-08-16 deadline and 24-hour cap.
+- **DECISION AH-005:** The owner confirmed the 2026-08-16 launch date, 24-hour total cap, and 13-hour allocation for this document; `REPLAY_TOOL_PRODUCT.md` owns the remaining 11 hours.
 
 # Authority and operating decision
 
 - **DECISION:** The existing repository becomes a frozen evidence source and extraction workspace, not the public product repository.
+- **DECISION:** `Chris0Jeky/agent-harness` remains public for now. Every tracked artifact is treated as immediately public; a future visibility change must be verified from live host state and does not relax the private-input boundary.
 - **DECISION:** The legacy dispatcher is preserved at a reviewed commit and immutable tag; it is not rewritten, reformatted, or expanded to support new command shapes.
 - **DECISION:** The only active implementation scope is the decision-replay kernel defined below and the minimum extraction support needed to move it into the clean public repository.
 - **CONSTRAINT:** Cross-repository autonomy, mandatory owner review, `HUMAN_TODO.md`, failure-ledger schema, and manual promotion policy are defined only in `CLAUDE_CONFIG_OPERATIONS.md`; agents must apply those rules by reference.
@@ -23,7 +24,7 @@ Owner: Cristian Tcaci
 
 # Freeze contract
 
-- **DECISION:** The recommended tag is `floor-v1-final` and must point to the last owner-reviewed universal-parser state.
+- **DECISION:** The immutable tag is `floor-v1-final` and points to the last owner-reviewed universal-parser state, `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
 - **CONSTRAINT:** Creating or pushing the tag requires owner review.
 - **CONSTRAINT:** After the tag, the legacy dispatcher path is read-only except for a security-critical preservation fix explicitly approved by the owner.
 - **CONSTRAINT:** New bypasses, false positives, and environment incompatibilities are recorded as evidence or corpus candidates; they are not automatically fixed in the legacy parser.
@@ -109,9 +110,9 @@ python -m replay_v0.cli replay \
 
 ## Legacy dispatcher wrapper
 
-- **DECISION:** The legacy wrapper exists only to generate or refresh a private decision recording from the pinned legacy environment.
+- **DECISION:** The legacy wrapper exists only to generate or refresh a private local decision recording from the pinned legacy environment.
 - **CONSTRAINT:** The wrapper must import or invoke the tagged dispatcher without modifying it.
-- **CONSTRAINT:** The wrapper reads the same `CommandEvent` stream and writes `PolicyDecision` records, but it may run only in the private repository or an owner-approved isolated environment.
+- **CONSTRAINT:** The wrapper reads the same `CommandEvent` stream and writes `PolicyDecision` records, but it may run only in an owner-controlled private workspace or an owner-approved isolated environment. Its output is never committed without privacy review.
 - **CONSTRAINT:** If the legacy dispatcher cannot process an event or cannot start, the wrapper emits `indeterminate`; it does not patch the dispatcher.
 - **CONSTRAINT:** The wrapper output must include a manifest with the exact legacy commit and environment notes before it can be used as a baseline recording.
 
@@ -236,7 +237,7 @@ python -m replay_v0.cli replay \
 
 # Repository layout for extraction work
 
-- **DECISION:** The private extraction workspace uses this bounded shape, adapted to existing paths where necessary:
+- **DECISION:** The existing extraction workspace uses this bounded shape, adapted to existing paths where necessary. Because this repository is public, private inputs and generated private outputs remain local and ignored:
 
 ```text
 agent-harness/
@@ -271,8 +272,15 @@ agent-harness/
 
 # Quality gates
 
-- **OPEN:** Bind these commands to the repository's existing tooling during Task 1; do not add missing tools without owner review.
-- **DECISION:** The target commands are:
+- **DECISION:** The authoritative dependency-free repository lanes are:
+
+```bash
+python -m unittest discover -s replay_v0/tests/unit -v
+python -m unittest discover -s replay_v0/tests/contract -v
+python -m unittest discover -s replay_v0/tests -v
+```
+
+- **DECISION:** Pytest 9.0.3 is an owner-approved development dependency and compatibility runner. These declared commands are also required:
 
 ```bash
 python -m pytest -q replay_v0/tests
@@ -280,13 +288,13 @@ python -m ruff check replay_v0
 python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 ```
 
-- **CONSTRAINT:** The third command is the fast lane and must complete in under 60 seconds without network access or live legacy execution.
+- **CONSTRAINT:** The unit-plus-contract portion of both runner interfaces is the fast lane and must complete in under 60 seconds without network access or live legacy execution.
 - **CONSTRAINT:** Required CI checks before merging extraction work are `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
-- **CONSTRAINT:** If Pytest or Ruff is not already approved in the repository, the agent must route the tooling decision to `HUMAN_TODO.md`; it may use existing equivalents but must update this document through owner-reviewed PR before changing the command contract.
+- **CONSTRAINT:** `replay-fast` and `replay-tests` use the authoritative dependency-free `unittest` lanes. `operations-contract` installs the approved development requirements and proves the declared Pytest commands remain compatible.
 
 # Calendar and budget allocation
 
-- **OPEN:** The schedule below assumes the owner confirms the 2026-08-16 launch and 24-hour total cap.
+- **DECISION:** The owner confirmed the 2026-08-16 launch date and 24-hour total cap on 2026-07-30.
 - **DECISION:** These ten tasks have a combined maximum of **13 hours**. `REPLAY_TOOL_PRODUCT.md` owns the remaining **11 hours**.
 - **CONSTRAINT:** When the cumulative logged time reaches 13 hours, the agent stops extraction work and presents the completed subset. Deferred polish does not consume the public-product allocation without owner approval.
 

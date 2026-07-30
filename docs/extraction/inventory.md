@@ -80,20 +80,20 @@ Task 10's allowlisted public bundle must exclude:
 
 ## Prerequisites and blockers carried forward
 
-- The live GitHub repository is public even though `AGENT_HARNESS_OPERATIONS.md` calls it private.
-  Treat every tracked artifact as public; H-12 owns the visibility decision.
+- The owner confirmed on 2026-07-30 that the live GitHub repository remains public for now. Treat
+  every tracked artifact as immediately public; H-12 is complete.
 - At the recorded base, `CLAUDE_CONFIG_OPERATIONS.md` and `REPLAY_TOOL_PRODUCT.md` were absent from
   the searched repository, history, and local authority locations. Subsequent `main` commit
-  `a35ff70` added `REPLAY_TOOL_PRODUCT.md`; `CLAUDE_CONFIG_OPERATIONS.md` remains absent, and H-9
-  owns that remaining authority gap.
-- Ruff and Black are pinned in `requirements-dev.txt`; CI uses `unittest`. Pytest is installed on
-  this machine but is not an approved repository dependency. H-10 owns the Task 3 command-contract
-  choice.
-- The exact tag, launch calendar, and time allocation remain owner decisions in H-8 and H-11.
+  `a35ff70` added `REPLAY_TOOL_PRODUCT.md`, and `6d6e22e` added
+  `CLAUDE_CONFIG_OPERATIONS.md`; H-9 is complete.
+- Ruff and Black remain pinned, Pytest 9.0.3 is now an approved pinned development dependency, and
+  the owner approved both the declared Pytest compatibility commands and authoritative
+  dependency-free `unittest` CI lanes; H-10 is complete.
+- The immutable tag, launch calendar, and time allocation were owner-confirmed on 2026-07-30;
+  H-8 and H-11 are complete.
 
-None of these blocks local, standard-library, privacy-safe implementation that makes no public or
-cross-repository change. They do block claims that publication, naming, licensing, schedule, or the
-Pytest-based merge gate is approved.
+Final name, licence, clean-repository creation, and release remain separate product gates. They do
+not block the approved local extraction implementation or its two test-runner interfaces.
 
 ## Verification performed
 

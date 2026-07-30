@@ -1,16 +1,17 @@
 # Legacy deny-floor v1 freeze record
 
-Status: **PROPOSED — owner review required; tag not created or pushed**
+Status: **FROZEN — owner approved; annotated tag created and pushed**
 
 Recorded: 2026-07-30
 
-Recommended immutable tag: `floor-v1-final`
+Immutable tag: `floor-v1-final`
 
 ## Frozen candidate
 
 | Field | Recorded value |
 |---|---|
 | Freeze commit | `02bd14cfe094f9b6af85b966de481ff3f45264cf` |
+| Annotated tag object | `5a939540bdce51e511d6b3bae98358e3e2ad9148` |
 | Reviewed implementation head | `d5e93631a6bd76f9c313719608892f5ed1747205` |
 | Merge provenance | [PR #132](https://github.com/Chris0Jeky/agent-harness/pull/132), merged by repository owner Cristian Tcaci on 2026-07-27 |
 | Floor version | `1.6.21 (2026-07-27)` |
@@ -28,8 +29,9 @@ Recommended immutable tag: `floor-v1-final`
 smoke matrix, harness, tests, or replay script. The tag therefore points to the reviewed legacy
 implementation merge, not to the later operations-only commit.
 
-The tag name and target remain proposals until the owner reviews them. No existing tag named
-`floor-v1-final` was present when this record was prepared.
+The owner approved the tag name and target on 2026-07-30. The annotated tag was created with
+message `Freeze legacy deny floor v1 at 1.6.21`, pushed to `origin`, and verified by its remote tag
+object. It is operationally immutable and must never be moved, replaced, or deleted.
 
 ## Preservation evidence
 
@@ -134,23 +136,22 @@ work can remain fail-closed under the repository/global rules. Cross-repository 
 naming, licensing, launch, and continuation decisions remain unverified until the owner supplies
 the authoritative paths.
 
-Subsequent `main` commit `a35ff70` added `REPLAY_TOOL_PRODUCT.md`, resolving the replay product
-authority. `CLAUDE_CONFIG_OPERATIONS.md` remains absent, so cross-repository autonomy, evidence
-handling, and owner-supervision policy stay fail-closed under H-9.
+Subsequent `main` commits added both governing references: `a35ff70` added
+`REPLAY_TOOL_PRODUCT.md`, and `6d6e22e` added `CLAUDE_CONFIG_OPERATIONS.md`. H-9 is complete; both
+authority sources are now directly inspectable at the repository root.
 
-## Repository visibility mismatch
+## Repository visibility decision
 
-`AGENT_HARNESS_OPERATIONS.md` describes this as an existing private repository. A live GitHub API
-read on 2026-07-30 instead returned `private: false` and `visibility: public` for
-`Chris0Jeky/agent-harness`. Live host state wins over prose. Until the owner reconciles that
-decision, every tracked file and proposed commit must be treated as immediately public, and no
-private replay output, transcript-derived command, unreviewed historical case, or extraction
-bundle may be committed or pushed here.
+The GitHub API returned `private: false` and `visibility: public` for
+`Chris0Jeky/agent-harness`, and the owner confirmed on 2026-07-30 that it remains public for now.
+Every tracked file and proposed commit is therefore treated as immediately public. Private replay
+output, transcript-derived commands, and unreviewed historical cases remain local regardless of a
+future visibility change.
 
-## Human-review-only tag procedure
+## Tag execution record
 
-Do **not** run this block until the owner confirms both the tag name and commit. Creating or
-pushing the tag is outside agent authority under `AGENT_HARNESS_OPERATIONS.md`.
+The owner explicitly authorized this procedure on 2026-07-30. It was executed once as recorded
+below and must not be rerun to replace or move the tag.
 
 ```powershell
 git fetch origin main
@@ -161,17 +162,14 @@ git show --no-patch floor-v1-final
 git push origin refs/tags/floor-v1-final
 ```
 
-Once created, the tag is operationally immutable: never move, replace, or delete it. Server-side
-tag protection was not verified, so immutability still depends on repository policy and owner
-control.
+Remote verification returned tag object `5a939540bdce51e511d6b3bae98358e3e2ad9148`, whose annotated
+target is `02bd14cfe094f9b6af85b966de481ff3f45264cf`. Server-side tag protection was not verified, so
+immutability still depends on repository policy and owner control.
 
 ## Deliberately not verified or performed
 
-- No tag was created or pushed.
-- No legacy parser change, repair, reformat, dependency change, or repository reorganisation was
-  made.
+- No legacy parser change, repair, reformat, parser dependency change, or repository
+  reorganisation was made as part of the freeze-tag action.
 - No private transcript or raw replay output was opened, copied, or executed.
-- No public-repository extraction, licence, name, or release decision was made.
-- The discrepancy between the operations document's `private` premise and the live public remote
-  was not resolved.
+- No clean public-repository creation, licence, final name, or release action was performed.
 - Fresh-session Codex `/hooks` trust and live canaries remain the existing human-owned H-2 gate.

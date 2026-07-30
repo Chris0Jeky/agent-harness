@@ -1,14 +1,14 @@
 Purpose: Authoritative product, repository, launch, release, distribution, and continuation brief for the public decision-replay tool.
-Status: PROVISIONAL ACTIVE; implementation may proceed under the assumed 2026-08-16 launch date and 24-hour total cap, but public release requires owner confirmation.
+Status: ACTIVE under the owner-confirmed 2026-08-16 launch date and 24-hour total cap; public release still requires owner confirmation.
 Authority relationship: This document wins for the public replay product, clean-repository decision, working name, README, release, outreach, and continuation gate; `AGENT_HARNESS_OPERATIONS.md` wins for replay-kernel technical contracts and `CLAUDE_CONFIG_OPERATIONS.md` wins for owner-supervision policy.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
-# OPEN items
+# Decision register
 
-- **OPEN RP-001:** Confirm the launch deadline of **2026-08-16**. This document uses it as the working deadline.
-- **OPEN RP-002:** Confirm the hard launch budget of **24 focused hours**, split as 13 hours under `AGENT_HARNESS_OPERATIONS.md` and 11 hours under this document.
-- **OPEN RP-003:** Confirm the continuation review date of **2026-09-30**.
+- **DECISION RP-001:** The owner confirmed the launch deadline of **2026-08-16**.
+- **DECISION RP-002:** The owner confirmed the hard launch budget of **24 focused hours**, split as 13 hours under `AGENT_HARNESS_OPERATIONS.md` and 11 hours under this document.
+- **DECISION RP-003:** The owner confirmed the continuation review date of **2026-09-30**.
 - **OPEN RP-004:** Select the final repository, Python package, and CLI name. `CharterReplay` / `charter-replay` is the working recommendation.
 - **OPEN RP-005:** Select the licence after provenance review. The recommendation is Apache-2.0 when all extracted code is owner-controlled and compatible; otherwise preserve the most restrictive compatible existing licence and record the reason.
 
@@ -264,7 +264,7 @@ charter-replay/
 
 # Quality gates
 
-- **OPEN:** The initial owner-reviewed repository setup may add `pytest`, `ruff`, and `build` as development dependencies. Agents must not add or upgrade them without approval.
+- **DECISION:** Pytest 9.0.3 is approved for the extraction compatibility gate. Ruff is already pinned in the extraction repository. Adding or upgrading `build`, or changing these versions in the clean product repository, still requires owner review.
 - **DECISION:** Required local commands are:
 
 ```bash
@@ -282,7 +282,7 @@ charter-replay replay --baseline recorded:examples/legacy-baseline/decisions.jso
 
 # Calendar and budget allocation
 
-- **OPEN:** The calendar assumes launch by 2026-08-16.
+- **DECISION:** The owner confirmed launch by 2026-08-16.
 - **DECISION:** The first ten tasks below have a combined maximum of **11 hours**. Together with the 13-hour extraction allocation, they exhaust the 24-hour cap.
 - **CONSTRAINT:** At 24 cumulative hours, agents stop, report the completed subset, and route omitted polish to the deferred backlog. The deadline does not authorise overtime or scope expansion.
 

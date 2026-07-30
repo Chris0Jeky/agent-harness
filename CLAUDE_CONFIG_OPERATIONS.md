@@ -1,15 +1,15 @@
 Purpose: Authoritative operating contract for high-autonomy agent work in the private `claude-config` repository.
-Status: ACTIVE; maintenance-only launch-window mode is assumed through 2026-08-16 pending owner confirmation.
+Status: ACTIVE; maintenance-only launch-window mode is owner-confirmed through 2026-08-16.
 Authority relationship: This document wins for private `claude-config` operations, cross-repository autonomy, failure-ledger, promotion-review, and private/public-boundary policy; the other three operating documents win only in their named repository domains.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
-# OPEN items
+# Decision register
 
-- **OPEN CC-001:** Confirm that the maintenance-only launch window ends on **2026-08-16**. This document proceeds on that assumption.
-- **OPEN CC-002:** Confirm that the shared launch budget is **24 focused hours across `agent-harness` extraction and the public replay repository**, not a separate 24-hour allowance for this repository.
+- **DECISION CC-001:** The owner confirmed that the maintenance-only launch window ends on **2026-08-16**.
+- **DECISION CC-002:** The owner confirmed that the shared launch budget is **24 focused hours across `agent-harness` extraction and the public replay repository**, not a separate 24-hour allowance for this repository.
 - **OPEN CC-003:** Confirm the repository's currently supported Python versions and existing test/lint entry points. Until confirmed, agents must not install or replace tooling merely to satisfy the proposed quality-gate interface.
-- **OPEN CC-004:** Confirm whether `CLAUDE_CONFIG_OPERATIONS.md` is committed to the private repository or kept in a private operations branch. It must never be copied into a public export unless explicitly allowlisted.
+- **DECISION CC-004:** The owner placed this canonical policy document at the root of the currently public `agent-harness` repository in commit `6d6e22e`. The policy prose is public, but the document remains excluded from the replay-v0 extraction allowlist and does not authorize exporting private Claude-config data.
 - **OPEN CC-005:** Confirm whether the existing Gardener already has a kill switch. If it does, preserve the existing mechanism and record it in `policy/catalog.yaml`; do not add a second switch.
 
 # Authority and classification rules
@@ -104,7 +104,7 @@ policies:
 - [ ] HT-YYYYMMDD-NNN | blocking: yes|no | owner: Cristian | action: <one human action> | reason: <why an agent cannot complete it> | evidence: <file, issue, or command output>
 ```
 
-- **CONSTRAINT:** Agents may append or update evidence on an entry. Agents may not mark an entry complete unless the repository contains direct evidence of the human action.
+- **CONSTRAINT:** Agents append or update evidence and mark an entry complete as soon as repository evidence proves every condition. An explicit owner decision may be recorded as that evidence in the same reviewed change. Agents must never infer a human decision, approval, acknowledgement, or subjective confirmation.
 
 # Failure and friction ledger
 
