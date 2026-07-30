@@ -28,18 +28,27 @@ gate passed, `1` means a configured change class was present, `2` means an input
 binding was invalid, and `3` means a policy process failed after a reportable comparison could be
 formed.
 
-Run the dependency-free test lane with:
+Run the authoritative dependency-free test lane with:
 
 ```text
 python -m unittest discover -s replay_v0/tests -v
+```
+
+After installing the owner-approved development requirements, prove Pytest compatibility with:
+
+```text
+python -m pytest -q replay_v0/tests
+python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 ```
 
 ## Baseline truth
 
 Despite its compatibility filename, `fixtures/legacy-decisions.jsonl` is a synthetic
 freeze-candidate expectation for the curated charter. It was not captured by executing the private
-legacy dispatcher, and it does not prove the proposed `floor-v1-final` tag exists or has owner
-approval. Its sidecar policy ID and every decision reason preserve that distinction.
+legacy dispatcher. The owner-approved `floor-v1-final` tag now exists at
+`02bd14cfe094f9b6af85b966de481ff3f45264cf`, but that immutable implementation tag does not turn
+this synthetic recording into captured dispatcher output. Its sidecar policy ID and every decision
+reason preserve that distinction.
 
 The reference candidate is equally narrow: it maps the 50 reviewed fixture event IDs to expected
 effects. It does not parse command text or reproduce the frozen dispatcher.

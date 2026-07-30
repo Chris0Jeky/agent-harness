@@ -1,6 +1,8 @@
 {
   "schema_version": "public-v0-extraction-manifest.v1",
-  "status": "owner-review-required",
+  "status": "owner-approved",
+  "approved_by": "Cristian Tcaci",
+  "approved_at": "2026-07-30",
   "file_count": 35,
   "files": [
     {
@@ -81,7 +83,7 @@
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "d53128b565fefe85a640300051b69a48f64631cc3b2c09f2ff3ade0c8e09025c"
+      "sha256": "05064589f2d40c68b4b6328149a280cbb5b0d1f328f4b0ae86190c21f0de9aec"
     },
     {
       "path": "replay_v0/reports.py",
@@ -151,7 +153,7 @@
     {
       "path": "replay_v0/tests/test_determinism.py",
       "kind": "test",
-      "sha256": "ffa13daaed2b4cb4960a969e878c95b162055a86689482850d212d94e6f03322"
+      "sha256": "baa2be67c2851ff6ddcab6ad8f54b02df5962ce5fd381cdb4931ebb934611a1d"
     },
     {
       "path": "replay_v0/tests/unit/__init__.py",

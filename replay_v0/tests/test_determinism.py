@@ -111,7 +111,9 @@ class DeterminismTests(unittest.TestCase):
     def test_public_extraction_manifest_is_exact_and_replay_only(self) -> None:
         manifest = json.loads(EXTRACTION_MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual("public-v0-extraction-manifest.v1", manifest["schema_version"])
-        self.assertEqual("owner-review-required", manifest["status"])
+        self.assertEqual("owner-approved", manifest["status"])
+        self.assertEqual("Cristian Tcaci", manifest["approved_by"])
+        self.assertEqual("2026-07-30", manifest["approved_at"])
         self.assertEqual(manifest["file_count"], len(manifest["files"]))
 
         paths = [entry["path"] for entry in manifest["files"]]
