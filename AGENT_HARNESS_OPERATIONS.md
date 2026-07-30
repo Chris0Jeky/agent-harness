@@ -125,6 +125,9 @@ python -m replay_v0.cli replay \
 
 - **DECISION:** A JSONL recording is a first-class policy source and is the default way to use the frozen legacy baseline.
 - **CONSTRAINT:** The recorded source file contains one `PolicyDecision` v1 object per corpus event and a sidecar manifest that identifies the original policy and commit.
+- **CONSTRAINT:** Source loading captures the sidecar and decision bytes once. Evaluation consumes
+  those exact validated bytes rather than reopening mutable paths, so a later matched-pair
+  replacement cannot execute under the earlier recorded-source identity.
 - **CONSTRAINT:** A missing `event_id`, duplicate `event_id`, invalid schema, or digest mismatch produces `indeterminate` for affected events and fails input validation.
 - **CONSTRAINT:** The legacy dispatcher never needs to execute in the public repository or demo.
 - **CONSTRAINT:** The reference source syntax is `recorded:<path>`.
@@ -185,7 +188,9 @@ python -m replay_v0.cli replay \
 - **CONSTRAINT:** Digests cover the exact committed bytes. Line-ending changes therefore require a manifest update.
 - **CONSTRAINT:** `event_count` is positive. Empty event or case collections are input-invalid and
   cannot create an all-zero passing comparison.
-- **CONSTRAINT:** The runner validates all listed digests before invoking any policy source.
+- **CONSTRAINT:** The runner reads each listed corpus file once, validates the captured bytes, and
+  parses those same immutable bytes before invoking any policy source. A later path replacement
+  cannot change events or cases under the earlier corpus-manifest digest.
 
 ## Run manifest
 

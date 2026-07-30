@@ -39,10 +39,11 @@ class ManifestError(ValueError):
 
 @dataclass(frozen=True)
 class LoadedCorpusManifest:
-    """A validated corpus manifest plus the digest of its exact source bytes."""
+    """A validated manifest plus its exact source and bound corpus bytes."""
 
     value: dict[str, Any]
     manifest_sha256: str
+    file_bytes: tuple[tuple[str, bytes], ...]
 
 
 def _require_mapping(value: object, label: str) -> Mapping[str, object]:
@@ -217,20 +218,27 @@ def load_corpus_manifest(path: str | Path) -> LoadedCorpusManifest:
         raise ManifestError("Corpus manifest is not valid UTF-8 JSON") from exc
     manifest = validate_corpus_manifest(raw_value)
 
+    captured_files: list[tuple[str, bytes]] = []
     for entry in manifest["files"]:
         target = manifest_path.parent.joinpath(*PurePosixPath(entry["path"]).parts)
         try:
-            actual_digest = sha256_file(target)
+            captured_bytes = target.read_bytes()
         except OSError as exc:
             raise ManifestError(
                 f"Corpus file {entry['path']!r} could not be read"
             ) from exc
+        actual_digest = sha256_bytes(captured_bytes)
         if actual_digest != entry["sha256"]:
             raise ManifestError(
                 f"Corpus file {entry['path']!r} does not match its SHA-256"
             )
+        captured_files.append((entry["path"], captured_bytes))
 
-    return LoadedCorpusManifest(manifest, sha256_bytes(manifest_bytes))
+    return LoadedCorpusManifest(
+        manifest,
+        sha256_bytes(manifest_bytes),
+        tuple(captured_files),
+    )
 
 
 def _validate_policy_identity(value: object, label: str) -> dict[str, str]:

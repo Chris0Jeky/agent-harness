@@ -15,10 +15,16 @@ import unittest
 from unittest import mock
 
 import replay_v0.policy_sources as policy_sources
-from replay_v0.cli import _load_process_source, main
+from replay_v0.cli import (
+    _load_charter_corpus,
+    _load_process_source,
+    _load_recorded_source,
+    main,
+)
 from replay_v0.manifests import (
     build_corpus_manifest,
     build_run_manifest,
+    load_corpus_manifest,
     manifest_json_bytes,
 )
 from replay_v0.policy_sources import PolicySourceResult, SourceFailure
@@ -192,6 +198,92 @@ for index, event in enumerate(events):
             exit_code = main(self.replay_args(corpus, recording, candidate, output))
             self.assertEqual(2, exit_code)
             self.assertFalse(output.exists())
+
+    def test_corpus_load_parses_the_exact_validated_bytes(self) -> None:
+        with self.fixture("same") as (_, corpus, _recording, _candidate):
+            replacement_events = [
+                {**event, "command": f"replacement command {index}"}
+                for index, event in enumerate(EVENTS)
+            ]
+            replacement_cases = [
+                {**case, "rationale": f"Replacement rationale {index}."}
+                for index, case in enumerate(CASES)
+            ]
+            begin_mutation = threading.Event()
+            mutation_complete = threading.Event()
+
+            def replace_corpus() -> None:
+                begin_mutation.wait()
+                (corpus / "events.jsonl").write_bytes(jsonl_bytes(replacement_events))
+                (corpus / "cases.jsonl").write_bytes(jsonl_bytes(replacement_cases))
+                mutation_complete.set()
+
+            def load_then_replace(path):
+                loaded = load_corpus_manifest(path)
+                begin_mutation.set()
+                self.assertTrue(mutation_complete.wait(timeout=5.0))
+                return loaded
+
+            writer = threading.Thread(target=replace_corpus)
+            writer.start()
+            with mock.patch(
+                "replay_v0.cli.load_corpus_manifest",
+                side_effect=load_then_replace,
+            ):
+                loaded = _load_charter_corpus(str(corpus))
+            writer.join(timeout=5.0)
+
+            self.assertFalse(writer.is_alive())
+            self.assertEqual(EVENTS, loaded.events)
+            self.assertEqual(CASES, loaded.cases)
+            self.assertEqual(
+                replacement_events,
+                [
+                    json.loads(line)
+                    for line in (corpus / "events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ],
+            )
+            self.assertEqual(
+                replacement_cases,
+                [
+                    json.loads(line)
+                    for line in (corpus / "cases.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ],
+            )
+
+    def test_recorded_load_evaluates_the_exact_validated_bytes(self) -> None:
+        with self.fixture("same") as (_, _corpus, recording, _candidate):
+            loaded = _load_recorded_source(str(recording))
+            original_identity = dict(loaded.identity)
+            replacement = [
+                {**decision, "effect": "allow" if index == 0 else "deny"}
+                for index, decision in enumerate(BASELINE)
+            ]
+            replacement_bytes = jsonl_bytes(replacement)
+            recording.write_bytes(replacement_bytes)
+            manifest_path = Path(f"{recording}.manifest.json")
+            replacement_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            replacement_manifest["policy_id"] = "replacement-policy"
+            replacement_manifest["policy_commit"] = "f" * 40
+            replacement_manifest["decisions_sha256"] = hashlib.sha256(
+                replacement_bytes
+            ).hexdigest()
+            replacement_manifest_bytes = manifest_json_bytes(replacement_manifest)
+            manifest_path.write_bytes(replacement_manifest_bytes)
+
+            result = loaded.source.evaluate(EVENTS)
+
+        self.assertEqual(["deny", "allow"], [row["effect"] for row in result.decisions])
+        self.assertTrue(result.is_valid)
+        self.assertEqual(original_identity, loaded.identity)
+        self.assertNotEqual(
+            original_identity["sha256"],
+            hashlib.sha256(replacement_manifest_bytes).hexdigest(),
+        )
 
     def test_exit_two_rejects_an_empty_corpus_before_loading_policies(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):

@@ -57,6 +57,9 @@ effects. It does not parse command text or reproduce the frozen dispatcher.
 
 Corpus and recorded-source manifests bind exact bytes with SHA-256. A run ID binds the runner
 version, both policy-source identities, the corpus-manifest digest, and gate configuration. Process
+startup captures every corpus file and both recorded-source files once, validates those captured
+bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
+later therefore cannot change a result under the earlier manifest or policy identity. Process
 identity v4 includes the executable bytes and execute-bit tuple, normalized invocation, entry-policy
 bytes, the relative names, exact regular-file bytes, and owner/group/other execute-bit tuples for
 the policy-parent root and entries, configured timeout, fixed environment, and policy-parent

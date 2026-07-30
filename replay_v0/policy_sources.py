@@ -349,20 +349,35 @@ class RecordedDecisionSource:
     """Read an exact-byte-bound JSONL decision recording without policy execution."""
 
     def __init__(
-        self, decisions_path: str | Path, manifest_path: str | Path | None = None
+        self,
+        decisions_path: str | Path,
+        manifest_path: str | Path | None = None,
+        *,
+        decisions_bytes: bytes | None = None,
+        manifest_bytes: bytes | None = None,
     ) -> None:
+        if (decisions_bytes is None) != (manifest_bytes is None):
+            raise ValueError(
+                "captured recorded decisions and manifest bytes must be supplied together"
+            )
         self.decisions_path = Path(decisions_path)
         self.manifest_path = (
             Path(manifest_path)
             if manifest_path is not None
             else _manifest_path(self.decisions_path)
         )
+        self.decisions_bytes = decisions_bytes
+        self.manifest_bytes = manifest_bytes
 
     def evaluate(self, event_values: list[object]) -> PolicySourceResult:
         events = validate_command_events(event_values)
 
         try:
-            manifest_bytes = self.manifest_path.read_bytes()
+            manifest_bytes = (
+                self.manifest_path.read_bytes()
+                if self.manifest_bytes is None
+                else self.manifest_bytes
+            )
             manifest_value = json.loads(
                 manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
             )
@@ -388,7 +403,11 @@ class RecordedDecisionSource:
             return _all_indeterminate(events, failure, "Recorded")
 
         try:
-            decision_bytes = self.decisions_path.read_bytes()
+            decision_bytes = (
+                self.decisions_path.read_bytes()
+                if self.decisions_bytes is None
+                else self.decisions_bytes
+            )
         except OSError as exc:
             failure = SourceFailure(
                 "recording-read-failed",

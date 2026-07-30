@@ -80,6 +80,10 @@ class RecordedSourceTests(unittest.TestCase):
         self.assertTrue(result.is_valid)
         self.assertEqual(["deny", "allow"], [row["effect"] for row in result.decisions])
 
+    def test_captured_inputs_must_be_supplied_as_a_pair(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            RecordedDecisionSource("decisions.jsonl", decisions_bytes=b"")
+
     def test_missing_record_becomes_indeterminate(self) -> None:
         with self.recording(DECISIONS[:1]) as path:
             result = RecordedDecisionSource(path).evaluate(EVENTS)

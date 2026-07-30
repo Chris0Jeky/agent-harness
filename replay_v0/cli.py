@@ -126,10 +126,10 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def _read_jsonl(path: Path, label: str) -> list[object]:
+def _read_jsonl_bytes(value: bytes, label: str) -> list[object]:
     try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ReplayInputError(f"{label} is not readable UTF-8") from exc
     records: list[object] = []
     for line_number, line in enumerate(split_jsonl_records(text), start=1):
@@ -159,17 +159,18 @@ def _load_charter_corpus(value: str) -> LoadedCharterCorpus:
     manifest_path = _resolve_manifest_path(value)
     loaded = load_corpus_manifest(manifest_path)
     entries = {entry["path"]: entry for entry in loaded.value["files"]}
+    captured_files = dict(loaded.file_bytes)
     required_paths = {"events.jsonl", "cases.jsonl"}
-    if set(entries) != required_paths:
+    if set(entries) != required_paths or set(captured_files) != required_paths:
         raise ReplayInputError(
             "charter corpus manifest must list exactly events.jsonl and cases.jsonl"
         )
 
     events = validate_command_events(
-        _read_jsonl(manifest_path.parent / "events.jsonl", "events.jsonl")
+        _read_jsonl_bytes(captured_files["events.jsonl"], "events.jsonl")
     )
     cases = validate_charter_cases(
-        _read_jsonl(manifest_path.parent / "cases.jsonl", "cases.jsonl")
+        _read_jsonl_bytes(captured_files["cases.jsonl"], "cases.jsonl")
     )
     if len(events) != loaded.value["event_count"]:
         raise ReplayInputError("corpus event_count does not match events.jsonl")
@@ -210,7 +211,12 @@ def _load_recorded_source(raw_path: str) -> LoadedPolicySource:
         raise ReplayInputError("recorded source count does not match its sidecar")
     return LoadedPolicySource(
         kind="recorded",
-        source=RecordedDecisionSource(path, manifest_path),
+        source=RecordedDecisionSource(
+            path,
+            manifest_path,
+            decisions_bytes=decision_bytes,
+            manifest_bytes=manifest_bytes,
+        ),
         identity={
             "kind": "recorded",
             "id": manifest.policy_id,

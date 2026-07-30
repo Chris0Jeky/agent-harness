@@ -75,8 +75,18 @@ class CorpusManifestTests(unittest.TestCase):
             loaded = load_corpus_manifest(manifest_path)
             self.assertEqual(manifest, loaded.value)
             self.assertEqual(sha256_bytes(manifest_bytes), loaded.manifest_sha256)
+            self.assertEqual(
+                {
+                    "events.jsonl": b'{"event_id":"one"}\n',
+                    "cases.jsonl": b'{"event_id":"one"}\n',
+                },
+                dict(loaded.file_bytes),
+            )
 
             (directory / "events.jsonl").write_bytes(b'{"event_id":"changed"}\n')
+            self.assertEqual(
+                b'{"event_id":"one"}\n', dict(loaded.file_bytes)["events.jsonl"]
+            )
             with self.assertRaisesRegex(ManifestError, "does not match"):
                 load_corpus_manifest(manifest_path)
 
