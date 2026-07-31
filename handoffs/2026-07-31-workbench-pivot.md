@@ -22,14 +22,14 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
 
 ## Exact published checkpoint
 
-- `origin/main` was `a6a1c847392899ad0e6d0709c44ea2aa67760979`, the merge commit for PR #194.
+- `origin/main` was `b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`, the merge commit for PR #193.
 - PR #194 preserved head `5b5cfbfc6179ac577e157b6c520c2ebaf6258608` as its second parent;
   `origin/main` contains that head; #167 is closed; run `30665083220` passed all nine jobs; the
   one-time post-merge comments/reviews/threads refresh found no late feedback.
 - The protected `floor-v1-final` tag remains object
   `5a939540bdce51e511d6b3bae98358e3e2ad9148`, peeled commit
   `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
-- GitHub had 69 open issues and one open PR (#193). `ROADMAP.md` maps every open issue exactly once.
+- GitHub had 69 open issues and one open PR (#195). `ROADMAP.md` maps every open issue exactly once.
   Refresh both counts before selecting work.
 - Canonical state: `docs/SYSTEM_STATE.md`; issue/PR ownership: `ROADMAP.md`; active work:
   `plans/ACTIVE.md`; measurements: `docs/BENCHMARKS.md`; legacy limitations:
@@ -65,6 +65,13 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
   inspection. It merged as `a6a1c847392899ad0e6d0709c44ea2aa67760979`, with parents `9deb1eb`
   and `5b5cfbf`; #167 closed. Exact-head local proof passed 855 tests with 13 declared skips,
   47 closeout tests with one expected NTFS skip, and 2237/2237 smoke cases. No live apply ran.
+- PR #193 merged the four owner-authorized #184 public-push security repairs as
+  `b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`, with parents `a6a1c84` and `8648e5c`, preserving
+  both topic commits. Run `30666338126` passed all nine jobs; the first HIGH was fixed once and the
+  exact-head fix-diff review found no remaining CRITICAL/HIGH issue. Five pre-merge connector
+  findings and one late post-merge P2 were classified as fail-closed usability defects, recorded in
+  #196, replied to, and resolved once. #184 then closed manually with exact producer proof because
+  the PR had no closing reference.
 - PRs #154/#155 were closed unmerged after exact inventory proved them stale/conflicting and
   superseded. Their remote branches and historical threads were preserved; no branch was deleted.
 
@@ -78,24 +85,20 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
   retained conflict. The owner must choose the policy before implementation.
 - Evidence comment: https://github.com/Chris0Jeky/agent-harness/issues/160#issuecomment-5146563160
 
-## Occupied PR #193 — do not race
+## PR #193 post-merge boundary
 
-- PR #193 (`fix(floor): close public push narrowing gaps`) is the sole open PR and maps to AH-3/#184.
-  Its writer checkout is `.worktrees/issue184-push-narrowing`; observed head was
-  `8648e5c7fb804fed4c991418401d411973350248`, with base/merge-base `a6a1c84`.
-- An independent first-head review found a HIGH one-shot configuration-probe fail-open; current head
-  `8648e5c` contains the bounded fix on the refreshed base. The connector review at superseded head
-  `b94732a` left four current threads (one P1 and three P2) plus one outdated P2. They still need
-  one-pass triage, and no current-head fix-diff review was recorded. New run `30666338126` had six
-  fast jobs green while the three aggregate Verify jobs were still running.
-- The owning writer must finish those findings and re-prove affected CI/review evidence. Do not
-  merge, edit, or remove this external checkout from another workstream.
-- #184 intentionally does not authorize live installation, trust/config mutation, or a NavSentinel
-  consumer sync; NavSentinel retired that repo-local harness in a newer owner-directed change.
+- Canonical floor source is now 1.6.22, but deployed global Claude bytes remain measured 1.6.21.
+  No live install, trust/config mutation, or consumer sync was authorized or performed.
+- Issue #196 owns the six fail-closed usability findings: branch-name ambiguity, submodule topology,
+  empty boolean, subdirectory common-dir resolution, tracking alias, and explicit
+  `--no-follow-tags` precedence. Do not reopen #193 or expand #196 into universal-parser work.
+- The registered `.worktrees/issue184-push-narrowing` checkout remains owned by its coordinator
+  until that coordinator inspects ignored content and removes it with plain `git worktree remove`.
 
 ## Occupied state to preserve
 
-- Primary checkout was tracked-clean at `main@a6a1c84`; ignored IDE/test/worktree caches remain.
+- Primary checkout was tracked-clean and fast-forwarded to `main@b2c2fd4`; ignored IDE/test/worktree
+  caches remain.
 - `crossproduct-gate`: tracked-clean historical branch; remote is gone; ignored caches remain.
 - `issue27-temporal-config`: tracked-clean occupied historical floor branch; ignored caches remain.
 - `replay-tool`: user-owned staged `scripts/replay_corpus.py`; never reset, restore, stash, or remove.
@@ -110,7 +113,7 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
 
 ## Exact next safe slice — #172
 
-Start only after PR #193 and this continuity PR have merged or parked, then use a fresh detached
+Start only after this continuity PR has merged or parked, then use a fresh detached
 `origin/main` worktree and branch. The slice is additive AH-6 evidence, not estate mutation.
 
 - **Observable outcome:** guarded closeout retains a worktree whose direct `ORIG_HEAD` target is an
@@ -134,7 +137,7 @@ Start only after PR #193 and this continuity PR have merged or parked, then use 
 - **Next handoff:** one PR closing only #172, with merge-commit preservation and no live apply.
 
 Issue #170 remains useful but additionally requires a real mode-capable POSIX/WSL positive control.
-Issues #185/#186/#188–#192 are mapped follow-ups, not workbench-wide priorities.
+Issues #185/#186/#188–#192/#196 are mapped follow-ups, not workbench-wide priorities.
 
 ## Refresh commands
 

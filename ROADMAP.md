@@ -1,6 +1,6 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-07-31 at `main@a6a1c847392899ad0e6d0709c44ea2aa67760979`.
+Snapshot: 2026-07-31 at `main@b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`.
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 
@@ -10,7 +10,7 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 |---|---|---|---|
 | AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #96, #119, #138, #185 |
 | AH-2 — internal Policy Lab | AH-1 truth and corpus provenance | **Implemented core; bounded follow-ups queued.** PR #140 merged deterministic replay evidence; PRs #159/#163 repaired report/manifest contracts; PRs #174/#176/#187 closed #152/#156/#177 with reproduction and schema/runtime proof. Replay remains internal and experimental. | #141, #142, #143, #145, #146, #147, #150, #157, #158 |
-| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Active only for a bounded security-preservation exception.** PR #193 owns the four reproduced #184 public-push gaps. Beyond that exception, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #74, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #184 |
+| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; #196 owns six review-proven fail-closed usability edges. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #74, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #196 |
 | AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165. #160 is reproduced and owner-blocked on precedence; #189 adds a bounded duplicate-Claude-floor seam. | #19, #85, #89, #98, #107, #160, #189 |
 | AH-5 — runtime/external adapters | AH-2 stable source and report contracts | **Partial.** Recorded and generic process sources exist; runtime surface parity remains bounded. | #86, #88 |
 | AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #84, #91, #101, #122, #131, #139, #170, #172, #186, #188, #190, #191, #192 |
@@ -24,8 +24,9 @@ All 69 issues open at this snapshot have one primary epic above. Cross-cutting o
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
 - #96 is the AH-1 freeze decision; PR #182 closed measured CI-budget defect #179; #185 is bounded
-  consumer-smoke proving work. #184 is the owner-authorized AH-3 security-preservation exception
-  now in occupied PR #193. #118/#120 are AH-8 friction evidence feeding AH-3.
+  consumer-smoke proving work. PR #193 merged the owner-authorized #184 AH-3 security-preservation
+  exception; #184 then closed with exact producer proof and #196 owns its fail-closed review
+  follow-ups. #118/#120 are AH-8 friction evidence feeding AH-3.
 - #19/#85/#89/#98 are the Doctor/configuration-reality cluster; #19/#85 also inform AH-5.
 - Closed #87 established the static MCP topology baseline through PR #161; #101/#139 remain
   estate-operations work, and #98/#101 retain AH-9 seams.
@@ -43,12 +44,12 @@ All 69 issues open at this snapshot have one primary epic above. Cross-cutting o
 
 ## Open PR ownership
 
-PR #193 is the sole open PR at this snapshot. Its occupied writer checkout is
-`.worktrees/issue184-push-narrowing`; head `8648e5c7fb804fed4c991418401d411973350248`
-addresses #184 but intentionally has no closing reference. Its base/merge-base is `a6a1c84`; new
-hosted CI is running, and four current plus one outdated connector thread still need bounded triage
-and current-head review. Do not modify, merge, or remove its checkout from another workstream. PRs
-#154/#155 remain closed unmerged with branches and historical threads
+PR #195 is the sole open PR at this snapshot and owns this continuity publication. PR #193 merged
+as `b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`, preserving head
+`8648e5c7fb804fed4c991418401d411973350248`; run `30666338126` passed all nine jobs. Its first
+five connector findings were recorded in #196 and resolved before merge; one late post-merge P2 was
+added to #196, replied to, and resolved once. #184 was closed manually with exact producer proof
+because #193 intentionally had no closing reference. PRs #154/#155 remain closed unmerged with branches and historical threads
 preserved. PRs #181/#182/#183/#187/#194 merged continuity, CI-budget, reachability, replay-schema,
 and suspend-aware closeout slices through `main@a6a1c84`. Every base or head change re-proves
 affected evidence.

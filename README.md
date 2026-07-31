@@ -181,8 +181,10 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-07-31): the shared floor is feature-frozen at `FLOOR_VERSION` 1.6.21,
-and its canonical and deployed Claude-hook bytes match on the measured workstation. Replay v0
+Current state (2026-07-31): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+source is 1.6.22 after the owner-authorized, four-case security-preservation repair in #184;
+the deployed Claude hook remains measured at 1.6.21, and no install or trust change is implied.
+Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
 checks, estate seed/sync foundations, and guarded worktree closeout are implemented. Closeout
