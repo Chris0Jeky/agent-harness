@@ -1642,39 +1642,64 @@ def apply_worktree_plan(
             candidate["revalidation"] = "changed"
             apply_ok = False
             continue
-        final_lease, final_lease_reason, final_lease_complete = inspect_worktree_lease(
-            Path(final_lease_path),
-            claimant=claimant,
-            common_git_dir=common_git_dir,
-            worktree=Path(current["path"]),
-            now=worktree_utc_now(),
-        )
-        if (
-            not final_lease_complete
-            or final_lease_reason
-            or final_lease.get("digest") != current["lease"].get("digest")
-            or clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS
-        ):
+        final_lease_path = Path(final_lease_path)
+        mutation_lock = final_lease_path.parent / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        try:
+            mutation_lock.mkdir()
+        except FileExistsError:
             candidate["apply"] = "kept"
-            candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
-            candidate["revalidation"] = "changed"
+            candidate["apply_reason"] = "cooperative_lease_mutation_in_progress"
+            candidate["revalidation"] = "unavailable"
             apply_ok = False
             continue
-
-        remove_result = worktree_git_result(
-            command_runner,
-            ["worktree", "remove", "--", current["path"]],
-            primary,
-        )
-        candidate["remove_exit_code"] = remove_result.returncode
-        candidate["revalidated_fingerprint"] = current["fingerprint"]
-        candidate["revalidation"] = "matched"
-        if remove_result.returncode:
+        except OSError as exc:
             candidate["apply"] = "kept"
-            candidate["apply_reason"] = "plain_remove_refused"
+            candidate["apply_reason"] = "cooperative_lease_lock_failed"
+            candidate["lease_lock_error"] = type(exc).__name__
+            candidate["revalidation"] = "unavailable"
             apply_ok = False
-        else:
-            candidate["apply"] = "removed"
+            continue
+        try:
+            final_lease, final_lease_reason, final_lease_complete = (
+                inspect_worktree_lease(
+                    final_lease_path,
+                    claimant=claimant,
+                    common_git_dir=common_git_dir,
+                    worktree=Path(current["path"]),
+                    now=worktree_utc_now(),
+                )
+            )
+            if (
+                not final_lease_complete
+                or final_lease_reason
+                or final_lease.get("digest") != current["lease"].get("digest")
+                or clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS
+            ):
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+                candidate["revalidation"] = "changed"
+                apply_ok = False
+                continue
+
+            remove_result = worktree_git_result(
+                command_runner,
+                ["worktree", "remove", "--", current["path"]],
+                primary,
+            )
+            candidate["remove_exit_code"] = remove_result.returncode
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "matched"
+            if remove_result.returncode:
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "plain_remove_refused"
+                apply_ok = False
+            else:
+                candidate["apply"] = "removed"
+        finally:
+            try:
+                mutation_lock.rmdir()
+            except FileNotFoundError:
+                pass
     return apply_ok
 
 

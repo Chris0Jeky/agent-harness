@@ -7443,11 +7443,28 @@ class WorktreeCloseoutTests(unittest.TestCase):
         )
         plan = self.plan()
         calls: list[list[str]] = []
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+        mutation_lock = lease_path.parent / harness.WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        reclaim_was_refused = False
 
         def recording_runner(
             command: list[str], cwd: Path
         ) -> subprocess.CompletedProcess[str]:
+            nonlocal reclaim_was_refused
             calls.append(command.copy())
+            if command[1:3] == ["worktree", "remove"]:
+                self.assertTrue(mutation_lock.is_dir())
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "mutation lock already exists"
+                ):
+                    harness.mutate_worktree_lease(
+                        worktree,
+                        action="acquire",
+                        claimant="cooperating-successor",
+                        replace_stale=True,
+                        now=lambda: harness.worktree_utc_now() + timedelta(hours=2),
+                    )
+                reclaim_was_refused = True
             return harness.worktree_git_runner(command, cwd)
 
         self.assertTrue(
@@ -7457,6 +7474,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(candidate["apply"], "removed")
         self.assertEqual(candidate["revalidation"], "matched")
         self.assertEqual(candidate["fingerprint"], candidate["revalidated_fingerprint"])
+        self.assertTrue(reclaim_was_refused)
         self.assertFalse(worktree.exists())
         self.assertEqual(
             self.git(

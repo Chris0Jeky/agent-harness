@@ -545,7 +545,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   work-tree redirection, clean tracked/staged/untracked/ignored state, no
   assume-unchanged/skip-worktree index flags, an unmodified commit graph, remote-ref reachability,
   an active exactly scoped lease owned by the supplied claimant, and same-run fingerprint plus
-  lease revalidation. Missing, malformed, mismatched, stale, nearly expired, changed, or differently
+  lease revalidation while holding the lease-mutation lock through plain removal. Missing,
+  malformed, mismatched, stale, nearly expired, changed, differently
   owned leases refuse safely. The default performs no fetch or mutation; `--apply` requires
   `--refresh --claimant`, uses only plain `git worktree remove`, never prunes repository-wide
   worktree metadata, and never deletes a branch. Git-locked, current, primary, outside, unavailable,
