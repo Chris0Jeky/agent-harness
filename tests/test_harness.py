@@ -4490,6 +4490,26 @@ allow_local_binding = true
         self.assertIn('active command-backed MCP server "docker" is duplicated', output)
         self.assertIn(str(config.resolve()), output)
 
+    def test_mcp_shared_user_project_source_is_not_duplicate(self) -> None:
+        codex_home = Path(self.temp.name) / "codex-home"
+        codex_home.mkdir()
+        shared_config = codex_home / "config.toml"
+        shared_config.write_text(
+            "[mcp_servers.shared]\n"
+            'command = "secret-command"\n'
+            'args = ["private-token"]\n',
+            encoding="utf-8",
+        )
+
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [shared_config])
+
+        self.assertTrue(ok, detail)
+        self.assertIn("1 active user and 0 active project command-backed", detail)
+        self.assertIn("0 active project config path(s)", detail)
+        self.assertNotIn("duplicated", detail)
+        self.assertNotIn("secret-command", detail)
+        self.assertNotIn("private-token", detail)
+
     def test_doctor_models_layered_mcp_enablement_and_argument_source(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
