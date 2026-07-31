@@ -33,8 +33,9 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 
 `worktrees` is a guarded closeout command. Its default is entirely read-only: it does not fetch,
 remove, prune, or delete branches, so otherwise-clean worktrees remain a keep verdict until
-remote evidence is explicitly refreshed. `--refresh` fetches every configured remote and accepts
-a candidate only when its HEAD is reachable from a resulting remote-tracking ref. `--apply`
+remote evidence is explicitly refreshed. `--refresh` fetches and prunes every configured remote's
+complete branch namespace and accepts a candidate only when its HEAD is reachable from a resulting
+remote-tracking ref. `--apply`
 requires that same-run refresh, fingerprints each candidate, revalidates the fingerprint within
 60 seconds, and invokes plain `git worktree remove` only for a physically contained, unlocked,
 clean worktree under the primary checkout's `.worktrees/` directory. Tracked, untracked, and every

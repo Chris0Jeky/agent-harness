@@ -38,6 +38,7 @@ WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_COMMON_DIR",
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_SYSTEM",
     "GIT_DIR",
     "GIT_INDEX_FILE",
@@ -620,6 +621,7 @@ def refresh_worktree_remotes(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for remote in remotes:
+        refspec = f"+refs/heads/*:refs/remotes/{remote}/*"
         result = worktree_git_result(
             command_runner,
             [
@@ -629,6 +631,7 @@ def refresh_worktree_remotes(
                 "--no-recurse-submodules",
                 "--",
                 remote,
+                refspec,
             ],
             primary,
         )

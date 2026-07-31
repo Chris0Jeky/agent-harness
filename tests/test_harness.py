@@ -7167,6 +7167,37 @@ class WorktreeCloseoutTests(unittest.TestCase):
             ["refs/remotes/origin/archive"],
         )
 
+    def test_narrow_fetch_refspec_cannot_leave_a_deleted_branch_looking_fresh(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("deleted-archive")
+        (worktree / "archive.txt").write_text("once published\n", encoding="utf-8")
+        self.git("add", "archive.txt", cwd=worktree)
+        self.git("commit", "-qm", "publish then delete archive", cwd=worktree)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/archive", cwd=worktree)
+        first = self.candidate(self.plan(), worktree)
+        self.assertEqual(first["verdict"], "remove")
+
+        self.git("push", "-q", "origin", ":refs/heads/archive")
+        self.git("config", "--unset-all", "remote.origin.fetch")
+        self.git(
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        second = self.candidate(self.plan(), worktree)
+        self.assertEqual(second["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", second["reasons"])
+        self.assertEqual(
+            self.git(
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes/origin/archive",
+            ).stdout.strip(),
+            "",
+        )
+
     def test_primary_locked_and_outside_worktrees_are_never_candidates(self) -> None:
         locked = self.add_worktree("locked")
         outside = self.base / "outside"
@@ -7442,6 +7473,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 "GIT_CONFIG_COUNT": "1",
                 "GIT_CONFIG_KEY_0": "remote.origin.url",
                 "GIT_CONFIG_VALUE_0": "poison",
+                "GIT_CONFIG_PARAMETERS": "'remote.poison.url=https://example.invalid'",
             }
         )
         with mock.patch.dict(os.environ, poisoned, clear=False):
@@ -7459,6 +7491,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertNotIn("GIT_CONFIG_COUNT", environment)
         self.assertNotIn("GIT_CONFIG_KEY_0", environment)
         self.assertNotIn("GIT_CONFIG_VALUE_0", environment)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
 
 
 if __name__ == "__main__":
