@@ -17,6 +17,7 @@ limitation are recorded. Historical results are not silently promoted to current
 | B-008 | PolicyDecision reason schema/runtime boundary, eight cases | Agreement improved from 7/8 to 8/8; run `30642286808` passed | [PR #176](https://github.com/Chris0Jeky/agent-harness/pull/176) | Covers the published CR/LF and length constraints; lone-surrogate parity remains #177. |
 | B-009 | Docker MCP gateway static boundary on Docker 29.6.2 | The original three-case matrix improved from 2/3 to 3/3 correct classifications; the final root-option/subcommand matrix passed 25/25; run `30645532130` passed all nine jobs after one Windows failed-job rerun | [PR #178](https://github.com/Chris0Jeky/agent-harness/pull/178) | Static Docker 29.6.2 root-option contract only; not runtime-topology, gateway-plugin, or performance evidence. |
 | B-010 | PR #178 exact-head Windows hosted CI, two attempts | Attempt 1 canceled at 15m05s after unit 6m18s, replay 2m53s, and 5m07s of smoke; attempt 2 passed in 11m33s with unit 5m32s, replay 9s, and smoke 5m17s | [Issue #179](https://github.com/Chris0Jeky/agent-harness/issues/179) | Two same-head GitHub-hosted Windows attempts prove budget exposure, not a long-run duration distribution or a product performance regression. |
+| B-011 | Guarded worktree partial-apply reporting in disposable synthetic repositories | Before PR #180, one completed removal followed by a registry-list failure yielded 0 output bytes and no summary; after the fix, each of two output modes reported exactly 1 removal and 2 retained/refused removable candidates; run `30649228936` passed | [PR #180](https://github.com/Chris0Jeky/agent-harness/pull/180) | Synthetic reporting-correctness evidence only; no live estate apply, transactional rollback, or performance claim. |
 
 ## Interpretation boundaries
 
@@ -24,7 +25,8 @@ limitation are recorded. Historical results are not silently promoted to current
   authorize universal-parser expansion or a current estate rollout.
 - B-005 proves deterministic report behavior for the checked synthetic inputs. It does not prove
   process sandboxing, production policy quality, or public-product readiness.
-- B-006–B-009 are bounded correctness matrices, not continuous precision or performance series.
+- B-006–B-009 and B-011 are bounded correctness matrices, not continuous precision or performance
+  series.
 - B-010 is CI proving-substrate evidence for AH-1; it does not justify skipping or allowing failure
   in any current gate.
 - Warning, ask/approval, deny, source failure, and indeterminate outcomes remain separate metrics.

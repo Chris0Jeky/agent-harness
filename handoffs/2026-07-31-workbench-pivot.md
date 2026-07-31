@@ -54,6 +54,13 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
   jobs after the Windows failed-job rerun. One HIGH review finding was fixed once; the final
   fix-range review was clean; four connector threads were triaged and resolved; post-merge
   feedback was checked once.
+- PR #180 merged complete fail-closed partial-apply reporting as
+  `e23e97b464208ee6035d4155ff7e9b5316f2efec`, with parents `576b540` and `c9e80c9`, preserving
+  implementation `c9e80c91e44cdf1b301fdab845560b75c486a96f`; #168 closed. Exact-head local gates
+  passed 846 tests with 13 declared skips, 38 closeout tests with one declared skip, and 2237/2237
+  smoke cases. Run `30649228936` passed all nine jobs. The independent review was clean; the sole
+  connector P2 was classified MEDIUM/non-blocking, declined, and resolved; post-merge feedback was
+  checked once. All mutation tests used disposable synthetic repositories; no live apply ran.
 - PRs #154/#155 were closed unmerged after independent exact inventory proved them stale,
   conflicting, and superseded by #161/#162/#169/#175. Their remote branches and historical
   threads were preserved; no branch was deleted.
@@ -63,8 +70,8 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
 
 ## Current state and canonical homes
 
-- Published base for the active wave: `origin/main@576b540b0e856ed61dc1b062b1cdae0abbcd89dd`.
-- Immediately after PR #178, GitHub had zero open PRs and 66 open issues. `ROADMAP.md` maps each
+- Published base for the final continuity slice: `origin/main@e23e97b464208ee6035d4155ff7e9b5316f2efec`.
+- Immediately after PR #180, GitHub had zero open PRs and 65 open issues. `ROADMAP.md` maps each
   open issue exactly once; new #179 is primary AH-1 CI proving-substrate work.
 - Canonical state: `docs/SYSTEM_STATE.md`. Issue/PR ownership: `ROADMAP.md`. Active work:
   `plans/ACTIVE.md`. Measurements: `docs/BENCHMARKS.md`. Legacy limitations:
@@ -76,53 +83,42 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
   assertions had passed through replay; attempt 2 passed in 11m33s. Do not weaken a check; measure
   recent distributions before changing the aggregate budget or stage topology.
 
-## Active workstreams
+## Active workstream
 
-### A — continuity docs
+### A — continuity docs (sole writer)
 
 - Writer checkout: `.worktrees/workbench-continuity-final-20260731`.
-- Branch: `docs/workbench-continuity-final`; base `576b540`.
+- Branch: `docs/workbench-continuity-final`; post-#180 merge commit `8f17839` contains base
+  `e23e97b` plus the continuity commit.
 - Scope is exactly the five canonical continuity files. Root `HANDOFF.md`, runtime behavior,
   floor limitations, and H-2 remain untouched.
-- Before publication, refresh after workstream B lands or parks, then prove the 66-entry issue map,
-  document budgets, tier JSON, exact diff, offline audit/Doctor, fresh review, hosted CI, aging,
-  and discussion triage.
-
-### B — #168 partial-apply reporting
-
-- Sole writer checkout: `.worktrees/partial-apply-report-20260731`.
-- Branch: `fix/issue168-partial-apply`; base `576b540`.
-- Synthetic reproduction removed the first worktree, retained the next after a controlled registry
-  probe failure, then raised before rendering: zero stdout, no summary, no top-level apply error.
-- Implement only complete/fail-closed JSON/text reporting, stable reason codes, synthetic tests,
-  and one `SPECS.md` sentence. No live apply, retry, rollback, prune, force, or #167/#170–#172 work.
-- After implementation, run focused/full local gates, one bounded review pipeline, all nine hosted
-  jobs, three-minute aging, triage once, and merge with commit preservation if clean.
+- Before publication, prove the 65-entry issue map, document budgets, tier JSON, exact diff,
+  offline audit/Doctor, fresh review, hosted CI, aging, and discussion triage.
 
 ## Occupied worktrees to preserve
 
-- Primary checkout: clean but intentionally behind `origin/main`; preserve user state.
+- Primary checkout: clean and at `e23e97b` when last checked; preserve user state and refresh rather
+  than assuming that remains current.
 - `crossproduct-gate`: tracked-clean historical test branch; remote branch is gone; ignored caches.
 - `issue27-temporal-config`: tracked-clean occupied historical floor branch; ignored caches.
 - `replay-tool`: user-owned staged `scripts/replay_corpus.py`; never reset, restore, stash, or remove.
 - `replay-v0-freeze`: ignored `.local/` evidence/caches and recovery evidence; never remove without
   separately proving and copying everything that must survive.
-- `workbench-continuity-final-20260731` and `partial-apply-report-20260731`: the two current writer
-  checkouts, one writer each.
+- `workbench-continuity-final-20260731`: the sole current writer checkout.
 - Empty, unregistered `.worktrees/replay-platform-reproduction-20260731` may remain locked by an
   external handle. It was verified empty and unregistered; leave it alone unless separately proving
   it safe to remove.
 
-The completed #175/#176/#178 writer worktrees were removed with plain `git worktree remove` only
+The completed #175/#176/#178/#180 writer worktrees were removed with plain `git worktree remove` only
 after tracked/untracked/ignored inspection found nothing except disposable caches. No parked branch
 was deleted. `replay-v0-freeze` and its ignored evidence were never touched.
 
 ## Next safe queue
 
-Finish #168 first; it is independently reproduced and already isolated. After #168 and continuity
-land, #179 is the strongest new substrate candidate because a required gate was directly canceled
-by the measured 15-minute aggregate budget. Its first action is read-only duration inventory, not a
-timeout guess. Then re-rank #170/#171/#172 and #160 from refreshed evidence. #98 remains unsuitable
+Finish continuity first. Then #179 is the strongest new substrate candidate because a required
+gate was directly canceled by the measured 15-minute aggregate budget. Its first action is
+read-only duration inventory, not a timeout guess. Then re-rank #170/#171/#172 and #160 from
+refreshed evidence. #98 remains unsuitable
 until source-versus-deployed global-guidance provenance is resolved.
 
 Exact #179 inventory command:
