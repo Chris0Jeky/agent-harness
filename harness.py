@@ -2344,8 +2344,10 @@ def codex_mcp_topology_status(
     codex_home: Path, project_config_paths: list[Path]
 ) -> tuple[bool, str]:
     """Check the static user/project MCP process-spawning topology."""
-    user_path = mcp_config_identity(codex_home / "config.toml")
-    project_paths = distinct_mcp_config_paths(project_config_paths)
+    config_paths = distinct_mcp_config_paths(
+        [codex_home / "config.toml", *project_config_paths]
+    )
+    user_path, *project_paths = config_paths
     user_states = layered_mcp_server_states([user_path])
     project_states = layered_mcp_server_states(project_paths)
     effective_states = layered_mcp_server_states([user_path, *project_paths])
