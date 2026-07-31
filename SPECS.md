@@ -531,7 +531,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
-  executables, and optionally one repo-local Codex floor definition.
+  executables, and optionally one repo-local Codex floor definition plus the static base-user and
+  active-project MCP topology. It rejects active command-backed names duplicated across those
+  scopes, layered mixed command/URL transports, and Docker MCP gateways with neither `--servers`
+  nor `--profile`; it never renders arguments, mutates configuration, or probes runtime processes.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
