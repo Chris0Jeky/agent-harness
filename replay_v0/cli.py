@@ -30,6 +30,7 @@ from replay_v0.digests import (
 )
 from replay_v0.manifests import (
     ManifestError,
+    RUN_GATE_CLASSES,
     build_run_manifest,
     load_corpus_manifest,
     manifest_json_bytes,
@@ -53,7 +54,6 @@ EXIT_INPUT_INVALID = 2
 EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
-SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
 PROCESS_IDENTITY_VERSION = "process-policy-identity.v9"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
@@ -86,8 +86,8 @@ class LoadedPolicySource:
 
 def _parse_fail_on(value: str) -> tuple[str, ...]:
     choices = value.split(",") if value else []
-    if not choices or any(choice not in SUPPORTED_FAIL_ON for choice in choices):
-        expected = ", ".join(sorted(SUPPORTED_FAIL_ON))
+    if not choices or any(choice not in RUN_GATE_CLASSES for choice in choices):
+        expected = ", ".join(sorted(RUN_GATE_CLASSES))
         raise argparse.ArgumentTypeError(
             f"expected a comma-separated selection from: {expected}"
         )

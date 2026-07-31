@@ -11,6 +11,7 @@ from replay_v0.manifests import (
     ManifestError,
     build_corpus_manifest,
     build_run_manifest,
+    derive_run_id,
     load_corpus_manifest,
     manifest_json_bytes,
     validate_corpus_manifest,
@@ -162,6 +163,61 @@ class RunManifestTests(unittest.TestCase):
                 corpus={**CORPUS, "event_count": 0},
                 fail_on=FAIL_ON,
             )
+
+    def test_all_gate_classes_are_accepted_by_build_derive_and_validation(self) -> None:
+        for gate_class in (
+            "newly-allowed",
+            "newly-denied",
+            "newly-indeterminate",
+        ):
+            with self.subTest(gate_class=gate_class):
+                derived_run_id = derive_run_id(
+                    runner_version="0.1.0",
+                    baseline_sha256=BASELINE["sha256"],
+                    candidate_sha256=CANDIDATE["sha256"],
+                    corpus_manifest_sha256=CORPUS["manifest_sha256"],
+                    fail_on=[gate_class],
+                )
+                manifest = build_run_manifest(
+                    generated_at="2026-07-30T12:00:00Z",
+                    baseline=BASELINE,
+                    candidate=CANDIDATE,
+                    corpus=CORPUS,
+                    fail_on=[gate_class],
+                    runner_version="0.1.0",
+                )
+                self.assertEqual(derived_run_id, manifest["run_id"])
+                self.assertEqual(manifest, validate_run_manifest(manifest))
+
+    def test_report_only_classes_are_rejected_by_build_derive_and_validation(
+        self,
+    ) -> None:
+        for report_only_class in ("unchanged", "resolved-indeterminate"):
+            with self.subTest(operation="derive", gate_class=report_only_class):
+                with self.assertRaisesRegex(ManifestError, "replay gate class"):
+                    derive_run_id(
+                        runner_version="0.1.0",
+                        baseline_sha256=BASELINE["sha256"],
+                        candidate_sha256=CANDIDATE["sha256"],
+                        corpus_manifest_sha256=CORPUS["manifest_sha256"],
+                        fail_on=[report_only_class],
+                    )
+
+            with self.subTest(operation="build", gate_class=report_only_class):
+                with self.assertRaisesRegex(ManifestError, "replay gate class"):
+                    build_run_manifest(
+                        generated_at="2026-07-30T12:00:00Z",
+                        baseline=BASELINE,
+                        candidate=CANDIDATE,
+                        corpus=CORPUS,
+                        fail_on=[report_only_class],
+                    )
+
+            invalid_manifest = self.build()
+            invalid_manifest["fail_on"] = [report_only_class]
+            with self.subTest(operation="validate", gate_class=report_only_class):
+                with self.assertRaisesRegex(ManifestError, "replay gate class"):
+                    validate_run_manifest(invalid_manifest)
 
     def test_run_id_changes_with_each_semantic_input_class(self) -> None:
         original = self.build()
