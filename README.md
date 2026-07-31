@@ -139,10 +139,11 @@ the root-checkout adapter through `/hooks`; do not edit trust hashes manually or
 Current state (2026-07-31): the shared floor is feature-frozen at `FLOOR_VERSION` 1.6.21,
 and its canonical and deployed Claude-hook bytes match on the measured workstation. Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
-charter; it is not a live enforcement product. The CLI, static Doctor/audit checks, and estate
-seed/sync foundations are implemented, while Doctor v2, bounded Pattern Guard v2, integrated
-measurement, and private `claude-config` integration remain roadmap work. Public replay or
-blueprint-plugin extraction is deferred under AH-10.
+charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
+checks, and estate seed/sync foundations are implemented. Guarded worktree closeout, further
+Doctor correctness, bounded Pattern Guard v2, integrated measurement, and private
+`claude-config` integration remain roadmap work. Public replay or blueprint-plugin extraction is
+deferred under AH-10.
 
 The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
 Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
