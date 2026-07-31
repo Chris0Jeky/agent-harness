@@ -8165,16 +8165,146 @@ class WorktreeCloseoutTests(unittest.TestCase):
 
     def test_expired_fingerprint_lease_refuses_removal(self) -> None:
         worktree = self.add_worktree("expired")
-        plan = self.plan(clock=lambda: 0.0)
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
         self.assertFalse(
             harness.apply_worktree_plan(
                 plan,
                 clock=lambda: harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1.0,
+                now=lambda: origin + timedelta(seconds=1),
             )
         )
         candidate = self.candidate(plan, worktree)
         self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
         self.assertTrue(worktree.is_dir())
+
+    def test_suspend_inclusive_fingerprint_age_refuses_removal(self) -> None:
+        worktree = self.add_worktree("suspend-expired")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: origin
+                + timedelta(seconds=harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertEqual(candidate["revalidation"], "expired")
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_utc_clock_rollback_refuses_removal(self) -> None:
+        worktree = self.add_worktree("clock-rollback")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: origin - timedelta(seconds=1),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_utc_clock_rollback")
+        self.assertEqual(candidate["revalidation"], "invalid")
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_utc_rollback_between_samples_refuses_removal(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("interstage-clock-rollback")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [
+            origin + timedelta(seconds=30),
+            origin + timedelta(seconds=20),
+        ]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_utc_clock_rollback")
+        self.assertEqual(candidate["revalidation"], "invalid")
+        self.assertEqual(current_times, [])
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_failure_stops_all_remaining_removals(self) -> None:
+        first = self.add_worktree("clock-failure-first")
+        second = self.add_worktree("clock-failure-second")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [origin - timedelta(seconds=1)]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        first_candidate = self.candidate(plan, first)
+        second_candidate = self.candidate(plan, second)
+        self.assertEqual(
+            first_candidate["apply_reason"], "fingerprint_utc_clock_rollback"
+        )
+        self.assertEqual(
+            second_candidate["apply_reason"],
+            "not_attempted_after_fingerprint_failure",
+        )
+        self.assertEqual(second_candidate["revalidation"], "not_attempted")
+        self.assertEqual(current_times, [])
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
+    def test_fingerprint_utc_expiry_during_revalidation_refuses_removal(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("revalidation-expired")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1),
+        ]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertEqual(candidate["revalidation"], "expired")
+        self.assertEqual(current_times, [])
+        self.assertTrue(worktree.is_dir())
+
+    def test_missing_or_malformed_fingerprint_utc_origin_refuses_apply(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("missing-utc-origin")
+        for label, generated_at in (("missing", None), ("malformed", "not-a-time")):
+            with self.subTest(label=label):
+                plan = self.plan()
+                if generated_at is None:
+                    plan.pop("generated_at")
+                else:
+                    plan["generated_at"] = generated_at
+                self.assertFalse(harness.apply_worktree_plan(plan))
+                self.assertEqual(plan["apply_error"], "fingerprint_origin_missing")
+                self.assertTrue(worktree.is_dir())
 
     def test_ignored_file_change_between_plan_and_remove_is_revalidated(self) -> None:
         worktree = self.add_worktree("race")

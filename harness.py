@@ -1884,11 +1884,33 @@ def find_worktree_record(
     return None
 
 
+def worktree_fingerprint_freshness_reason(
+    fingerprint_started: float,
+    generated_at: datetime,
+    *,
+    current_monotonic: float,
+    current_time: datetime,
+) -> str:
+    """Return a fail-closed reason when either fingerprint clock is invalid."""
+
+    active_age = current_monotonic - fingerprint_started
+    utc_age = (current_time.astimezone(timezone.utc) - generated_at).total_seconds()
+    if utc_age < 0:
+        return "fingerprint_utc_clock_rollback"
+    if (
+        active_age > WORKTREE_FINGERPRINT_LEASE_SECONDS
+        or utc_age > WORKTREE_FINGERPRINT_LEASE_SECONDS
+    ):
+        return "fingerprint_lease_expired"
+    return ""
+
+
 def apply_worktree_plan(
     plan: dict[str, Any],
     *,
     command_runner: Any = worktree_git_runner,
     clock: Any = monotonic,
+    now: Any = worktree_utc_now,
 ) -> bool:
     """Apply one fresh plan; return false when any requested removal is refused."""
 
@@ -1916,21 +1938,57 @@ def apply_worktree_plan(
     process_cwd = canonical_worktree_path(Path.cwd())
     remotes = list(plan["refresh"]["remotes"])
     fingerprint_started = plan.get("_fingerprint_created_monotonic")
-    if not isinstance(fingerprint_started, (int, float)):
+    fingerprint_generated_at = parse_worktree_lease_timestamp(plan.get("generated_at"))
+    if not isinstance(fingerprint_started, (int, float)) or (
+        fingerprint_generated_at is None
+    ):
         plan["apply_error"] = "fingerprint_origin_missing"
         return False
+    last_utc_sample = fingerprint_generated_at
+
+    def sample_fingerprint_freshness() -> tuple[str, datetime]:
+        nonlocal last_utc_sample
+        current_monotonic = clock()
+        current_time = now().astimezone(timezone.utc)
+        if current_time < last_utc_sample:
+            return "fingerprint_utc_clock_rollback", current_time
+        last_utc_sample = current_time
+        return (
+            worktree_fingerprint_freshness_reason(
+                fingerprint_started,
+                fingerprint_generated_at,
+                current_monotonic=current_monotonic,
+                current_time=current_time,
+            ),
+            current_time,
+        )
+
+    def refuse_fingerprint_failure(
+        candidate_index: int, candidate: dict[str, Any], reason: str
+    ) -> bool:
+        candidate["apply"] = "kept"
+        candidate["apply_reason"] = reason
+        candidate["revalidation"] = (
+            "expired" if reason == "fingerprint_lease_expired" else "invalid"
+        )
+        for remaining in plan["worktrees"][candidate_index + 1 :]:
+            remaining["apply"] = "kept"
+            if remaining["verdict"] == "remove":
+                remaining["apply_reason"] = "not_attempted_after_fingerprint_failure"
+                remaining["revalidation"] = "not_attempted"
+        return False
+
     apply_ok = True
 
     for candidate_index, candidate in enumerate(plan["worktrees"]):
         if candidate["verdict"] != "remove":
             candidate["apply"] = "kept"
             continue
-        if clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS:
-            candidate["apply"] = "kept"
-            candidate["apply_reason"] = "fingerprint_lease_expired"
-            candidate["revalidation"] = "expired"
-            apply_ok = False
-            continue
+        freshness_reason, _ = sample_fingerprint_freshness()
+        if freshness_reason:
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
+            )
 
         try:
             current_records = canonicalize_worktree_records(
@@ -1961,6 +2019,11 @@ def apply_worktree_plan(
         history_rewrite, history_complete = worktree_history_rewrite_evidence(
             primary, common_git_dir, command_runner
         )
+        freshness_reason, revalidation_time = sample_fingerprint_freshness()
+        if freshness_reason:
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
+            )
         current, current_complete = inspect_worktree_candidate(
             current_record,
             primary=primary,
@@ -1975,7 +2038,7 @@ def apply_worktree_plan(
             history_rewrite_complete=history_complete,
             claimant=claimant,
             command_runner=command_runner,
-            now=worktree_utc_now(),
+            now=revalidation_time,
         )
         if (
             not current_complete
@@ -2014,20 +2077,29 @@ def apply_worktree_plan(
             apply_ok = False
             continue
         try:
+            freshness_reason, lease_probe_time = sample_fingerprint_freshness()
+            if freshness_reason:
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
+                )
             final_lease, final_lease_reason, final_lease_complete = (
                 inspect_worktree_lease(
                     final_lease_path,
                     claimant=claimant,
                     common_git_dir=common_git_dir,
                     worktree=Path(current["path"]),
-                    now=worktree_utc_now(),
+                    now=lease_probe_time,
                 )
             )
+            freshness_reason, _ = sample_fingerprint_freshness()
+            if freshness_reason:
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
+                )
             if (
                 not final_lease_complete
                 or final_lease_reason
                 or final_lease.get("digest") != current["lease"].get("digest")
-                or clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS
             ):
                 candidate["apply"] = "kept"
                 candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
@@ -2112,6 +2184,7 @@ def worktrees_command(
     *,
     command_runner: Any = worktree_git_runner,
     clock: Any = monotonic,
+    now: Any = worktree_utc_now,
 ) -> int:
     if args.apply and not args.refresh:
         raise HarnessError("--apply requires --refresh")
@@ -2126,10 +2199,13 @@ def worktrees_command(
         claimant=claimant,
         command_runner=command_runner,
         clock=clock,
+        now=now,
     )
     apply_ok = True
     if args.apply:
-        apply_ok = apply_worktree_plan(plan, command_runner=command_runner, clock=clock)
+        apply_ok = apply_worktree_plan(
+            plan, command_runner=command_runner, clock=clock, now=now
+        )
     summarize_worktree_plan(plan)
     plan.pop("_fingerprint_created_monotonic", None)
     if args.json:
