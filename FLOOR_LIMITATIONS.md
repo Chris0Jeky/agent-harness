@@ -3,10 +3,9 @@
 The floor is **FEATURE-FROZEN** (BLUEPRINT §2; decision record: issue #96, ratified in #92).
 This file is the ledger of its known bypass families: shapes the argv parser does not model
 and — under the freeze — will not grow to model. The SPECS §6 charter matrix still blocks in
-canonical form (CI-asserted by the smoke suite). Once open PR #71 lands, several families
-below will additionally be pinned in both directions by its
-`tests/test_prefix_wrapper_crossproduct.py`, which fails `UNEXPECTEDLY FIXED` if a documented
-bypass starts blocking — until then the pin is pending, not live. A new discovery gets one line
+canonical form (CI-asserted by the smoke suite). PR #71 merged as `21485bc`; its
+`tests/test_prefix_wrapper_crossproduct.py` now pins the named families in both directions and
+fails `UNEXPECTEDLY FIXED` if a documented bypass starts blocking. A new discovery gets one line
 here plus a closed issue, never a fix — unless it regresses the charter matrix as literally
 written. The walls remain branch protection and restricted toolsets (BLUEPRINT law 5); the
 floor is a tripwire, not a sandbox. Budget: this ledger caps at 120 lines; overflow rotates
