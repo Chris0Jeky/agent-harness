@@ -1,50 +1,52 @@
 # Active workstreams
 
-Snapshot: 2026-07-31. Base: `81125c57ec6d1a750ddd43b0110c6928f9f4a860`.
+Snapshot: 2026-07-31. Base: `8d4b69d147b4f1e930b3388e5b3ce7d2661ab82e`.
 Exactly two workstreams are active; do not start a third until one lands or parks.
 
-## A — AH-1/AH-2 continuity state
+## A — AH-4/AH-6 PR #161 MCP topology successor
 
-- **Observable outcome:** canonical current-state, roadmap, active-plan, benchmark, and dated
-  handoff records replace contradictory root status without rewriting historical `HANDOFF.md`.
-- **Evidence:** the workbench brief requires the four homes; they were absent on merged `main`;
-  README still claimed the 2026-07-24/v1.5.4 state and `FLOOR_LIMITATIONS.md` called merged PR #71 open.
-- **In:** `README.md`, `.agent-harness/tier.json`, `FLOOR_LIMITATIONS.md`, `docs/SYSTEM_STATE.md`,
-  `docs/BENCHMARKS.md`, `ROADMAP.md`, this plan, and a dated `handoffs/` record.
-- **Out:** policy behavior, floor expansion, deployment, H-2, private data, and historical handoff rewrites.
-- **Architecture seam:** continuity and evidence ownership only.
-- **Tests/fixtures/corpus:** no executable fixture change; run offline audit, Doctor, doc references,
-  JSON parsing, budget/format checks, and `git diff --check`.
-- **Measurement:** transcribe only the bounded results already recorded on #21, #39, #118, #120,
-  and merged PR #140; no new performance claim.
-- **Limitation:** GitHub and deployed runtime state can drift immediately after this snapshot.
-- **Exact verification:** `py -3 harness.py audit . --offline`; `py -3 harness.py doctor`;
-  `py -3 -m json.tool .agent-harness\tier.json`; `git diff --check`.
-- **Next executable handoff:** publish, review once, pass hosted CI, age the exact head, triage once,
-  and merge with a merge commit.
+- **Observable outcome:** static Doctor reports real cross-scope MCP duplication and unbounded Docker
+  gateways without false failures from platform path spellings or command shims.
+- **Evidence:** PR #161 supersedes parked PR #155 for #87; live head `f824fe7` has two unresolved
+  automatic review threads and a base that predates merged PR #159. Follow-up #160 records a
+  separate disabled mixed-transport precedence decision.
+- **In:** only the existing PR #161 branch/worktree and its bounded review/base-refresh pipeline.
+- **Out:** new writer checkouts, #160 implementation, live MCP mutation, process cleanup, or estate canaries.
+- **Architecture seam:** read-only Doctor MCP topology discovery.
+- **Tests/fixtures/corpus:** the PR's focused layered-config fixtures and full harness gates; no corpus.
+- **Measurement:** read-only consumer probes already recorded in PR #161; no new estate mutation.
+- **Limitation:** PR #161's current hosted CI is stale after `main` advanced to `8d4b69d`.
+- **Exact verification:** refresh the PR head/base/merge-base, triage its two threads once, then run
+  the repository unit/smoke/audit/Doctor gates and hosted CI at the resulting exact head.
+- **Next executable handoff:** the existing #161 writer owns any fix. Other agents remain read-only,
+  avoid its checkout, and revisit only at a workflow event.
 
-## B — AH-2 issue #153 literal Markdown report text
+## B — AH-2 issue #144 run-manifest gate validation
 
-- **Observable outcome:** policy-controlled Markdown table cells render literally without changing
-  JSON evidence or gate outcomes.
-- **Evidence:** issue #153 records a reproduced table-structure injection in replay output.
-- **In:** the smallest comparison/report rendering seam, focused tests, and extraction-manifest hashes.
-- **Out:** HTML sanitization beyond Markdown table text, policy grammar, parser expansion, global
-  enforcement, public extraction, and unrelated replay follow-ups.
-- **Architecture seam:** deterministic human-readable report presentation after comparison.
-- **Tests/fixtures/corpus:** focused metacharacter cases; no corpus expansion unless the behavior
-  requires a committed fixture.
-- **Measurement:** correctness assertions only; no latency or general rendering benchmark.
-- **Limitation:** this protects the generated Markdown table contract, not every downstream renderer.
-- **Exact verification:** `py -3 -m unittest replay_v0.tests.unit.test_compare -v`;
+- **Observable outcome:** run-manifest build, run-ID derivation, and load/validation accept exactly
+  the CLI's three supported gate classes and reject `unchanged`/`resolved-indeterminate`.
+- **Evidence:** issue #144 records the library/CLI contract mismatch; the supported CLI already
+  rejects the two extra report classes before manifest construction.
+- **In:** the manifest gate-class boundary, focused build/derive/load tests, and extraction hashes.
+- **Out:** the five report diff classes, CLI grammar, schemas, policy sources, parser expansion,
+  global enforcement, and public extraction.
+- **Architecture seam:** generated run-manifest semantic validation and stable run-ID inputs.
+- **Tests/fixtures/corpus:** in-memory rejection cases; no corpus or external fixture change expected.
+- **Measurement:** correctness assertions only; no latency or policy-quality benchmark.
+- **Limitation:** run manifests are generated outputs rather than replay inputs, so this aligns the
+  supported library contract without claiming a new external compatibility surface.
+- **Exact verification:** `py -3 -m unittest replay_v0.tests.unit.test_manifests -v`;
   `py -3 -m unittest discover -s replay_v0\tests -v`; replay Ruff/Black/compile/extraction checks;
   `git diff --check`.
-- **Next executable handoff:** commit the bounded fix, independent adversarial review, publish, hosted
-  CI, three-minute aging, one comment/thread triage, and merge-commit preservation.
+- **Next executable handoff:** commit the bounded fix, independent adversarial review, publish,
+  hosted CI, three-minute aging, one comment/thread triage, and merge-commit preservation.
 
 ## Parked or queued, not active
 
-- PR #154/#151 and PR #155/#87 stay parked on their recorded cross-platform blockers.
-- #144 and #152 remain bounded AH-2 candidates after #153; neither is active.
+- The continuity branch `docs/workbench-continuity-20260731` is locally complete and reviewed, but
+  parked until overlapping PR #161 lands or parks. Then merge current `origin/main`, reconcile
+  README/state facts, rerun scoped checks/review, and publish it.
+- PR #154/#151 and superseded PR #155/#87 stay parked on their recorded blockers.
+- #152 remains the next bounded replay candidate after #144; it is not active.
 - H-2 is owner-parked. Do not run estate-wide canaries or disable the harness.
 - AH-10 extraction and a public replay repository remain deferred.

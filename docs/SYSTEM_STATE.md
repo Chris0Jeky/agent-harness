@@ -1,6 +1,6 @@
 # System state
 
-Snapshot: 2026-07-31, after PR #140 merged as `81125c57ec6d1a750ddd43b0110c6928f9f4a860`.
+Snapshot: 2026-07-31, after PR #159 merged as `8d4b69d147b4f1e930b3388e5b3ce7d2661ab82e`.
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
 ## Evidence vocabulary
@@ -20,9 +20,9 @@ Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on
 | Repository mission and authority | implemented | `AGENT_HARNESS_AGENT_BRIEF.md`; `.agent-harness/tier.json` declares T3, push free, merge free | Authority can change; re-read both tier declarations before mutation. |
 | Legacy deny-floor source | implemented, frozen | `templates/hooks/dispatch.py` reports 1.6.21; `floor-v1-final` tag object `5a939540bdce51e511d6b3bae98358e3e2ad9148` peels to `02bd14cfe094f9b6af85b966de481ff3f45264cf`; limitations live only in `FLOOR_LIMITATIONS.md` | No universal-parser expansion. Bounded false-positive fixes require the existing freeze exceptions and evidence. |
 | Shared Claude-hook floor | deployed, unverified | On 2026-07-31 canonical and `~/.claude/hooks/dispatch.py` SHA-256 both measured `E1A4E7714913788DD801F0FA43A3E5B30EA0433709F97142509B56B1C442EF68`, version 1.6.21 | Static equality does not prove Codex activation or trust. H-2 is the sole open human action and is owner-parked. |
-| Replay v0 / Policy Lab | implemented, benchmarked, experimental | PR #140 merged; `replay_v0`; nine-job run 30624510146 passed at head `6261c32`; 50-event charter measurement is recorded in `docs/BENCHMARKS.md` | Internal evidence tool only. It is not a sandbox, global blocker, public repository, or universal policy language. Follow-ups are AH-2 issues. |
-| Audit and Doctor foundation | implemented, unverified | `harness.py audit`, `harness.py doctor`, and their unit tests; configuration-reality issues #19, #85, #89, #98 | Static inspection cannot prove every runtime layer. Doctor v2 grows only from reproduced failures. |
-| Estate seed/sync operations | implemented, experimental | `harness.py seed`, `audit`, `doctor`, and dry-run/backed-up `sync-global`; issues #87, #101, #139 | Cross-repo closeout and topology work remain incomplete; PRs #154/#155 are parked and their pre-#140 CI is stale for the new base. |
+| Replay v0 / Policy Lab | implemented, benchmarked, experimental | PR #140 merged the core; PR #159 closed #153's literal-Markdown defect; `replay_v0`; nine-job runs 30624510146 and 30626399786 passed at their exact heads; 50-event charter measurement is recorded in `docs/BENCHMARKS.md` | Internal evidence tool only. It is not a sandbox, global blocker, public repository, or universal policy language. Follow-ups are AH-2 issues. |
+| Audit and Doctor foundation | implemented, unverified | `harness.py audit`, `harness.py doctor`, and their unit tests; configuration-reality issues #19, #85, #89, #98, #160 | Static inspection cannot prove every runtime layer. Doctor v2 grows only from reproduced failures. |
+| Estate seed/sync operations | implemented, experimental | `harness.py seed`, `audit`, `doctor`, and dry-run/backed-up `sync-global`; issues #87, #101, #139 | Cross-repo closeout and topology work remain incomplete; #154/#155 are parked and #161 is their active #87 successor. Every pre-current-base CI result must be reproved after the base moves. |
 | Pattern Guard v2 | experimental, unverified | AH-3 contract in the brief; measured inputs #21, #118, #120 | No Pattern Guard v2 implementation or shadow result exists. Start with bounded catastrophic families, not the legacy universal parser. |
 | Integrated measurement | benchmarked, unverified | Historical measurements in `docs/BENCHMARKS.md` | No current 1.6.21 estate baseline, continuous benchmark store, Doctor precision series, or task-completion metric is verified. |
 | Claude-config integration | experimental, unverified | `CLAUDE_CONFIG_OPERATIONS.md`; AH-9 boundary | Private evidence stays private. No broad cross-repository mutation is active. |
