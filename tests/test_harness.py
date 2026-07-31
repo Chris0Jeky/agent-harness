@@ -8213,6 +8213,58 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(candidate["revalidation"], "invalid")
         self.assertTrue(worktree.is_dir())
 
+    def test_fingerprint_utc_rollback_between_samples_refuses_removal(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("interstage-clock-rollback")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [
+            origin + timedelta(seconds=30),
+            origin + timedelta(seconds=20),
+        ]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_utc_clock_rollback")
+        self.assertEqual(candidate["revalidation"], "invalid")
+        self.assertEqual(current_times, [])
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_failure_stops_all_remaining_removals(self) -> None:
+        first = self.add_worktree("clock-failure-first")
+        second = self.add_worktree("clock-failure-second")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [origin - timedelta(seconds=1)]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        first_candidate = self.candidate(plan, first)
+        second_candidate = self.candidate(plan, second)
+        self.assertEqual(
+            first_candidate["apply_reason"], "fingerprint_utc_clock_rollback"
+        )
+        self.assertEqual(
+            second_candidate["apply_reason"],
+            "not_attempted_after_fingerprint_failure",
+        )
+        self.assertEqual(second_candidate["revalidation"], "not_attempted")
+        self.assertEqual(current_times, [])
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
     def test_fingerprint_utc_expiry_during_revalidation_refuses_removal(
         self,
     ) -> None:
@@ -8220,6 +8272,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         origin = harness.worktree_utc_now()
         plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
         current_times = [
+            origin + timedelta(seconds=1),
             origin + timedelta(seconds=1),
             origin + timedelta(seconds=1),
             origin + timedelta(seconds=harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1),

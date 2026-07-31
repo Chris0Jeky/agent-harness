@@ -55,7 +55,7 @@ lease. The same claimant may renew or release it; an expired lease may be replac
 explicit `acquire --replace-stale`. Missing, malformed, wrong-schema, wrong-scope, wrong-path,
 expired, nearly expired, or differently owned records are keep verdicts. APPLY requires
 `--refresh --claimant <same-id> --apply`, at least ten seconds remaining on the lease, a fingerprint
-whose monotonic active-runtime age and suspend-inclusive UTC age are both less than 60 seconds, and
+whose monotonic active-runtime age and suspend-inclusive UTC age are both no more than 60 seconds, and
 immediate fingerprint plus lease revalidation. UTC clock rollback fails closed. APPLY holds the same
 per-worktree mutation lock used by acquire/renew from final lease validation through plain removal,
 so a cooperating successor cannot reclaim an expiring lease mid-removal.

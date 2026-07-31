@@ -1944,28 +1944,51 @@ def apply_worktree_plan(
     ):
         plan["apply_error"] = "fingerprint_origin_missing"
         return False
+    last_utc_sample = fingerprint_generated_at
+
+    def sample_fingerprint_freshness() -> tuple[str, datetime]:
+        nonlocal last_utc_sample
+        current_monotonic = clock()
+        current_time = now().astimezone(timezone.utc)
+        if current_time < last_utc_sample:
+            return "fingerprint_utc_clock_rollback", current_time
+        last_utc_sample = current_time
+        return (
+            worktree_fingerprint_freshness_reason(
+                fingerprint_started,
+                fingerprint_generated_at,
+                current_monotonic=current_monotonic,
+                current_time=current_time,
+            ),
+            current_time,
+        )
+
+    def refuse_fingerprint_failure(
+        candidate_index: int, candidate: dict[str, Any], reason: str
+    ) -> bool:
+        candidate["apply"] = "kept"
+        candidate["apply_reason"] = reason
+        candidate["revalidation"] = (
+            "expired" if reason == "fingerprint_lease_expired" else "invalid"
+        )
+        for remaining in plan["worktrees"][candidate_index + 1 :]:
+            remaining["apply"] = "kept"
+            if remaining["verdict"] == "remove":
+                remaining["apply_reason"] = "not_attempted_after_fingerprint_failure"
+                remaining["revalidation"] = "not_attempted"
+        return False
+
     apply_ok = True
 
     for candidate_index, candidate in enumerate(plan["worktrees"]):
         if candidate["verdict"] != "remove":
             candidate["apply"] = "kept"
             continue
-        freshness_reason = worktree_fingerprint_freshness_reason(
-            fingerprint_started,
-            fingerprint_generated_at,
-            current_monotonic=clock(),
-            current_time=now(),
-        )
+        freshness_reason, _ = sample_fingerprint_freshness()
         if freshness_reason:
-            candidate["apply"] = "kept"
-            candidate["apply_reason"] = freshness_reason
-            candidate["revalidation"] = (
-                "expired"
-                if freshness_reason == "fingerprint_lease_expired"
-                else "invalid"
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
             )
-            apply_ok = False
-            continue
 
         try:
             current_records = canonicalize_worktree_records(
@@ -1996,7 +2019,11 @@ def apply_worktree_plan(
         history_rewrite, history_complete = worktree_history_rewrite_evidence(
             primary, common_git_dir, command_runner
         )
-        revalidation_time = now().astimezone(timezone.utc)
+        freshness_reason, revalidation_time = sample_fingerprint_freshness()
+        if freshness_reason:
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
+            )
         current, current_complete = inspect_worktree_candidate(
             current_record,
             primary=primary,
@@ -2050,32 +2077,25 @@ def apply_worktree_plan(
             apply_ok = False
             continue
         try:
-            final_time = now().astimezone(timezone.utc)
+            freshness_reason, lease_probe_time = sample_fingerprint_freshness()
+            if freshness_reason:
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
+                )
             final_lease, final_lease_reason, final_lease_complete = (
                 inspect_worktree_lease(
                     final_lease_path,
                     claimant=claimant,
                     common_git_dir=common_git_dir,
                     worktree=Path(current["path"]),
-                    now=final_time,
+                    now=lease_probe_time,
                 )
             )
-            freshness_reason = worktree_fingerprint_freshness_reason(
-                fingerprint_started,
-                fingerprint_generated_at,
-                current_monotonic=clock(),
-                current_time=final_time,
-            )
+            freshness_reason, _ = sample_fingerprint_freshness()
             if freshness_reason:
-                candidate["apply"] = "kept"
-                candidate["apply_reason"] = freshness_reason
-                candidate["revalidation"] = (
-                    "expired"
-                    if freshness_reason == "fingerprint_lease_expired"
-                    else "invalid"
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
                 )
-                apply_ok = False
-                continue
             if (
                 not final_lease_complete
                 or final_lease_reason
