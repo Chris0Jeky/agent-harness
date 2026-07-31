@@ -36,10 +36,10 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 `worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
 renew leases, remove worktrees, prune worktree metadata, or delete branches. An explicit
 `--refresh` fetches and prunes every configured remote's complete branch namespace, then accepts
-reachability only from the refreshed remote-tracking refs. A grafts file or any replace ref blocks
-the candidate, and the Git subprocess environment disables replace objects. A per-worktree
-`core.worktree` redirect also blocks the candidate rather than letting status inspect another
-directory.
+reachability only from the refreshed remote-tracking refs. A repository grafts file or any replace
+ref blocks the candidate, and the Git subprocess environment disables replace objects and removes
+an inherited `GIT_GRAFT_FILE`. A per-worktree `core.worktree` redirect also blocks the candidate
+rather than letting status inspect another directory.
 
 APPLY is a cooperative protocol. `worktree-lease --action acquire` creates a short-lived record in
 that linked worktree's Git administrative directory, scoped to one canonical physical common-Git
@@ -56,15 +56,21 @@ so a cooperating successor cannot reclaim an expiring lease mid-removal.
 Every existing path is converted once to its physical canonical spelling and that identity is used
 for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
 collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
-untracked, ignored, assume-unchanged, and skip-worktree state blocks removal. The only destructive
-command is plain `git worktree remove -- <canonical-path>`; a refusal becomes keep. There is no
-`--force`, branch deletion, or repository-wide `git worktree prune`.
+untracked, ignored, executable-mode-only, assume-unchanged, skip-worktree, and index resolve-undo
+state blocks removal. So do detached or non-local-branch HEADs, a pending `COMMIT_EDITMSG` that
+differs from the current commit message, worktree-local refs, non-baseline administrative/operation
+state, a non-regular HEAD reflog, and commits found on either side of a raw HEAD reflog record or in
+`ORIG_HEAD` that are not retained by a local branch or tag. Requiring an attached `refs/heads/*`
+branch keeps current HEAD rooted in a local ref while plain removal runs.
+The only destructive command is plain `git worktree remove -- <canonical-path>`; a
+refusal becomes keep. There is no `--force`, branch deletion, or repository-wide
+`git worktree prune`.
 
 The lease coordinates only participants that follow this contract. It cannot discover or stop a
 non-cooperating external process, watcher, or writer; such a process can still race after the last
 inspection, including by creating an ignored file. The command reports that limitation in text and
-JSON and does not claim arbitrary occupancy detection. `--json` emits the complete evidence and
-result summary.
+JSON and does not claim arbitrary occupancy detection. `--json` schema version 3 emits the complete
+preservation evidence and result summary.
 
 Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every

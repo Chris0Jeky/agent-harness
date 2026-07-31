@@ -29,7 +29,7 @@ from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
 
-WORKTREE_PLAN_SCHEMA_VERSION = 2
+WORKTREE_PLAN_SCHEMA_VERSION = 3
 WORKTREE_FINGERPRINT_LEASE_SECONDS = 60.0
 WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
 WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION = 1
@@ -48,12 +48,26 @@ WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_SYSTEM",
     "GIT_DIR",
+    "GIT_GRAFT_FILE",
     "GIT_INDEX_FILE",
     "GIT_NAMESPACE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_PREFIX",
     "GIT_REPLACE_REF_BASE",
     "GIT_WORK_TREE",
+)
+WORKTREE_ADMIN_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        "HEAD",
+        "ORIG_HEAD",
+        "COMMIT_EDITMSG",
+        "commondir",
+        "gitdir",
+        "index",
+        "logs",
+        "refs",
+        WORKTREE_OWNERSHIP_LEASE_FILENAME,
+    }
 )
 
 CODEX_HOOK_EVENT_NAMES = (
@@ -1200,6 +1214,199 @@ def refs_containing_head(
     return sorted(containing, key=lambda item: item["ref"]), ""
 
 
+def worktree_local_refs(
+    path: Path, command_runner: Any
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/bisect/",
+            "refs/worktree/",
+            "refs/rewritten/",
+        ],
+        path,
+    )
+    if result.returncode:
+        return [], f"worktree-local ref probe failed with exit {result.returncode}"
+    refs: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return [], "worktree-local ref probe returned an invalid record"
+        object_id = object_id.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "worktree-local ref probe returned an invalid object id"
+        refs.append({"ref": ref, "oid": object_id})
+    return sorted(refs, key=lambda item: item["ref"]), ""
+
+
+def worktree_administrative_state(git_dir: Path) -> tuple[list[str], str]:
+    """List linked-worktree metadata that plain removal would discard."""
+
+    try:
+        top_level = sorted(entry.name for entry in git_dir.iterdir())
+    except OSError as exc:
+        return [], f"cannot inspect worktree metadata: {type(exc).__name__}"
+    state = [name for name in top_level if name not in WORKTREE_ADMIN_ALLOWED_TOP_LEVEL]
+    for directory_name, allowed_names in (("logs", {"HEAD"}), ("refs", set())):
+        directory = git_dir / directory_name
+        try:
+            directory_stat = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            state.append(directory_name)
+            continue
+        try:
+            children = sorted(entry.name for entry in directory.iterdir())
+        except FileNotFoundError:
+            # A concurrent metadata mutation is not safe evidence.
+            return [], f"worktree {directory_name} metadata changed during inspection"
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        state.extend(
+            f"{directory_name}/{name}" for name in children if name not in allowed_names
+        )
+        for name in children:
+            if name not in allowed_names:
+                continue
+            child = directory / name
+            try:
+                child_stat = child.lstat()
+            except FileNotFoundError:
+                return [], (
+                    f"worktree {directory_name}/{name} metadata changed "
+                    "during inspection"
+                )
+            except OSError as exc:
+                return [], (
+                    f"cannot inspect worktree {directory_name}/{name} metadata: "
+                    f"{type(exc).__name__}"
+                )
+            if not stat.S_ISREG(child_stat.st_mode):
+                state.append(f"{directory_name}/{name}")
+    return sorted(state), ""
+
+
+def normalized_commit_message(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def worktree_commit_editmsg_status(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[str, str]:
+    message_path = git_dir / "COMMIT_EDITMSG"
+    try:
+        proposed = message_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "absent", ""
+    except (OSError, UnicodeError) as exc:
+        return "unknown", f"cannot read COMMIT_EDITMSG: {type(exc).__name__}"
+    head_message = worktree_git_result(
+        command_runner, ["log", "-1", "--format=%B", "HEAD"], path
+    )
+    if head_message.returncode:
+        return "unknown", (
+            f"HEAD commit-message probe failed with exit {head_message.returncode}"
+        )
+    if normalized_commit_message(proposed) == normalized_commit_message(
+        head_message.stdout
+    ):
+        return "matches_head", ""
+    return "differs_from_head", ""
+
+
+def worktree_head_reflog_commits(git_dir: Path) -> tuple[list[str], str]:
+    reflog_path = git_dir / "logs" / "HEAD"
+    try:
+        records = reflog_path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return [], ""
+    except OSError as exc:
+        return [], f"cannot read HEAD reflog: {type(exc).__name__}"
+
+    commits: list[str] = []
+    for record in records:
+        fields = record.split(b" ", 2)
+        if len(fields) != 3:
+            return [], "HEAD reflog contains an invalid record"
+        for raw_object_id in fields[:2]:
+            try:
+                object_id = raw_object_id.decode("ascii").lower()
+            except UnicodeDecodeError:
+                return [], "HEAD reflog contains a non-ASCII object id"
+            if len(object_id) in (40, 64) and not object_id.strip("0"):
+                continue
+            if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id):
+                return [], "HEAD reflog contains an invalid object id"
+            commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def worktree_recovery_commits(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    commits, reflog_error = worktree_head_reflog_commits(git_dir)
+    if reflog_error:
+        return [], reflog_error
+
+    orig_head = worktree_git_result(
+        command_runner,
+        ["rev-parse", "--verify", "--quiet", "ORIG_HEAD^{commit}"],
+        path,
+    )
+    if orig_head.returncode not in (0, 1):
+        return [], f"ORIG_HEAD probe failed with exit {orig_head.returncode}"
+    if orig_head.returncode == 0:
+        object_id = orig_head.stdout.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "ORIG_HEAD probe returned an invalid object id"
+        commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def commits_without_local_retention(
+    primary: Path, commits: list[str], command_runner: Any
+) -> tuple[list[str], str]:
+    unreachable: list[str] = []
+    for offset in range(0, len(commits), 64):
+        batch = commits[offset : offset + 64]
+        result = worktree_git_result(
+            command_runner,
+            [
+                "rev-list",
+                "--no-walk",
+                *batch,
+                "--not",
+                "--branches",
+                "--tags",
+            ],
+            primary,
+        )
+        if result.returncode:
+            return (
+                [],
+                f"recovery reachability probe failed with exit {result.returncode}",
+            )
+        for line in result.stdout.splitlines():
+            object_id = line.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+                return [], "recovery reachability probe returned an invalid object id"
+            unreachable.append(object_id)
+    return sorted(set(unreachable)), ""
+
+
 def worktree_candidate_fingerprint(
     candidate: dict[str, Any], common_git_dir: Path
 ) -> str:
@@ -1217,6 +1424,13 @@ def worktree_candidate_fingerprint(
         "changes": candidate["changes"],
         "ignored": candidate["ignored"],
         "index_preservation_flags": candidate["index_preservation_flags"],
+        "index_resolve_undo": candidate["index_resolve_undo"],
+        "commit_editmsg_status": candidate["commit_editmsg_status"],
+        "tracked_mode_changes": candidate["tracked_mode_changes"],
+        "worktree_local_refs": candidate["worktree_local_refs"],
+        "worktree_administrative_state": candidate["worktree_administrative_state"],
+        "recovery_commits": candidate["recovery_commits"],
+        "unretained_recovery_commits": candidate["unretained_recovery_commits"],
         "containing_remote_refs": candidate["containing_remote_refs"],
         "history_rewrite": candidate["history_rewrite"],
         "lease_digest": candidate["lease"].get("digest"),
@@ -1260,6 +1474,13 @@ def inspect_worktree_candidate(
         "changes": [],
         "ignored": [],
         "index_preservation_flags": [],
+        "index_resolve_undo": [],
+        "commit_editmsg_status": "not_inspected",
+        "tracked_mode_changes": [],
+        "worktree_local_refs": [],
+        "worktree_administrative_state": [],
+        "recovery_commits": [],
+        "unretained_recovery_commits": [],
         "containing_remote_refs": [],
         "history_rewrite": history_rewrite.copy(),
         "lease": {
@@ -1297,6 +1518,12 @@ def inspect_worktree_candidate(
         keep("git_locked")
     if record["prunable"]:
         keep("prunable_metadata")
+    if record["detached"]:
+        keep("detached_head")
+    if not isinstance(record["branch"], str) or not record["branch"].startswith(
+        "refs/heads/"
+    ):
+        keep("head_not_on_local_branch")
 
     shape_is_probeable = record.get("path_key") is not None and not record["bare"]
     contained = False
@@ -1384,6 +1611,113 @@ def inspect_worktree_candidate(
                 candidate["index_preservation_flags"] = flagged
                 if flagged:
                     keep("index_preservation_flags")
+            resolve_undo_result = worktree_git_result(
+                command_runner, ["ls-files", "--resolve-undo", "-z"], path
+            )
+            if resolve_undo_result.returncode:
+                keep("index_resolve_undo_probe_failed")
+                complete = False
+            else:
+                candidate["index_resolve_undo"] = [
+                    entry for entry in resolve_undo_result.stdout.split("\0") if entry
+                ]
+                if candidate["index_resolve_undo"]:
+                    keep("index_resolve_undo")
+
+    if top_matches:
+        mode_result = worktree_git_result(
+            command_runner,
+            [
+                "-c",
+                "core.fileMode=true",
+                "diff-files",
+                "--summary",
+                "-z",
+                "--ignore-submodules=none",
+                "--",
+            ],
+            path,
+        )
+        if mode_result.returncode:
+            keep("tracked_mode_probe_failed")
+            complete = False
+        else:
+            candidate["tracked_mode_changes"] = [
+                entry for entry in mode_result.stdout.split("\0") if entry
+            ]
+            if candidate["tracked_mode_changes"]:
+                keep("tracked_mode_changes")
+
+    git_dir: Path | None = None
+    git_dir_error = ""
+    if top_matches:
+        git_dir, git_dir_error = linked_worktree_git_dir(
+            path, common_git_dir, command_runner
+        )
+        if git_dir is None:
+            keep("worktree_git_dir_probe_failed")
+            candidate["worktree_git_dir_error"] = git_dir_error
+            complete = False
+
+    if top_matches:
+        local_refs, local_refs_error = worktree_local_refs(path, command_runner)
+        if local_refs_error:
+            keep("worktree_local_ref_probe_failed")
+            candidate["worktree_local_ref_error"] = local_refs_error
+            complete = False
+        else:
+            candidate["worktree_local_refs"] = local_refs
+            if local_refs:
+                keep("worktree_local_refs")
+
+    if git_dir is not None:
+        administrative_state, administrative_error = worktree_administrative_state(
+            git_dir
+        )
+        if administrative_error:
+            keep("worktree_administrative_state_probe_failed")
+            candidate["worktree_administrative_state_error"] = administrative_error
+            complete = False
+        else:
+            candidate["worktree_administrative_state"] = administrative_state
+            if administrative_state:
+                keep("worktree_administrative_state")
+
+        commit_editmsg_status, commit_editmsg_error = worktree_commit_editmsg_status(
+            path, git_dir, command_runner
+        )
+        candidate["commit_editmsg_status"] = commit_editmsg_status
+        if commit_editmsg_error:
+            keep("commit_editmsg_probe_failed")
+            candidate["commit_editmsg_error"] = commit_editmsg_error
+            complete = False
+        elif commit_editmsg_status == "differs_from_head":
+            keep("commit_editmsg_uncommitted")
+
+    if (
+        git_dir is not None
+        and "logs/HEAD" not in candidate["worktree_administrative_state"]
+    ):
+        recovery_commits, recovery_error = worktree_recovery_commits(
+            path, git_dir, command_runner
+        )
+        if recovery_error:
+            keep("worktree_recovery_probe_failed")
+            candidate["worktree_recovery_error"] = recovery_error
+            complete = False
+        else:
+            candidate["recovery_commits"] = recovery_commits
+            unretained, retention_error = commits_without_local_retention(
+                primary, recovery_commits, command_runner
+            )
+            if retention_error:
+                keep("worktree_recovery_reachability_probe_failed")
+                candidate["worktree_recovery_reachability_error"] = retention_error
+                complete = False
+            else:
+                candidate["unretained_recovery_commits"] = unretained
+                if unretained:
+                    keep("unretained_recovery_commits")
 
     if top_matches:
         if not remote_evidence_ready:
@@ -1411,9 +1745,6 @@ def inspect_worktree_candidate(
                 candidate["containing_remote_refs"] = containing
 
     if top_matches:
-        git_dir, git_dir_error = linked_worktree_git_dir(
-            path, common_git_dir, command_runner
-        )
         if git_dir is None:
             keep("cooperative_lease_probe_failed")
             candidate["lease"]["status"] = "cooperative_lease_probe_failed"
