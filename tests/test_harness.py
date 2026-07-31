@@ -4458,6 +4458,111 @@ allow_local_binding = true
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
 
+    def test_doctor_rejects_user_project_command_mcp_duplicate(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        config = nested / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[mcp_servers.docker]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run", "--servers", "github"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            nested,
+            user_config=(
+                "[mcp_servers.docker]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--profile", "safe"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex MCP topology", output)
+        self.assertIn("active command-backed MCP server 'docker' is duplicated", output)
+        self.assertIn(str(config), output)
+
+    def test_doctor_rejects_unbounded_user_docker_mcp_gateway(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[mcp_servers.MCP_DOCKER]\n"
+                'command = "C:\\\\Program Files\\\\Docker\\\\docker.exe"\n'
+                'args = ["--context", "desktop-linux", "mcp", "gateway", "run"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex MCP topology", output)
+        self.assertIn("active Docker MCP gateway 'MCP_DOCKER'", output)
+        self.assertIn("has no --servers or --profile bound", output)
+
+    def test_doctor_accepts_bounded_disabled_and_url_mcp_entries(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        config = repo / ".codex" / "config.toml"
+        config.write_text(
+            "[mcp_servers.docker]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run"]\n'
+            "enabled = false\n\n"
+            "[mcp_servers.docs]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run", "--profile=safe"]\n\n'
+            "[mcp_servers.remote]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run", "--servers=github"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[mcp_servers.docker]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--servers", "github"]\n\n'
+                "[mcp_servers.remote]\n"
+                'url = "https://example.invalid/mcp"\n'
+            ),
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex MCP topology", output)
+        self.assertIn("1 active user and 2 active project", output)
+
+    def test_doctor_rejects_malformed_project_mcp_arguments(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[mcp_servers.bad]\n" 'command = "docker"\n' 'args = "mcp gateway run"\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex MCP topology", output)
+        self.assertIn("mcp_servers.bad.args", output)
+        self.assertIn("must be an array of strings", output)
+
     def test_doctor_requires_canonical_root_hooks_json_adapter(self) -> None:
         repo = self.make_repo()
         valid_adapter = (

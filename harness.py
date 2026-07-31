@@ -512,6 +512,106 @@ def toml_config(config_path: Path) -> dict[str, Any] | None:
     return config
 
 
+def active_command_mcp_servers(
+    config_path: Path,
+) -> list[tuple[str, Path, str, tuple[str, ...]]]:
+    """Return active command-backed MCP declarations without exposing arguments."""
+    config = toml_config(config_path)
+    if config is None or "mcp_servers" not in config:
+        return []
+    servers = config["mcp_servers"]
+    if not isinstance(servers, dict):
+        raise HarnessError(f"mcp_servers in {config_path} must be a table")
+
+    declarations: list[tuple[str, Path, str, tuple[str, ...]]] = []
+    for name, entry in servers.items():
+        if not isinstance(entry, dict):
+            raise HarnessError(f"mcp_servers.{name} in {config_path} must be a table")
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HarnessError(
+                f"mcp_servers.{name}.enabled in {config_path} must be a boolean"
+            )
+        if not enabled or "command" not in entry:
+            continue
+        command = entry["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise HarnessError(
+                f"mcp_servers.{name}.command in {config_path} must be a non-empty string"
+            )
+        args = entry.get("args", [])
+        if not isinstance(args, list) or not all(
+            isinstance(argument, str) for argument in args
+        ):
+            raise HarnessError(
+                f"mcp_servers.{name}.args in {config_path} must be an array of strings"
+            )
+        declarations.append((name, config_path, command, tuple(args)))
+    return declarations
+
+
+def unbounded_docker_mcp_gateway(command: str, args: tuple[str, ...]) -> bool:
+    """Recognize a Docker MCP gateway that can load the whole registry."""
+    executable = re.split(r"[\\/]", command)[-1].casefold()
+    if executable not in {"docker", "docker.exe"}:
+        return False
+    gateway_run = any(
+        args[index : index + 3] == ("mcp", "gateway", "run")
+        for index in range(max(0, len(args) - 2))
+    )
+    if not gateway_run:
+        return False
+    return not any(
+        argument in {"--servers", "--profile"}
+        or argument.startswith("--servers=")
+        or argument.startswith("--profile=")
+        for argument in args
+    )
+
+
+def codex_mcp_topology_status(
+    codex_home: Path, project_config_paths: list[Path]
+) -> tuple[bool, str]:
+    """Check the static user/project MCP process-spawning topology."""
+    user_path = codex_home / "config.toml"
+    user_declarations = active_command_mcp_servers(user_path)
+    project_paths = list(dict.fromkeys(project_config_paths))
+    project_declarations = [
+        declaration
+        for config_path in project_paths
+        for declaration in active_command_mcp_servers(config_path)
+    ]
+
+    findings: list[str] = []
+    user_by_name = {name: source for name, source, _command, _args in user_declarations}
+    for name, source, _command, _args in project_declarations:
+        if name in user_by_name:
+            findings.append(
+                f"active command-backed MCP server {name!r} is duplicated across "
+                f"user {user_by_name[name]} and project {source}"
+            )
+    for name, source, command, args in user_declarations + project_declarations:
+        if unbounded_docker_mcp_gateway(command, args):
+            findings.append(
+                f"active Docker MCP gateway {name!r} in {source} has no "
+                "--servers or --profile bound"
+            )
+
+    scope = (
+        f"inspected base user config {user_path} and {len(project_paths)} active "
+        "project config path(s); stored profiles, system/managed config, CLI, and "
+        "runtime process state are outside this static check"
+    )
+    if findings:
+        return False, f"{'; '.join(findings)}; {scope}"
+    return (
+        True,
+        f"{len(user_declarations)} active user and {len(project_declarations)} "
+        f"active project command-backed MCP declaration(s); no cross-scope "
+        f"duplicate spawning name or unbounded Docker gateway; {scope}",
+    )
+
+
 def validate_toml_integer_range(value: Any, location: str) -> None:
     """Match Rust TOML's signed 64-bit integer representation."""
     pending = [(value, location)]
@@ -4899,6 +4999,8 @@ def doctor(args: argparse.Namespace) -> int:
         )
     )
     if args.repo:
+        mcp_ok = False
+        mcp_detail = "project config sources were not resolved"
         try:
             marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
         except (HarnessError, OSError, UnicodeError) as exc:
@@ -4940,6 +5042,19 @@ def doctor(args: argparse.Namespace) -> int:
                     requested_path, requested_checkout
                 )
             ]
+            if marker_ok:
+                try:
+                    mcp_ok, mcp_detail = codex_mcp_topology_status(
+                        codex_home, project_config_paths
+                    )
+                except (HarnessError, OSError, UnicodeError) as exc:
+                    mcp_ok = False
+                    mcp_detail = str(exc)
+            else:
+                mcp_detail = (
+                    "static project MCP layer walk is unavailable because the Codex "
+                    f"project-root marker check failed: {marker_detail}"
+                )
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
                 requested_path, requested_checkout, authoritative_checkout
             )
@@ -5121,6 +5236,7 @@ def doctor(args: argparse.Namespace) -> int:
             adapter_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
         checks.append(("Codex adapter contract", adapter_ok, adapter_detail))
+        checks.append(("Codex MCP topology", mcp_ok, mcp_detail))
         checks.append(
             ("Codex project hook activation", activation_ok, activation_detail)
         )
