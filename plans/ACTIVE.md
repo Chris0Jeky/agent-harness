@@ -1,49 +1,56 @@
 # Active workstreams
 
-Snapshot: 2026-07-31. Base: `e23e97b464208ee6035d4155ff7e9b5316f2efec`.
+Snapshot: 2026-07-31. Published base: `b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`.
 One workstream is active; the second slot is free.
 
-## A — AH-1 continuity refresh
+## A — AH-1 continuity publication (PR #195)
 
-- **Observable outcome:** canonical state, roadmap, active-plan, measured-evidence, and dated-handoff
-  homes agree with live Git/GitHub evidence after PRs #173–#180, including measured CI-budget
-  follow-up #179 and completed partial-apply reporting #168.
-- **Evidence:** branch `docs/workbench-continuity-final` contains post-PR #180 main through merge
-  commit `8f17839`; PRs #152/#156/#164/#165/#168 are closed; PRs #154/#155 are closed unmerged and
-  superseded; GitHub had no open PR at the base snapshot; 65 open issues require one primary epic.
+- **Observable outcome:** the five canonical continuity homes describe `main@b2c2fd4`, all 69 open
+  issues map exactly once, and the next session can resume without trusting historical root
+  `HANDOFF.md`.
+- **Evidence:** branch `docs/workbench-continuity-20260731` preserves its original continuity commit
+  while merging current `origin/main`; PR #193 merged as `b2c2fd4`, preserving head `8648e5c`; all
+  nine jobs in run `30666338126` passed; six connector threads were tracked in #196 and resolved.
 - **In:** `docs/SYSTEM_STATE.md`, `ROADMAP.md`, this file, `docs/BENCHMARKS.md`, and
   `handoffs/2026-07-31-workbench-pivot.md`.
-- **Out:** runtime behavior, root `HANDOFF.md`, legacy floor limitations, H-2 activity, live estate
-  mutation, plugin extraction, public replay, or another checkout.
-- **Architecture seam:** evidence and state ownership across the workbench, not enforcement.
-- **Tests/fixtures/corpus:** no fixture or corpus change; issue-map, document-budget, JSON,
-  audit/Doctor, Markdown/diff, review, hosted CI, aging, and triage gates apply.
-- **Measurement:** only directly measured B-006–B-011 entries are added; no current estate
-  baseline, longitudinal Doctor series, or performance improvement is claimed.
-- **Limitation:** GitHub, tier, deployed bytes, and worktree ownership can change after this dated
-  snapshot; successors must refresh them before mutation.
+- **Out:** runtime behavior beyond the merged base, root `HANDOFF.md`, `FLOOR_LIMITATIONS.md`, H-2
+  activity, live estate/config/Docker mutation, public replay, plugin extraction, or sibling edits.
+- **Architecture seam:** evidence/state ownership across AH-1 through AH-10, not enforcement.
+- **Tests/fixtures/corpus:** no fixture/corpus change; live issue-map, JSON, audit/Doctor,
+  Markdown/diff, fix-diff review, hosted CI, aging, and all-surface triage gates apply.
+- **Measurement:** only measured B-012 through B-014 evidence is added; no current estate baseline,
+  longitudinal Doctor series, or universal policy quality is claimed.
+- **Limitation:** deployed global floor remains 1.6.21 while canonical source is 1.6.22. Static
+  Doctor cannot prove fresh-session trust; GitHub state can change after this dated snapshot.
 - **Exact verification:** `py -3 -B harness.py audit . --offline`; `py -3 -B harness.py doctor
-  --repo . --offline`; parse `.agent-harness/tier.json`; prove every open issue maps exactly once;
-  enforce document budgets; `git diff --check origin/main...HEAD`.
-- **Next executable handoff:** complete one fresh exact-range review, publish a ready PR, require
-  all nine hosted jobs green, age and triage the exact head once, and merge with a merge commit if
-  live state remains clean.
+  --repo . --offline` (expected exit 1 only for canonical 1.6.22 versus deployed 1.6.21 shared-floor
+  drift; any other failure blocks); prove 69/69 live issue mapping; parse tier JSON; `git diff
+  --check origin/main...HEAD`.
+- **Next executable handoff:** push the base-refresh fix, verify the exact head against `b2c2fd4`,
+  require all nine hosted jobs green, finish one fix-diff review, age/triage once, and merge-commit.
 
 ## Completed in this wave
 
-- AH-6 #168 merged through PR #180 as `e23e97b`, preserving implementation `c9e80c9`. Synthetic
-  JSON/text matrices now report one completed removal and two fail-closed retentions after later
-  registry failure. No live `worktrees --apply` ran.
-- AH-4 #164/#165 merged through PRs #175/#178; AH-2 #152/#156 merged through PRs #174/#176.
-- PRs #154/#155 were closed unmerged after exact supersession inventory; their branches remain
-  historical evidence.
+- PR #182 closed #179 by changing only the aggregate Verify timeout from 15 to 20 minutes. PR #183
+  closed #171 by reducing reflog reachability probes from up to five Git processes to one stdin-fed
+  traversal with equivalent fail-closed results.
+- PR #187 closed #177 with schema/runtime surrogate parity. PR #194 closed #167 with suspend-aware,
+  rollback-detecting fingerprint expiry and global stop-on-invalidity. No live closeout apply ran.
+- PR #193 merged the four owner-authorized #184 public-push security repairs as `b2c2fd4`; #184 then
+  closed with exact producer proof, without authorizing live installation. Five pre-merge and one post-merge fail-closed usability
+  findings were classified once, recorded in #196, and resolved without another fix loop.
+- PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
+  review evidence remain preserved.
 
 ## Parked or queued, not active
 
-- #179 is the measured AH-1 Windows aggregate CI-budget repair and the exact next safe slice.
-  Inventory timings before changing the workflow; never skip or allow-fail a proving check.
-- #167/#170/#171/#172 remain bounded AH-6 follow-ups. None authorizes live estate cleanup.
-- #160 is the remaining bounded Doctor topology follow-up. #177 is the bounded replay
-  lone-surrogate parity follow-up.
-- H-2 is owner-parked. Do not run estate-wide canaries or disable the harness.
-- AH-10 extraction and a public replay repository remain deferred.
+- #160 is reproduced and owner-blocked on disabled mixed-transport precedence. Recommended rule:
+  effective disablement suppresses only cross-layer conflict; same-table conflict remains invalid.
+- #172 is the exact next independent safe slice after PR #195 settles: preserve direct non-commit
+  `ORIG_HEAD` identity with additive fingerprint evidence. #170 additionally needs a real
+  POSIX/mode-capable proving environment.
+- #196 is the bounded AH-3 follow-up for six fail-closed public-push usability edges; it is not
+  permission to reopen #193 or broaden the parser.
+- #185/#186/#188–#192 are mapped follow-ups, not permission to broaden the active wave.
+- H-2 is the sole open human item and owner-parked. Do not run estate-wide canaries or disable the
+  harness. AH-10 extraction and a public replay repository remain deferred.

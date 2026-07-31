@@ -18,6 +18,9 @@ limitation are recorded. Historical results are not silently promoted to current
 | B-009 | Docker MCP gateway static boundary on Docker 29.6.2 | The original three-case matrix improved from 2/3 to 3/3 correct classifications; the final root-option/subcommand matrix passed 25/25; run `30645532130` passed all nine jobs after one Windows failed-job rerun | [PR #178](https://github.com/Chris0Jeky/agent-harness/pull/178) | Static Docker 29.6.2 root-option contract only; not runtime-topology, gateway-plugin, or performance evidence. |
 | B-010 | PR #178 exact-head Windows hosted CI, two attempts | Attempt 1 canceled at 15m05s after unit 6m18s, replay 2m53s, and 5m07s of smoke; attempt 2 passed in 11m33s with unit 5m32s, replay 9s, and smoke 5m17s | [Issue #179](https://github.com/Chris0Jeky/agent-harness/issues/179) | Two same-head GitHub-hosted Windows attempts prove budget exposure, not a long-run duration distribution or a product performance regression. |
 | B-011 | Guarded worktree partial-apply reporting in disposable synthetic repositories | Before PR #180, one completed removal followed by a registry-list failure yielded 0 output bytes and no summary; after the fix, each of two output modes reported exactly 1 removal and 2 retained/refused removable candidates; run `30649228936` passed | [PR #180](https://github.com/Chris0Jeky/agent-harness/pull/180) | Synthetic reporting-correctness evidence only; no live estate apply, transactional rollback, or performance claim. |
+| B-012 | GitHub-hosted Windows aggregate Verify jobs, 24-job cohort plus PR #182 exact head | Cohort median 11m18.5s, nearest-rank p95 12m34s, maximum 13m01s; the unchanged gate passed at the new 20-minute budget in 11m45s in run `30652837868` | [PR #182](https://github.com/Chris0Jeky/agent-harness/pull/182) | Historical GitHub-hosted cohort, not a duration guarantee. Linux/macOS inherit the same five-minute increase before a genuine hang is terminated. |
+| B-013 | Guarded-closeout recovery reachability in disposable Git 2.45.1 repositories on Windows | A 259-object, nine-pair comparison preserved verdicts 9/9 and reduced Git processes from 5 to 1 each time; old/new median was 240.7/48.2ms (4.99×). A separate 70-commit boundary case reduced calls 2 to 1 with exact set delta 0 | [PR #183](https://github.com/Chris0Jeky/agent-harness/pull/183) | Disposable local repositories, not an estate-wide latency series. One stdin traversal remains bounded by the existing timeout and fails closed on malformed/nonzero results. |
+| B-014 | PolicyDecision Draft 2020-12 surrogate boundary using independent `jsonschema` 4.26.0 | Runtime and schema agreed on 14/14 cases across `event_id` and `reason`: normalized surrogate pairs/astral text accepted; lone or direct surrogate code units rejected; CR/LF rejected and U+2028/U+2029 accepted where applicable | [PR #187](https://github.com/Chris0Jeky/agent-harness/pull/187) | Conformance matrix, not performance evidence. The authoritative engine was an independent review tool; checked-in tests remain dependency-free and do not pin `jsonschema`. |
 
 ## Interpretation boundaries
 
@@ -25,10 +28,10 @@ limitation are recorded. Historical results are not silently promoted to current
   authorize universal-parser expansion or a current estate rollout.
 - B-005 proves deterministic report behavior for the checked synthetic inputs. It does not prove
   process sandboxing, production policy quality, or public-product readiness.
-- B-006–B-009 and B-011 are bounded correctness matrices, not continuous precision or performance
-  series.
-- B-010 is CI proving-substrate evidence for AH-1; it does not justify skipping or allowing failure
-  in any current gate.
+- B-006–B-009, B-011, and B-014 are bounded correctness matrices, not continuous precision or
+  performance series.
+- B-010/B-012 are CI proving-substrate evidence for AH-1; they do not justify skipping or allowing
+  failure in any current gate. B-013 is a local closeout microbenchmark, not an estate claim.
 - Warning, ask/approval, deny, source failure, and indeterminate outcomes remain separate metrics.
 
 ## Not yet benchmarked
