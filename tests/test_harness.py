@@ -7357,6 +7357,16 @@ class WorktreeCloseoutTests(unittest.TestCase):
             check=check,
         )
 
+    def hash_blob(self, contents: str, *, cwd: Path | None = None) -> str:
+        return subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=cwd or self.repo,
+            input=contents,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
     def add_worktree(
         self,
         name: str,
@@ -7831,6 +7841,170 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 self.assertEqual(unretained, [])
                 self.assertIn(expected_error, error)
 
+    def test_non_commit_orig_head_identity_is_reported_and_retained(self) -> None:
+        tagged = self.add_worktree("orig-head-tag")
+        self.git(
+            "tag",
+            "-a",
+            "test/orig-head-object",
+            "-m",
+            "direct ORIG_HEAD tag",
+            cwd=tagged,
+        )
+        tag_oid = self.git(
+            "rev-parse", "refs/tags/test/orig-head-object", cwd=tagged
+        ).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", tag_oid, cwd=tagged)
+        self.git("update-ref", "-d", "refs/tags/test/orig-head-object", cwd=tagged)
+
+        blobbed = self.add_worktree("orig-head-blob")
+        blob_oid = self.hash_blob("direct ORIG_HEAD blob\n", cwd=blobbed)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=blobbed)
+
+        plan = self.plan()
+        for worktree, object_id, object_type in (
+            (tagged, tag_oid, "tag"),
+            (blobbed, blob_oid, "blob"),
+        ):
+            with self.subTest(object_type=object_type):
+                candidate = self.candidate(plan, worktree)
+                self.assertEqual(
+                    candidate["orig_head_object"],
+                    {"oid": object_id, "type": object_type},
+                )
+                self.assertEqual(candidate["verdict"], "keep")
+                self.assertIn("non_commit_orig_head", candidate["reasons"])
+
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        for worktree, object_id in ((tagged, tag_oid), (blobbed, blob_oid)):
+            candidate = self.candidate(plan, worktree)
+            self.assertEqual(candidate["apply"], "kept")
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual(
+                self.git("rev-parse", "ORIG_HEAD", cwd=worktree).stdout.strip(),
+                object_id,
+            )
+
+    def test_commit_orig_head_keeps_existing_recovery_behavior(self) -> None:
+        worktree = self.add_worktree("orig-head-commit")
+        commit = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", commit, cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(
+            candidate["orig_head_object"], {"oid": commit, "type": "commit"}
+        )
+        self.assertIn(commit, candidate["recovery_commits"])
+        self.assertNotIn("non_commit_orig_head", candidate["reasons"])
+        self.assertEqual(candidate["verdict"], "remove")
+
+    def test_absent_orig_head_does_not_resolve_a_same_named_branch(self) -> None:
+        worktree = self.add_worktree("orig-head-absent")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        (git_dir / "ORIG_HEAD").unlink(missing_ok=True)
+        self.git("branch", "ORIG_HEAD", "HEAD", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertIsNone(candidate["orig_head_object"])
+        self.assertNotIn("non_commit_orig_head", candidate["reasons"])
+        self.assertEqual(candidate["verdict"], "remove")
+
+    def test_orig_head_type_probe_runs_only_for_a_present_object(self) -> None:
+        worktree = self.add_worktree("orig-head-probe-budget")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        calls: list[list[str]] = []
+
+        def recording_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        (git_dir / "ORIG_HEAD").unlink(missing_ok=True)
+        self.assertEqual(
+            harness.worktree_orig_head_object(worktree, git_dir, recording_runner),
+            (None, ""),
+        )
+        self.assertEqual(calls, [])
+
+        blob_oid = self.hash_blob("one bounded type probe\n", cwd=worktree)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
+        self.assertEqual(
+            harness.worktree_orig_head_object(worktree, git_dir, recording_runner),
+            ({"oid": blob_oid, "type": "blob"}, ""),
+        )
+        self.assertEqual(calls, [["git", "cat-file", "-t", blob_oid]])
+
+    def test_orig_head_identity_change_is_caught_during_revalidation(self) -> None:
+        worktree = self.add_worktree("orig-head-revalidation")
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["orig_head_object"]["type"], "commit")
+
+        blob_oid = self.hash_blob("late direct ORIG_HEAD blob\n", cwd=worktree)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
+
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(candidate["apply"], "kept")
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertEqual(candidate["revalidation"], "changed")
+        self.assertNotEqual(
+            candidate["fingerprint"], candidate["revalidated_fingerprint"]
+        )
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(
+            self.git("rev-parse", "ORIG_HEAD", cwd=worktree).stdout.strip(),
+            blob_oid,
+        )
+
+    def test_orig_head_type_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("orig-head-type-failure")
+        commit = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", commit, cwd=worktree)
+
+        def failing_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1:3] == ["cat-file", "-t"] and harness.same_worktree_path(
+                cwd, worktree
+            ):
+                return subprocess.CompletedProcess(
+                    command, 7, "misleading", "controlled failure"
+                )
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        plan = self.plan(command_runner=failing_runner)
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("worktree_recovery_probe_failed", candidate["reasons"])
+        self.assertIn("object-type probe failed", candidate["worktree_recovery_error"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_non_regular_orig_head_is_incomplete(self) -> None:
+        worktree = self.add_worktree("orig-head-directory")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        orig_head = git_dir / "ORIG_HEAD"
+        orig_head.unlink(missing_ok=True)
+        orig_head.mkdir()
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("worktree_recovery_probe_failed", candidate["reasons"])
+        self.assertIn("not a regular file", candidate["worktree_recovery_error"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(orig_head.is_dir())
+
     def test_worktree_local_state_and_unique_reflog_are_preserved(self) -> None:
         worktree = self.add_worktree("local-state")
         (worktree / "unique.txt").write_text("only here\n", encoding="utf-8")
@@ -7914,6 +8088,8 @@ class WorktreeCloseoutTests(unittest.TestCase):
         git_dir = Path(
             self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
         )
+        blob_oid = self.hash_blob("direct evidence beside a non-regular reflog\n")
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
         reflog_path = git_dir / "logs" / "HEAD"
         reflog_path.unlink()
         reflog_path.mkdir()
@@ -7926,6 +8102,10 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(candidate["verdict"], "keep")
         self.assertIn("worktree_administrative_state", candidate["reasons"])
         self.assertIn("logs/HEAD", candidate["worktree_administrative_state"])
+        self.assertEqual(
+            candidate["orig_head_object"], {"oid": blob_oid, "type": "blob"}
+        )
+        self.assertIn("non_commit_orig_head", candidate["reasons"])
         self.assertTrue(plan["complete"])
         self.assertTrue(harness.apply_worktree_plan(plan))
         self.assertTrue(evidence.is_file())
@@ -8732,6 +8912,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
             "commit_editmsg_status",
             "worktree_local_refs",
             "worktree_administrative_state",
+            "orig_head_object",
             "recovery_commits",
             "unretained_recovery_commits",
         ):
