@@ -23,7 +23,7 @@ from replay_v0.corpus import (
 )
 from replay_v0.digests import (
     canonical_json_bytes,
-    executable_bits,
+    permission_bits,
     sha256_bytes,
     sha256_file,
     sha256_tree,
@@ -53,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v4"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v5"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -249,7 +249,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         policy_digest = sha256_file(policy_path)
         policy_tree_digest = sha256_tree(lexical_policy_path.parent)
         executable_digest = sha256_file(bound_executable_path)
-        executable_mode = executable_bits(bound_executable_path)
+        executable_permissions = permission_bits(bound_executable_path)
     except OSError as exc:
         raise ReplayInputError(
             "process executable or policy file could not be read"
@@ -262,7 +262,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     normalized_identity = {
         "schema_version": PROCESS_IDENTITY_VERSION,
         "executable": {
-            "executable_bits": executable_mode,
+            "permission_bits": executable_permissions,
             "name": bound_executable_path.name,
             "sha256": executable_digest,
         },
@@ -291,7 +291,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             .with_input_binding(
                 executable_path=bound_executable_path,
                 executable_sha256=executable_digest,
-                executable_bits=executable_mode,
+                executable_permissions=executable_permissions,
                 policy_tree_path=lexical_policy_path.parent,
                 policy_sha256=policy_digest,
                 policy_tree_sha256=policy_tree_digest,

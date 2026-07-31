@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Any
@@ -21,7 +22,7 @@ from replay_v0.corpus import (
     validate_command_events,
     validate_policy_decision,
 )
-from replay_v0.digests import executable_bits, sha256_file, sha256_tree
+from replay_v0.digests import permission_bits, sha256_file, sha256_tree
 
 RECORDED_MANIFEST_VERSION = "recorded-policy-manifest.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -70,8 +71,16 @@ class PolicySourceResult:
 
 
 def _cleanup_snapshot_root(root: Path) -> SourceFailure | None:
+    def make_writable_and_retry(function, raw_path, _exc_info) -> None:
+        path = Path(raw_path)
+        if path.is_symlink():
+            path.unlink()
+            return
+        path.chmod(stat.S_IRWXU)
+        function(raw_path)
+
     try:
-        shutil.rmtree(root)
+        shutil.rmtree(root, onerror=make_writable_and_retry)
     except FileNotFoundError:
         return None
     except OSError:
@@ -90,7 +99,7 @@ class _ProcessInputSnapshot:
     argv: tuple[str, ...]
     cwd: str
     executable_sha256: str
-    executable_bits: str
+    executable_permissions: str
     policy_sha256: str
     policy_tree_sha256: str
 
@@ -100,7 +109,7 @@ class _ProcessInputSnapshot:
         policy = policy_tree / self.argv[-1]
         try:
             actual_executable = sha256_file(executable)
-            actual_executable_bits = executable_bits(executable)
+            actual_executable_permissions = permission_bits(executable)
             actual_policy = sha256_file(policy)
             actual_tree = sha256_tree(policy_tree)
         except OSError:
@@ -110,7 +119,7 @@ class _ProcessInputSnapshot:
             )
         if (
             actual_executable != self.executable_sha256
-            or actual_executable_bits != self.executable_bits
+            or actual_executable_permissions != self.executable_permissions
             or actual_policy != self.policy_sha256
             or actual_tree != self.policy_tree_sha256
         ):
@@ -492,7 +501,7 @@ class ProcessDecisionSource:
         *,
         executable_path: str | Path,
         executable_sha256: str,
-        executable_bits: str,
+        executable_permissions: str,
         policy_tree_path: str | Path,
         policy_sha256: str,
         policy_tree_sha256: str,
@@ -505,12 +514,14 @@ class ProcessDecisionSource:
             or not _SHA256.fullmatch(policy_tree_sha256)
         ):
             raise ValueError("process input bindings require lowercase SHA-256 digests")
-        if not re.fullmatch(r"[01]{3}", executable_bits):
-            raise ValueError("process executable binding requires three execute bits")
+        if not re.fullmatch(r"[0-7]{4}", executable_permissions):
+            raise ValueError(
+                "process executable binding requires four octal permission digits"
+            )
         self.executable_binding = (
             Path(executable_path),
             executable_sha256,
-            executable_bits,
+            executable_permissions,
         )
         self.policy_tree_binding = (
             Path(policy_tree_path),
@@ -558,7 +569,7 @@ class ProcessDecisionSource:
                 message="Policy process input bindings are incomplete.",
             )
 
-        executable_path, expected_executable, expected_executable_bits = (
+        executable_path, expected_executable, expected_executable_permissions = (
             self.executable_binding
         )
         policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
@@ -593,7 +604,7 @@ class ProcessDecisionSource:
                     )
             shutil.copytree(policy_tree_path, snapshot_policy_tree)
             actual_executable = sha256_file(snapshot_executable)
-            actual_executable_bits = executable_bits(snapshot_executable)
+            actual_executable_permissions = permission_bits(snapshot_executable)
             actual_policy = sha256_file(snapshot_policy)
             actual_tree = sha256_tree(snapshot_policy_tree)
         except (OSError, shutil.Error):
@@ -609,7 +620,7 @@ class ProcessDecisionSource:
         if (
             not snapshot_policy.is_file()
             or actual_executable != expected_executable
-            or actual_executable_bits != expected_executable_bits
+            or actual_executable_permissions != expected_executable_permissions
             or actual_policy != expected_policy
             or actual_tree != expected_tree
         ):
@@ -632,7 +643,7 @@ class ProcessDecisionSource:
             ),
             cwd=str(snapshot_policy_tree),
             executable_sha256=expected_executable,
-            executable_bits=expected_executable_bits,
+            executable_permissions=expected_executable_permissions,
             policy_sha256=expected_policy,
             policy_tree_sha256=expected_tree,
         )

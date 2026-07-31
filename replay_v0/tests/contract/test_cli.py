@@ -539,6 +539,62 @@ for index, event in enumerate(events):
         allowed_manifest = build_run_manifest(candidate=allowed.identity, **common)
         self.assertNotEqual(denied_manifest["run_id"], allowed_manifest["run_id"])
 
+    def test_process_policy_permissions_bind_behavior_and_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            probe = directory / "mode-probe"
+            policy.write_text(
+                "import json\n"
+                "import os\n"
+                "import stat\n"
+                "import sys\n"
+                "effect = 'allow' if os.stat('mode-probe').st_mode & stat.S_IWUSR else 'deny'\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                '    print(json.dumps({"schema_version": "policy-decision.v1", '
+                '"event_id": event["event_id"], "effect": effect, '
+                '"reason": "Preserved permission probe."}))\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            probe.write_bytes(b"same bytes\n")
+            os.chmod(probe, 0o666)
+            writable = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            writable_result = writable.source.evaluate(EVENTS)
+
+            os.chmod(probe, 0o444)
+            read_only = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            read_only_result = read_only.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["allow", "allow"],
+            [decision["effect"] for decision in writable_result.decisions],
+        )
+        self.assertEqual(
+            ["deny", "deny"],
+            [decision["effect"] for decision in read_only_result.decisions],
+        )
+        self.assertEqual((), writable_result.failures)
+        self.assertEqual((), read_only_result.failures)
+        self.assertNotEqual(writable.identity["sha256"], read_only.identity["sha256"])
+        common = {
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "baseline",
+                "sha256": "1" * 64,
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "manifest_sha256": "2" * 64,
+                "event_count": len(EVENTS),
+            },
+            "fail_on": ["newly-allowed"],
+        }
+        writable_manifest = build_run_manifest(candidate=writable.identity, **common)
+        read_only_manifest = build_run_manifest(candidate=read_only.identity, **common)
+        self.assertNotEqual(writable_manifest["run_id"], read_only_manifest["run_id"])
+
     @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
     def test_process_helper_executable_bits_change_identity_and_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -580,44 +636,42 @@ for index, event in enumerate(events):
             non_executable_manifest["run_id"], executable_manifest["run_id"]
         )
 
-    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
-    def test_process_executable_bits_change_identity(self) -> None:
+    def test_process_executable_permissions_change_identity(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
             executable_directory = directory / "bin"
             policy_directory = directory / "policy"
             executable_directory.mkdir()
             policy_directory.mkdir()
-            executable = executable_directory / "python-copy"
+            executable = executable_directory / (
+                "python-copy.exe" if os.name == "nt" else "python-copy"
+            )
             policy = policy_directory / "policy.py"
             shutil.copy2(sys.executable, executable)
             policy.write_text("pass\n", encoding="utf-8", newline="\n")
             os.chmod(executable, 0o755)
-            executable_identity = _load_process_source(
+            writable_identity = _load_process_source(
                 f"{executable},{policy}", 5.0
             ).identity
 
-            os.chmod(executable, 0o644)
-            non_executable_identity = _load_process_source(
+            os.chmod(executable, 0o555)
+            read_only_identity = _load_process_source(
                 f"{executable},{policy}", 5.0
             ).identity
 
-        self.assertNotEqual(
-            executable_identity["sha256"], non_executable_identity["sha256"]
-        )
+        self.assertNotEqual(writable_identity["sha256"], read_only_identity["sha256"])
 
-    @unittest.skipIf(os.name == "nt", "Windows has no portable POSIX execute bits")
-    def test_process_helper_mode_is_revalidated_before_execution(self) -> None:
+    def test_process_helper_permissions_are_revalidated_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
             policy = directory / "policy.py"
             helper = directory / "helper"
             policy.write_text("pass\n", encoding="utf-8", newline="\n")
             helper.write_bytes(b"#!/bin/sh\nexit 0\n")
-            os.chmod(helper, 0o644)
+            os.chmod(helper, 0o666)
             loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
 
-            os.chmod(helper, 0o755)
+            os.chmod(helper, 0o444)
             with mock.patch("replay_v0.policy_sources.subprocess.run") as process_run:
                 result = loaded.source.evaluate(EVENTS)
 
@@ -812,6 +866,40 @@ for index, event in enumerate(events):
         )
         self.assertIn(
             "process-snapshot-changed", [failure.code for failure in result.failures]
+        )
+
+    @unittest.skipIf(os.name == "nt", "Windows read-only cleanup has separate coverage")
+    def test_process_snapshot_permission_change_invalidates_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "mode-probe"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            helper.write_bytes(b"same bytes\n")
+            os.chmod(helper, 0o666)
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_evaluate = loaded.source._evaluate_runtime
+
+            def mutate_snapshot_then_run(events, *, argv, cwd):
+                os.chmod(Path(cwd) / helper.name, 0o444)
+                return original_evaluate(events, argv=argv, cwd=cwd)
+
+            with mock.patch.object(
+                loaded.source,
+                "_evaluate_runtime",
+                side_effect=mutate_snapshot_then_run,
+            ):
+                result = loaded.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
+        self.assertEqual(
+            ["process-snapshot-changed"],
+            [failure.code for failure in result.failures],
         )
 
     def test_process_policy_symlink_keeps_supplied_parent_and_name(self) -> None:

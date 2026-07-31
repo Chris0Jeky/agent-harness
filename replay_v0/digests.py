@@ -25,17 +25,14 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def executable_bits(path: str | Path) -> str:
-    """Return the owner/group/other execute tuple that affects traversal or launch."""
+def permission_bits(path: str | Path) -> str:
+    """Return the four-octal-digit permission mode preserved by snapshot copies."""
 
-    mode = Path(path).stat().st_mode
-    return "".join(
-        "1" if mode & bit else "0" for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
-    )
+    return f"{stat.S_IMODE(Path(path).stat().st_mode):04o}"
 
 
 def sha256_tree(path: str | Path) -> str:
-    """Hash tree names, regular-file bytes, and executable-bit tuples."""
+    """Hash tree names, regular-file bytes, and preserved permission modes."""
 
     root = Path(path)
     if not root.is_dir() or root.is_symlink():
@@ -43,7 +40,7 @@ def sha256_tree(path: str | Path) -> str:
 
     entries: list[dict[str, str]] = [
         {
-            "executable_bits": executable_bits(root),
+            "permission_bits": permission_bits(root),
             "kind": "directory",
             "path": "",
         }
@@ -57,7 +54,7 @@ def sha256_tree(path: str | Path) -> str:
                 )
             entries.append(
                 {
-                    "executable_bits": executable_bits(entry),
+                    "permission_bits": permission_bits(entry),
                     "kind": "file",
                     "path": relative_path,
                     "sha256": sha256_file(entry),
@@ -66,7 +63,7 @@ def sha256_tree(path: str | Path) -> str:
         elif entry.is_dir():
             entries.append(
                 {
-                    "executable_bits": executable_bits(entry),
+                    "permission_bits": permission_bits(entry),
                     "kind": "directory",
                     "path": relative_path,
                 }
@@ -74,7 +71,7 @@ def sha256_tree(path: str | Path) -> str:
         elif entry.is_file():
             entries.append(
                 {
-                    "executable_bits": executable_bits(entry),
+                    "permission_bits": permission_bits(entry),
                     "kind": "file",
                     "path": relative_path,
                     "sha256": sha256_file(entry),

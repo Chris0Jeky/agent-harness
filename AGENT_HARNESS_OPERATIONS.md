@@ -99,17 +99,20 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
-- **CONSTRAINT:** Process identity binds the executable bytes and execute-bit tuple, the
-  entry-policy bytes, plus the relative names, exact regular-file bytes, and owner/group/other
-  execute-bit tuples for the policy-parent root and entries. Installed dependencies, files outside
-  that tree, network responses, and host metadata remain outside the portable identity, so callers
-  that depend on them must isolate and record that environment.
+- **CONSTRAINT:** Process identity binds the executable bytes and four-octal-digit permission mode,
+  the entry-policy bytes, plus the relative names, exact regular-file bytes, and permission modes
+  for the policy-parent root and entries. A preserved permission difference therefore changes the
+  identity even when names, bytes, and execute bits are unchanged. Installed dependencies, files
+  outside that tree, network responses, and other host metadata remain outside the portable
+  identity, so callers that depend on them must isolate and record that environment.
 - **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
   policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
-  executable, mode, and complete-tree digests against process identity v4 before and after
-  execution, and launches only the snapshot paths. Original-path drift, snapshot drift, or a copy
-  mismatch yields `indeterminate` decisions and exit `3`; cleanup failure is also source-failed.
-  The snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
+  executable, permission mode, and complete-tree digests against process identity v5 before and
+  after execution, and launches only the snapshot paths. Original-path drift, snapshot drift, or a
+  copy mismatch yields `indeterminate` decisions and exit `3`; cleanup failure is also
+  source-failed. Cleanup may make paths writable only inside the runner-created private snapshot
+  so copied read-only inputs can be removed; it never changes the original policy tree. The
+  snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
   mutate-and-restore process, and a non-relocatable executable fails closed rather than falling
   back to its original path.
 - **CONSTRAINT:** The reference invocation shape is:
