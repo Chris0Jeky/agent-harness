@@ -126,9 +126,24 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             ) as handle:
                 json.dump(tier, handle)
 
-    def narrowing(self, args, cwd):
+    def narrowing(self, args, cwd, command_runner=None):
         with floor_environment.hermetic_environment(dispatch, None):
-            return dispatch.sensitive_push_narrowing_status(args, cwd)
+            kwargs = {"command_runner": command_runner} if command_runner else {}
+            return dispatch.sensitive_push_narrowing_status(args, cwd, **kwargs)
+
+    def narrowing_with_failed_config_probe(self, args, cwd):
+        failed = False
+
+        def fail_once(argv, project_dir):
+            nonlocal failed
+            if not failed and argv[-3:] == ["config", "--null", "--list"]:
+                failed = True
+                return ""
+            return dispatch.command_output(argv, project_dir)
+
+        result = self.narrowing(args, cwd, fail_once)
+        self.assertTrue(failed, "the config-list failure fixture did not fire")
+        return result
 
     # --- the allowed shape -------------------------------------------------
 
@@ -311,6 +326,11 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
             self.assertFalse(allowed, detail)
             self.assertIn("followTags", detail)
+            allowed, detail = self.narrowing_with_failed_config_probe(
+                ["origin", "main"], self.nonsensitive
+            )
+            self.assertFalse(allowed, detail)
+            self.assertIn("configuration", detail)
         finally:
             self._git(self.nonsensitive, "config", "--unset", "push.followTags")
         allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
@@ -342,6 +362,11 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             allowed, detail = self.narrowing(["origin"], self.nonsensitive)
             self.assertFalse(allowed, detail)
             self.assertIn("upstream", detail)
+            allowed, detail = self.narrowing_with_failed_config_probe(
+                ["origin"], self.nonsensitive
+            )
+            self.assertFalse(allowed, detail)
+            self.assertIn("configuration", detail)
             self._git(
                 self.nonsensitive,
                 "config",

@@ -8756,27 +8756,38 @@ def sensitive_push_narrowing_status(
                 "destination is not a configured remote of the pushed repository",
                 diagnostics,
             )
-    configured_follow_tags = command_output_before_deadline(
+    configured_push_state = command_output_before_deadline(
         command_runner,
         [
             "git",
             *(git_globals or []),
             "config",
-            "--get-regexp",
-            r"^push\.followtags$",
+            "--null",
+            "--list",
         ],
         project_dir,
         deadline,
         diagnostics,
     )
-    # Read keyed raw values so an invalid or valueless boolean cannot collapse
-    # to the same empty stdout as an absent key. Git accepts several false
-    # spellings; every other occurrence fails closed because it can make an
-    # otherwise branch-only push publish an annotated tag.
+    if not configured_push_state:
+        return False, detail_with_diagnostics(
+            "unresolved push configuration", diagnostics
+        )
+    config_values: dict[str, list[str]] = {}
+    for entry in configured_push_state.split("\0"):
+        if not entry:
+            continue
+        key, separator, value = entry.partition("\n")
+        if not separator:
+            return False, "push configuration listing is malformed"
+        config_values.setdefault(key.lower(), []).append(value)
+    # The all-config probe exits zero even when a specific key is absent, so a
+    # resolver failure cannot collapse to the same answer as "not configured".
+    # Git accepts several false spellings; every other occurrence fails closed
+    # because it can make a branch-only push publish an annotated tag.
     if any(
-        " " not in entry
-        or entry.split(" ", 1)[1].strip().lower() not in {"false", "no", "off", "0"}
-        for entry in configured_follow_tags.splitlines()
+        value.strip().lower() not in {"false", "no", "off", "0"}
+        for value in config_values.get("push.followtags", [])
     ):
         return False, "configured push.followTags may publish annotated tags"
     # Independent of the destination check: `git push origin` names a remote and
@@ -8804,19 +8815,7 @@ def sensitive_push_narrowing_status(
         ).strip()
         if configured_push_refspecs:
             return False, "a refspec-less push inherits a configured push refspec"
-        configured_push_defaults = command_output_before_deadline(
-            command_runner,
-            [
-                "git",
-                *(git_globals or []),
-                "config",
-                "--get-all",
-                "push.default",
-            ],
-            project_dir,
-            deadline,
-            diagnostics,
-        ).splitlines()
+        configured_push_defaults = config_values.get("push.default", [])
         push_default = (
             configured_push_defaults[-1].strip().lower()
             if configured_push_defaults
