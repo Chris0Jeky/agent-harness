@@ -1030,8 +1030,17 @@ for index, event in enumerate(events):
         self.assertEqual((), first.failures)
         self.assertEqual((), second.failures)
         self.assertEqual(first.decisions, second.decisions)
-        self.assertIn(str(snapshot_root), first.decisions[0]["reason"])
-        self.assertNotIn(str(changed_parent), first.decisions[0]["reason"])
+        visible_cwd_raw, visible_argv0, visible_file_raw = first.decisions[0][
+            "reason"
+        ].split("|")
+        visible_cwd = Path(visible_cwd_raw)
+        visible_file = Path(visible_file_raw)
+        self.assertEqual("policy", visible_cwd.name)
+        self.assertEqual(snapshot_root.name, visible_cwd.parent.name)
+        self.assertEqual(snapshot_parent.name, visible_cwd.parent.parent.name)
+        self.assertEqual("policy.py", visible_argv0)
+        self.assertEqual(visible_cwd / "policy.py", visible_file)
+        self.assertNotIn(changed_parent.name, first.decisions[0]["reason"])
         self.assertFalse(snapshot_root.exists())
 
     def test_process_snapshot_parent_disappearance_fails_closed(self) -> None:

@@ -128,7 +128,7 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "a34fb7f50dafe5c742f5fc09ee9cbf62801bfcc6868bc0cec6f8c53258fa408d"
+      "sha256": "70a4c27ddc14df8ed5ce6c37926c29b6cc8da5d1d0393069107254b4929b6362"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
