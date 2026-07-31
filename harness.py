@@ -1911,7 +1911,7 @@ def apply_worktree_plan(
         return False
     apply_ok = True
 
-    for candidate in plan["worktrees"]:
+    for candidate_index, candidate in enumerate(plan["worktrees"]):
         if candidate["verdict"] != "remove":
             candidate["apply"] = "kept"
             continue
@@ -1922,9 +1922,22 @@ def apply_worktree_plan(
             apply_ok = False
             continue
 
-        current_records = canonicalize_worktree_records(
-            list_worktrees(primary, command_runner), relative_to=primary
-        )
+        try:
+            current_records = canonicalize_worktree_records(
+                list_worktrees(primary, command_runner), relative_to=primary
+            )
+        except HarnessError:
+            plan["apply_error"] = "partial_apply_revalidation_failed"
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "revalidation_probe_failed"
+            candidate["revalidation"] = "unavailable"
+            for remaining in plan["worktrees"][candidate_index + 1 :]:
+                remaining["apply"] = "kept"
+                if remaining["verdict"] == "remove":
+                    remaining["apply_reason"] = (
+                        "not_attempted_after_revalidation_failure"
+                    )
+            return False
         current_record = find_worktree_record(current_records, Path(candidate["path"]))
         refs, refs_error = remote_tracking_refs(primary, remotes, command_runner)
         if current_record is None or refs_error:
@@ -2067,6 +2080,8 @@ def render_worktree_plan(plan: dict[str, Any]) -> None:
         print(f"[{state}] remote evidence: {detail}")
     else:
         print("[read-only] remote evidence was not refreshed")
+    if plan.get("apply_error"):
+        print(f"[FAIL] apply: {plan['apply_error']}")
     for candidate in plan["worktrees"]:
         detail = ", ".join(candidate["reasons"]) or "safe after revalidation"
         print(f"[{candidate['verdict']}] {candidate['path']}: {detail}")

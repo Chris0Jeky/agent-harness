@@ -560,6 +560,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   `--refresh --claimant`, uses only plain `git worktree remove`, never prunes repository-wide
   worktree metadata, and never deletes a branch. Git-locked, current, primary, outside, unavailable,
   detached, administratively stateful, and cooperatively occupied worktrees are retained.
+  If a later candidate's fresh registry revalidation fails after an earlier removal, APPLY stops,
+  retains current and remaining candidates, reports the partial result, and never retries or rolls back.
   Canonical identity collapses Windows short/long paths and macOS `/var` aliases. JSON schema
   version 3 carries the mode, index-recovery, pending-message status, local-ref,
   administrative-state, and recovery-retention evidence without emitting commit-message content.
