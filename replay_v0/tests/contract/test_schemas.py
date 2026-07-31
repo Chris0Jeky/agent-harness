@@ -45,6 +45,24 @@ class SchemaContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, f"^{expected}$"):
             callback()
 
+    @staticmethod
+    def schema_accepts_string(field_schema: dict[str, object], value: str) -> bool:
+        minimum = field_schema.get("minLength")
+        maximum = field_schema.get("maxLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            return False
+        if isinstance(maximum, int) and len(value) > maximum:
+            return False
+        pattern = field_schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            return False
+        excluded = field_schema.get("not")
+        if isinstance(excluded, dict):
+            excluded_pattern = excluded.get("pattern")
+            if isinstance(excluded_pattern, str) and re.search(excluded_pattern, value):
+                return False
+        return True
+
     def test_valid_records_round_trip_without_mutation(self) -> None:
         for value, validator in (
             (VALID_EVENT, validate_command_event),
@@ -134,20 +152,8 @@ class SchemaContractTests(unittest.TestCase):
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         reason_schema = schema["properties"]["reason"]
 
-        def schema_accepts(reason: str) -> bool:
-            if (
-                not reason_schema["minLength"]
-                <= len(reason)
-                <= reason_schema["maxLength"]
-            ):
-                return False
-            pattern = reason_schema.get("pattern")
-            if pattern is not None and re.search(pattern, reason) is None:
-                return False
-            excluded = reason_schema.get("not")
-            if excluded is not None and re.search(excluded["pattern"], reason):
-                return False
-            return True
+        json_escaped_pair = json.loads(r'"\ud83d\ude00"')
+        self.assertEqual("\U0001f600", json_escaped_pair)
 
         for label, reason, expected in (
             ("ordinary", "ordinary reason", True),
@@ -155,6 +161,13 @@ class SchemaContractTests(unittest.TestCase):
             ("embedded LF", "line one\nline two", False),
             ("trailing LF", "one line\n", False),
             ("trailing CR", "one line\r", False),
+            ("lone high surrogate", "\ud800", False),
+            ("lone low surrogate", "\udfff", False),
+            ("direct surrogate pair", "\ud83d\ude00", False),
+            ("JSON-escaped surrogate pair", json_escaped_pair, True),
+            ("ordinary astral code point", "\U0001f600", True),
+            ("line separator", "\u2028", True),
+            ("paragraph separator", "\u2029", True),
             ("length 1", "x", True),
             ("length 500", "x" * 500, True),
             ("length 501", "x" * 501, False),
@@ -167,12 +180,47 @@ class SchemaContractTests(unittest.TestCase):
                     runtime_accepts = False
                 else:
                     runtime_accepts = True
-                schema_accepts_reason = schema_accepts(reason)
+                schema_accepts_reason = self.schema_accepts_string(
+                    reason_schema, reason
+                )
                 self.assertEqual(expected, schema_accepts_reason)
                 self.assertEqual(schema_accepts_reason, runtime_accepts)
 
         self.assertNotIn("pattern", reason_schema)
-        self.assertEqual({"pattern": "[\\r\\n]"}, reason_schema["not"])
+        self.assertEqual({"pattern": "[\\r\\n\\uD800-\\uDFFF]"}, reason_schema["not"])
+
+    def test_policy_event_id_schema_matches_runtime_utf8_boundary(self) -> None:
+        schema_path = (
+            Path(__file__).parents[2] / "schemas" / "policy-decision.v1.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        event_id_schema = schema["properties"]["event_id"]
+        json_escaped_pair = json.loads(r'"\ud83d\ude00"')
+
+        for label, event_id, expected in (
+            ("ordinary", "ordinary-event", True),
+            ("lone high surrogate", "\ud800", False),
+            ("lone low surrogate", "\udfff", False),
+            ("direct surrogate pair", "\ud83d\ude00", False),
+            ("JSON-escaped surrogate pair", json_escaped_pair, True),
+            ("ordinary astral code point", "\U0001f600", True),
+        ):
+            with self.subTest(label=label):
+                decision = {**VALID_DECISION, "event_id": event_id}
+                try:
+                    validate_policy_decision(decision)
+                except ValidationError:
+                    runtime_accepts = False
+                else:
+                    runtime_accepts = True
+                schema_accepts_event_id = self.schema_accepts_string(
+                    event_id_schema, event_id
+                )
+                self.assertEqual(expected, schema_accepts_event_id)
+                self.assertEqual(schema_accepts_event_id, runtime_accepts)
+
+        self.assertNotIn("pattern", event_id_schema)
+        self.assertEqual({"pattern": "[\\uD800-\\uDFFF]"}, event_id_schema["not"])
 
     def test_charter_class_is_closed(self) -> None:
         case = {**VALID_CASE, "case_class": "safe"}
