@@ -7,13 +7,17 @@
   "required": ["schema_version", "event_id", "effect", "reason"],
   "properties": {
     "schema_version": {"const": "policy-decision.v1"},
-    "event_id": {"type": "string", "minLength": 1},
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "not": {"pattern": "[\\uD800-\\uDFFF]"}
+    },
     "effect": {"enum": ["allow", "deny", "indeterminate"]},
     "reason": {
       "type": "string",
       "minLength": 1,
       "maxLength": 500,
-      "not": {"pattern": "[\\r\\n]"}
+      "not": {"pattern": "[\\r\\n\\uD800-\\uDFFF]"}
     }
   }
 }

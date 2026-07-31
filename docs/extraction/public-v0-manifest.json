@@ -103,7 +103,7 @@
     {
       "path": "replay_v0/schemas/policy-decision.v1.schema.json",
       "kind": "schema",
-      "sha256": "50bbfb6038bf1c2da4b5c79640c4a66a852eb083bdc07e2ef880712831695ac4"
+      "sha256": "0d125ead92578ee7d9846d641e17e8e7c631058a597de8e531a0b20d6262eaf6"
     },
     {
       "path": "replay_v0/tests/__init__.py",
@@ -138,7 +138,7 @@
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
       "kind": "test",
-      "sha256": "7ac3f0e1c44292c407ed8ad5a42a9ccc10db725eeb3f2a714a8959b30d63433f"
+      "sha256": "e004c1140d73d6aeedf8a5d2f95d9386d0e45c1245d0fe1f364219df13ddd27d"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
