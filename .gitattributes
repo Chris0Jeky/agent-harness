@@ -1,0 +1,2 @@
+replay_v0/**/*.json text eol=lf
+replay_v0/**/*.jsonl text eol=lf
