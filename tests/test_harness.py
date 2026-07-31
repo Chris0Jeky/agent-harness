@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import io
 import json
 import os
@@ -4457,6 +4458,139 @@ allow_local_binding = true
         self.assertEqual(result, 0, output)
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+
+    def test_doctor_rejects_user_project_command_mcp_duplicate(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        config = nested / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[mcp_servers.docker]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run", "--servers", "github"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            nested,
+            user_config=(
+                "[mcp_servers.docker]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--profile", "safe"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex MCP topology", output)
+        self.assertIn('active command-backed MCP server "docker" is duplicated', output)
+        self.assertIn(str(config.resolve()), output)
+
+    def test_doctor_models_layered_mcp_enablement_and_argument_source(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        project_config = repo / ".codex" / "config.toml"
+        project_config.write_text(
+            "[mcp_servers.MCP_DOCKER]\n" 'args = ["mcp", "gateway", "run"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[mcp_servers.MCP_DOCKER]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--profile", "safe"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("arguments in " + str(project_config.resolve()), output)
+        self.assertNotIn("args = [", output)
+
+        project_config.write_text(
+            "[mcp_servers.MCP_DOCKER]\n" "enabled = false\n",
+            encoding="utf-8",
+        )
+        codex_home = Path(self.temp.name) / "second-codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            "[mcp_servers.MCP_DOCKER]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run"]\n',
+            encoding="utf-8",
+        )
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [project_config])
+        self.assertTrue(ok, detail)
+        self.assertNotIn("active Docker MCP gateway", detail)
+
+    def test_mcp_docker_gateway_recognizes_windows_pathext_shims(self) -> None:
+        args = ("mcp", "gateway", "run")
+        for executable in ("docker.cmd", "DOCKER.CMD", "docker.bat", "Docker.BAT"):
+            with self.subTest(executable=executable):
+                self.assertTrue(harness.unbounded_docker_mcp_gateway(executable, args))
+        self.assertFalse(
+            harness.unbounded_docker_mcp_gateway(
+                "docker.cmd", args + ("--servers=github",)
+            )
+        )
+        self.assertFalse(harness.unbounded_docker_mcp_gateway("podman.cmd", args))
+
+    def test_mcp_rejects_layered_mixed_transports_without_rendering_values(
+        self,
+    ) -> None:
+        root = Path(self.temp.name)
+        user = root / "user.toml"
+        project = root / "project.toml"
+        user.write_text(
+            '[mcp_servers.one]\ncommand = "secret-command"\n', encoding="utf-8"
+        )
+        project.write_text(
+            '[mcp_servers.one]\nurl = "https://private.invalid/token"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(harness.HarnessError, "mixes command") as caught:
+            harness.layered_mcp_server_states([user, project])
+        self.assertNotIn("secret-command", str(caught.exception))
+        self.assertNotIn("private.invalid", str(caught.exception))
+
+    def test_mcp_malformed_name_is_escaped_in_diagnostics(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            '[mcp_servers."evil\\n[ok] forged"]\nenabled = "yes"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(harness.HarnessError) as caught:
+            harness.mcp_server_patches(config)
+        detail = str(caught.exception)
+        self.assertNotIn("\n[ok] forged", detail)
+        self.assertIn(r"\n[ok] forged", detail)
+
+    @unittest.skipUnless(os.name == "nt", "Windows short paths are platform-specific")
+    def test_mcp_source_paths_use_one_windows_filesystem_identity(self) -> None:
+        config = Path(self.temp.name) / "long-name-config.toml"
+        config.write_text("[mcp_servers.one]\n", encoding="utf-8")
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            str(config), buffer, len(buffer)
+        )
+        if not length or Path(buffer.value) == config:
+            self.skipTest("8.3 short-path spelling is unavailable on this volume")
+        short = Path(buffer.value)
+        paths = harness.distinct_mcp_config_paths([config, short])
+        self.assertEqual(paths, [config.resolve()])
+        self.assertEqual(
+            harness.mcp_server_patches(short)[0][1],
+            config.resolve(),
+        )
 
     def test_doctor_requires_canonical_root_hooks_json_adapter(self) -> None:
         repo = self.make_repo()
