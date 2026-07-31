@@ -142,8 +142,9 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             self.assertTrue(allowed, (args, detail))
 
     def test_head_source_allows(self):
-        allowed, detail = self.narrowing(["origin", "HEAD:main"], self.nonsensitive)
-        self.assertTrue(allowed, detail)
+        for refspec in ("HEAD", "HEAD:refs/heads/main"):
+            allowed, detail = self.narrowing(["origin", refspec], self.nonsensitive)
+            self.assertTrue(allowed, (refspec, detail))
 
     def test_end_to_end_check_allows_the_attributable_push(self):
         decision, reason = checked(
@@ -304,6 +305,83 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         allowed, detail = self.narrowing(["origin"], self.nonsensitive)
         self.assertTrue(allowed, detail)
 
+    def test_configured_follow_tags_keeps_the_deny(self):
+        self._git(self.nonsensitive, "config", "push.followTags", "true")
+        try:
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("followTags", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "push.followTags")
+        allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+        self.assertTrue(allowed, detail)
+        self._git(self.nonsensitive, "config", "push.followTags", "false")
+        try:
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertTrue(allowed, detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "push.followTags")
+        self._git(self.nonsensitive, "config", "push.followTags", "not-a-bool")
+        try:
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("followTags", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "push.followTags")
+
+    def test_upstream_push_default_cannot_target_a_tag(self):
+        self._git(self.nonsensitive, "config", "push.default", "upstream")
+        self._git(self.nonsensitive, "config", "branch.main.remote", "origin")
+        self._git(
+            self.nonsensitive,
+            "config",
+            "branch.main.merge",
+            "refs/tags/public-release",
+        )
+        try:
+            allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("upstream", detail)
+            self._git(
+                self.nonsensitive,
+                "config",
+                "branch.main.merge",
+                "refs/heads/main",
+            )
+            allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+            self.assertTrue(allowed, detail)
+            self._git(
+                self.nonsensitive,
+                "config",
+                "--add",
+                "branch.main.merge",
+                "refs/tags/other-release",
+            )
+            allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("upstream", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "push.default")
+            self._git(self.nonsensitive, "config", "--unset", "branch.main.remote")
+            self._git(
+                self.nonsensitive,
+                "config",
+                "--unset-all",
+                "branch.main.merge",
+            )
+
+    def test_unqualified_refspec_destination_keeps_the_deny(self):
+        allowed, detail = self.narrowing(
+            [
+                "--force-with-lease=feature/x:0123456789012345678901234567890123456789",
+                "origin",
+                "main:feature/x",
+            ],
+            self.nonsensitive,
+        )
+        self.assertFalse(allowed, detail)
+        self.assertIn("refspec", detail)
+
     def test_an_undeclared_sensitive_data_flag_is_not_an_implicit_false(self):
         implicit = os.path.join(self.root, "implicitflags")
         self._make_repo(implicit, {"tier": 1, "flags": {}})
@@ -330,6 +408,45 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         allowed, detail = self.narrowing(["origin", "wt-feature"], outside)
         self.assertFalse(allowed)
         self.assertIn("inside a sensitive_data root", detail)
+
+    def test_separate_git_dir_cannot_hide_a_sensitive_primary(self):
+        primary = os.path.join(self.sensitive_root, "separate-primary")
+        git_dir = os.path.join(self.root, "separate-git-data")
+        outside = os.path.join(self.root, "separate-outside-worktree")
+        os.makedirs(primary)
+        self._git(
+            self.root,
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            git_dir,
+            primary,
+        )
+        with open(os.path.join(primary, "seed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("seed\n")
+        os.makedirs(os.path.join(primary, ".agent-harness"))
+        with open(
+            os.path.join(primary, ".agent-harness", "tier.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump({"tier": 2, "flags": {"sensitive_data": False}}, handle)
+        self._git(primary, "add", "seed.txt", ".agent-harness/tier.json")
+        self._git(primary, "commit", "-m", "seed separate git dir")
+        self._git(
+            primary,
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+        self._git(primary, "worktree", "add", "--detach", outside, "main")
+        self._git(outside, "switch", "-c", "separate-wt")
+
+        allowed, detail = self.narrowing(["origin", "separate-wt"], outside)
+        self.assertFalse(allowed, detail)
+        self.assertIn("separate Git directory", detail)
 
     def test_a_worktree_cannot_declassify_its_own_sensitive_repository(self):
         """A repo that declares sensitive_data ITSELF stays denied from any of
@@ -385,8 +502,9 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         for refspec in ("main:refs/tags/v1", "main:refs/notes/x", "main:refs/*"):
             allowed, _detail = self.narrowing(["origin", refspec], self.nonsensitive)
             self.assertFalse(allowed, refspec)
-        # the ordinary branch-to-branch spellings still allow
-        for refspec in ("main", "main:main", "main:refs/heads/other"):
+        # source-only and fully qualified branch destinations still allow;
+        # an unqualified destination can resolve to an existing remote tag.
+        for refspec in ("main", "main:refs/heads/other"):
             allowed, detail = self.narrowing(["origin", refspec], self.nonsensitive)
             self.assertTrue(allowed, (refspec, detail))
 

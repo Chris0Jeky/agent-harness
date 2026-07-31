@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.21 (2026-07-27)"
+FLOOR_VERSION = "1.6.22 (2026-07-31)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8636,8 +8636,9 @@ def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
     The DESTINATION side matters even though this function is named for the
     source: `main:refs/tags/v1` has a perfectly valid branch source and still
     creates a remote TAG, a ref class the ratified #48 condition set excludes
-    (PR #132 review). An unqualified destination is left to git, which resolves
-    it under refs/heads for a branch source.
+    (PR #132 review). An unqualified destination is not safe either: Git can
+    resolve `main:feature/x` to an existing remote `refs/tags/feature/x`, so an
+    explicit destination must prove the `refs/heads/` namespace itself.
     """
     sources: list[str] = []
     for refspec in refspecs:
@@ -8648,7 +8649,7 @@ def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
             return None
         if not src or "*" in src:
             return None
-        if colon and dst.startswith("refs/") and not dst.startswith("refs/heads/"):
+        if colon and not dst.startswith("refs/heads/"):
             return None
         if "*" in dst:
             return None
@@ -8755,6 +8756,29 @@ def sensitive_push_narrowing_status(
                 "destination is not a configured remote of the pushed repository",
                 diagnostics,
             )
+    configured_follow_tags = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "config",
+            "--get-regexp",
+            r"^push\.followtags$",
+        ],
+        project_dir,
+        deadline,
+        diagnostics,
+    )
+    # Read keyed raw values so an invalid or valueless boolean cannot collapse
+    # to the same empty stdout as an absent key. Git accepts several false
+    # spellings; every other occurrence fails closed because it can make an
+    # otherwise branch-only push publish an annotated tag.
+    if any(
+        " " not in entry
+        or entry.split(" ", 1)[1].strip().lower() not in {"false", "no", "off", "0"}
+        for entry in configured_follow_tags.splitlines()
+    ):
+        return False, "configured push.followTags may publish annotated tags"
     # Independent of the destination check: `git push origin` names a remote and
     # is STILL refspec-less. Keying this off `else` skipped the very shape the
     # review reported.
@@ -8780,6 +8804,63 @@ def sensitive_push_narrowing_status(
         ).strip()
         if configured_push_refspecs:
             return False, "a refspec-less push inherits a configured push refspec"
+        configured_push_defaults = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "config",
+                "--get-all",
+                "push.default",
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).splitlines()
+        push_default = (
+            configured_push_defaults[-1].strip().lower()
+            if configured_push_defaults
+            else "simple"
+        )
+        if push_default == "upstream":
+            current_branch = command_output_before_deadline(
+                command_runner,
+                [
+                    "git",
+                    *(git_globals or []),
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "HEAD",
+                ],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).strip()
+            upstream_merge = (
+                command_output_before_deadline(
+                    command_runner,
+                    [
+                        "git",
+                        *(git_globals or []),
+                        "config",
+                        "--get-all",
+                        f"branch.{current_branch}.merge",
+                    ],
+                    project_dir,
+                    deadline,
+                    diagnostics,
+                ).splitlines()
+                if current_branch
+                else []
+            )
+            if not upstream_merge or any(
+                not merge_ref.strip().startswith("refs/heads/")
+                for merge_ref in upstream_merge
+            ):
+                return False, "push.default upstream does not target refs/heads"
+        elif push_default not in {"simple", "current"}:
+            return False, f"push.default {push_default or 'unknown'} is not branch-only"
     declaration_present = False
     for authority_dir in (".agent-harness", ".claude"):
         try:
@@ -8820,7 +8901,35 @@ def sensitive_push_narrowing_status(
         )
     if not os.path.isabs(common_dir):
         common_dir = os.path.join(toplevel, common_dir)
-    containment_roots.append(os.path.dirname(os.path.abspath(common_dir)))
+    common_dir = os.path.abspath(common_dir)
+    worktree_metadata = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ],
+        project_dir,
+        deadline,
+        diagnostics,
+    )
+    primary_record = worktree_metadata.split("\0", 1)[0]
+    if not primary_record.startswith("worktree "):
+        return False, detail_with_diagnostics(
+            "unresolved primary checkout", diagnostics
+        )
+    primary_checkout = os.path.abspath(primary_record[len("worktree ") :])
+    common_parent = os.path.dirname(common_dir)
+    if os.path.normcase(primary_checkout) != os.path.normcase(common_parent):
+        # `git init --separate-git-dir` leaves no reliable primary-checkout
+        # pointer in the shared repository metadata: `worktree list` reports
+        # the detached Git storage itself as the primary. The real checkout may
+        # sit under a sensitive root, so this topology cannot earn exemption.
+        return False, "a separate Git directory hides the primary checkout"
+    containment_roots.append(primary_checkout)
     # Skip ONLY the toplevel, whose declaration condition 3 just validated.
     # Skipping the primary too — which an earlier revision did, by building the
     # skip set from BOTH roots — silences the primary's OWN declaration whenever
