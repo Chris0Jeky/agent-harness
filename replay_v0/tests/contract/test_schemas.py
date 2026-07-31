@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import unittest
 
 from replay_v0.corpus import (
@@ -125,6 +126,53 @@ class SchemaContractTests(unittest.TestCase):
                 self.assert_validation_error(
                     expected, lambda: validate_policy_decision(decision)
                 )
+
+    def test_policy_reason_schema_matches_runtime_boundaries(self) -> None:
+        schema_path = (
+            Path(__file__).parents[2] / "schemas" / "policy-decision.v1.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        reason_schema = schema["properties"]["reason"]
+
+        def schema_accepts(reason: str) -> bool:
+            if (
+                not reason_schema["minLength"]
+                <= len(reason)
+                <= reason_schema["maxLength"]
+            ):
+                return False
+            pattern = reason_schema.get("pattern")
+            if pattern is not None and re.search(pattern, reason) is None:
+                return False
+            excluded = reason_schema.get("not")
+            if excluded is not None and re.search(excluded["pattern"], reason):
+                return False
+            return True
+
+        for label, reason, expected in (
+            ("ordinary", "ordinary reason", True),
+            ("empty", "", False),
+            ("embedded LF", "line one\nline two", False),
+            ("trailing LF", "one line\n", False),
+            ("trailing CR", "one line\r", False),
+            ("length 1", "x", True),
+            ("length 500", "x" * 500, True),
+            ("length 501", "x" * 501, False),
+        ):
+            with self.subTest(label=label):
+                decision = {**VALID_DECISION, "reason": reason}
+                try:
+                    validate_policy_decision(decision)
+                except ValidationError:
+                    runtime_accepts = False
+                else:
+                    runtime_accepts = True
+                schema_accepts_reason = schema_accepts(reason)
+                self.assertEqual(expected, schema_accepts_reason)
+                self.assertEqual(schema_accepts_reason, runtime_accepts)
+
+        self.assertNotIn("pattern", reason_schema)
+        self.assertEqual({"pattern": "[\\r\\n]"}, reason_schema["not"])
 
     def test_charter_class_is_closed(self) -> None:
         case = {**VALID_CASE, "case_class": "safe"}
