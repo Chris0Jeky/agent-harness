@@ -22,12 +22,53 @@ import sys
 import tomllib
 import uuid
 from collections.abc import Mapping
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
+
+WORKTREE_PLAN_SCHEMA_VERSION = 3
+WORKTREE_FINGERPRINT_LEASE_SECONDS = 60.0
+WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
+WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION = 1
+WORKTREE_OWNERSHIP_LEASE_SCOPE = "exclusive-plain-worktree-remove"
+WORKTREE_OWNERSHIP_LEASE_FILENAME = "agent-harness-closeout-lease.json"
+WORKTREE_OWNERSHIP_LOCK_DIRECTORY = "agent-harness-closeout-lease.lock"
+WORKTREE_OWNERSHIP_DEFAULT_SECONDS = 300.0
+WORKTREE_OWNERSHIP_MAX_SECONDS = 3600.0
+WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS = 10.0
+WORKTREE_GIT_CONTEXT_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_WORK_TREE",
+)
+WORKTREE_ADMIN_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        "HEAD",
+        "ORIG_HEAD",
+        "COMMIT_EDITMSG",
+        "commondir",
+        "gitdir",
+        "index",
+        "logs",
+        "refs",
+        WORKTREE_OWNERSHIP_LEASE_FILENAME,
+    }
+)
 
 CODEX_HOOK_EVENT_NAMES = (
     "PreToolUse",
@@ -429,6 +470,1648 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
     raise HarnessError(
         "cannot resolve root checkout from Git common directory: " f"{common_dir}"
     )
+
+
+# --- Guarded linked-worktree closeout ---------------------------------------
+
+
+def worktree_git_environment() -> dict[str, str]:
+    """Return an environment that cannot redirect Git away from the named repo."""
+
+    environment = os.environ.copy()
+    for name in WORKTREE_GIT_CONTEXT_ENV:
+        environment.pop(name, None)
+    for name in list(environment):
+        if name == "GIT_CONFIG_COUNT" or name.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            environment.pop(name, None)
+    # Reachability must use the stored commit graph, never replace refs inherited
+    # from the caller. Grafts are rejected separately because Git has no
+    # equivalent process-level switch for them.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    return environment
+
+
+def worktree_git_runner(
+    command: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded Git command for the guarded worktree workflow."""
+
+    if not command or command[0] != "git":
+        return subprocess.CompletedProcess(command, 127, "", "only git is supported")
+    spawn_argv, failure = probe_spawn_argv(command, worktree_git_environment())
+    if failure:
+        return subprocess.CompletedProcess(command, 127, "", failure)
+    try:
+        return subprocess.run(
+            spawn_argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+            env=worktree_git_environment(),
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(command, 124, "", "command timed out")
+    except UnicodeError as exc:
+        return subprocess.CompletedProcess(command, 125, "", type(exc).__name__)
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+
+
+def worktree_git_result(
+    command_runner: Any, args: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    result = command_runner(["git", *args], cwd)
+    if not isinstance(result, subprocess.CompletedProcess):
+        raise HarnessError("worktree command runner returned an invalid result")
+    return result
+
+
+def canonical_worktree_path(path: Path, *, strict: bool = True) -> Path:
+    """Return the one physical path spelling used by the closeout workflow."""
+
+    absolute = Path(os.path.abspath(path.expanduser()))
+    try:
+        return absolute.resolve(strict=strict)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(
+            f"cannot canonicalize worktree path {absolute}: {exc}"
+        ) from exc
+
+
+def worktree_path_key(path: Path) -> str:
+    """Return a comparison key for an already-canonical physical path."""
+
+    return os.path.normcase(str(path))
+
+
+def same_worktree_path(left: Path, right: Path) -> bool:
+    return worktree_path_key(left) == worktree_path_key(right)
+
+
+def worktree_path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        return os.path.commonpath(
+            [worktree_path_key(path), worktree_path_key(parent)]
+        ) == worktree_path_key(parent)
+    except ValueError:
+        return False
+
+
+def parse_worktree_list(output: str) -> list[dict[str, Any]]:
+    """Parse `git worktree list --porcelain -z` without path quoting."""
+
+    records: list[dict[str, Any]] = []
+    for raw_record in output.split("\0\0"):
+        if not raw_record:
+            continue
+        record: dict[str, Any] = {
+            "path": "",
+            "head": "",
+            "branch": None,
+            "detached": False,
+            "bare": False,
+            "locked": False,
+            "lock_reason": "",
+            "prunable": False,
+            "prunable_reason": "",
+        }
+        for field in raw_record.split("\0"):
+            if field.startswith("worktree "):
+                record["path"] = field.removeprefix("worktree ")
+            elif field.startswith("HEAD "):
+                record["head"] = field.removeprefix("HEAD ")
+            elif field.startswith("branch "):
+                record["branch"] = field.removeprefix("branch ")
+            elif field == "detached":
+                record["detached"] = True
+            elif field == "bare":
+                record["bare"] = True
+            elif field == "locked" or field.startswith("locked "):
+                record["locked"] = True
+                record["lock_reason"] = field.removeprefix("locked").strip()
+            elif field == "prunable" or field.startswith("prunable "):
+                record["prunable"] = True
+                record["prunable_reason"] = field.removeprefix("prunable").strip()
+        if not record["path"]:
+            raise HarnessError("git worktree list returned a record without a path")
+        records.append(record)
+    if not records:
+        raise HarnessError("git worktree list returned no worktrees")
+    return records
+
+
+def list_worktrees(primary: Path, command_runner: Any) -> list[dict[str, Any]]:
+    result = worktree_git_result(
+        command_runner, ["worktree", "list", "--porcelain", "-z"], primary
+    )
+    if result.returncode:
+        raise HarnessError(f"git worktree list failed with exit {result.returncode}")
+    return parse_worktree_list(result.stdout)
+
+
+def canonicalize_worktree_records(
+    records: list[dict[str, Any]], *, relative_to: Path
+) -> list[dict[str, Any]]:
+    canonical_records: list[dict[str, Any]] = []
+    for source in records:
+        record = source.copy()
+        raw_path = Path(record["path"])
+        if not raw_path.is_absolute():
+            raw_path = relative_to / raw_path
+        try:
+            canonical = canonical_worktree_path(raw_path)
+            record["path"] = str(canonical)
+            record["path_key"] = worktree_path_key(canonical)
+            record["path_error"] = ""
+        except HarnessError as exc:
+            record["path"] = str(canonical_worktree_path(raw_path, strict=False))
+            record["path_key"] = None
+            record["path_error"] = str(exc)
+        canonical_records.append(record)
+    return canonical_records
+
+
+def registered_worktree_context(
+    path: Path, command_runner: Any
+) -> tuple[Path, Path, Path, list[dict[str, Any]]]:
+    """Resolve a requested path without trusting configurable core.worktree."""
+
+    requested_input = canonical_worktree_path(path)
+    records = canonicalize_worktree_records(
+        list_worktrees(requested_input, command_runner), relative_to=requested_input
+    )
+    if records[0]["bare"] or records[0]["path_key"] is None:
+        raise HarnessError("bare or unavailable repositories have no worktree root")
+    primary = Path(records[0]["path"])
+    matches = [
+        Path(record["path"])
+        for record in records
+        if record["path_key"] is not None
+        and worktree_path_is_within(requested_input, Path(record["path"]))
+    ]
+    if not matches:
+        raise HarnessError(
+            f"requested path is not inside a registered Git worktree: {requested_input}"
+        )
+    requested = max(matches, key=lambda item: len(worktree_path_key(item)))
+    common_git_dir = resolve_common_git_dir(primary, command_runner)
+    return requested, primary, common_git_dir, records
+
+
+def resolve_worktree_checkout(path: Path, command_runner: Any) -> Path:
+    requested, _primary, _common_git_dir, _records = registered_worktree_context(
+        path, command_runner
+    )
+    return requested
+
+
+def resolve_common_git_dir(primary: Path, command_runner: Any) -> Path:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--git-common-dir"], primary
+    )
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError("cannot resolve the repository's common Git directory")
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = primary / common
+    return canonical_worktree_path(common)
+
+
+def registered_worktree_toplevel(
+    path: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(command_runner, ["rev-parse", "--show-toplevel"], path)
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --show-toplevel failed with exit {result.returncode}",
+        )
+    top = Path(result.stdout.strip())
+    if not top.is_absolute():
+        top = path / top
+    try:
+        return canonical_worktree_path(top), ""
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+def linked_worktree_git_dir(
+    path: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--absolute-git-dir"], path
+    )
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --absolute-git-dir failed with exit {result.returncode}",
+        )
+    try:
+        git_dir = canonical_worktree_path(Path(result.stdout.strip()))
+        worktrees_admin = canonical_worktree_path(common_git_dir / "worktrees")
+    except HarnessError as exc:
+        return None, str(exc)
+    if same_worktree_path(git_dir, common_git_dir) or not worktree_path_is_within(
+        git_dir, worktrees_admin
+    ):
+        return None, "candidate does not have linked-worktree administrative metadata"
+    return git_dir, ""
+
+
+def worktree_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def validate_worktree_claimant(claimant: str | None) -> str:
+    if claimant is None:
+        raise HarnessError("a cooperative lease claimant is required")
+    normalized = claimant.strip()
+    if (
+        not normalized
+        or len(normalized) > 200
+        or not normalized.isprintable()
+        or any(character in normalized for character in "\r\n\0")
+    ):
+        raise HarnessError("claimant must be 1-200 printable single-line characters")
+    return normalized
+
+
+def parse_worktree_lease_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def render_worktree_lease_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def worktree_lease_digest(record: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_worktree_lease(path: Path) -> tuple[dict[str, Any] | None, str, bool]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "cooperative_lease_missing", True
+    except (OSError, UnicodeError):
+        return None, "cooperative_lease_probe_failed", False
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        return None, "cooperative_lease_malformed", True
+    if not isinstance(value, dict):
+        return None, "cooperative_lease_malformed", True
+    return value, "", True
+
+
+def inspect_worktree_lease(
+    path: Path,
+    *,
+    claimant: str | None,
+    common_git_dir: Path,
+    worktree: Path,
+    now: datetime,
+    minimum_remaining_seconds: float = WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS,
+) -> tuple[dict[str, Any], str, bool]:
+    """Validate one cooperative ownership record without authenticating its claim."""
+
+    info: dict[str, Any] = {
+        "path": str(path),
+        "status": "unknown",
+        "claimant": None,
+        "lease_id": None,
+        "expires_at": None,
+        "remaining_seconds": None,
+        "digest": None,
+    }
+    record, reason, complete = load_worktree_lease(path)
+    if record is None:
+        info["status"] = reason
+        return info, reason, complete
+
+    expected_fields = {
+        "schema_version",
+        "lease_id",
+        "claimant",
+        "scope",
+        "common_git_dir",
+        "worktree",
+        "created_at",
+        "renewed_at",
+        "expires_at",
+    }
+    if set(record) != expected_fields:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("schema_version") != WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION:
+        info["status"] = "cooperative_lease_schema_mismatch"
+        return info, "cooperative_lease_schema_mismatch", True
+    try:
+        uuid.UUID(str(record.get("lease_id")))
+    except (ValueError, AttributeError, TypeError):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    record_claimant = record.get("claimant")
+    try:
+        normalized_claimant = validate_worktree_claimant(record_claimant)
+    except HarnessError:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("scope") != WORKTREE_OWNERSHIP_LEASE_SCOPE:
+        info["status"] = "cooperative_lease_scope_mismatch"
+        return info, "cooperative_lease_scope_mismatch", True
+    if record.get("common_git_dir") != str(common_git_dir) or record.get(
+        "worktree"
+    ) != str(worktree):
+        info["status"] = "cooperative_lease_identity_mismatch"
+        return info, "cooperative_lease_identity_mismatch", True
+
+    created = parse_worktree_lease_timestamp(record.get("created_at"))
+    renewed = parse_worktree_lease_timestamp(record.get("renewed_at"))
+    expires = parse_worktree_lease_timestamp(record.get("expires_at"))
+    if (
+        created is None
+        or renewed is None
+        or expires is None
+        or not (created <= renewed < expires)
+        or (expires - renewed).total_seconds() > WORKTREE_OWNERSHIP_MAX_SECONDS
+    ):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+
+    current = now.astimezone(timezone.utc)
+    remaining = (expires - current).total_seconds()
+    info.update(
+        {
+            "claimant": normalized_claimant,
+            "lease_id": record["lease_id"],
+            "expires_at": render_worktree_lease_timestamp(expires),
+            "remaining_seconds": max(0.0, remaining),
+            "digest": worktree_lease_digest(record),
+            "record": record,
+        }
+    )
+    if renewed > current:
+        reason = "cooperative_lease_not_yet_valid"
+    elif remaining <= 0:
+        reason = "cooperative_lease_expired"
+    elif claimant is None:
+        reason = "cooperative_lease_claimant_not_supplied"
+    elif normalized_claimant != claimant:
+        reason = "cooperative_lease_owned_by_other"
+    elif remaining < minimum_remaining_seconds:
+        reason = "cooperative_lease_expires_too_soon"
+    else:
+        reason = ""
+    info["status"] = reason or "active_owned"
+    return info, reason, True
+
+
+def worktree_lease_target(repo: Path, command_runner: Any) -> tuple[Path, Path, Path]:
+    requested, primary, common_git_dir, _records = registered_worktree_context(
+        repo, command_runner
+    )
+    if same_worktree_path(requested, primary):
+        raise HarnessError("the primary checkout cannot hold a closeout lease")
+    worktree_directory = canonical_worktree_path(primary / ".worktrees")
+    if (
+        not worktree_path_is_within(worktree_directory, primary)
+        or same_worktree_path(worktree_directory, primary)
+        or not worktree_path_is_within(requested, worktree_directory)
+        or same_worktree_path(requested, worktree_directory)
+    ):
+        raise HarnessError(
+            "worktree is outside the primary checkout's .worktrees directory"
+        )
+    top, top_error = registered_worktree_toplevel(requested, command_runner)
+    if top_error or top is None or not same_worktree_path(top, requested):
+        raise HarnessError(
+            "Git work-tree configuration redirects away from the registered path"
+        )
+    git_dir, git_dir_error = linked_worktree_git_dir(
+        requested, common_git_dir, command_runner
+    )
+    if git_dir is None:
+        raise HarnessError(f"cannot resolve linked-worktree metadata: {git_dir_error}")
+    return requested, common_git_dir, git_dir
+
+
+def write_worktree_lease(path: Path, record: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(record, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def mutate_worktree_lease(
+    repo: Path,
+    *,
+    action: str,
+    claimant: str | None,
+    ttl_seconds: float = WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    replace_stale: bool = False,
+    command_runner: Any = worktree_git_runner,
+    now: Any = worktree_utc_now,
+) -> dict[str, Any]:
+    """Create, renew, release, or inspect one cooperative ownership lease."""
+
+    if action not in {"status", "acquire", "renew", "release"}:
+        raise HarnessError(f"unsupported worktree lease action: {action}")
+    if replace_stale and action != "acquire":
+        raise HarnessError("--replace-stale is valid only with --action acquire")
+    if action != "status":
+        claimant = validate_worktree_claimant(claimant)
+    elif claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    if not (1.0 <= ttl_seconds <= WORKTREE_OWNERSHIP_MAX_SECONDS):
+        raise HarnessError(
+            f"lease TTL must be between 1 and {WORKTREE_OWNERSHIP_MAX_SECONDS:g} seconds"
+        )
+
+    worktree, common_git_dir, git_dir = worktree_lease_target(repo, command_runner)
+    lease_path = git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME
+    current_time = now().astimezone(timezone.utc)
+    if action == "status":
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        status_without_claimant = (
+            claimant is None and reason == "cooperative_lease_claimant_not_supplied"
+        )
+        if status_without_claimant:
+            info["status"] = "active"
+            reason = ""
+        return {
+            "action": action,
+            "ok": complete and not reason,
+            "reason": reason,
+            "worktree": str(worktree),
+            "common_git_dir": str(common_git_dir),
+            "lease": info,
+        }
+
+    lock_directory = git_dir / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+    try:
+        lock_directory.mkdir()
+    except FileExistsError as exc:
+        raise HarnessError(
+            "lease mutation lock already exists; inspect it before any manual recovery"
+        ) from exc
+    try:
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        if not complete:
+            raise HarnessError("cannot safely read the existing cooperative lease")
+        existing = info.get("record")
+
+        if action == "acquire":
+            if existing is not None and not (
+                reason == "cooperative_lease_expired" and replace_stale
+            ):
+                raise HarnessError(
+                    "lease already exists; only explicit --replace-stale may replace an expired lease"
+                )
+            if existing is None and reason != "cooperative_lease_missing":
+                raise HarnessError(f"cannot replace unsafe lease state: {reason}")
+            record = {
+                "schema_version": WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION,
+                "lease_id": str(uuid.uuid4()),
+                "claimant": claimant,
+                "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+                "common_git_dir": str(common_git_dir),
+                "worktree": str(worktree),
+                "created_at": render_worktree_lease_timestamp(current_time),
+                "renewed_at": render_worktree_lease_timestamp(current_time),
+                "expires_at": render_worktree_lease_timestamp(
+                    current_time + timedelta(seconds=ttl_seconds)
+                ),
+            }
+            write_worktree_lease(lease_path, record)
+        elif action == "renew":
+            if reason:
+                raise HarnessError(f"lease renewal refused: {reason}")
+            assert existing is not None
+            record = existing.copy()
+            record["renewed_at"] = render_worktree_lease_timestamp(current_time)
+            record["expires_at"] = render_worktree_lease_timestamp(
+                current_time + timedelta(seconds=ttl_seconds)
+            )
+            write_worktree_lease(lease_path, record)
+        else:
+            if existing is None or info.get("claimant") != claimant:
+                raise HarnessError(f"lease release refused: {reason}")
+            if reason not in {
+                "",
+                "cooperative_lease_expired",
+                "cooperative_lease_expires_too_soon",
+            }:
+                raise HarnessError(f"lease release refused: {reason}")
+            lease_path.unlink()
+            return {
+                "action": action,
+                "ok": True,
+                "reason": "",
+                "worktree": str(worktree),
+                "common_git_dir": str(common_git_dir),
+                "lease": {"path": str(lease_path), "status": "released"},
+            }
+    finally:
+        try:
+            lock_directory.rmdir()
+        except FileNotFoundError:
+            pass
+
+    verified, verified_reason, verified_complete = inspect_worktree_lease(
+        lease_path,
+        claimant=claimant,
+        common_git_dir=common_git_dir,
+        worktree=worktree,
+        now=current_time,
+        minimum_remaining_seconds=0.0,
+    )
+    return {
+        "action": action,
+        "ok": verified_complete and not verified_reason,
+        "reason": verified_reason,
+        "worktree": str(worktree),
+        "common_git_dir": str(common_git_dir),
+        "lease": verified,
+    }
+
+
+def worktree_lease_command(args: argparse.Namespace) -> int:
+    result = mutate_worktree_lease(
+        Path(args.repo),
+        action=args.action,
+        claimant=args.claimant,
+        ttl_seconds=args.ttl_seconds,
+        replace_stale=args.replace_stale,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        state = "ok" if result["ok"] else "keep"
+        detail = result["reason"] or result["lease"]["status"]
+        print(f"[{state}] {result['worktree']}: {detail}")
+    return 0 if result["ok"] else 1
+
+
+def configured_worktree_remotes(
+    primary: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    result = worktree_git_result(command_runner, ["remote"], primary)
+    if result.returncode:
+        return [], f"git remote failed with exit {result.returncode}"
+    remotes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not remotes:
+        return [], "no configured remotes"
+    return sorted(set(remotes)), ""
+
+
+def refresh_worktree_remotes(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for remote in remotes:
+        refspec = f"+refs/heads/*:refs/remotes/{remote}/*"
+        result = worktree_git_result(
+            command_runner,
+            [
+                "fetch",
+                "--prune",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                remote,
+                refspec,
+            ],
+            primary,
+        )
+        results.append(
+            {
+                "remote": remote,
+                "ok": result.returncode == 0,
+                "exit_code": result.returncode,
+            }
+        )
+    return results
+
+
+def remote_tracking_refs(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> tuple[dict[str, str], str]:
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"],
+        primary,
+    )
+    if result.returncode:
+        return {}, f"git for-each-ref failed with exit {result.returncode}"
+    prefixes = tuple(f"refs/remotes/{remote}/" for remote in remotes)
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return {}, "git for-each-ref returned an invalid record"
+        if not ref.startswith(prefixes) or ref.endswith("/HEAD"):
+            continue
+        refs[ref] = object_id.strip()
+    if not refs:
+        return {}, "fetch produced no remote-tracking refs"
+    return refs, ""
+
+
+def worktree_history_rewrite_evidence(
+    primary: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[dict[str, Any], bool]:
+    evidence: dict[str, Any] = {
+        "ok": False,
+        "grafts_file": str(common_git_dir / "info" / "grafts"),
+        "grafts_present": False,
+        "replace_refs": [],
+        "error": "",
+    }
+    try:
+        evidence["grafts_present"] = (common_git_dir / "info" / "grafts").exists()
+    except OSError as exc:
+        evidence["error"] = f"cannot inspect grafts metadata: {type(exc).__name__}"
+        return evidence, False
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname)", "refs/replace/"],
+        primary,
+    )
+    if result.returncode:
+        evidence["error"] = f"replace-ref probe failed with exit {result.returncode}"
+        return evidence, False
+    evidence["replace_refs"] = sorted(
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    )
+    evidence["ok"] = not evidence["grafts_present"] and not evidence["replace_refs"]
+    return evidence, True
+
+
+def refs_containing_head(
+    primary: Path,
+    head: str,
+    refs: dict[str, str],
+    command_runner: Any,
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            f"--contains={head}",
+            "refs/remotes/",
+        ],
+        primary,
+    )
+    if result.returncode:
+        return [], f"reachability probe failed with exit {result.returncode}"
+    containing = []
+    for ref in result.stdout.splitlines():
+        ref = ref.strip()
+        if ref in refs:
+            containing.append({"ref": ref, "oid": refs[ref]})
+    return sorted(containing, key=lambda item: item["ref"]), ""
+
+
+def worktree_local_refs(
+    path: Path, command_runner: Any
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/bisect/",
+            "refs/worktree/",
+            "refs/rewritten/",
+        ],
+        path,
+    )
+    if result.returncode:
+        return [], f"worktree-local ref probe failed with exit {result.returncode}"
+    refs: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return [], "worktree-local ref probe returned an invalid record"
+        object_id = object_id.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "worktree-local ref probe returned an invalid object id"
+        refs.append({"ref": ref, "oid": object_id})
+    return sorted(refs, key=lambda item: item["ref"]), ""
+
+
+def worktree_administrative_state(git_dir: Path) -> tuple[list[str], str]:
+    """List linked-worktree metadata that plain removal would discard."""
+
+    try:
+        top_level = sorted(entry.name for entry in git_dir.iterdir())
+    except OSError as exc:
+        return [], f"cannot inspect worktree metadata: {type(exc).__name__}"
+    state = [name for name in top_level if name not in WORKTREE_ADMIN_ALLOWED_TOP_LEVEL]
+    for directory_name, allowed_names in (("logs", {"HEAD"}), ("refs", set())):
+        directory = git_dir / directory_name
+        try:
+            directory_stat = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            state.append(directory_name)
+            continue
+        try:
+            children = sorted(entry.name for entry in directory.iterdir())
+        except FileNotFoundError:
+            # A concurrent metadata mutation is not safe evidence.
+            return [], f"worktree {directory_name} metadata changed during inspection"
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        state.extend(
+            f"{directory_name}/{name}" for name in children if name not in allowed_names
+        )
+        for name in children:
+            if name not in allowed_names:
+                continue
+            child = directory / name
+            try:
+                child_stat = child.lstat()
+            except FileNotFoundError:
+                return [], (
+                    f"worktree {directory_name}/{name} metadata changed "
+                    "during inspection"
+                )
+            except OSError as exc:
+                return [], (
+                    f"cannot inspect worktree {directory_name}/{name} metadata: "
+                    f"{type(exc).__name__}"
+                )
+            if not stat.S_ISREG(child_stat.st_mode):
+                state.append(f"{directory_name}/{name}")
+    return sorted(state), ""
+
+
+def normalized_commit_message(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def worktree_commit_editmsg_status(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[str, str]:
+    message_path = git_dir / "COMMIT_EDITMSG"
+    try:
+        proposed = message_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "absent", ""
+    except (OSError, UnicodeError) as exc:
+        return "unknown", f"cannot read COMMIT_EDITMSG: {type(exc).__name__}"
+    head_message = worktree_git_result(
+        command_runner, ["log", "-1", "--format=%B", "HEAD"], path
+    )
+    if head_message.returncode:
+        return "unknown", (
+            f"HEAD commit-message probe failed with exit {head_message.returncode}"
+        )
+    if normalized_commit_message(proposed) == normalized_commit_message(
+        head_message.stdout
+    ):
+        return "matches_head", ""
+    return "differs_from_head", ""
+
+
+def worktree_head_reflog_commits(git_dir: Path) -> tuple[list[str], str]:
+    reflog_path = git_dir / "logs" / "HEAD"
+    try:
+        records = reflog_path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return [], ""
+    except OSError as exc:
+        return [], f"cannot read HEAD reflog: {type(exc).__name__}"
+
+    commits: list[str] = []
+    for record in records:
+        fields = record.split(b" ", 2)
+        if len(fields) != 3:
+            return [], "HEAD reflog contains an invalid record"
+        for raw_object_id in fields[:2]:
+            try:
+                object_id = raw_object_id.decode("ascii").lower()
+            except UnicodeDecodeError:
+                return [], "HEAD reflog contains a non-ASCII object id"
+            if len(object_id) in (40, 64) and not object_id.strip("0"):
+                continue
+            if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id):
+                return [], "HEAD reflog contains an invalid object id"
+            commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def worktree_recovery_commits(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    commits, reflog_error = worktree_head_reflog_commits(git_dir)
+    if reflog_error:
+        return [], reflog_error
+
+    orig_head = worktree_git_result(
+        command_runner,
+        ["rev-parse", "--verify", "--quiet", "ORIG_HEAD^{commit}"],
+        path,
+    )
+    if orig_head.returncode not in (0, 1):
+        return [], f"ORIG_HEAD probe failed with exit {orig_head.returncode}"
+    if orig_head.returncode == 0:
+        object_id = orig_head.stdout.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "ORIG_HEAD probe returned an invalid object id"
+        commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def commits_without_local_retention(
+    primary: Path, commits: list[str], command_runner: Any
+) -> tuple[list[str], str]:
+    unreachable: list[str] = []
+    for offset in range(0, len(commits), 64):
+        batch = commits[offset : offset + 64]
+        result = worktree_git_result(
+            command_runner,
+            [
+                "rev-list",
+                "--no-walk",
+                *batch,
+                "--not",
+                "--branches",
+                "--tags",
+            ],
+            primary,
+        )
+        if result.returncode:
+            return (
+                [],
+                f"recovery reachability probe failed with exit {result.returncode}",
+            )
+        for line in result.stdout.splitlines():
+            object_id = line.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+                return [], "recovery reachability probe returned an invalid object id"
+            unreachable.append(object_id)
+    return sorted(set(unreachable)), ""
+
+
+def worktree_candidate_fingerprint(
+    candidate: dict[str, Any], common_git_dir: Path
+) -> str:
+    state = {
+        "path": candidate["path"],
+        "path_key": candidate.get("path_key"),
+        "common_git_dir": str(common_git_dir),
+        "head": candidate["head"],
+        "branch": candidate["branch"],
+        "detached": candidate["detached"],
+        "locked": candidate["locked"],
+        "lock_reason": candidate["lock_reason"],
+        "prunable": candidate["prunable"],
+        "prunable_reason": candidate["prunable_reason"],
+        "changes": candidate["changes"],
+        "ignored": candidate["ignored"],
+        "index_preservation_flags": candidate["index_preservation_flags"],
+        "index_resolve_undo": candidate["index_resolve_undo"],
+        "commit_editmsg_status": candidate["commit_editmsg_status"],
+        "tracked_mode_changes": candidate["tracked_mode_changes"],
+        "worktree_local_refs": candidate["worktree_local_refs"],
+        "worktree_administrative_state": candidate["worktree_administrative_state"],
+        "recovery_commits": candidate["recovery_commits"],
+        "unretained_recovery_commits": candidate["unretained_recovery_commits"],
+        "containing_remote_refs": candidate["containing_remote_refs"],
+        "history_rewrite": candidate["history_rewrite"],
+        "lease_digest": candidate["lease"].get("digest"),
+        "lease_status": candidate["lease"].get("status"),
+        "reasons": candidate["reasons"],
+    }
+    encoded = json.dumps(
+        state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def inspect_worktree_candidate(
+    record: dict[str, Any],
+    *,
+    primary: Path,
+    requested: Path,
+    process_cwd: Path,
+    worktree_dir: Path,
+    common_git_dir: Path,
+    remote_evidence_ready: bool,
+    remote_evidence_requested: bool,
+    refs: dict[str, str],
+    history_rewrite: dict[str, Any],
+    history_rewrite_complete: bool,
+    claimant: str | None,
+    command_runner: Any,
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    path = Path(record["path"])
+    candidate: dict[str, Any] = {
+        "path": str(path),
+        "path_key": record.get("path_key"),
+        "head": record["head"],
+        "branch": record["branch"],
+        "detached": record["detached"],
+        "locked": record["locked"],
+        "lock_reason": record["lock_reason"],
+        "prunable": record["prunable"],
+        "prunable_reason": record["prunable_reason"],
+        "changes": [],
+        "ignored": [],
+        "index_preservation_flags": [],
+        "index_resolve_undo": [],
+        "commit_editmsg_status": "not_inspected",
+        "tracked_mode_changes": [],
+        "worktree_local_refs": [],
+        "worktree_administrative_state": [],
+        "recovery_commits": [],
+        "unretained_recovery_commits": [],
+        "containing_remote_refs": [],
+        "history_rewrite": history_rewrite.copy(),
+        "lease": {
+            "path": None,
+            "status": "not_inspected",
+            "claimant": None,
+            "lease_id": None,
+            "expires_at": None,
+            "remaining_seconds": None,
+            "digest": None,
+        },
+        "reasons": [],
+        "verdict": "keep",
+        "fingerprint": "",
+        "revalidation": "not_requested",
+        "apply": "not_requested",
+    }
+    complete = True
+
+    def keep(reason: str) -> None:
+        if reason not in candidate["reasons"]:
+            candidate["reasons"].append(reason)
+
+    if record.get("path_key") is None:
+        keep("path_unavailable")
+        candidate["path_error"] = record.get("path_error", "")
+        complete = False
+    if record.get("path_key") is not None and same_worktree_path(path, primary):
+        keep("primary_checkout")
+    if record.get("path_key") is not None and same_worktree_path(path, requested):
+        keep("requested_checkout")
+    if record["bare"]:
+        keep("bare_repository")
+    if record["locked"]:
+        keep("git_locked")
+    if record["prunable"]:
+        keep("prunable_metadata")
+    if record["detached"]:
+        keep("detached_head")
+    if not isinstance(record["branch"], str) or not record["branch"].startswith(
+        "refs/heads/"
+    ):
+        keep("head_not_on_local_branch")
+
+    shape_is_probeable = record.get("path_key") is not None and not record["bare"]
+    contained = False
+    if shape_is_probeable and not same_worktree_path(path, primary):
+        if (
+            not worktree_path_is_within(worktree_dir, primary)
+            or same_worktree_path(worktree_dir, primary)
+            or not worktree_path_is_within(path, worktree_dir)
+            or same_worktree_path(path, worktree_dir)
+        ):
+            keep("outside_worktree_directory")
+        else:
+            contained = True
+            if worktree_path_is_within(process_cwd, path):
+                keep("process_cwd_occupied")
+
+    top_matches = False
+    if contained:
+        measured_top, top_error = registered_worktree_toplevel(path, command_runner)
+        if top_error or measured_top is None:
+            keep("worktree_toplevel_probe_failed")
+            candidate["worktree_toplevel_error"] = top_error
+            complete = False
+        elif not same_worktree_path(measured_top, path):
+            keep("worktree_path_redirected")
+            candidate["measured_toplevel"] = str(measured_top)
+        else:
+            top_matches = True
+
+    if top_matches:
+        head_result = worktree_git_result(command_runner, ["rev-parse", "HEAD"], path)
+        if head_result.returncode or not head_result.stdout.strip():
+            keep("head_probe_failed")
+            complete = False
+        else:
+            measured_head = head_result.stdout.strip()
+            if measured_head != record["head"]:
+                keep("head_changed_during_audit")
+            candidate["head"] = measured_head
+
+    if top_matches:
+        status_result = worktree_git_result(
+            command_runner,
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            path,
+        )
+        if status_result.returncode:
+            keep("status_probe_failed")
+            complete = False
+        else:
+            entries = [entry for entry in status_result.stdout.split("\0") if entry]
+            candidate["ignored"] = [
+                entry.removeprefix("!! ")
+                for entry in entries
+                if entry.startswith("!! ")
+            ]
+            candidate["changes"] = [
+                entry for entry in entries if not entry.startswith("!! ")
+            ]
+            if candidate["changes"]:
+                keep("tracked_or_untracked_changes")
+            if candidate["ignored"]:
+                keep("ignored_files")
+            index_result = worktree_git_result(
+                command_runner, ["ls-files", "-v", "-z"], path
+            )
+            if index_result.returncode:
+                keep("index_probe_failed")
+                complete = False
+            else:
+                flagged = []
+                for entry in index_result.stdout.split("\0"):
+                    if len(entry) < 3 or entry[1] != " ":
+                        continue
+                    tag = entry[0]
+                    if tag == "S" or tag.islower():
+                        flagged.append(entry)
+                candidate["index_preservation_flags"] = flagged
+                if flagged:
+                    keep("index_preservation_flags")
+            resolve_undo_result = worktree_git_result(
+                command_runner, ["ls-files", "--resolve-undo", "-z"], path
+            )
+            if resolve_undo_result.returncode:
+                keep("index_resolve_undo_probe_failed")
+                complete = False
+            else:
+                candidate["index_resolve_undo"] = [
+                    entry for entry in resolve_undo_result.stdout.split("\0") if entry
+                ]
+                if candidate["index_resolve_undo"]:
+                    keep("index_resolve_undo")
+
+    if top_matches:
+        mode_result = worktree_git_result(
+            command_runner,
+            [
+                "-c",
+                "core.fileMode=true",
+                "diff-files",
+                "--summary",
+                "-z",
+                "--ignore-submodules=none",
+                "--",
+            ],
+            path,
+        )
+        if mode_result.returncode:
+            keep("tracked_mode_probe_failed")
+            complete = False
+        else:
+            candidate["tracked_mode_changes"] = [
+                entry for entry in mode_result.stdout.split("\0") if entry
+            ]
+            if candidate["tracked_mode_changes"]:
+                keep("tracked_mode_changes")
+
+    git_dir: Path | None = None
+    git_dir_error = ""
+    if top_matches:
+        git_dir, git_dir_error = linked_worktree_git_dir(
+            path, common_git_dir, command_runner
+        )
+        if git_dir is None:
+            keep("worktree_git_dir_probe_failed")
+            candidate["worktree_git_dir_error"] = git_dir_error
+            complete = False
+
+    if top_matches:
+        local_refs, local_refs_error = worktree_local_refs(path, command_runner)
+        if local_refs_error:
+            keep("worktree_local_ref_probe_failed")
+            candidate["worktree_local_ref_error"] = local_refs_error
+            complete = False
+        else:
+            candidate["worktree_local_refs"] = local_refs
+            if local_refs:
+                keep("worktree_local_refs")
+
+    if git_dir is not None:
+        administrative_state, administrative_error = worktree_administrative_state(
+            git_dir
+        )
+        if administrative_error:
+            keep("worktree_administrative_state_probe_failed")
+            candidate["worktree_administrative_state_error"] = administrative_error
+            complete = False
+        else:
+            candidate["worktree_administrative_state"] = administrative_state
+            if administrative_state:
+                keep("worktree_administrative_state")
+
+        commit_editmsg_status, commit_editmsg_error = worktree_commit_editmsg_status(
+            path, git_dir, command_runner
+        )
+        candidate["commit_editmsg_status"] = commit_editmsg_status
+        if commit_editmsg_error:
+            keep("commit_editmsg_probe_failed")
+            candidate["commit_editmsg_error"] = commit_editmsg_error
+            complete = False
+        elif commit_editmsg_status == "differs_from_head":
+            keep("commit_editmsg_uncommitted")
+
+    if (
+        git_dir is not None
+        and "logs/HEAD" not in candidate["worktree_administrative_state"]
+    ):
+        recovery_commits, recovery_error = worktree_recovery_commits(
+            path, git_dir, command_runner
+        )
+        if recovery_error:
+            keep("worktree_recovery_probe_failed")
+            candidate["worktree_recovery_error"] = recovery_error
+            complete = False
+        else:
+            candidate["recovery_commits"] = recovery_commits
+            unretained, retention_error = commits_without_local_retention(
+                primary, recovery_commits, command_runner
+            )
+            if retention_error:
+                keep("worktree_recovery_reachability_probe_failed")
+                candidate["worktree_recovery_reachability_error"] = retention_error
+                complete = False
+            else:
+                candidate["unretained_recovery_commits"] = unretained
+                if unretained:
+                    keep("unretained_recovery_commits")
+
+    if top_matches:
+        if not remote_evidence_ready:
+            keep(
+                "remote_refresh_failed"
+                if remote_evidence_requested
+                else "remote_evidence_not_refreshed"
+            )
+        elif not history_rewrite_complete:
+            keep("history_rewrite_probe_failed")
+            complete = False
+        elif not history_rewrite["ok"]:
+            keep("history_rewrite_metadata_present")
+        else:
+            containing, reachability_error = refs_containing_head(
+                primary, candidate["head"], refs, command_runner
+            )
+            if reachability_error:
+                keep("reachability_probe_failed")
+                candidate["reachability_error"] = reachability_error
+                complete = False
+            elif not containing:
+                keep("head_not_on_fetched_remote_ref")
+            else:
+                candidate["containing_remote_refs"] = containing
+
+    if top_matches:
+        if git_dir is None:
+            keep("cooperative_lease_probe_failed")
+            candidate["lease"]["status"] = "cooperative_lease_probe_failed"
+            candidate["lease_error"] = git_dir_error
+            complete = False
+        else:
+            lease_info, lease_reason, lease_complete = inspect_worktree_lease(
+                git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME,
+                claimant=claimant,
+                common_git_dir=common_git_dir,
+                worktree=path,
+                now=now,
+            )
+            candidate["lease"] = lease_info
+            if lease_reason:
+                keep(lease_reason)
+            complete = complete and lease_complete
+
+    if not candidate["reasons"]:
+        candidate["verdict"] = "remove"
+    candidate["fingerprint"] = worktree_candidate_fingerprint(candidate, common_git_dir)
+    return candidate, complete
+
+
+def worktree_plan(
+    repo: Path,
+    *,
+    refresh: bool,
+    claimant: str | None = None,
+    command_runner: Any = worktree_git_runner,
+    process_cwd: Path | None = None,
+    clock: Any = monotonic,
+    now: Any = worktree_utc_now,
+) -> dict[str, Any]:
+    if claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    requested, primary, common_git_dir, records = registered_worktree_context(
+        repo, command_runner
+    )
+    worktree_dir = canonical_worktree_path(primary / ".worktrees", strict=False)
+    current = canonical_worktree_path(process_cwd or Path.cwd())
+    generated_monotonic = clock()
+    generated_time = now().astimezone(timezone.utc)
+
+    remotes, remote_error = configured_worktree_remotes(primary, command_runner)
+    fetch_results: list[dict[str, Any]] = []
+    refs: dict[str, str] = {}
+    refresh_error = remote_error
+    if refresh and not refresh_error:
+        fetch_results = refresh_worktree_remotes(primary, remotes, command_runner)
+        failed = [item for item in fetch_results if not item["ok"]]
+        if failed:
+            names = ", ".join(item["remote"] for item in failed)
+            refresh_error = f"fetch failed for: {names}"
+        else:
+            refs, refresh_error = remote_tracking_refs(primary, remotes, command_runner)
+    remote_evidence_ready = refresh and not refresh_error
+    history_rewrite, history_rewrite_complete = worktree_history_rewrite_evidence(
+        primary, common_git_dir, command_runner
+    )
+
+    candidates = []
+    complete = not (refresh and refresh_error)
+    for record in records:
+        candidate, candidate_complete = inspect_worktree_candidate(
+            record,
+            primary=primary,
+            requested=requested,
+            process_cwd=current,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=remote_evidence_ready,
+            remote_evidence_requested=refresh,
+            refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_rewrite_complete,
+            claimant=claimant,
+            command_runner=command_runner,
+            now=generated_time,
+        )
+        candidates.append(candidate)
+        complete = complete and candidate_complete
+
+    return {
+        "schema_version": WORKTREE_PLAN_SCHEMA_VERSION,
+        "generated_at": render_worktree_lease_timestamp(generated_time),
+        "fingerprint_lease_seconds": WORKTREE_FINGERPRINT_LEASE_SECONDS,
+        "cooperative_lease": {
+            "claimant": claimant,
+            "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+            "minimum_apply_remaining_seconds": (
+                WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS
+            ),
+            "noncooperating_processes_detected": False,
+        },
+        "repo": str(requested),
+        "primary": str(primary),
+        "common_git_dir": str(common_git_dir),
+        "worktree_directory": str(worktree_dir),
+        "refresh": {
+            "requested": refresh,
+            "ok": remote_evidence_ready,
+            "remotes": remotes,
+            "fetches": fetch_results,
+            "error": refresh_error,
+            "remote_refs": [
+                {"ref": ref, "oid": oid} for ref, oid in sorted(refs.items())
+            ],
+        },
+        "history_rewrite": history_rewrite,
+        "apply_requested": False,
+        "branch_deletion": "not_performed",
+        "administrative_cleanup": "plain_remove_only_no_global_prune",
+        "complete": complete,
+        "worktrees": candidates,
+        "summary": {},
+        "_fingerprint_created_monotonic": generated_monotonic,
+    }
+
+
+def find_worktree_record(
+    records: list[dict[str, Any]], candidate_path: Path
+) -> dict[str, Any] | None:
+    for record in records:
+        if record.get("path_key") == worktree_path_key(candidate_path):
+            return record
+    return None
+
+
+def apply_worktree_plan(
+    plan: dict[str, Any],
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+) -> bool:
+    """Apply one fresh plan; return false when any requested removal is refused."""
+
+    plan["apply_requested"] = True
+    if not plan["refresh"]["ok"]:
+        plan["apply_error"] = "remote_refresh_failed"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    if not plan["complete"]:
+        plan["apply_error"] = "audit_incomplete"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    claimant = plan.get("cooperative_lease", {}).get("claimant")
+    if not claimant:
+        plan["apply_error"] = "cooperative_lease_claimant_required"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    primary = Path(plan["primary"])
+    requested = Path(plan["repo"])
+    common_git_dir = Path(plan["common_git_dir"])
+    worktree_dir = Path(plan["worktree_directory"])
+    process_cwd = canonical_worktree_path(Path.cwd())
+    remotes = list(plan["refresh"]["remotes"])
+    fingerprint_started = plan.get("_fingerprint_created_monotonic")
+    if not isinstance(fingerprint_started, (int, float)):
+        plan["apply_error"] = "fingerprint_origin_missing"
+        return False
+    apply_ok = True
+
+    for candidate in plan["worktrees"]:
+        if candidate["verdict"] != "remove":
+            candidate["apply"] = "kept"
+            continue
+        if clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "fingerprint_lease_expired"
+            candidate["revalidation"] = "expired"
+            apply_ok = False
+            continue
+
+        current_records = canonicalize_worktree_records(
+            list_worktrees(primary, command_runner), relative_to=primary
+        )
+        current_record = find_worktree_record(current_records, Path(candidate["path"]))
+        refs, refs_error = remote_tracking_refs(primary, remotes, command_runner)
+        if current_record is None or refs_error:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = (
+                "worktree_disappeared" if current_record is None else "ref_probe_failed"
+            )
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        history_rewrite, history_complete = worktree_history_rewrite_evidence(
+            primary, common_git_dir, command_runner
+        )
+        current, current_complete = inspect_worktree_candidate(
+            current_record,
+            primary=primary,
+            requested=requested,
+            process_cwd=process_cwd,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=True,
+            remote_evidence_requested=True,
+            refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_complete,
+            claimant=claimant,
+            command_runner=command_runner,
+            now=worktree_utc_now(),
+        )
+        if (
+            not current_complete
+            or current["verdict"] != "remove"
+            or current["fingerprint"] != candidate["fingerprint"]
+        ):
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "state_changed_since_audit"
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+
+        final_lease_path = current["lease"].get("path")
+        if not final_lease_path:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+        final_lease_path = Path(final_lease_path)
+        mutation_lock = final_lease_path.parent / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        try:
+            mutation_lock.mkdir()
+        except FileExistsError:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_mutation_in_progress"
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        except OSError as exc:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_lock_failed"
+            candidate["lease_lock_error"] = type(exc).__name__
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        try:
+            final_lease, final_lease_reason, final_lease_complete = (
+                inspect_worktree_lease(
+                    final_lease_path,
+                    claimant=claimant,
+                    common_git_dir=common_git_dir,
+                    worktree=Path(current["path"]),
+                    now=worktree_utc_now(),
+                )
+            )
+            if (
+                not final_lease_complete
+                or final_lease_reason
+                or final_lease.get("digest") != current["lease"].get("digest")
+                or clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS
+            ):
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+                candidate["revalidation"] = "changed"
+                apply_ok = False
+                continue
+
+            remove_result = worktree_git_result(
+                command_runner,
+                ["worktree", "remove", "--", current["path"]],
+                primary,
+            )
+            candidate["remove_exit_code"] = remove_result.returncode
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "matched"
+            if remove_result.returncode:
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "plain_remove_refused"
+                apply_ok = False
+            else:
+                candidate["apply"] = "removed"
+        finally:
+            try:
+                mutation_lock.rmdir()
+            except FileNotFoundError:
+                pass
+    return apply_ok
+
+
+def summarize_worktree_plan(plan: dict[str, Any]) -> None:
+    candidates = plan["worktrees"]
+    plan["summary"] = {
+        "total": len(candidates),
+        "would_remove": sum(item["verdict"] == "remove" for item in candidates),
+        "kept": sum(item["verdict"] != "remove" for item in candidates),
+        "removed": sum(item["apply"] == "removed" for item in candidates),
+        "apply_refusals": sum(
+            item["apply"] == "kept" and item["verdict"] == "remove"
+            for item in candidates
+        ),
+    }
+
+
+def render_worktree_plan(plan: dict[str, Any]) -> None:
+    print(f"repo: {plan['repo']}")
+    print(f"worktree directory: {plan['worktree_directory']}")
+    claimant = plan["cooperative_lease"]["claimant"]
+    if claimant:
+        print(f"cooperative claimant: {claimant}")
+    else:
+        print("[read-only] no cooperative claimant was supplied")
+    print(
+        "[limit] non-cooperating external processes are not detected; "
+        "their writes can still race plain removal"
+    )
+    refresh = plan["refresh"]
+    if refresh["requested"]:
+        state = "ok" if refresh["ok"] else "FAIL"
+        detail = refresh["error"] or f"{len(refresh['remote_refs'])} refs refreshed"
+        print(f"[{state}] remote evidence: {detail}")
+    else:
+        print("[read-only] remote evidence was not refreshed")
+    for candidate in plan["worktrees"]:
+        detail = ", ".join(candidate["reasons"]) or "safe after revalidation"
+        print(f"[{candidate['verdict']}] {candidate['path']}: {detail}")
+        if candidate["apply"] == "removed":
+            print("  applied: removed with plain git worktree remove")
+        elif candidate.get("apply_reason"):
+            print(f"  applied: kept ({candidate['apply_reason']})")
+    summary = plan["summary"]
+    print(
+        "summary: "
+        f"{summary['would_remove']} removable, {summary['kept']} kept, "
+        f"{summary['removed']} removed, {summary['apply_refusals']} apply refusals"
+    )
+
+
+def worktrees_command(
+    args: argparse.Namespace,
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+) -> int:
+    if args.apply and not args.refresh:
+        raise HarnessError("--apply requires --refresh")
+    claimant = getattr(args, "claimant", None)
+    if args.apply and not claimant:
+        raise HarnessError(
+            "--apply requires --claimant with an active cooperative lease"
+        )
+    plan = worktree_plan(
+        Path(args.repo),
+        refresh=args.refresh,
+        claimant=claimant,
+        command_runner=command_runner,
+        clock=clock,
+    )
+    apply_ok = True
+    if args.apply:
+        apply_ok = apply_worktree_plan(plan, command_runner=command_runner, clock=clock)
+    summarize_worktree_plan(plan)
+    plan.pop("_fingerprint_created_monotonic", None)
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        render_worktree_plan(plan)
+    return 0 if plan["complete"] and apply_ok else 1
 
 
 def codex_hook_source_status(
@@ -5509,6 +7192,52 @@ def parser() -> argparse.ArgumentParser:
         "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
+
+    worktrees = sub.add_parser(
+        "worktrees", help="audit or plainly remove proven-safe linked worktrees"
+    )
+    worktrees.add_argument(
+        "--repo", default=".", help="repository or linked worktree to inspect"
+    )
+    worktrees.add_argument(
+        "--refresh",
+        action="store_true",
+        help="fetch every configured remote before evaluating reachability",
+    )
+    worktrees.add_argument(
+        "--apply",
+        action="store_true",
+        help="remove revalidated safe candidates; requires --refresh and --claimant",
+    )
+    worktrees.add_argument(
+        "--claimant",
+        help="self-declared identity that must own each active cooperative lease",
+    )
+    worktrees.add_argument("--json", action="store_true")
+    worktrees.set_defaults(func=worktrees_command)
+
+    lease = sub.add_parser(
+        "worktree-lease", help="manage a cooperative linked-worktree ownership lease"
+    )
+    lease.add_argument(
+        "--repo", default=".", help="the exact linked worktree that owns the lease"
+    )
+    lease.add_argument(
+        "--action", choices=("status", "acquire", "renew", "release"), required=True
+    )
+    lease.add_argument("--claimant", help="stable identity of the cooperating owner")
+    lease.add_argument(
+        "--ttl-seconds",
+        type=float,
+        default=WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    )
+    lease.add_argument(
+        "--replace-stale",
+        action="store_true",
+        help="allow acquire to replace only a structurally valid expired lease",
+    )
+    lease.add_argument("--json", action="store_true")
+    lease.set_defaults(func=worktree_lease_command)
     return root
 
 

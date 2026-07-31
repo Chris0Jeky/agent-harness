@@ -16,7 +16,7 @@ share one repository while keeping their contracts explicit.
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
-| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up shared global sync |
+| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, guarded worktree closeout, and backed-up shared global sync |
 | `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting bypass matrix (version = `FLOOR_VERSION` in `dispatch.py`). `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
@@ -28,11 +28,55 @@ py -3 .\harness.py doctor
 py -3 .\harness.py doctor --repo C:\path\to\repo
 py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
+py -3 .\harness.py worktrees --repo C:\path\to\repo
+py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --json
+py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action acquire --claimant session-123
+py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action renew --claimant session-123
+py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --claimant session-123 --apply --json
 
 # Diff, then install global guidance, skills, and the shared dispatcher with backups.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 ```
+
+`worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
+renew leases, remove worktrees, prune worktree metadata, or delete branches. An explicit
+`--refresh` fetches and prunes every configured remote's complete branch namespace, then accepts
+reachability only from the refreshed remote-tracking refs. A repository grafts file or any replace
+ref blocks the candidate, and the Git subprocess environment disables replace objects and removes
+an inherited `GIT_GRAFT_FILE`. A per-worktree `core.worktree` redirect also blocks the candidate
+rather than letting status inspect another directory.
+
+APPLY is a cooperative protocol. `worktree-lease --action acquire` creates a short-lived record in
+that linked worktree's Git administrative directory, scoped to one canonical physical common-Git
+directory and worktree path. The claimant is a stable, unique, self-declared session identity, not
+an authenticated principal; cooperating writers must not share it. Creation refuses any existing
+lease. The same claimant may renew or release it; an expired lease may be replaced only by an
+explicit `acquire --replace-stale`. Missing, malformed, wrong-schema, wrong-scope, wrong-path,
+expired, nearly expired, or differently owned records are keep verdicts. APPLY requires
+`--refresh --claimant <same-id> --apply`, at least ten seconds remaining on the lease, a fingerprint
+less than 60 seconds old, and immediate fingerprint plus lease revalidation. APPLY holds the same
+per-worktree mutation lock used by acquire/renew from final lease validation through plain removal,
+so a cooperating successor cannot reclaim an expiring lease mid-removal.
+
+Every existing path is converted once to its physical canonical spelling and that identity is used
+for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
+collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
+untracked, ignored, executable-mode-only, assume-unchanged, skip-worktree, and index resolve-undo
+state blocks removal. So do detached or non-local-branch HEADs, a pending `COMMIT_EDITMSG` that
+differs from the current commit message, worktree-local refs, non-baseline administrative/operation
+state, a non-regular HEAD reflog, and commits found on either side of a raw HEAD reflog record or in
+`ORIG_HEAD` that are not retained by a local branch or tag. Requiring an attached `refs/heads/*`
+branch keeps current HEAD rooted in a local ref while plain removal runs.
+The only destructive command is plain `git worktree remove -- <canonical-path>`; a
+refusal becomes keep. There is no `--force`, branch deletion, or repository-wide
+`git worktree prune`.
+
+The lease coordinates only participants that follow this contract. It cannot discover or stop a
+non-cooperating external process, watcher, or writer; such a process can still race after the last
+inspection, including by creating an ignored file. The command reports that limitation in text and
+JSON and does not claim arbitrary occupancy detection. `--json` schema version 3 emits the complete
+preservation evidence and result summary.
 
 Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every

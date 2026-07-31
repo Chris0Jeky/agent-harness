@@ -5,13 +5,14 @@ import ctypes
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -7159,6 +7160,1136 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(
             [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
         )
+
+
+class WorktreeCloseoutTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = harness.canonical_worktree_path(Path(self.temp.name), strict=True)
+        self.remote = self.base / "remote.git"
+        self.repo = self.base / "repo"
+        self.claimant = "test-session"
+        subprocess.run(["git", "init", "--bare", "-q", str(self.remote)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "Harness Test")
+        (self.repo / "README.md").write_text("fixture\n", encoding="utf-8")
+        (self.repo / ".gitignore").write_text("private-report.md\n", encoding="utf-8")
+        self.git("add", "README.md", ".gitignore")
+        self.git("commit", "-qm", "create fixture")
+        self.git("branch", "-M", "main")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-qu", "origin", "main")
+        (self.repo / ".worktrees").mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def git(
+        self, *args: str, cwd: Path | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd or self.repo,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def add_worktree(
+        self,
+        name: str,
+        *,
+        branch: str | None = None,
+        detached: bool = False,
+        lease: bool = True,
+    ) -> Path:
+        worktree = self.repo / ".worktrees" / name
+        args = ["worktree", "add"]
+        if detached:
+            args.append("--detach")
+        else:
+            args.extend(["-b", branch or f"test/{name}"])
+        args.extend([str(worktree), "origin/main"])
+        self.git(*args)
+        if lease:
+            self.acquire_lease(worktree)
+        return worktree
+
+    def acquire_lease(
+        self,
+        worktree: Path,
+        *,
+        claimant: str | None = None,
+        ttl_seconds: float = harness.WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+        replace_stale: bool = False,
+        now=None,
+    ) -> dict[str, object]:
+        kwargs = {}
+        if now is not None:
+            kwargs["now"] = now
+        return harness.mutate_worktree_lease(
+            worktree,
+            action="acquire",
+            claimant=claimant or self.claimant,
+            ttl_seconds=ttl_seconds,
+            replace_stale=replace_stale,
+            **kwargs,
+        )
+
+    def plan(
+        self, *, refresh: bool = True, claimant: str | None = None, **kwargs
+    ) -> dict[str, object]:
+        kwargs.setdefault("process_cwd", self.repo)
+        return harness.worktree_plan(
+            self.repo,
+            refresh=refresh,
+            claimant=claimant or self.claimant,
+            **kwargs,
+        )
+
+    @staticmethod
+    def candidate(plan: dict[str, object], path: Path) -> dict[str, object]:
+        expected_path = harness.canonical_worktree_path(path, strict=path.exists())
+        expected = harness.worktree_path_key(expected_path)
+        for candidate in plan["worktrees"]:
+            if candidate["path_key"] == expected or (
+                candidate["path_key"] is None
+                and harness.worktree_path_key(Path(candidate["path"])) == expected
+            ):
+                return candidate
+        raise AssertionError(f"missing worktree candidate: {path}")
+
+    def test_cooperative_lease_lifecycle_is_exclusive_explicit_and_expiring(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("lease-lifecycle", lease=False)
+        start = datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)
+        missing = self.candidate(self.plan(now=lambda: start), worktree)
+        self.assertIn("cooperative_lease_missing", missing["reasons"])
+
+        acquired = self.acquire_lease(worktree, ttl_seconds=30, now=lambda: start)
+        lease_id = acquired["lease"]["lease_id"]
+        owned = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=5)), worktree
+        )
+        self.assertEqual(owned["verdict"], "remove")
+
+        with self.assertRaisesRegex(harness.HarnessError, "renewal refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="renew",
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=10),
+            )
+        renewed = harness.mutate_worktree_lease(
+            worktree,
+            action="renew",
+            claimant=self.claimant,
+            ttl_seconds=50,
+            now=lambda: start + timedelta(seconds=10),
+        )
+        self.assertEqual(renewed["lease"]["lease_id"], lease_id)
+
+        occupied = self.candidate(
+            self.plan(
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=11),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_owned_by_other", occupied["reasons"])
+
+        expired = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=61)), worktree
+        )
+        self.assertIn("cooperative_lease_expired", expired["reasons"])
+        with self.assertRaisesRegex(harness.HarnessError, "replace-stale"):
+            self.acquire_lease(
+                worktree,
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=61),
+            )
+        replaced = self.acquire_lease(
+            worktree,
+            claimant="successor",
+            replace_stale=True,
+            now=lambda: start + timedelta(seconds=61),
+        )
+        self.assertNotEqual(replaced["lease"]["lease_id"], lease_id)
+        with self.assertRaisesRegex(harness.HarnessError, "release refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="release",
+                claimant=self.claimant,
+                now=lambda: start + timedelta(seconds=62),
+            )
+        released = harness.mutate_worktree_lease(
+            worktree,
+            action="release",
+            claimant="successor",
+            now=lambda: start + timedelta(seconds=62),
+        )
+        self.assertTrue(released["ok"])
+        after_release = self.candidate(
+            self.plan(
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=62),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_missing", after_release["reasons"])
+
+    def test_malformed_and_mismatched_leases_fail_closed(self) -> None:
+        worktree = self.add_worktree("bad-lease")
+        plan = self.plan()
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+
+        lease_path.write_text("{not json", encoding="utf-8")
+        malformed = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_malformed", malformed["reasons"])
+
+        lease_path.unlink()
+        acquired = self.acquire_lease(worktree)
+        record = acquired["lease"]["record"].copy()
+        record["worktree"] = str(self.repo)
+        harness.write_worktree_lease(lease_path, record)
+        mismatched = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_identity_mismatch", mismatched["reasons"])
+
+    def test_canonical_identity_collapses_aliases_and_drives_reported_path(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("canonical")
+        candidate = self.candidate(self.plan(), worktree)
+        canonical = harness.canonical_worktree_path(worktree)
+        self.assertEqual(candidate["path"], str(canonical))
+        self.assertEqual(candidate["path_key"], harness.worktree_path_key(canonical))
+
+        alias = self.base / "canonical-alias"
+        try:
+            alias.symlink_to(worktree, target_is_directory=True)
+        except OSError:
+            return
+        self.assertTrue(
+            harness.same_worktree_path(
+                harness.canonical_worktree_path(alias), canonical
+            )
+        )
+
+    def test_current_and_other_claimant_occupied_worktrees_are_retained(self) -> None:
+        current = self.add_worktree("current")
+        occupied = self.add_worktree("occupied", lease=False)
+        self.acquire_lease(occupied, claimant="another-agent")
+        plan = self.plan(process_cwd=current)
+        self.assertIn("process_cwd_occupied", self.candidate(plan, current)["reasons"])
+        self.assertIn(
+            "cooperative_lease_owned_by_other",
+            self.candidate(plan, occupied)["reasons"],
+        )
+
+    def test_default_is_read_only_and_does_not_trust_stale_remote_refs(self) -> None:
+        worktree = self.add_worktree("read-only")
+        plan = self.plan(refresh=False)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("remote_evidence_not_refreshed", candidate["reasons"])
+        self.assertTrue(worktree.is_dir())
+
+        with self.assertRaisesRegex(harness.HarnessError, "requires --refresh"):
+            harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo), refresh=False, apply=True, json=True
+                )
+            )
+        with self.assertRaisesRegex(harness.HarnessError, "requires --claimant"):
+            harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=None,
+                    json=True,
+                )
+            )
+
+    def test_refreshed_remote_containment_makes_a_clean_candidate_removable(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("contained")
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/main"],
+        )
+
+    def test_detached_candidate_is_retained_despite_remote_containment(self) -> None:
+        worktree = self.add_worktree("detached-contained", detached=True)
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("detached_head", candidate["reasons"])
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/main"],
+        )
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_remote_tracking_symbolic_head_is_not_a_local_branch(self) -> None:
+        worktree = self.add_worktree("remote-symbolic", detached=True)
+        self.git("symbolic-ref", "HEAD", "refs/remotes/origin/main", cwd=worktree)
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertFalse(candidate["detached"])
+        self.assertEqual(candidate["branch"], "refs/remotes/origin/main")
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_local_branch", candidate["reasons"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_tracked_untracked_and_ignored_content_are_preservation_blockers(
+        self,
+    ) -> None:
+        tracked = self.add_worktree("tracked")
+        untracked = self.add_worktree("untracked")
+        ignored = self.add_worktree("ignored")
+        (tracked / "README.md").write_text("changed\n", encoding="utf-8")
+        (untracked / "scratch.txt").write_text("keep\n", encoding="utf-8")
+        (ignored / "private-report.md").write_text("private\n", encoding="utf-8")
+
+        plan = self.plan()
+        for path, reason in (
+            (tracked, "tracked_or_untracked_changes"),
+            (untracked, "tracked_or_untracked_changes"),
+            (ignored, "ignored_files"),
+        ):
+            with self.subTest(path=path.name):
+                candidate = self.candidate(plan, path)
+                self.assertEqual(candidate["verdict"], "keep")
+                self.assertIn(reason, candidate["reasons"])
+
+    def test_staged_content_is_a_preservation_blocker(self) -> None:
+        staged = self.add_worktree("staged")
+        (staged / "staged.txt").write_text("keep\n", encoding="utf-8")
+        self.git("add", "staged.txt", cwd=staged)
+
+        candidate = self.candidate(self.plan(), staged)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("tracked_or_untracked_changes", candidate["reasons"])
+        self.assertTrue(any(entry.startswith("A ") for entry in candidate["changes"]))
+
+    def test_clean_detached_commit_must_reach_a_remote_tracking_ref(self) -> None:
+        worktree = self.add_worktree("unreachable", detached=True)
+        (worktree / "only-here.txt").write_text("local\n", encoding="utf-8")
+        self.git("add", "only-here.txt", cwd=worktree)
+        self.git("commit", "-qm", "local detached commit", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", candidate["reasons"])
+
+    def test_index_flags_cannot_hide_work_that_removal_would_destroy(self) -> None:
+        worktree = self.add_worktree("assume-unchanged")
+        self.git("update-index", "--assume-unchanged", "README.md", cwd=worktree)
+        (worktree / "README.md").write_text("hidden change\n", encoding="utf-8")
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("index_preservation_flags", candidate["reasons"])
+        self.assertTrue(candidate["index_preservation_flags"])
+
+    def test_clean_index_resolve_undo_state_is_a_preservation_blocker(self) -> None:
+        conflict = self.repo / "conflict.txt"
+        conflict.write_text("base\n", encoding="utf-8")
+        self.git("add", "conflict.txt")
+        self.git("commit", "-qm", "add conflict fixture")
+        self.git("push", "-q")
+        worktree = self.add_worktree("resolve-undo")
+
+        conflict.write_text("main\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on main")
+        self.git("push", "-q")
+        worktree_conflict = worktree / "conflict.txt"
+        worktree_conflict.write_text("branch\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on branch", cwd=worktree)
+        merge = self.git("merge", "origin/main", cwd=worktree, check=False)
+        self.assertNotEqual(merge.returncode, 0)
+        worktree_conflict.write_text("resolved\n", encoding="utf-8")
+        self.git("add", "conflict.txt", cwd=worktree)
+        self.git("commit", "-qm", "resolve merge", cwd=worktree)
+        self.git("push", "-q", "origin", "test/resolve-undo")
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        causal_probe = self.git("ls-files", "--resolve-undo", "-z", cwd=worktree).stdout
+        self.assertTrue(causal_probe)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("index_resolve_undo", candidate["reasons"])
+        self.assertEqual(
+            candidate["index_resolve_undo"],
+            [entry for entry in causal_probe.split("\0") if entry],
+        )
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_mode_only_change_is_a_blocker_when_core_filemode_is_false(self) -> None:
+        script = self.repo / "tool.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.git("add", "tool.sh")
+        self.git("commit", "-qm", "add script")
+        self.git("push", "-q")
+        worktree = self.add_worktree("mode-only")
+        self.git("config", "core.fileMode", "false", cwd=worktree)
+        worktree_script = worktree / "tool.sh"
+        os.chmod(worktree_script, worktree_script.stat().st_mode | 0o111)
+        causal_probe = self.git(
+            "-c",
+            "core.fileMode=true",
+            "diff-files",
+            "--summary",
+            "--",
+            "tool.sh",
+            cwd=worktree,
+        )
+        if not causal_probe.stdout:
+            self.skipTest("filesystem does not expose executable mode changes")
+        self.assertEqual(self.git("status", "--porcelain=v1", cwd=worktree).stdout, "")
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("tracked_mode_changes", candidate["reasons"])
+        self.assertTrue(candidate["tracked_mode_changes"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_worktree_local_state_and_unique_reflog_are_preserved(self) -> None:
+        worktree = self.add_worktree("local-state")
+        (worktree / "unique.txt").write_text("only here\n", encoding="utf-8")
+        self.git("add", "unique.txt", cwd=worktree)
+        self.git("commit", "-qm", "unique local commit", cwd=worktree)
+        unique = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("reset", "--hard", "origin/main", cwd=worktree)
+        self.git("update-ref", "refs/bisect/bad", unique, cwd=worktree)
+
+        local_ref_plan = self.plan()
+        with_local_ref = self.candidate(local_ref_plan, worktree)
+        self.assertEqual(with_local_ref["verdict"], "keep")
+        self.assertIn("worktree_local_refs", with_local_ref["reasons"])
+        self.assertIn("worktree_administrative_state", with_local_ref["reasons"])
+        self.assertEqual(
+            [item["ref"] for item in with_local_ref["worktree_local_refs"]],
+            ["refs/bisect/bad"],
+        )
+        self.assertIn(unique, with_local_ref["unretained_recovery_commits"])
+        self.assertTrue(harness.apply_worktree_plan(local_ref_plan))
+        self.assertTrue(worktree.is_dir())
+
+        self.git("update-ref", "-d", "refs/bisect/bad", cwd=worktree)
+        reflog_only = self.candidate(self.plan(), worktree)
+        self.assertEqual(reflog_only["verdict"], "keep")
+        self.assertNotIn("worktree_local_refs", reflog_only["reasons"])
+        self.assertIn("unretained_recovery_commits", reflog_only["reasons"])
+        self.assertIn(unique, reflog_only["unretained_recovery_commits"])
+
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        (git_dir / "sequencer").mkdir()
+        operation = self.candidate(self.plan(), worktree)
+        self.assertIn("worktree_administrative_state", operation["reasons"])
+        self.assertIn("sequencer", operation["worktree_administrative_state"])
+
+    def test_old_side_of_head_reflog_preserves_unique_commit(self) -> None:
+        worktree = self.add_worktree("old-reflog-side")
+        self.git("switch", "--detach", cwd=worktree)
+        (worktree / "unique.txt").write_text("only in reflog\n", encoding="utf-8")
+        self.git("add", "unique.txt", cwd=worktree)
+        self.git("commit", "-qm", "unique detached commit", cwd=worktree)
+        unique = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("switch", "test/old-reflog-side", cwd=worktree)
+
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        reflog_path = git_dir / "logs" / "HEAD"
+        records = reflog_path.read_bytes().splitlines(keepends=True)
+        retained_records = [
+            record for record in records if record.split(b" ", 2)[1].decode() != unique
+        ]
+        self.assertLess(len(retained_records), len(records))
+        self.assertTrue(
+            any(
+                record.split(b" ", 2)[0].decode() == unique
+                for record in retained_records
+            )
+        )
+        reflog_path.write_bytes(b"".join(retained_records))
+        (git_dir / "COMMIT_EDITMSG").unlink(missing_ok=True)
+
+        new_sides = self.git(
+            "reflog", "show", "--format=%H", "--no-abbrev", "HEAD", cwd=worktree
+        ).stdout.splitlines()
+        self.assertNotIn(unique, new_sides)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("unretained_recovery_commits", candidate["reasons"])
+        self.assertIn(unique, candidate["recovery_commits"])
+        self.assertIn(unique, candidate["unretained_recovery_commits"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_non_regular_head_reflog_is_administrative_state(self) -> None:
+        worktree = self.add_worktree("head-reflog-directory")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        reflog_path = git_dir / "logs" / "HEAD"
+        reflog_path.unlink()
+        reflog_path.mkdir()
+        evidence = reflog_path / "unique-recovery.txt"
+        evidence.write_text("preserve me\n", encoding="utf-8")
+        self.assertEqual(self.git("reflog", "show", "HEAD", cwd=worktree).returncode, 0)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_administrative_state", candidate["reasons"])
+        self.assertIn("logs/HEAD", candidate["worktree_administrative_state"])
+        self.assertTrue(plan["complete"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(evidence.is_file())
+
+    def test_any_fetched_remote_tracking_ref_can_preserve_the_head(self) -> None:
+        worktree = self.add_worktree("archive")
+        (worktree / "archive.txt").write_text("published\n", encoding="utf-8")
+        self.git("add", "archive.txt", cwd=worktree)
+        self.git("commit", "-qm", "publish archive", cwd=worktree)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/archive", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["commit_editmsg_status"], "matches_head")
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/archive"],
+        )
+
+    def test_failed_commit_message_is_a_preservation_blocker(self) -> None:
+        worktree = self.add_worktree("failed-commit-message")
+        hook = self.repo / ".git" / "hooks" / "commit-msg"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        os.chmod(hook, 0o755)
+        failed = self.git(
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unique uncommitted rationale",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        self.assertIn(
+            "unique uncommitted rationale",
+            (git_dir / "COMMIT_EDITMSG").read_text(encoding="utf-8"),
+        )
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertEqual(candidate["commit_editmsg_status"], "differs_from_head")
+        self.assertIn("commit_editmsg_uncommitted", candidate["reasons"])
+        self.assertNotIn("unique uncommitted rationale", json.dumps(candidate))
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_narrow_fetch_refspec_cannot_leave_a_deleted_branch_looking_fresh(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("deleted-archive")
+        (worktree / "archive.txt").write_text("once published\n", encoding="utf-8")
+        self.git("add", "archive.txt", cwd=worktree)
+        self.git("commit", "-qm", "publish then delete archive", cwd=worktree)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/archive", cwd=worktree)
+        first = self.candidate(self.plan(), worktree)
+        self.assertEqual(first["verdict"], "remove")
+
+        self.git("push", "-q", "origin", ":refs/heads/archive")
+        self.git("config", "--unset-all", "remote.origin.fetch")
+        self.git(
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        second = self.candidate(self.plan(), worktree)
+        self.assertEqual(second["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", second["reasons"])
+        self.assertEqual(
+            self.git(
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes/origin/archive",
+            ).stdout.strip(),
+            "",
+        )
+
+    def test_core_worktree_redirection_refuses_the_registered_path(self) -> None:
+        worktree = self.add_worktree("redirected")
+        alternate = self.base / "alternate-worktree"
+        shutil.copytree(worktree, alternate, ignore=shutil.ignore_patterns(".git"))
+        self.git("config", "extensions.worktreeConfig", "true")
+        self.git(
+            "config",
+            "--worktree",
+            "core.worktree",
+            str(alternate),
+            cwd=worktree,
+        )
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_path_redirected", candidate["reasons"])
+        self.assertEqual(
+            harness.canonical_worktree_path(Path(candidate["measured_toplevel"])),
+            harness.canonical_worktree_path(alternate),
+        )
+
+    def test_grafts_and_replace_refs_cannot_supply_reachability(self) -> None:
+        worktree = self.add_worktree("rewritten-history")
+        grafts = self.repo / ".git" / "info" / "grafts"
+        grafts.write_text("# even presence is refused\n", encoding="utf-8")
+        grafted = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", grafted["reasons"])
+        self.assertTrue(grafted["history_rewrite"]["grafts_present"])
+
+        grafts.unlink()
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", f"refs/replace/{head}", head)
+        replaced = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", replaced["reasons"])
+        self.assertEqual(
+            replaced["history_rewrite"]["replace_refs"],
+            [f"refs/replace/{head}"],
+        )
+
+    def test_inherited_external_graft_cannot_supply_reachability(self) -> None:
+        worktree = self.add_worktree("external-graft")
+        published = self.git("rev-parse", "origin/main").stdout.strip()
+        tree = self.git("rev-parse", "HEAD^{tree}", cwd=worktree).stdout.strip()
+        orphan = subprocess.run(
+            ["git", "commit-tree", tree, "-m", "unpublished orphan"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.git("reset", "--hard", orphan, cwd=worktree)
+        graft = self.base / "external-grafts"
+        graft.write_text(f"{published} {orphan}\n", encoding="utf-8")
+        poisoned = os.environ.copy()
+        poisoned["GIT_GRAFT_FILE"] = str(graft)
+        causal_probe = subprocess.run(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname)",
+                f"--contains={orphan}",
+                "refs/remotes/",
+            ],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=poisoned,
+        )
+        self.assertIn("refs/remotes/origin/main", causal_probe.stdout)
+
+        with mock.patch.dict(os.environ, {"GIT_GRAFT_FILE": str(graft)}):
+            plan = self.plan()
+            candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", candidate["reasons"])
+        self.assertEqual(candidate["containing_remote_refs"], [])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_primary_locked_and_outside_worktrees_are_never_candidates(self) -> None:
+        locked = self.add_worktree("locked")
+        outside = self.base / "outside"
+        self.git("worktree", "add", "--detach", str(outside), "origin/main")
+        self.git("worktree", "lock", "--reason", "fixture", str(locked))
+
+        plan = self.plan()
+        primary = self.candidate(plan, self.repo)
+        self.assertIn("primary_checkout", primary["reasons"])
+        self.assertIn("requested_checkout", primary["reasons"])
+        self.assertIn("git_locked", self.candidate(plan, locked)["reasons"])
+        self.assertIn(
+            "outside_worktree_directory", self.candidate(plan, outside)["reasons"]
+        )
+
+    def test_apply_uses_plain_remove_never_prunes_and_keeps_branch(
+        self,
+    ) -> None:
+        worktree = self.add_worktree(
+            "remove-me", branch="test/worktree-closeout-retained"
+        )
+        plan = self.plan()
+        calls: list[list[str]] = []
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+        mutation_lock = lease_path.parent / harness.WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        reclaim_was_refused = False
+
+        def recording_runner(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal reclaim_was_refused
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "remove"]:
+                self.assertTrue(mutation_lock.is_dir())
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "mutation lock already exists"
+                ):
+                    harness.mutate_worktree_lease(
+                        worktree,
+                        action="acquire",
+                        claimant="cooperating-successor",
+                        replace_stale=True,
+                        now=lambda: harness.worktree_utc_now() + timedelta(hours=2),
+                    )
+                reclaim_was_refused = True
+            return harness.worktree_git_runner(command, cwd)
+
+        self.assertTrue(
+            harness.apply_worktree_plan(plan, command_runner=recording_runner)
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply"], "removed")
+        self.assertEqual(candidate["revalidation"], "matched")
+        self.assertEqual(candidate["fingerprint"], candidate["revalidated_fingerprint"])
+        self.assertTrue(reclaim_was_refused)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(
+            self.git(
+                "show-ref",
+                "--verify",
+                "refs/heads/test/worktree-closeout-retained",
+                check=False,
+            ).returncode,
+            0,
+        )
+        remove_calls = [call for call in calls if call[1:3] == ["worktree", "remove"]]
+        self.assertEqual(len(remove_calls), 1)
+        self.assertNotIn("--force", remove_calls[0])
+        self.assertNotIn("-f", remove_calls[0])
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+        self.assertEqual(
+            plan["administrative_cleanup"], "plain_remove_only_no_global_prune"
+        )
+
+    def test_expired_fingerprint_lease_refuses_removal(self) -> None:
+        worktree = self.add_worktree("expired")
+        plan = self.plan(clock=lambda: 0.0)
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1.0,
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertTrue(worktree.is_dir())
+
+    def test_ignored_file_change_between_plan_and_remove_is_revalidated(self) -> None:
+        worktree = self.add_worktree("race")
+        plan = self.plan()
+        changed = False
+
+        def racing_runner(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal changed
+            if (
+                not changed
+                and command[1:4] == ["status", "--porcelain=v1", "-z"]
+                and harness.same_worktree_path(cwd, worktree)
+            ):
+                (worktree / "private-report.md").write_text(
+                    "arrived late\n", encoding="utf-8"
+                )
+                changed = True
+            return harness.worktree_git_runner(command, cwd)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(plan, command_runner=racing_runner)
+        )
+        self.assertTrue(changed)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertTrue(worktree.is_dir())
+        self.assertTrue((worktree / "private-report.md").is_file())
+
+    def test_administrative_state_change_before_remove_is_revalidated(self) -> None:
+        worktree = self.add_worktree("admin-race")
+        plan = self.plan()
+        changed = False
+
+        def racing_runner(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal changed
+            if (
+                not changed
+                and command[1:3] == ["rev-parse", "--absolute-git-dir"]
+                and harness.same_worktree_path(cwd, worktree)
+            ):
+                git_dir = Path(
+                    self.git(
+                        "rev-parse", "--absolute-git-dir", cwd=worktree
+                    ).stdout.strip()
+                )
+                (git_dir / "sequencer").mkdir()
+                changed = True
+            return harness.worktree_git_runner(command, cwd)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(plan, command_runner=racing_runner)
+        )
+        self.assertTrue(changed)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertTrue(worktree.is_dir())
+
+    def test_administrative_state_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("admin-probe-failure")
+        with mock.patch.object(
+            harness,
+            "worktree_administrative_state",
+            return_value=([], "permission denied"),
+        ):
+            plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn(
+            "worktree_administrative_state_probe_failed", candidate["reasons"]
+        )
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_commit_editmsg_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("commit-message-probe-failure")
+        with mock.patch.object(
+            harness,
+            "worktree_commit_editmsg_status",
+            return_value=("unknown", "permission denied"),
+        ):
+            plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("commit_editmsg_probe_failed", candidate["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_lease_change_during_revalidation_refuses_plain_removal(self) -> None:
+        worktree = self.add_worktree("lease-race")
+        plan = self.plan()
+        original_inspector = harness.inspect_worktree_lease
+        calls = 0
+
+        def changing_inspector(*args, **kwargs):
+            nonlocal calls
+            result = original_inspector(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                lease_path = Path(result[0]["path"])
+                record = result[0]["record"].copy()
+                record["lease_id"] = str(harness.uuid.uuid4())
+                harness.write_worktree_lease(lease_path, record)
+            return result
+
+        with mock.patch.object(
+            harness, "inspect_worktree_lease", side_effect=changing_inspector
+        ):
+            self.assertFalse(harness.apply_worktree_plan(plan))
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(
+            candidate["apply_reason"], "cooperative_lease_revalidation_failed"
+        )
+        self.assertTrue(worktree.is_dir())
+
+    def test_fetch_status_remove_and_prune_failures_are_not_parsed_as_success(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("failures")
+
+        def fetch_failure(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1:2] == ["fetch"]:
+                return subprocess.CompletedProcess(command, 9, "stale output", "failed")
+            return harness.worktree_git_runner(command, cwd)
+
+        fetch_plan = harness.worktree_plan(
+            self.repo,
+            refresh=True,
+            command_runner=fetch_failure,
+            process_cwd=self.repo,
+        )
+        self.assertFalse(fetch_plan["complete"])
+        self.assertFalse(fetch_plan["refresh"]["ok"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=True,
+                ),
+                command_runner=fetch_failure,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(output.getvalue())["apply_error"], "remote_refresh_failed"
+        )
+
+        status_injected = False
+
+        def status_failure(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal status_injected
+            if command[1:2] == ["status"] and harness.same_worktree_path(cwd, worktree):
+                status_injected = True
+                return subprocess.CompletedProcess(
+                    command, 8, "?? misleading", "failed"
+                )
+            return harness.worktree_git_runner(command, cwd)
+
+        status_plan = harness.worktree_plan(
+            self.repo,
+            refresh=True,
+            command_runner=status_failure,
+            process_cwd=self.repo,
+        )
+        status_candidate = self.candidate(status_plan, worktree)
+        self.assertTrue(status_injected)
+        self.assertIn("status_probe_failed", status_candidate["reasons"])
+        self.assertFalse(status_plan["complete"])
+
+        good_plan = self.plan()
+        calls: list[list[str]] = []
+
+        def remove_failure(
+            command: list[str], cwd: Path
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(command, 7, "", "refused")
+            return harness.worktree_git_runner(command, cwd)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(good_plan, command_runner=remove_failure)
+        )
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(
+            self.candidate(good_plan, worktree)["apply_reason"],
+            "plain_remove_refused",
+        )
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+
+    def test_head_index_reachability_and_list_failures_block(self) -> None:
+        worktree = self.add_worktree("probe-failures")
+
+        def runner_failing(predicate):
+            injected: list[list[str]] = []
+
+            def failing_runner(
+                command: list[str], cwd: Path
+            ) -> subprocess.CompletedProcess[str]:
+                if predicate(command, cwd):
+                    injected.append(command.copy())
+                    return subprocess.CompletedProcess(
+                        command, 6, "misleading", "failed"
+                    )
+                return harness.worktree_git_runner(command, cwd)
+
+            return failing_runner, injected
+
+        cases = (
+            (
+                "head_probe_failed",
+                lambda command, cwd: command[1:3] == ["rev-parse", "HEAD"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "index_probe_failed",
+                lambda command, cwd: command[1:3] == ["ls-files", "-v"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "index_resolve_undo_probe_failed",
+                lambda command, cwd: command[1:3] == ["ls-files", "--resolve-undo"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "tracked_mode_probe_failed",
+                lambda command, cwd: command[1:4]
+                == ["-c", "core.fileMode=true", "diff-files"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "worktree_local_ref_probe_failed",
+                lambda command, cwd: command[1:2] == ["for-each-ref"]
+                and "refs/bisect/" in command
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "worktree_recovery_reachability_probe_failed",
+                lambda command, cwd: command[1:3] == ["rev-list", "--no-walk"]
+                and harness.same_worktree_path(cwd, self.repo),
+            ),
+            (
+                "reachability_probe_failed",
+                lambda command, _cwd: any(
+                    part.startswith("--contains=") for part in command
+                ),
+            ),
+        )
+
+        for reason, predicate in cases:
+            with self.subTest(reason=reason):
+                failing_runner, injected = runner_failing(predicate)
+                plan = harness.worktree_plan(
+                    self.repo,
+                    refresh=True,
+                    command_runner=failing_runner,
+                    process_cwd=self.repo,
+                )
+                self.assertTrue(injected)
+                self.assertIn(reason, self.candidate(plan, worktree)["reasons"])
+                self.assertFalse(plan["complete"])
+
+        with mock.patch.object(
+            harness,
+            "worktree_head_reflog_commits",
+            return_value=([], "permission denied"),
+        ):
+            recovery_plan = self.plan()
+        self.assertIn(
+            "worktree_recovery_probe_failed",
+            self.candidate(recovery_plan, worktree)["reasons"],
+        )
+        self.assertFalse(recovery_plan["complete"])
+
+        list_failure, list_injected = runner_failing(
+            lambda command, _cwd: command[1:3] == ["worktree", "list"]
+        )
+        with self.assertRaisesRegex(harness.HarnessError, "worktree list failed"):
+            harness.worktree_plan(
+                self.repo,
+                refresh=False,
+                command_runner=list_failure,
+                process_cwd=self.repo,
+            )
+        self.assertTrue(list_injected)
+
+    def test_removing_one_candidate_preserves_unavailable_worktree_metadata(
+        self,
+    ) -> None:
+        removable = self.add_worktree("remove-one")
+        unavailable = self.add_worktree("temporarily-unavailable")
+        unavailable_git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=unavailable).stdout.strip()
+        )
+        shutil.rmtree(unavailable)
+
+        plan = self.plan()
+        self.assertIn("path_unavailable", self.candidate(plan, unavailable)["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(removable.exists())
+        self.assertTrue(unavailable_git_dir.is_dir())
+
+    def test_json_summary_is_machine_readable(self) -> None:
+        self.add_worktree("json")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo), refresh=False, apply=False, json=True
+                )
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(
+            payload["fingerprint_lease_seconds"],
+            harness.WORKTREE_FINGERPRINT_LEASE_SECONDS,
+        )
+        self.assertIn("worktrees", payload)
+        candidate = self.candidate(payload, self.repo / ".worktrees" / "json")
+        for field in (
+            "tracked_mode_changes",
+            "index_resolve_undo",
+            "commit_editmsg_status",
+            "worktree_local_refs",
+            "worktree_administrative_state",
+            "recovery_commits",
+            "unretained_recovery_commits",
+        ):
+            self.assertIn(field, candidate)
+        self.assertEqual(payload["summary"]["removed"], 0)
+        self.assertEqual(payload["branch_deletion"], "not_performed")
+        self.assertFalse(
+            payload["cooperative_lease"]["noncooperating_processes_detected"]
+        )
+        self.assertNotIn("_fingerprint_created_monotonic", payload)
+
+    def test_git_runner_clears_repository_redirecting_environment(self) -> None:
+        completed = subprocess.CompletedProcess(["git", "status"], 0, "", "")
+        poisoned = {name: "poison" for name in harness.WORKTREE_GIT_CONTEXT_ENV}
+        poisoned.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "remote.origin.url",
+                "GIT_CONFIG_VALUE_0": "poison",
+                "GIT_CONFIG_PARAMETERS": "'remote.poison.url=https://example.invalid'",
+            }
+        )
+        with mock.patch.dict(os.environ, poisoned, clear=False):
+            with mock.patch.object(
+                harness, "probe_spawn_argv", return_value=(["git", "status"], "")
+            ):
+                with mock.patch.object(
+                    harness.subprocess, "run", return_value=completed
+                ) as spawn:
+                    result = harness.worktree_git_runner(["git", "status"], self.repo)
+        self.assertEqual(result.returncode, 0)
+        environment = spawn.call_args.kwargs["env"]
+        for name in harness.WORKTREE_GIT_CONTEXT_ENV:
+            self.assertNotIn(name, environment)
+        self.assertNotIn("GIT_CONFIG_COUNT", environment)
+        self.assertNotIn("GIT_CONFIG_KEY_0", environment)
+        self.assertNotIn("GIT_CONFIG_VALUE_0", environment)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
 
 
 if __name__ == "__main__":
