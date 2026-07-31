@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 import json
 from typing import Any
 
@@ -66,7 +67,7 @@ def report_json_bytes(report: dict[str, Any]) -> bytes:
 
 def _table_cell(value: object) -> str:
     return (
-        str(value)
+        escape(str(value), quote=False)
         .replace("\\", "\\\\")
         .replace("|", "\\|")
         .replace("\r", " ")
