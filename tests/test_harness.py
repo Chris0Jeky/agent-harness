@@ -7437,6 +7437,18 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertTrue(harness.apply_worktree_plan(plan))
         self.assertTrue(worktree.is_dir())
 
+    def test_remote_tracking_symbolic_head_is_not_a_local_branch(self) -> None:
+        worktree = self.add_worktree("remote-symbolic", detached=True)
+        self.git("symbolic-ref", "HEAD", "refs/remotes/origin/main", cwd=worktree)
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertFalse(candidate["detached"])
+        self.assertEqual(candidate["branch"], "refs/remotes/origin/main")
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_local_branch", candidate["reasons"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
     def test_tracked_untracked_and_ignored_content_are_preservation_blockers(
         self,
     ) -> None:
@@ -7600,10 +7612,43 @@ class WorktreeCloseoutTests(unittest.TestCase):
 
         candidate = self.candidate(self.plan(), worktree)
         self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["commit_editmsg_status"], "matches_head")
         self.assertEqual(
             [item["ref"] for item in candidate["containing_remote_refs"]],
             ["refs/remotes/origin/archive"],
         )
+
+    def test_failed_commit_message_is_a_preservation_blocker(self) -> None:
+        worktree = self.add_worktree("failed-commit-message")
+        hook = self.repo / ".git" / "hooks" / "commit-msg"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        os.chmod(hook, 0o755)
+        failed = self.git(
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unique uncommitted rationale",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        self.assertIn(
+            "unique uncommitted rationale",
+            (git_dir / "COMMIT_EDITMSG").read_text(encoding="utf-8"),
+        )
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertEqual(candidate["commit_editmsg_status"], "differs_from_head")
+        self.assertIn("commit_editmsg_uncommitted", candidate["reasons"])
+        self.assertNotIn("unique uncommitted rationale", json.dumps(candidate))
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
 
     def test_narrow_fetch_refspec_cannot_leave_a_deleted_branch_looking_fresh(
         self,
@@ -7881,6 +7926,21 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(plan["apply_error"], "audit_incomplete")
         self.assertTrue(worktree.is_dir())
 
+    def test_commit_editmsg_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("commit-message-probe-failure")
+        with mock.patch.object(
+            harness,
+            "worktree_commit_editmsg_status",
+            return_value=("unknown", "permission denied"),
+        ):
+            plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("commit_editmsg_probe_failed", candidate["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
     def test_lease_change_during_revalidation_refuses_plain_removal(self) -> None:
         worktree = self.add_worktree("lease-race")
         plan = self.plan()
@@ -8118,6 +8178,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         for field in (
             "tracked_mode_changes",
             "index_resolve_undo",
+            "commit_editmsg_status",
             "worktree_local_refs",
             "worktree_administrative_state",
             "recovery_commits",

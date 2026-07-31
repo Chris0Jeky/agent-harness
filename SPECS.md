@@ -547,9 +547,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   removal operand, exact containment under the primary checkout's `.worktrees/`, no configured
   work-tree redirection, clean tracked/staged/untracked/ignored state, no executable-mode-only
   difference, no assume-unchanged/skip-worktree index flags or resolve-undo recovery records, no
-  worktree-local refs or non-baseline administrative/operation state, no recovery commit held only
-  by the candidate HEAD reflog or `ORIG_HEAD`, an attached local branch, an unmodified commit graph
-  after scrubbing inherited graft overrides, remote-ref reachability, an active exactly scoped
+  pending `COMMIT_EDITMSG` differing from the current commit message, no worktree-local refs or
+  non-baseline administrative/operation state, no recovery commit held only by the candidate HEAD
+  reflog or `ORIG_HEAD`, an attached `refs/heads/*` local branch, an unmodified commit graph after
+  scrubbing inherited graft overrides, remote-ref reachability, an active exactly scoped
   lease owned by the supplied claimant, and same-run fingerprint plus lease revalidation while
   holding the lease-mutation lock through plain removal. Missing,
   malformed, mismatched, stale, nearly expired, changed, differently
@@ -558,8 +559,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   worktree metadata, and never deletes a branch. Git-locked, current, primary, outside, unavailable,
   detached, administratively stateful, and cooperatively occupied worktrees are retained.
   Canonical identity collapses Windows short/long paths and macOS `/var` aliases. JSON schema
-  version 3 carries the mode, index-recovery, local-ref, administrative-state, and
-  recovery-retention evidence.
+  version 3 carries the mode, index-recovery, pending-message status, local-ref,
+  administrative-state, and recovery-retention evidence without emitting commit-message content.
 
 The owner lease is coordination, not authentication or an OS lock. It proves nothing about a
 process that does not follow the protocol. A non-cooperating process or watcher may still write

@@ -1281,6 +1281,34 @@ def worktree_administrative_state(git_dir: Path) -> tuple[list[str], str]:
     return sorted(state), ""
 
 
+def normalized_commit_message(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def worktree_commit_editmsg_status(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[str, str]:
+    message_path = git_dir / "COMMIT_EDITMSG"
+    try:
+        proposed = message_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "absent", ""
+    except (OSError, UnicodeError) as exc:
+        return "unknown", f"cannot read COMMIT_EDITMSG: {type(exc).__name__}"
+    head_message = worktree_git_result(
+        command_runner, ["log", "-1", "--format=%B", "HEAD"], path
+    )
+    if head_message.returncode:
+        return "unknown", (
+            f"HEAD commit-message probe failed with exit {head_message.returncode}"
+        )
+    if normalized_commit_message(proposed) == normalized_commit_message(
+        head_message.stdout
+    ):
+        return "matches_head", ""
+    return "differs_from_head", ""
+
+
 def worktree_recovery_commits(path: Path, command_runner: Any) -> tuple[list[str], str]:
     reflog = worktree_git_result(
         command_runner,
@@ -1357,6 +1385,7 @@ def worktree_candidate_fingerprint(
         "ignored": candidate["ignored"],
         "index_preservation_flags": candidate["index_preservation_flags"],
         "index_resolve_undo": candidate["index_resolve_undo"],
+        "commit_editmsg_status": candidate["commit_editmsg_status"],
         "tracked_mode_changes": candidate["tracked_mode_changes"],
         "worktree_local_refs": candidate["worktree_local_refs"],
         "worktree_administrative_state": candidate["worktree_administrative_state"],
@@ -1406,6 +1435,7 @@ def inspect_worktree_candidate(
         "ignored": [],
         "index_preservation_flags": [],
         "index_resolve_undo": [],
+        "commit_editmsg_status": "not_inspected",
         "tracked_mode_changes": [],
         "worktree_local_refs": [],
         "worktree_administrative_state": [],
@@ -1450,6 +1480,10 @@ def inspect_worktree_candidate(
         keep("prunable_metadata")
     if record["detached"]:
         keep("detached_head")
+    if not isinstance(record["branch"], str) or not record["branch"].startswith(
+        "refs/heads/"
+    ):
+        keep("head_not_on_local_branch")
 
     shape_is_probeable = record.get("path_key") is not None and not record["bare"]
     contained = False
@@ -1608,6 +1642,17 @@ def inspect_worktree_candidate(
             candidate["worktree_administrative_state"] = administrative_state
             if administrative_state:
                 keep("worktree_administrative_state")
+
+        commit_editmsg_status, commit_editmsg_error = worktree_commit_editmsg_status(
+            path, git_dir, command_runner
+        )
+        candidate["commit_editmsg_status"] = commit_editmsg_status
+        if commit_editmsg_error:
+            keep("commit_editmsg_probe_failed")
+            candidate["commit_editmsg_error"] = commit_editmsg_error
+            complete = False
+        elif commit_editmsg_status == "differs_from_head":
+            keep("commit_editmsg_uncommitted")
 
     if top_matches:
         recovery_commits, recovery_error = worktree_recovery_commits(
