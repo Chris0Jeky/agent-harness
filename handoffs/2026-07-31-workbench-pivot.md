@@ -3,7 +3,7 @@
 Refresh refs, PRs, issues, checks, reviews, comments, threads, worktrees, and tier declarations
 before acting. This is a factual checkpoint, not authority to reuse stale gate evidence.
 
-## Mission and invariants
+## End-to-end objective and invariants
 
 - Operate `agent-harness` as the agent-operations workbench: frozen legacy floor, internal replay
   Policy Lab, Doctor, estate operations, bounded Pattern Guard v2, measurement, adapters, and
@@ -18,101 +18,94 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
 - H-2 is the only open `HUMAN_TODO.md` item and is owner-parked. Do not restart estate-wide
   canaries or disable the harness.
 
-## Proven completed work
+## Completed and directly verified
 
-- PR #140 merged as `81125c57ec6d1a750ddd43b0110c6928f9f4a860`, with parents
-  `7a07238fb8a4d1af826343158abaf863051b6ef5` and
-  `6261c32e9040815ab38a15cb2c668d15358e2a05`. `origin/main` contains the requested
-  `fd87e06c1c55ceed5cef3c736710b513317f3c89` and every successor commit. #148/#149 closed;
-  all 27 original threads plus later triage were resolved, and the post-merge feedback check found
-  no late finding.
-- PR #159 closed #153's literal-Markdown report defect. Merge `8d4b69d147b4f1e930b3388e5b3ce7d2661ab82e`
-  preserved head `e0f8fa5ab75147085d3bfcc5aaa0d7ebcb8222f6`; run `30626399786` passed all nine jobs;
-  the one post-merge feedback check was empty.
-- PR #161 closed #87's static MCP-topology slice. Merge
-  `bea61078937a93aa73e2015ac533f2c9d061f5e8` preserved head
-  `416046b746280422348419619a9cab286fa75617`; run `30627690916` passed all nine jobs. Its two
-  non-blocking false-positive findings were resolved and tracked as #164/#165; no late feedback
-  appeared after merge.
-- PR #163 closed #144's run-manifest gate-class mismatch. Merge
-  `347ab97cfc800dcc3621ffd15d041f4e949e3fd6` has parents `bea61078937a93aa73e2015ac533f2c9d061f5e8`
-  and `c2c139bf1300ed235cc99ad0cf4fbf4411cb80c8`, preserving implementation commit
-  `d41d311e2a3a929dbd2724e9d62cc8140a825458`. Exact-head run `30628366731` passed all nine jobs;
-  #144 closed; comments, reviews, threads, and the one post-merge feedback check were empty.
+- PR #140 merged as `81125c57ec6d1a750ddd43b0110c6928f9f4a860`; `origin/main` contains
+  `fd87e06c1c55ceed5cef3c736710b513317f3c89` and every successor. #148/#149 closed, all
+  27 original threads were resolved, and the post-merge late-feedback check was empty.
+- PR #159 merged as `8d4b69d147b4f1e930b3388e5b3ce7d2661ab82e`, preserved head
+  `e0f8fa5ab75147085d3bfcc5aaa0d7ebcb8222f6`, passed nine-job run `30626399786`, and closed #153.
+- PR #161 merged as `bea61078937a93aa73e2015ac533f2c9d061f5e8`, preserved head
+  `416046b746280422348419619a9cab286fa75617`, passed run `30627690916`, and closed #87.
+  Non-blocking follow-ups #164/#165 remain open.
+- PR #163 merged as `347ab97cfc800dcc3621ffd15d041f4e949e3fd6`, preserved implementation
+  `d41d311e2a3a929dbd2724e9d62cc8140a825458`, passed run `30628366731`, and closed #144.
+- PR #162 merged as `bb20cdd2528d7191a74a4dd2486bb622d6e80df1`, with parents `347ab97` and
+  `c58a0ea`, preserving every guarded-closeout commit. Run `30629391405` passed all nine jobs and
+  #151 closed. Its late review found preservation defects; every thread was triaged once.
+- PR #169 repaired those confirmed work-loss paths and merged as
+  `27ec3b6b0c8430058b4aa2570b0f4a9dda66938f`, with parents `bb20cdd` and
+  `cb43065c6d06675e0cff1393628512778ec767ae`. All four branch commits were preserved. Exact-head
+  local gates passed 842 tests with 13 skips and 2237/2237 smoke cases; hosted run `30634860134`
+  passed all nine jobs. All six connector threads were triaged and resolved, #166 closed, and the
+  one post-merge late-feedback check found nothing new. #170/#171/#172 hold the non-blocking work.
 - The protected `floor-v1-final` tag remains object
   `5a939540bdce51e511d6b3bae98358e3e2ad9148`, peeled
   `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
 
-## Live state and ownership
+## Live state and canonical homes
 
-- Published `main` at this snapshot: `347ab97cfc800dcc3621ffd15d041f4e949e3fd6`.
-- GitHub has 64 open issues. `ROADMAP.md` maps each exactly once to AH-1 through AH-8; AH-9/AH-10
+- Published `main` at this snapshot: `27ec3b6b0c8430058b4aa2570b0f4a9dda66938f`.
+- GitHub has 68 open issues. `ROADMAP.md` maps each exactly once to AH-1 through AH-8; AH-9/AH-10
   are secondary/deferred seams.
-- Open PRs are #154, #155, and #162. #154 is superseded by #162; #155 is superseded by merged
-  #161. Do not revive either parked predecessor.
-- Exactly two workstreams are active:
-  1. continuity branch `docs/workbench-continuity-20260731` in
-     `C:\Users\jekyt\source\agent-harness\.worktrees\workbench-continuity-20260731`;
-  2. PR #162/#151 in `...\.worktrees\issue151-successor`, owned by its existing writer.
-- PR #162 current head is `c58a0ea` with merge-base `347ab97`. Two earlier hosted attempts failed
-  only because platform-alias fault injections compared a canonical command cwd to a noncanonical
-  fixture root. The current one-line test repair canonicalizes that root; run `30629391405` is the
-  exact-head hosted gate and was still in progress at this snapshot. Do not edit its checkout.
-- #160/#164/#165 are bounded Doctor follow-ups. They are mapped, not active.
-- #152 is the next bounded replay candidate only after an active slot opens.
+- The only open PRs are parked predecessors #154 and #155. #154 is superseded by merged #162;
+  #155 is superseded by merged #161. Do not revive either.
+- Current state: `docs/SYSTEM_STATE.md`. Issue/PR ownership: `ROADMAP.md`. Active/queued work:
+  `plans/ACTIVE.md`. Measurements: `docs/BENCHMARKS.md`. Legacy limitations:
+  `FLOOR_LIMITATIONS.md`. Root `HANDOFF.md` remains historical/stale and was not rewritten.
+- The continuity branch `docs/workbench-continuity-20260731` is the sole active writer until its
+  PR lands or parks. If this document is already on `main`, refresh live state and treat that
+  workstream as complete rather than recreating it.
 
-## Continuity branch
+## Continuity slice
 
-The branch creates or updates:
+The branch normally merged `origin/main@27ec3b6` and changes only:
 
-- `docs/SYSTEM_STATE.md` — implemented/deployed/benchmarked/experimental/frozen/unverified/stale;
-- `ROADMAP.md` — AH-1 through AH-10 dependencies, evidence, outcome state, and complete issue/PR map;
-- `plans/ACTIVE.md` — exactly the two active workstreams above;
-- `docs/BENCHMARKS.md` — only measured inputs/methods/results/limitations;
-- `README.md` — workbench mission and current-state correction;
-- `FLOOR_LIMITATIONS.md` — canonical legacy limitation wording only;
-- `.agent-harness/tier.json` — 2026-07-31 review date;
+- `.agent-harness/tier.json`, `README.md`, `FLOOR_LIMITATIONS.md`;
+- `docs/SYSTEM_STATE.md`, `ROADMAP.md`, `plans/ACTIVE.md`, `docs/BENCHMARKS.md`;
 - this dated handoff.
 
-Root `HANDOFF.md` is deliberately untouched and classified as historical/stale. The branch has
-merged current `origin/main`; query `git rev-parse HEAD` and `git merge-base HEAD origin/main`
-rather than relying on a prose SHA. It must be refreshed again if PR #162 or any other PR lands.
-
-Before publication, finish the exact current-range verification and fresh-context review. The
-initial pre-#161 range already passed review, offline audit, Doctor, tier parsing, issue mapping,
-line budgets, and diff checks; that evidence is not a substitute for the refreshed range.
+It adds no runtime behavior, fixture, corpus, deployment, or benchmark result. Before publication,
+prove the 68-entry issue map, document budgets, tier JSON, exact diff, offline audit, Doctor, one
+fresh-context review, required hosted CI, three-minute head age, and one comment/thread triage.
 
 ## Occupied worktrees
 
-- `crossproduct-gate`: tracked-clean; remote branch is gone. Preserve until separately audited.
-- `issue151-successor`: active PR #162 writer checkout. Read-only to every other agent.
+- Primary checkout: preserve user state; it may lag `origin/main` until the owner advances it.
+- `crossproduct-gate`: tracked-clean historical test branch; remote branch is gone.
 - `issue27-temporal-config`: tracked-clean occupied historical branch.
 - `replay-tool`: user-owned staged `scripts/replay_corpus.py`; never reset, restore, stash, or remove.
-- `replay-v0-freeze`: branch is behind remote and contains ignored `.local/` evidence plus caches.
-  It was intentionally left untouched; never remove it without separately proving and preserving
-  anything needed outside the worktree.
-- `workbench-continuity-20260731`: current writer checkout.
+- `replay-v0-freeze`: contains ignored `.local/` evidence plus caches and a recovery commit detected
+  by the guarded audit. It was deliberately left untouched; never remove it without separately
+  proving and preserving everything needed outside the worktree.
+- `workbench-continuity-20260731`: current writer checkout until the continuity PR lands.
 
-The completed #153 and #144 worktrees were removed with plain `git worktree remove` only after
-confirming they held no tracked/untracked work and only disposable caches. Their remote branches
-were preserved.
+The #162/#169 writer worktrees were removed with plain `git worktree remove` only after tracked,
+untracked, and ignored inspection showed nothing except disposable test caches. No parked branch
+was deleted.
 
-## Exact continuation
+## Exact next safe slice after continuity
 
-1. Run `git fetch origin --prune`; refresh `.agent-harness/tier.json`, `origin/main`, PR #162, open
-   issues/PRs, comments/reviews/threads, and `floor-v1-final` before mutation.
-2. At the next PR #162 workflow event, inspect run `30629391405`. If any job is red, identify the
-   cause and leave its writer checkout untouched. If it merges, prove merge parents/head history,
-   #151 closure, and one late-feedback check.
-3. Merge current `origin/main` into this continuity branch if the base moved. Reconcile README and
-   live issue/PR/active-state facts once; do not rewrite root `HANDOFF.md`.
-4. Verify the open-issue map, document budgets, tier JSON, `git diff --check`, offline audit, and
-   Doctor. Obtain one fresh-context exact-range review.
-5. Publish a ready PR, allow automatic review without summoning it, run all required hosted CI,
-   age the final head three minutes, triage every comment/thread once, and merge with an exact-head
-   merge commit only when the declared gate is green.
-6. After continuity lands, the next safe executable slice is #152: platform-valid replay
-   reproduction commands, bounded to structured argv/rendering and Windows/POSIX proof.
+Issue #152 is the recommended next executable slice.
+
+- **Observable outcome:** every replay report exposes structured reproduction argv plus an
+  explicitly labelled platform-valid rendering; Windows paths with spaces do not use POSIX
+  single-quote semantics.
+- **Evidence:** #152 records that `shlex.join()` is currently used for every host and can produce a
+  non-runnable `cmd.exe` command.
+- **In:** `replay_v0/cli.py`, `replay_v0/reports.py`, exact Windows/POSIX rendering tests, a path
+  containing spaces, and direct execution proof where the host supports it.
+- **Out:** a general shell parser, universal command grammar, policy-process argv changes, private
+  paths, and operational outputs in committed fixtures.
+- **Architecture seam:** reproduction argv construction and Markdown rendering; structured argv is
+  the portable source of truth.
+- **Tests/fixtures/corpus:** add public synthetic fixtures only; no private corpus change.
+- **Measurement:** record host, rendered form, and whether the fixture invocation executed.
+- **Limitation:** one string cannot be portable across PowerShell, `cmd.exe`, and POSIX shells.
+- **Exact verification:** `py -3 -m unittest replay_v0.tests.unit.test_compare replay_v0.tests.contract.test_cli -v` and `py -3 -m pytest -q replay_v0/tests`.
+- **Next executable handoff:** create a fresh detached worktree from current `origin/main`, switch a
+  new branch before committing, reproduce the Windows space-path failure first, and ship only the
+  smallest structured-argv/rendering contract.
 
 ## Refresh commands
 
@@ -120,7 +113,6 @@ were preserved.
 git fetch origin --prune
 git rev-parse origin/main
 git show-ref -d refs/tags/floor-v1-final
-gh pr view 162 --repo Chris0Jeky/agent-harness --json headRefOid,baseRefOid,state,mergeable,mergeStateStatus,statusCheckRollup,reviews,comments,closingIssuesReferences
 gh pr list --repo Chris0Jeky/agent-harness --state open --limit 100
 gh issue list --repo Chris0Jeky/agent-harness --state open --limit 200
 py -3 harness.py audit . --offline

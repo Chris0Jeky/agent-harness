@@ -1,6 +1,6 @@
 # System state
 
-Snapshot: 2026-07-31, after PR #163 merged as `347ab97cfc800dcc3621ffd15d041f4e949e3fd6`.
+Snapshot: 2026-07-31, after PR #169 merged as `27ec3b6b0c8430058b4aa2570b0f4a9dda66938f`.
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
 ## Evidence vocabulary
@@ -22,8 +22,8 @@ Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on
 | Shared Claude-hook floor | deployed, unverified | On 2026-07-31 canonical and `~/.claude/hooks/dispatch.py` SHA-256 both measured `E1A4E7714913788DD801F0FA43A3E5B30EA0433709F97142509B56B1C442EF68`, version 1.6.21 | Static equality does not prove Codex activation or trust. H-2 is the sole open human action and is owner-parked. |
 | Replay v0 / Policy Lab | implemented, benchmarked, experimental | PR #140 merged the core; PRs #159/#163 closed bounded report and manifest defects; `replay_v0`; exact-head nine-job runs `30624510146`, `30626399786`, and `30628366731` passed | Internal evidence tool only. It is not a sandbox, global blocker, public repository, or universal policy language. |
 | Audit and Doctor foundation | implemented, experimental, unverified | `harness.py audit` and `doctor`; PR #161 added static MCP topology diagnosis and closed #87 | Static inspection cannot prove every runtime layer. #160/#164/#165 are bounded correctness follow-ups, not authorization for live mutation. |
-| Estate seed/sync/closeout operations | implemented, experimental | `seed`, `audit`, `doctor`, and backed-up `sync-global` are on `main`; PR #162 owns guarded worktree closeout | PR #162 is not merged and its current exact-head hosted proof is still in progress after two test-only platform-path repairs. Non-cooperating process liveness remains outside its stated lease contract. |
-| Pattern Guard v2 | experimental, unverified | AH-3 contract in the brief; measured inputs #21, #118, #120 | No Pattern Guard v2 implementation or shadow result exists. Start with bounded catastrophic families, not the legacy universal parser. |
+| Estate seed/sync/closeout operations | implemented, experimental | `seed`, `audit`, `doctor`, and backed-up `sync-global` are on `main`; PR #162 added guarded worktree closeout and PR #169 repaired confirmed late-review preservation defects; exact-head runs `30629391405` and `30634860134` passed all nine jobs | The lease is cooperative, not process authentication. #167/#168/#170/#171/#172 are bounded correctness, reporting, false-keep, and performance follow-ups. No live estate cleanup was run. |
+| Pattern Guard v2 | unverified | AH-3 contract in the brief; measured inputs #21, #118, #120 | No Pattern Guard v2 implementation or shadow result exists. Start with bounded catastrophic families, not the legacy universal parser. |
 | Integrated measurement | benchmarked, unverified | Historical measurements in `docs/BENCHMARKS.md` | No current 1.6.21 estate baseline, continuous benchmark store, Doctor precision series, or task-completion metric is verified. |
 | Claude-config integration | experimental, unverified | `CLAUDE_CONFIG_OPERATIONS.md`; AH-9 boundary | Private evidence stays private. No broad cross-repository mutation is active. |
 | Public extraction and plugin products | frozen | `REPLAY_TOOL_PRODUCT.md` and `BLUEPRINT_PLUGIN_PRODUCT.md` are explicitly deferred under AH-10 | Do not create a public replay repository or extract a plugin until internal stability and demand are demonstrated and approved. |
