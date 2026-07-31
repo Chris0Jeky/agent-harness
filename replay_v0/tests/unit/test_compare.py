@@ -62,6 +62,26 @@ class ComparisonTests(unittest.TestCase):
         self.baseline = [decision(row[0], row[1], "baseline") for row in EFFECTS]
         self.candidate = [decision(row[0], row[2], "candidate") for row in EFFECTS]
         self.cases = [charter_case(row[0]) for row in EFFECTS]
+        self.manifest = {
+            "run_id": "f" * 64,
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "floor-v1-final",
+                "sha256": "1" * 64,
+            },
+            "candidate": {
+                "kind": "process",
+                "id": "candidate-policy",
+                "sha256": "2" * 64,
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "manifest_sha256": "3" * 64,
+                "event_count": len(self.events),
+            },
+            "fail_on": ["newly-allowed", "newly-indeterminate"],
+        }
 
     def test_all_five_classes_follow_corpus_order_and_preserve_reasons(self) -> None:
         result = compare_decisions(
@@ -124,27 +144,7 @@ class ComparisonTests(unittest.TestCase):
         comparison = compare_decisions(
             self.events, self.baseline, self.candidate, case_values=self.cases
         )
-        manifest = {
-            "run_id": "f" * 64,
-            "generated_at": "2026-07-30T12:00:00Z",
-            "baseline": {
-                "kind": "recorded",
-                "id": "floor-v1-final",
-                "sha256": "1" * 64,
-            },
-            "candidate": {
-                "kind": "process",
-                "id": "candidate-policy",
-                "sha256": "2" * 64,
-            },
-            "corpus": {
-                "id": "charter-v0.1",
-                "manifest_sha256": "3" * 64,
-                "event_count": len(self.events),
-            },
-            "fail_on": ["newly-allowed", "newly-indeterminate"],
-        }
-        report = build_json_report(comparison, manifest)
+        report = build_json_report(comparison, self.manifest)
         self.assertEqual("fail", report["gate"]["status"])
         self.assertEqual(
             ["newly-allowed", "newly-indeterminate"],
@@ -154,8 +154,10 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn(DECISION_REPLAY_LIMITATION, report["limitations"])
         self.assertNotIn("reproduction_command", report)
 
-        command = "python -m replay_v0.cli replay --corpus fictional"
-        markdown = render_markdown_report(report, reproduction_command=command)
+        argv = ["/opt/Python Tools/python3", "-m", "replay_v0.cli", "replay"]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="posix-sh"
+        )
         opening = markdown.split("## Event results", maxsplit=1)[0]
         for expected in (
             "Counts:",
@@ -163,11 +165,115 @@ class ComparisonTests(unittest.TestCase):
             "Baseline: `floor-v1-final`",
             "Candidate: `candidate-policy`",
             "Corpus: `charter-v0.1`",
-            "Reproduce:",
+            "Reproduce with structured argv (portable source of truth):",
+            "POSIX sh rendering for this host:",
         ):
             self.assertIn(expected, opening)
-        self.assertIn(command, opening)
+        self.assertIn(json.dumps(argv), opening)
+        self.assertIn("'/opt/Python Tools/python3' -m replay_v0.cli replay", opening)
         self.assertIn(DECISION_REPLAY_LIMITATION, markdown)
+
+    def test_reproduction_rendering_is_exact_for_posix_and_powershell(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        posix_argv = [
+            "/opt/Python Tools/python3",
+            "-m",
+            "replay_v0.cli",
+            "--output",
+            "/tmp/Policy Lab/owner's report",
+        ]
+        posix = render_markdown_report(
+            report, reproduction_argv=posix_argv, reproduction_shell="posix-sh"
+        )
+        self.assertIn(json.dumps(posix_argv), posix)
+        self.assertIn(
+            "    '/opt/Python Tools/python3' -m replay_v0.cli --output "
+            "'/tmp/Policy Lab/owner'\"'\"'s report'",
+            posix,
+        )
+
+        windows_argv = [
+            r"C:\Program Files\Python\python.exe",
+            "-m",
+            "replay_v0.cli",
+            "--output",
+            r"C:\Policy Lab\owner's report & 100% [proof]",
+        ]
+        powershell = render_markdown_report(
+            report,
+            reproduction_argv=windows_argv,
+            reproduction_shell="powershell",
+        )
+        self.assertIn(json.dumps(windows_argv), powershell)
+        self.assertIn(
+            "    & 'C:\\Program Files\\Python\\python.exe' '-m' "
+            "'replay_v0.cli' '--output' "
+            "'C:\\Policy Lab\\owner''s report & 100% [proof]'",
+            powershell,
+        )
+
+    def test_shell_rendering_omits_values_outside_the_proved_subset(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        argv = ["python", "", 'contains"quote', "line\nbreak"]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="powershell"
+        )
+        self.assertIn(json.dumps(argv), markdown)
+        self.assertIn("Windows PowerShell rendering omitted:", markdown)
+        self.assertNotIn("    & ", markdown)
+
+    def test_powershell_rendering_omits_a_trailing_backslash_argument(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        argv = ["python", "--output", "C:\\Policy Lab\\"]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="powershell"
+        )
+        self.assertIn(json.dumps(argv), markdown)
+        self.assertIn("Windows PowerShell rendering omitted:", markdown)
+        self.assertNotIn("    & ", markdown)
+
+    def test_powershell_rendering_omits_smart_quote_injection(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        payload = "before\u2019 ; Write-Output __SMART_QUOTE_INJECTION__ ; \u2018after"
+        argv = ["python", "--output", payload]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="powershell"
+        )
+        self.assertIn(payload, markdown)
+        self.assertIn("Windows PowerShell rendering omitted:", markdown)
+        self.assertNotIn("    & ", markdown)
 
     def test_markdown_table_renders_policy_text_literally_without_changing_json(
         self,
@@ -210,7 +316,11 @@ class ComparisonTests(unittest.TestCase):
 
         report = build_json_report(comparison, manifest)
         serialized_report = json.loads(report_json_bytes(report))
-        markdown = render_markdown_report(report, reproduction_command="replay fixture")
+        markdown = render_markdown_report(
+            report,
+            reproduction_argv=["replay", "fixture"],
+            reproduction_shell="posix-sh",
+        )
 
         self.assertEqual(
             hostile_id, serialized_report["results"][0]["event"]["event_id"]

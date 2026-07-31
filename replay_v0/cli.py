@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import shlex
 import shutil
 import sys
 import tempfile
@@ -350,9 +349,9 @@ def _generated_at() -> str:
     return timestamp.isoformat().replace("+00:00", "Z")
 
 
-def _reproduction_command(args: argparse.Namespace) -> str:
-    parts = [
-        "python",
+def _reproduction_argv(args: argparse.Namespace) -> list[str]:
+    return [
+        sys.executable,
         "-m",
         "replay_v0.cli",
         "replay",
@@ -369,7 +368,6 @@ def _reproduction_command(args: argparse.Namespace) -> str:
         "--timeout",
         str(args.timeout),
     ]
-    return shlex.join(parts)
 
 
 def _run_validate(args: argparse.Namespace) -> int:
@@ -492,7 +490,8 @@ def _run_replay(args: argparse.Namespace) -> int:
         baseline_failures=baseline_result.failures,
         candidate_failures=candidate_result.failures,
     )
-    reproduction_command = _reproduction_command(args)
+    reproduction_argv = _reproduction_argv(args)
+    reproduction_shell = "powershell" if os.name == "nt" else "posix-sh"
 
     output = Path(args.output)
     try:
@@ -501,7 +500,9 @@ def _run_replay(args: argparse.Namespace) -> int:
             run_manifest_bytes=manifest_json_bytes(run_manifest),
             report_bytes=report_json_bytes(report),
             markdown_bytes=render_markdown_report(
-                report, reproduction_command=reproduction_command
+                report,
+                reproduction_argv=reproduction_argv,
+                reproduction_shell=reproduction_shell,
             ).encode("utf-8"),
         )
     except OSError as exc:

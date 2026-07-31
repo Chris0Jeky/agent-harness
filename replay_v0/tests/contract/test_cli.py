@@ -28,6 +28,7 @@ from replay_v0.manifests import (
     manifest_json_bytes,
 )
 from replay_v0.policy_sources import PolicySourceResult, SourceFailure
+from replay_v0.reports import _shell_reproduction_command
 
 EVENTS = [
     {
@@ -187,9 +188,53 @@ for index, event in enumerate(events):
             self.assertEqual(["newly-allowed"], report["gate"]["triggered"])
             self.assertNotIn("reproduction_command", report)
             markdown = (output / "report.md").read_text(encoding="utf-8")
-            self.assertIn("python -m replay_v0.cli replay", markdown)
+            self.assertIn("structured argv (portable source of truth)", markdown)
+            self.assertIn(
+                json.dumps([sys.executable, "-m", "replay_v0.cli"])[1:-1], markdown
+            )
+            expected_shell = (
+                "Windows PowerShell rendering for this host:"
+                if os.name == "nt"
+                else "POSIX sh rendering for this host:"
+            )
+            self.assertIn(expected_shell, markdown)
             self.assertIn(str(output), markdown)
             self.assertTrue((output / "run-manifest.json").is_file())
+
+    def test_host_reproduction_forms_preserve_the_proved_argv_subset(self) -> None:
+        script = "import sys;print(chr(31).join(sys.argv[1:]))"
+        if os.name == "nt":
+            expected = [
+                r"C:\Policy Lab\owner's report & 100% [proof]",
+                "dollar$ caret^ bang! semi;",
+            ]
+            shell = "powershell"
+            shell_argv = [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+            ]
+        else:
+            expected = [
+                "/tmp/Policy Lab/owner's report & 100% [proof]",
+                "dollar$ caret^ bang! semi;",
+            ]
+            shell = "posix-sh"
+            shell_argv = ["/bin/sh", "-c"]
+        argv = [sys.executable, "-c", script, *expected]
+        direct = subprocess.run(argv, check=False, capture_output=True, text=True)
+        self.assertEqual(0, direct.returncode, direct.stderr)
+        self.assertEqual(chr(31).join(expected) + "\n", direct.stdout)
+
+        command = _shell_reproduction_command(argv, shell)
+        self.assertIsNotNone(command)
+        rendered = subprocess.run(
+            [*shell_argv, command], check=False, capture_output=True, text=True
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        self.assertEqual(chr(31).join(expected) + "\n", rendered.stdout)
 
     def test_exit_two_rejects_a_digest_mismatch_without_policy_execution(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):

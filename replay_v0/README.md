@@ -23,10 +23,15 @@ Run the clean reference comparison:
 python -m replay_v0.cli replay --baseline recorded:replay_v0/fixtures/legacy-decisions.jsonl --candidate process:python,replay_v0/tests/fixtures/process_policies/reference_candidate.py --corpus replay_v0/corpora/charter/events.jsonl --output .local/replay-proof
 ```
 
-The command writes `run-manifest.json`, `report.json`, and `report.md`. Exit `0` means the configured
-gate passed, `1` means a configured change class was present, `2` means an input or exact-byte
-binding was invalid, and `3` means a policy process failed after a reportable comparison could be
-formed.
+The command writes `run-manifest.json`, `report.json`, and `report.md`. The Markdown report keeps a
+JSON argv array as the portable reproduction source of truth and labels its additional rendering
+as either POSIX `sh` or Windows PowerShell; it never claims `cmd.exe` compatibility. Arguments
+outside the proved nonempty, single-line shell subset keep the structured argv but omit the shell
+form. Path-bearing reproduction material remains outside deterministic `report.json`.
+
+Exit `0` means the configured gate passed, `1` means a configured change class was present, `2`
+means an input or exact-byte binding was invalid, and `3` means a policy process failed after a
+reportable comparison could be formed.
 
 Run the authoritative dependency-free test lane with:
 
