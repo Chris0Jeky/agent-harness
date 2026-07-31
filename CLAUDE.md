@@ -39,6 +39,7 @@ py -3 harness.py doctor [--repo <path>] [--offline]
 py -3 harness.py audit <repo> [--json] [--offline]
 py -3 harness.py seed <repo> --tier N [--sensitive-data]
 py -3 harness.py sync-global --config-root <claude-config checkout> [--apply]
+py -3 harness.py worktrees --repo <repo> [--refresh] [--apply] [--json]
 ```
 
 `.github/workflows/ci.yml` is the single source of that file list — it had drifted to 19 entries
@@ -49,7 +50,7 @@ py_compile) or they are silently unlinted.
 
 Two Python artifacts, both deliberately dependency-free (stdlib only):
 
-**`harness.py`** — single-file CLI with four subcommands:
+**`harness.py`** — single-file CLI with five subcommands:
 - `audit` — validates every tier declaration a repo carries (`.agent-harness/tier.json` and a
   legacy `.claude/tier.json` bind to the STRICTEST union, exactly as the dispatcher resolves
   them), doc line budgets (CLAUDE.md is capped per tier: T3 = 150 lines), and scans
@@ -74,6 +75,9 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   blockers fail closed. It does not fully validate unrelated config fields, prove runtime/cloud
   overrides, or execute the hook — a CWD-specific new-session `/hooks` review and live safe/deny
   canary remain mandatory.
+- `worktrees` — reports linked worktrees without mutation by default; an explicit all-remote
+  refresh plus `--apply` removes only clean, contained, remote-reachable candidates after a
+  short-lived fingerprint revalidation, using plain removal and retaining every branch
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is

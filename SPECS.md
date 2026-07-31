@@ -531,6 +531,16 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   removes only the obsolete managed global Codex matcher.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition.
+- `harness.py worktrees --repo <path> [--refresh] [--apply] [--json]` — reports every registered
+  linked worktree and only removes a candidate after an explicit all-remote refresh, exact physical
+  containment under the primary checkout's `.worktrees/`, clean tracked/untracked/ignored status,
+  no assume-unchanged/skip-worktree index flags, remote-ref reachability, and a same-run 60-second
+  fingerprint revalidation. The default performs no fetch or mutation; `--apply` requires
+  `--refresh` and uses only plain `git worktree remove`.
+  Git-locked worktrees and the requested/current checkout are retained. Arbitrary external-process
+  occupancy is not portable to prove, so a plain-removal refusal remains a keep verdict. Pruning
+  runs only after a successful removal; branch deletion and ignored-path exceptions are outside
+  this command.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
