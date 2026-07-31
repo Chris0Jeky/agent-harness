@@ -99,7 +99,7 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
-- **CONSTRAINT:** Process identity v8 binds the executable's lexical invocation basename and the
+- **CONSTRAINT:** Process identity v9 binds the executable's lexical invocation basename and the
   resolved target's bytes and four-octal-digit permission mode, the entry-policy bytes, plus the
   relative names, exact regular-file bytes, and permission modes for the policy-parent root and
   entries. An executable alias and its target therefore have distinct identities when their
@@ -108,14 +108,19 @@ Owner: Cristian Tcaci
   unchanged. The selected resolved snapshot parent is captured once and represented in the identity
   only by an opaque SHA-256 digest; different policy-visible temporary roots therefore produce
   different process identities and run IDs without exposing their absolute paths in manifests.
-  Installed dependencies, files outside that tree, network responses, and other host metadata
-  remain outside the identity, so callers that depend on them must isolate and record that
+  V9 also binds a fixed snapshot modification time of `946684800000000000` ns
+  (2000-01-01T00:00:00Z). Installed dependencies, files outside that tree, network responses, and
+  other host metadata remain outside the identity; access/change/birth times and filesystem object
+  identities are not normalized, so callers that depend on them must isolate and record that
   environment.
 - **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
   policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
-  executable, permission mode, and complete-tree digests against process identity v8 before and
-  after execution, and launches the policy only from the snapshot paths. Runner-owned snapshot and
-  executable directories have fixed `0700` permissions on POSIX. Evaluation reuses the parent
+  executable, permission mode, and complete-tree digests against process identity v9, normalizes
+  every copied file and directory mtime to the fixed v9 value, verifies that mtime before and after
+  execution, and launches the policy only from the snapshot paths. Changing only source mtimes
+  therefore preserves identity/run ID and cannot change the policy-observed copied mtime.
+  Runner-owned snapshot and executable directories have fixed `0700` permissions on POSIX.
+  Evaluation reuses the parent
   captured during source loading, and the private root suffix is derived from the process identity,
   so policy-visible working, argument, and file paths are stable for that identity. A missing
   parent or pre-existing identity path fails closed; a pre-existing path is neither reused nor

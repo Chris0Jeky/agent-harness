@@ -60,20 +60,24 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v8 includes the executable's lexical invocation basename, the resolved executable target's
+identity v9 includes the executable's lexical invocation basename, the resolved executable target's
 bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
 regular-file bytes, and permission modes for the policy-parent root and entries, configured
 timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
 working-directory contract. It also binds an opaque SHA-256 digest of the selected resolved
 snapshot parent without writing that absolute path to the run manifest. Process identities are
-therefore conservatively host/path-sensitive when policy-visible temporary roots differ. An
+therefore conservatively host/path-sensitive when policy-visible temporary roots differ. V9 also
+binds the snapshot-mtime contract: every copied file and directory has modification time
+`946684800000000000` ns (2000-01-01T00:00:00Z). An
 executable alias and its target have distinct identities when their invocation names differ, while
 the snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
 copies the bound executable and complete policy-parent tree into a private temporary snapshot,
 verifies that the snapshot's entry-policy bytes, executable bytes and permission mode, and complete
-tree digest exactly match the identity before and after execution, and launches the policy only
-from the snapshot paths. The resolved parent is captured once while the source is loaded and reused
-during evaluation; the private root suffix is derived from the process identity. Consequently,
+tree digest exactly match the identity, normalizes every snapshot mtime, verifies that fixed mtime
+before and after execution, and launches the policy only from the snapshot paths. Changing only a
+source mtime therefore preserves the identity and run ID and cannot change the copied mtime observed
+by the policy. The resolved parent is captured once while the source is loaded and reused during
+evaluation; the private root suffix is derived from the process identity. Consequently,
 `cwd`, `argv[0]`, and policy-file paths exposed by a successful run remain stable for that identity,
 and changing the selected parent changes the identity and run ID. A missing parent or pre-existing
 identity path fails closed; a pre-existing path is neither reused nor removed. A candidate snapshot
@@ -98,8 +102,8 @@ relocatable enough to run from the snapshot; adjacent loader libraries are copie
 runtime dependencies, and Python uses its host base prefix for its unbound standard library. If the
 captured executable cannot start, replay fails closed instead of falling back to the original path.
 External installed dependencies, files outside the policy tree, network responses, and host
-metadata remain outside the portable identity; callers that depend on them must isolate and record
-that environment.
+metadata remain outside the identity; access/change/birth times and filesystem object identities
+are not normalized. Callers that depend on them must isolate and record that environment.
 
 Policy standard streams are backed by temporary files, so a descendant retaining inherited stream
 handles cannot extend the configured timeout. On Windows an event-gated supervisor enters a

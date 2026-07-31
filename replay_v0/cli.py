@@ -38,6 +38,7 @@ from replay_v0.policy_sources import (
     PolicySourceResult,
     ProcessDecisionSource,
     RecordedDecisionSource,
+    SNAPSHOT_MTIME_NS,
     validate_recorded_manifest,
 )
 from replay_v0.reports import (
@@ -53,7 +54,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v8"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v9"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -277,6 +278,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         "environment": normalized_environment,
         "execution_inputs": "private-validated-identity-path-snapshot",
         "runner_directory_permission_bits": "0700",
+        "snapshot_mtime_ns": SNAPSHOT_MTIME_NS,
         "snapshot_parent_sha256": sha256_bytes(os.fsencode(snapshot_parent)),
         "working_directory": "identity-bound-parent-and-derived-snapshot-policy-parent",
     }

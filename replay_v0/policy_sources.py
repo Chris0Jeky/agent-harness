@@ -32,6 +32,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PROCESS_CLEANUP_GRACE_SECONDS = 1.0
 _RUNNER_DIRECTORY_MODE = 0o700
+SNAPSHOT_MTIME_NS = 946684800_000_000_000
 _WINDOWS_EXEC_FAILURE_PREFIX = b"replay-wrapper-exec-failed:"
 _WINDOWS_POLICY_WRAPPER = r"""
 import ctypes
@@ -434,6 +435,53 @@ def _cleanup_snapshot_root(root: Path) -> SourceFailure | None:
     return None
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _normalize_snapshot_mtimes(root: Path) -> None:
+    """Set every copied modification time to the replay v0 fixed epoch."""
+
+    for raw_directory, directory_names, file_names in os.walk(
+        root, topdown=False, onerror=_raise_walk_error
+    ):
+        directory = Path(raw_directory)
+        for name in file_names:
+            path = directory / name
+            metadata = path.stat()
+            os.utime(
+                path,
+                ns=(metadata.st_atime_ns, SNAPSHOT_MTIME_NS),
+            )
+        for name in directory_names:
+            path = directory / name
+            metadata = path.stat()
+            os.utime(
+                path,
+                ns=(metadata.st_atime_ns, SNAPSHOT_MTIME_NS),
+            )
+    metadata = root.stat()
+    os.utime(
+        root,
+        ns=(metadata.st_atime_ns, SNAPSHOT_MTIME_NS),
+    )
+
+
+def _snapshot_mtimes_are_normalized(root: Path) -> bool:
+    """Return whether the root and every copied entry retain the fixed mtime."""
+
+    if root.stat().st_mtime_ns != SNAPSHOT_MTIME_NS:
+        return False
+    for raw_directory, directory_names, file_names in os.walk(
+        root, onerror=_raise_walk_error
+    ):
+        directory = Path(raw_directory)
+        for name in (*directory_names, *file_names):
+            if (directory / name).stat().st_mtime_ns != SNAPSHOT_MTIME_NS:
+                return False
+    return True
+
+
 @dataclass(frozen=True)
 class _ProcessInputSnapshot:
     """Private execution paths that contain the exact bound process inputs."""
@@ -455,6 +503,7 @@ class _ProcessInputSnapshot:
             actual_executable_permissions = permission_bits(executable)
             actual_policy = sha256_file(policy)
             actual_tree = sha256_tree(policy_tree)
+            mtimes_are_normalized = _snapshot_mtimes_are_normalized(self.root)
         except OSError:
             return SourceFailure(
                 "process-snapshot-changed",
@@ -465,6 +514,7 @@ class _ProcessInputSnapshot:
             or actual_executable_permissions != self.executable_permissions
             or actual_policy != self.policy_sha256
             or actual_tree != self.policy_tree_sha256
+            or not mtimes_are_normalized
         ):
             return SourceFailure(
                 "process-snapshot-changed",
@@ -1023,11 +1073,31 @@ class ProcessDecisionSource:
                         snapshot_executable.parent / companion.name,
                     )
             shutil.copytree(policy_tree_path, snapshot_policy_tree)
+        except (OSError, shutil.Error):
+            return self._snapshot_failure(
+                events,
+                code="process-input-changed",
+                message=(
+                    "Bound policy process inputs became unavailable while their "
+                    "private snapshot was created."
+                ),
+                snapshot_root=snapshot_root,
+            )
+        try:
+            _normalize_snapshot_mtimes(snapshot_root)
+        except (OSError, NotImplementedError):
+            return self._snapshot_failure(
+                events,
+                code="process-snapshot-unavailable",
+                message="The private policy process snapshot could not be normalized.",
+                snapshot_root=snapshot_root,
+            )
+        try:
             actual_executable = sha256_file(snapshot_executable)
             actual_executable_permissions = permission_bits(snapshot_executable)
             actual_policy = sha256_file(snapshot_policy)
             actual_tree = sha256_tree(snapshot_policy_tree)
-        except (OSError, shutil.Error):
+        except OSError:
             return self._snapshot_failure(
                 events,
                 code="process-input-changed",

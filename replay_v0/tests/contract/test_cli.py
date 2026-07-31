@@ -1065,6 +1065,114 @@ for index, event in enumerate(events):
             [decision["effect"] for decision in result.decisions],
         )
 
+    def test_process_snapshot_normalizes_policy_and_runner_mtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy_directory = directory / "source"
+            snapshot_parent = directory / "snapshots"
+            policy_directory.mkdir()
+            snapshot_parent.mkdir()
+            policy = policy_directory / "policy.py"
+            helper = policy_directory / "helper.txt"
+            expected = policy_sources.SNAPSHOT_MTIME_NS
+            policy.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"expected = {expected}\n"
+                "paths = (Path(__file__), Path('helper.txt'), Path.cwd(), "
+                "Path(sys.executable), Path(sys.executable).parent, Path.cwd().parent)\n"
+                "observed = [path.stat().st_mtime_ns for path in paths]\n"
+                "effect = 'allow' if all(value == expected for value in observed) else 'deny'\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                "    print(json.dumps({'schema_version': 'policy-decision.v1', "
+                "'event_id': event['event_id'], 'effect': effect, "
+                "'reason': ','.join(map(str, observed))}))\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            helper.write_bytes(b"same helper bytes\n")
+
+            outcomes = []
+            source_mtimes = (expected, expected + 2_000_000_000)
+            for source_mtime in source_mtimes:
+                for path in (policy, helper, policy_directory):
+                    metadata = path.stat()
+                    os.utime(path, ns=(metadata.st_atime_ns, source_mtime))
+                with mock.patch(
+                    "replay_v0.cli.tempfile.gettempdir",
+                    return_value=str(snapshot_parent),
+                ):
+                    loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+                result = loaded.source.evaluate(EVENTS)
+                outcomes.append((loaded, result))
+                self.assertEqual(source_mtime, policy.stat().st_mtime_ns)
+                self.assertEqual(source_mtime, helper.stat().st_mtime_ns)
+                self.assertEqual(source_mtime, policy_directory.stat().st_mtime_ns)
+
+            common = {
+                "generated_at": "2026-07-30T12:00:00Z",
+                "baseline": {
+                    "kind": "recorded",
+                    "id": "baseline",
+                    "sha256": "1" * 64,
+                },
+                "corpus": {
+                    "id": "charter-v0.1",
+                    "manifest_sha256": "2" * 64,
+                    "event_count": len(EVENTS),
+                },
+                "fail_on": ["newly-allowed"],
+            }
+            manifests = [
+                build_run_manifest(candidate=loaded.identity, **common)
+                for loaded, _result in outcomes
+            ]
+
+        self.assertEqual(outcomes[0][0].identity, outcomes[1][0].identity)
+        self.assertEqual(manifests[0]["run_id"], manifests[1]["run_id"])
+        for _loaded, result in outcomes:
+            self.assertEqual((), result.failures)
+            self.assertEqual(
+                ["allow", "allow"],
+                [decision["effect"] for decision in result.decisions],
+            )
+            self.assertEqual(
+                [str(expected)] * 6,
+                result.decisions[0]["reason"].split(","),
+            )
+
+    def test_process_snapshot_mtime_normalization_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot_root = loaded.source.snapshot_parent / (
+                f"replay-process-inputs-{loaded.identity['sha256']}"
+            )
+
+            with mock.patch(
+                "replay_v0.policy_sources._normalize_snapshot_mtimes",
+                side_effect=OSError("synthetic normalization failure"),
+            ), mock.patch(
+                "replay_v0.policy_sources._run_policy_process"
+            ) as process_run:
+                result = loaded.source.evaluate(EVENTS)
+
+        process_run.assert_not_called()
+        self.assertFalse(snapshot_root.exists())
+        self.assertEqual(
+            ["process-snapshot-unavailable"],
+            [failure.code for failure in result.failures],
+        )
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
+
     @unittest.skipIf(os.name == "nt", "POSIX umask controls directory modes")
     def test_process_snapshot_runner_directory_modes_ignore_umask(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -1283,6 +1391,48 @@ for index, event in enumerate(events):
         )
         self.assertIn(
             "process-snapshot-changed", [failure.code for failure in result.failures]
+        )
+
+    def test_process_snapshot_mtime_change_during_launch_invalidates_decisions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            helper = directory / "rules.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            helper.write_text('EFFECT = "deny"\n', encoding="utf-8", newline="\n")
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_evaluate = loaded.source._evaluate_runtime
+
+            def touch_snapshot_then_run(events, *, argv, cwd):
+                snapshot_helper = Path(cwd) / helper.name
+                metadata = snapshot_helper.stat()
+                os.utime(
+                    snapshot_helper,
+                    ns=(
+                        metadata.st_atime_ns,
+                        policy_sources.SNAPSHOT_MTIME_NS + 1_000_000_000,
+                    ),
+                )
+                return original_evaluate(events, argv=argv, cwd=cwd)
+
+            with mock.patch.object(
+                loaded.source,
+                "_evaluate_runtime",
+                side_effect=touch_snapshot_then_run,
+            ):
+                result = loaded.source.evaluate(EVENTS)
+
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
+        self.assertEqual(
+            ["process-snapshot-changed"],
+            [failure.code for failure in result.failures],
         )
 
     @unittest.skipIf(os.name == "nt", "Windows read-only cleanup has separate coverage")
