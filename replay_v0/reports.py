@@ -86,7 +86,13 @@ def _shell_reproduction_command(argv: list[str], shell: str) -> str | None:
     if shell == "powershell":
         # Windows PowerShell 5.1's native binder does not preserve every possible
         # quoted argv value. Stay inside the directly proved literal subset.
-        if any('"' in value for value in argv):
+        if any(
+            '"' in value
+            or value.endswith("\\")
+            or "\u2018" in value
+            or "\u2019" in value
+            for value in argv
+        ):
             return None
         return "& " + " ".join("'" + value.replace("'", "''") + "'" for value in argv)
     raise ValueError(f"unsupported reproduction shell {shell!r}")

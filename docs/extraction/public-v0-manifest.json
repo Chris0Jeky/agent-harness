@@ -88,7 +88,7 @@
     {
       "path": "replay_v0/reports.py",
       "kind": "source",
-      "sha256": "2e8387de0a3c84e28029c50a92c4748afd7473e3ab6c972db18fdcbce41ba159"
+      "sha256": "5dba444555118910b775ca728eac3022a56a4a631672754aaa79a7b1a75e4b59"
     },
     {
       "path": "replay_v0/schemas/charter-case.v1.schema.json",
@@ -163,7 +163,7 @@
     {
       "path": "replay_v0/tests/unit/test_compare.py",
       "kind": "test",
-      "sha256": "f0dfb00c25d4fe9e9ba26da70b5cd3ab2ce2af452e59768e36469644694205e6"
+      "sha256": "525cf33773a36984e914be3d85b4d81092b5d5c6ac5669571498f55d920236fb"
     },
     {
       "path": "replay_v0/tests/unit/test_digests.py",

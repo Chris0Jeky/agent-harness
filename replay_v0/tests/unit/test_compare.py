@@ -238,6 +238,43 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("Windows PowerShell rendering omitted:", markdown)
         self.assertNotIn("    & ", markdown)
 
+    def test_powershell_rendering_omits_a_trailing_backslash_argument(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        argv = ["python", "--output", "C:\\Policy Lab\\"]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="powershell"
+        )
+        self.assertIn(json.dumps(argv), markdown)
+        self.assertIn("Windows PowerShell rendering omitted:", markdown)
+        self.assertNotIn("    & ", markdown)
+
+    def test_powershell_rendering_omits_smart_quote_injection(self) -> None:
+        report = build_json_report(
+            compare_decisions(
+                self.events,
+                self.baseline,
+                self.candidate,
+                case_values=self.cases,
+            ),
+            self.manifest,
+        )
+        payload = "before\u2019 ; Write-Output __SMART_QUOTE_INJECTION__ ; \u2018after"
+        argv = ["python", "--output", payload]
+        markdown = render_markdown_report(
+            report, reproduction_argv=argv, reproduction_shell="powershell"
+        )
+        self.assertIn(payload, markdown)
+        self.assertIn("Windows PowerShell rendering omitted:", markdown)
+        self.assertNotIn("    & ", markdown)
+
     def test_markdown_table_renders_policy_text_literally_without_changing_json(
         self,
     ) -> None:
