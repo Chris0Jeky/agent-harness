@@ -7603,6 +7603,68 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertIn("worktree_administrative_state", operation["reasons"])
         self.assertIn("sequencer", operation["worktree_administrative_state"])
 
+    def test_old_side_of_head_reflog_preserves_unique_commit(self) -> None:
+        worktree = self.add_worktree("old-reflog-side")
+        self.git("switch", "--detach", cwd=worktree)
+        (worktree / "unique.txt").write_text("only in reflog\n", encoding="utf-8")
+        self.git("add", "unique.txt", cwd=worktree)
+        self.git("commit", "-qm", "unique detached commit", cwd=worktree)
+        unique = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("switch", "test/old-reflog-side", cwd=worktree)
+
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        reflog_path = git_dir / "logs" / "HEAD"
+        records = reflog_path.read_bytes().splitlines(keepends=True)
+        retained_records = [
+            record for record in records if record.split(b" ", 2)[1].decode() != unique
+        ]
+        self.assertLess(len(retained_records), len(records))
+        self.assertTrue(
+            any(
+                record.split(b" ", 2)[0].decode() == unique
+                for record in retained_records
+            )
+        )
+        reflog_path.write_bytes(b"".join(retained_records))
+        (git_dir / "COMMIT_EDITMSG").unlink(missing_ok=True)
+
+        new_sides = self.git(
+            "reflog", "show", "--format=%H", "--no-abbrev", "HEAD", cwd=worktree
+        ).stdout.splitlines()
+        self.assertNotIn(unique, new_sides)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("unretained_recovery_commits", candidate["reasons"])
+        self.assertIn(unique, candidate["recovery_commits"])
+        self.assertIn(unique, candidate["unretained_recovery_commits"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_non_regular_head_reflog_is_administrative_state(self) -> None:
+        worktree = self.add_worktree("head-reflog-directory")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        reflog_path = git_dir / "logs" / "HEAD"
+        reflog_path.unlink()
+        reflog_path.mkdir()
+        evidence = reflog_path / "unique-recovery.txt"
+        evidence.write_text("preserve me\n", encoding="utf-8")
+        self.assertEqual(self.git("reflog", "show", "HEAD", cwd=worktree).returncode, 0)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_administrative_state", candidate["reasons"])
+        self.assertIn("logs/HEAD", candidate["worktree_administrative_state"])
+        self.assertTrue(plan["complete"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(evidence.is_file())
+
     def test_any_fetched_remote_tracking_ref_can_preserve_the_head(self) -> None:
         worktree = self.add_worktree("archive")
         (worktree / "archive.txt").write_text("published\n", encoding="utf-8")
@@ -8097,11 +8159,6 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 and harness.same_worktree_path(cwd, worktree),
             ),
             (
-                "worktree_recovery_probe_failed",
-                lambda command, cwd: command[1:3] == ["reflog", "show"]
-                and harness.same_worktree_path(cwd, worktree),
-            ),
-            (
                 "worktree_recovery_reachability_probe_failed",
                 lambda command, cwd: command[1:3] == ["rev-list", "--no-walk"]
                 and harness.same_worktree_path(cwd, self.repo),
@@ -8126,6 +8183,18 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 self.assertTrue(injected)
                 self.assertIn(reason, self.candidate(plan, worktree)["reasons"])
                 self.assertFalse(plan["complete"])
+
+        with mock.patch.object(
+            harness,
+            "worktree_head_reflog_commits",
+            return_value=([], "permission denied"),
+        ):
+            recovery_plan = self.plan()
+        self.assertIn(
+            "worktree_recovery_probe_failed",
+            self.candidate(recovery_plan, worktree)["reasons"],
+        )
+        self.assertFalse(recovery_plan["complete"])
 
         list_failure, list_injected = runner_failing(
             lambda command, _cwd: command[1:3] == ["worktree", "list"]

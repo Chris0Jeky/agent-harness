@@ -1278,6 +1278,24 @@ def worktree_administrative_state(git_dir: Path) -> tuple[list[str], str]:
         state.extend(
             f"{directory_name}/{name}" for name in children if name not in allowed_names
         )
+        for name in children:
+            if name not in allowed_names:
+                continue
+            child = directory / name
+            try:
+                child_stat = child.lstat()
+            except FileNotFoundError:
+                return [], (
+                    f"worktree {directory_name}/{name} metadata changed "
+                    "during inspection"
+                )
+            except OSError as exc:
+                return [], (
+                    f"cannot inspect worktree {directory_name}/{name} metadata: "
+                    f"{type(exc).__name__}"
+                )
+            if not stat.S_ISREG(child_stat.st_mode):
+                state.append(f"{directory_name}/{name}")
     return sorted(state), ""
 
 
@@ -1309,17 +1327,39 @@ def worktree_commit_editmsg_status(
     return "differs_from_head", ""
 
 
-def worktree_recovery_commits(path: Path, command_runner: Any) -> tuple[list[str], str]:
-    reflog = worktree_git_result(
-        command_runner,
-        ["reflog", "show", "--format=%H", "--no-abbrev", "HEAD"],
-        path,
-    )
-    if reflog.returncode:
-        return [], f"HEAD reflog probe failed with exit {reflog.returncode}"
-    commits = [line.strip().lower() for line in reflog.stdout.splitlines() if line]
-    if any(not re.fullmatch(r"[0-9a-f]{40,64}", commit) for commit in commits):
-        return [], "HEAD reflog probe returned an invalid object id"
+def worktree_head_reflog_commits(git_dir: Path) -> tuple[list[str], str]:
+    reflog_path = git_dir / "logs" / "HEAD"
+    try:
+        records = reflog_path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return [], ""
+    except OSError as exc:
+        return [], f"cannot read HEAD reflog: {type(exc).__name__}"
+
+    commits: list[str] = []
+    for record in records:
+        fields = record.split(b" ", 2)
+        if len(fields) != 3:
+            return [], "HEAD reflog contains an invalid record"
+        for raw_object_id in fields[:2]:
+            try:
+                object_id = raw_object_id.decode("ascii").lower()
+            except UnicodeDecodeError:
+                return [], "HEAD reflog contains a non-ASCII object id"
+            if len(object_id) in (40, 64) and not object_id.strip("0"):
+                continue
+            if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id):
+                return [], "HEAD reflog contains an invalid object id"
+            commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def worktree_recovery_commits(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    commits, reflog_error = worktree_head_reflog_commits(git_dir)
+    if reflog_error:
+        return [], reflog_error
 
     orig_head = worktree_git_result(
         command_runner,
@@ -1654,9 +1694,12 @@ def inspect_worktree_candidate(
         elif commit_editmsg_status == "differs_from_head":
             keep("commit_editmsg_uncommitted")
 
-    if top_matches:
+    if (
+        git_dir is not None
+        and "logs/HEAD" not in candidate["worktree_administrative_state"]
+    ):
         recovery_commits, recovery_error = worktree_recovery_commits(
-            path, command_runner
+            path, git_dir, command_runner
         )
         if recovery_error:
             keep("worktree_recovery_probe_failed")

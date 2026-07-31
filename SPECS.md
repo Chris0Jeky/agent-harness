@@ -547,10 +547,12 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   removal operand, exact containment under the primary checkout's `.worktrees/`, no configured
   work-tree redirection, clean tracked/staged/untracked/ignored state, no executable-mode-only
   difference, no assume-unchanged/skip-worktree index flags or resolve-undo recovery records, no
-  pending `COMMIT_EDITMSG` differing from the current commit message, no worktree-local refs or
-  non-baseline administrative/operation state, no recovery commit held only by the candidate HEAD
-  reflog or `ORIG_HEAD`, an attached `refs/heads/*` local branch, an unmodified commit graph after
-  scrubbing inherited graft overrides, remote-ref reachability, an active exactly scoped
+  pending `COMMIT_EDITMSG` differing from the current commit message, no worktree-local refs,
+  non-baseline administrative/operation state, or non-regular candidate HEAD reflog, no recovery
+  commit held only by either object-ID side of a raw candidate HEAD reflog record or by
+  `ORIG_HEAD`, an attached `refs/heads/*` local branch, an unmodified commit graph after scrubbing
+  inherited graft
+  overrides, remote-ref reachability, an active exactly scoped
   lease owned by the supplied claimant, and same-run fingerprint plus lease revalidation while
   holding the lease-mutation lock through plain removal. Missing,
   malformed, mismatched, stale, nearly expired, changed, differently
