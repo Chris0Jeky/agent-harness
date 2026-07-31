@@ -81,9 +81,10 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   authentication
 - `worktrees` — reports linked worktrees without mutation by default; an explicit all-remote
   refresh plus a matching active owner lease and `--apply` removes only clean, attached,
-  canonically contained, remote-reachable candidates with no hidden mode, recovery-ref, reflog, or
-  administrative state after short-lived fingerprint and lease revalidation, using plain removal,
-  retaining every branch, and never globally pruning worktree metadata
+  canonically contained, remote-reachable candidates with no hidden mode, index resolve-undo,
+  recovery-ref, reflog, or administrative state after short-lived fingerprint and lease
+  revalidation, using plain removal, retaining every branch, and never globally pruning worktree
+  metadata
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is

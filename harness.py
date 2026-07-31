@@ -1356,6 +1356,7 @@ def worktree_candidate_fingerprint(
         "changes": candidate["changes"],
         "ignored": candidate["ignored"],
         "index_preservation_flags": candidate["index_preservation_flags"],
+        "index_resolve_undo": candidate["index_resolve_undo"],
         "tracked_mode_changes": candidate["tracked_mode_changes"],
         "worktree_local_refs": candidate["worktree_local_refs"],
         "worktree_administrative_state": candidate["worktree_administrative_state"],
@@ -1404,6 +1405,7 @@ def inspect_worktree_candidate(
         "changes": [],
         "ignored": [],
         "index_preservation_flags": [],
+        "index_resolve_undo": [],
         "tracked_mode_changes": [],
         "worktree_local_refs": [],
         "worktree_administrative_state": [],
@@ -1535,6 +1537,18 @@ def inspect_worktree_candidate(
                 candidate["index_preservation_flags"] = flagged
                 if flagged:
                     keep("index_preservation_flags")
+            resolve_undo_result = worktree_git_result(
+                command_runner, ["ls-files", "--resolve-undo", "-z"], path
+            )
+            if resolve_undo_result.returncode:
+                keep("index_resolve_undo_probe_failed")
+                complete = False
+            else:
+                candidate["index_resolve_undo"] = [
+                    entry for entry in resolve_undo_result.stdout.split("\0") if entry
+                ]
+                if candidate["index_resolve_undo"]:
+                    keep("index_resolve_undo")
 
     if top_matches:
         mode_result = worktree_git_result(

@@ -7488,6 +7488,41 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertIn("index_preservation_flags", candidate["reasons"])
         self.assertTrue(candidate["index_preservation_flags"])
 
+    def test_clean_index_resolve_undo_state_is_a_preservation_blocker(self) -> None:
+        conflict = self.repo / "conflict.txt"
+        conflict.write_text("base\n", encoding="utf-8")
+        self.git("add", "conflict.txt")
+        self.git("commit", "-qm", "add conflict fixture")
+        self.git("push", "-q")
+        worktree = self.add_worktree("resolve-undo")
+
+        conflict.write_text("main\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on main")
+        self.git("push", "-q")
+        worktree_conflict = worktree / "conflict.txt"
+        worktree_conflict.write_text("branch\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on branch", cwd=worktree)
+        merge = self.git("merge", "origin/main", cwd=worktree, check=False)
+        self.assertNotEqual(merge.returncode, 0)
+        worktree_conflict.write_text("resolved\n", encoding="utf-8")
+        self.git("add", "conflict.txt", cwd=worktree)
+        self.git("commit", "-qm", "resolve merge", cwd=worktree)
+        self.git("push", "-q", "origin", "test/resolve-undo")
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        causal_probe = self.git("ls-files", "--resolve-undo", "-z", cwd=worktree).stdout
+        self.assertTrue(causal_probe)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("index_resolve_undo", candidate["reasons"])
+        self.assertEqual(
+            candidate["index_resolve_undo"],
+            [entry for entry in causal_probe.split("\0") if entry],
+        )
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
     def test_mode_only_change_is_a_blocker_when_core_filemode_is_false(self) -> None:
         script = self.repo / "tool.sh"
         script.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -7985,6 +8020,11 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 and harness.same_worktree_path(cwd, worktree),
             ),
             (
+                "index_resolve_undo_probe_failed",
+                lambda command, cwd: command[1:3] == ["ls-files", "--resolve-undo"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
                 "tracked_mode_probe_failed",
                 lambda command, cwd: command[1:4]
                 == ["-c", "core.fileMode=true", "diff-files"]
@@ -8077,6 +8117,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         candidate = self.candidate(payload, self.repo / ".worktrees" / "json")
         for field in (
             "tracked_mode_changes",
+            "index_resolve_undo",
             "worktree_local_refs",
             "worktree_administrative_state",
             "recovery_commits",

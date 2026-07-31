@@ -56,12 +56,13 @@ so a cooperating successor cannot reclaim an expiring lease mid-removal.
 Every existing path is converted once to its physical canonical spelling and that identity is used
 for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
 collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
-untracked, ignored, executable-mode-only, assume-unchanged, and skip-worktree state blocks removal.
-So do detached HEADs, worktree-local refs, non-baseline administrative/operation state, and HEAD
-reflog or `ORIG_HEAD` commits not retained by a local branch or tag. Requiring an attached branch
-keeps current HEAD rooted in a local ref while plain removal runs. The only destructive command is
-plain `git worktree remove -- <canonical-path>`; a refusal becomes keep. There is no `--force`,
-branch deletion, or repository-wide `git worktree prune`.
+untracked, ignored, executable-mode-only, assume-unchanged, skip-worktree, and index resolve-undo
+state blocks removal. So do detached HEADs, worktree-local refs, non-baseline
+administrative/operation state, and HEAD reflog or `ORIG_HEAD` commits not retained by a local
+branch or tag. Requiring an attached branch keeps current HEAD rooted in a local ref while plain
+removal runs. The only destructive command is plain `git worktree remove -- <canonical-path>`; a
+refusal becomes keep. There is no `--force`, branch deletion, or repository-wide
+`git worktree prune`.
 
 The lease coordinates only participants that follow this contract. It cannot discover or stop a
 non-cooperating external process, watcher, or writer; such a process can still race after the last
