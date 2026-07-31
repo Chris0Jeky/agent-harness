@@ -88,6 +88,7 @@ class DeterminismTests(unittest.TestCase):
         self.assertEqual(first["run-manifest.json"], second["run-manifest.json"])
         self.assertEqual(first["report.json"], second["report.json"])
         self.assertNotEqual(first["report.md"], second["report.md"])
+        self.assertNotIn(b"reproduction_argv", first["report.json"])
         manifest = json.loads(first["run-manifest.json"])
         report = json.loads(first["report.json"])
         self.assertEqual(manifest["run_id"], report["run_id"])
@@ -105,6 +106,15 @@ class DeterminismTests(unittest.TestCase):
         )
         first_markdown = first["report.md"].decode("utf-8")
         second_markdown = second["report.md"].decode("utf-8")
+        self.assertIn("structured argv (portable source of truth)", first_markdown)
+        self.assertIn(
+            (
+                "Windows PowerShell rendering for this host:"
+                if os.name == "nt"
+                else "POSIX sh rendering for this host:"
+            ),
+            first_markdown,
+        )
         self.assertIn(str(first_output), first_markdown)
         self.assertIn(str(second_output), second_markdown)
 

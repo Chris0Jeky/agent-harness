@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 import json
+import shlex
 from typing import Any
 
 from replay_v0.compare import ComparisonResult, DIFF_CLASSES
@@ -75,7 +76,28 @@ def _table_cell(value: object) -> str:
     )
 
 
-def render_markdown_report(report: dict[str, Any], *, reproduction_command: str) -> str:
+def _shell_reproduction_command(argv: list[str], shell: str) -> str | None:
+    """Render the bounded host-shell subset; structured argv remains authoritative."""
+
+    if not argv or any(not value or "\r" in value or "\n" in value for value in argv):
+        return None
+    if shell == "posix-sh":
+        return shlex.join(argv)
+    if shell == "powershell":
+        # Windows PowerShell 5.1's native binder does not preserve every possible
+        # quoted argv value. Stay inside the directly proved literal subset.
+        if any('"' in value for value in argv):
+            return None
+        return "& " + " ".join("'" + value.replace("'", "''") + "'" for value in argv)
+    raise ValueError(f"unsupported reproduction shell {shell!r}")
+
+
+def render_markdown_report(
+    report: dict[str, Any],
+    *,
+    reproduction_argv: list[str],
+    reproduction_shell: str,
+) -> str:
     """Render a compact report with literal invocation details for operators."""
 
     counts = report["counts"]
@@ -85,6 +107,13 @@ def render_markdown_report(report: dict[str, Any], *, reproduction_command: str)
     corpus = report["corpus"]
     triggered = ", ".join(gate["triggered"]) or "none"
     count_summary = "; ".join(f"{name}={counts[name]}" for name in DIFF_CLASSES)
+    shell_labels = {
+        "posix-sh": "POSIX sh",
+        "powershell": "Windows PowerShell",
+    }
+    if reproduction_shell not in shell_labels:
+        raise ValueError(f"unsupported reproduction shell {reproduction_shell!r}")
+    shell_command = _shell_reproduction_command(reproduction_argv, reproduction_shell)
 
     lines = [
         "# Replay v0 comparison",
@@ -103,15 +132,34 @@ def render_markdown_report(report: dict[str, Any], *, reproduction_command: str)
             f"Corpus: `{corpus['id']}` ({corpus['event_count']} events, manifest "
             f"SHA-256 `{corpus['manifest_sha256']}`)."
         ),
-        "Reproduce:",
+        "Reproduce with structured argv (portable source of truth):",
         "",
-        f"    {reproduction_command}",
+        f"    {json.dumps(reproduction_argv, ensure_ascii=False)}",
         "",
-        "## Event results",
-        "",
-        "| Event | Classification | Baseline | Candidate |",
-        "|---|---|---|---|",
     ]
+    shell_label = shell_labels[reproduction_shell]
+    if shell_command is None:
+        lines.append(
+            f"{shell_label} rendering omitted: an argument is empty, multiline, or outside "
+            "the proved literal subset."
+        )
+    else:
+        lines.extend(
+            [
+                f"{shell_label} rendering for this host:",
+                "",
+                f"    {shell_command}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Event results",
+            "",
+            "| Event | Classification | Baseline | Candidate |",
+            "|---|---|---|---|",
+        ]
+    )
     for result in report["results"]:
         lines.append(
             "| "
