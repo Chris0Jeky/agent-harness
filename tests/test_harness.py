@@ -4563,6 +4563,91 @@ allow_local_binding = true
         )
         self.assertFalse(harness.unbounded_docker_mcp_gateway("podman.cmd", args))
 
+    def test_mcp_docker_gateway_matches_only_docker_subcommand(self) -> None:
+        for label, args, expected in (
+            ("direct", ("mcp", "gateway", "run"), True),
+            ("boolean global", ("--debug", "mcp", "gateway", "run"), True),
+            (
+                "short boolean assignment",
+                ("-D=false", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "value global",
+                ("--context", "safe", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "attached long value",
+                ("--config=private-config", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "attached short value",
+                ("-ldebug", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "ordinary container",
+                ("run", "--rm", "private-image", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "different subcommand",
+                ("compose", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "missing global value",
+                ("--context", "mcp", "gateway", "run"),
+                False,
+            ),
+            ("terminal global", ("--version", "mcp", "gateway", "run"), False),
+            (
+                "false terminal assignment",
+                ("-v=false", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "true terminal assignment",
+                ("--version=true", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "bounded gateway",
+                (
+                    "--context",
+                    "safe",
+                    "mcp",
+                    "gateway",
+                    "run",
+                    "--servers=github",
+                ),
+                False,
+            ),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    expected,
+                    harness.unbounded_docker_mcp_gateway("docker", args),
+                )
+
+        codex_home = Path(self.temp.name) / "docker-container-codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            "[mcp_servers.container]\n"
+            'command = "docker"\n'
+            'args = ["run", "--rm", "private-image", "mcp", "gateway", '
+            '"run", "private-argument"]\n',
+            encoding="utf-8",
+        )
+
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [])
+
+        self.assertTrue(ok, detail)
+        self.assertNotIn("private-image", detail)
+        self.assertNotIn("private-argument", detail)
+
     def test_mcp_rejects_layered_mixed_transports_without_rendering_values(
         self,
     ) -> None:

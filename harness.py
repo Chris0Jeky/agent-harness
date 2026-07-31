@@ -2321,22 +2321,92 @@ def layered_mcp_server_states(config_paths: list[Path]) -> dict[str, dict[str, A
     return states
 
 
+_DOCKER_BOOLEAN_GLOBAL_OPTIONS = frozenset({"-D", "--debug", "--tls", "--tlsverify"})
+_DOCKER_VALUE_GLOBAL_OPTIONS = frozenset(
+    {
+        "--config",
+        "-c",
+        "--context",
+        "-H",
+        "--host",
+        "-l",
+        "--log-level",
+        "--tlscacert",
+        "--tlscert",
+        "--tlskey",
+    }
+)
+_DOCKER_TERMINAL_GLOBAL_OPTIONS = frozenset({"-h", "--help", "-v", "--version"})
+_DOCKER_SHORT_VALUE_OPTIONS = ("-c", "-H", "-l")
+
+
+def _docker_subcommand_index(args: tuple[str, ...]) -> int | None:
+    """Locate Docker's subcommand after its bounded root-option prefix."""
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--":
+            index += 1
+            return index if index < len(args) else None
+        if argument in _DOCKER_TERMINAL_GLOBAL_OPTIONS:
+            return None
+        if argument in _DOCKER_BOOLEAN_GLOBAL_OPTIONS:
+            index += 1
+            continue
+        if argument in _DOCKER_VALUE_GLOBAL_OPTIONS:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        name, separator, value = argument.partition("=")
+        if separator:
+            if name in _DOCKER_TERMINAL_GLOBAL_OPTIONS:
+                if value.casefold() == "false":
+                    index += 1
+                    continue
+                return None
+            if name in _DOCKER_BOOLEAN_GLOBAL_OPTIONS and value.casefold() in {
+                "true",
+                "false",
+            }:
+                index += 1
+                continue
+            if name in _DOCKER_VALUE_GLOBAL_OPTIONS and value:
+                index += 1
+                continue
+            return None
+        if argument.startswith("--"):
+            return None
+        if any(
+            argument.startswith(option) and len(argument) > len(option)
+            for option in _DOCKER_SHORT_VALUE_OPTIONS
+        ):
+            index += 1
+            continue
+        if argument.startswith("-"):
+            return None
+        return index
+    return None
+
+
 def unbounded_docker_mcp_gateway(command: str, args: tuple[str, ...]) -> bool:
     """Recognize a Docker MCP gateway that can load the whole registry."""
     executable = re.split(r"[\\/]", command)[-1].casefold()
     if executable not in {"docker", "docker.exe", "docker.cmd", "docker.bat"}:
         return False
-    gateway_run = any(
-        args[index : index + 3] == ("mcp", "gateway", "run")
-        for index in range(max(0, len(args) - 2))
-    )
-    if not gateway_run:
+    subcommand_index = _docker_subcommand_index(args)
+    if subcommand_index is None or args[subcommand_index : subcommand_index + 3] != (
+        "mcp",
+        "gateway",
+        "run",
+    ):
         return False
+    gateway_args = args[subcommand_index + 3 :]
     return not any(
         argument in {"--servers", "--profile"}
         or argument.startswith("--servers=")
         or argument.startswith("--profile=")
-        for argument in args
+        for argument in gateway_args
     )
 
 
