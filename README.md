@@ -10,7 +10,7 @@ explicit where their hook/config contracts differ.
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
-| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, and backed-up shared global sync |
+| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, guarded worktree closeout, and backed-up shared global sync |
 | `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting bypass matrix (version = `FLOOR_VERSION` in `dispatch.py`). `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
 | `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
 
@@ -22,11 +22,25 @@ py -3 .\harness.py doctor
 py -3 .\harness.py doctor --repo C:\path\to\repo
 py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
+py -3 .\harness.py worktrees --repo C:\path\to\repo
+py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --json
+py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --apply --json
 
 # Diff, then install global guidance, skills, and the shared dispatcher with backups.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 ```
+
+`worktrees` is a guarded closeout command. Its default is entirely read-only: it does not fetch,
+remove, prune, or delete branches, so otherwise-clean worktrees remain a keep verdict until
+remote evidence is explicitly refreshed. `--refresh` fetches every configured remote and accepts
+a candidate only when its HEAD is reachable from a resulting remote-tracking ref. `--apply`
+requires that same-run refresh, fingerprints each candidate, revalidates the fingerprint within
+60 seconds, and invokes plain `git worktree remove` only for a physically contained, unlocked,
+clean worktree under the primary checkout's `.worktrees/` directory. Tracked, untracked, and every
+ignored path are preservation blockers, as are index flags that can hide working-tree changes.
+A plain-removal refusal becomes a keep result; `--force` and branch deletion are not implemented.
+`--json` emits the complete evidence and result summary.
 
 Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every

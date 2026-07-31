@@ -29,6 +29,24 @@ from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
 
+WORKTREE_PLAN_SCHEMA_VERSION = 1
+WORKTREE_LEASE_SECONDS = 60.0
+WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
+WORKTREE_GIT_CONTEXT_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_WORK_TREE",
+)
+
 CODEX_HOOK_EVENT_NAMES = (
     "PreToolUse",
     "PermissionRequest",
@@ -429,6 +447,687 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
     raise HarnessError(
         "cannot resolve root checkout from Git common directory: " f"{common_dir}"
     )
+
+
+# --- Guarded linked-worktree closeout ---------------------------------------
+
+
+def worktree_git_environment() -> dict[str, str]:
+    """Return an environment that cannot redirect Git away from the named repo."""
+
+    environment = os.environ.copy()
+    for name in WORKTREE_GIT_CONTEXT_ENV:
+        environment.pop(name, None)
+    for name in list(environment):
+        if name == "GIT_CONFIG_COUNT" or name.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            environment.pop(name, None)
+    return environment
+
+
+def worktree_git_runner(
+    command: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded Git command for the guarded worktree workflow."""
+
+    if not command or command[0] != "git":
+        return subprocess.CompletedProcess(command, 127, "", "only git is supported")
+    spawn_argv, failure = probe_spawn_argv(command, worktree_git_environment())
+    if failure:
+        return subprocess.CompletedProcess(command, 127, "", failure)
+    try:
+        return subprocess.run(
+            spawn_argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+            env=worktree_git_environment(),
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(command, 124, "", "command timed out")
+    except UnicodeError as exc:
+        return subprocess.CompletedProcess(command, 125, "", type(exc).__name__)
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+
+
+def worktree_git_result(
+    command_runner: Any, args: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    result = command_runner(["git", *args], cwd)
+    if not isinstance(result, subprocess.CompletedProcess):
+        raise HarnessError("worktree command runner returned an invalid result")
+    return result
+
+
+def resolve_worktree_checkout(path: Path, command_runner: Any) -> Path:
+    requested = Path(os.path.abspath(path.expanduser()))
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--show-toplevel"], requested
+    )
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError(f"not a Git worktree: {requested}")
+    root = Path(result.stdout.strip())
+    if not root.is_absolute():
+        root = requested / root
+    try:
+        return root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(f"cannot resolve Git worktree {root}: {exc}") from exc
+
+
+def parse_worktree_list(output: str) -> list[dict[str, Any]]:
+    """Parse `git worktree list --porcelain -z` without path quoting."""
+
+    records: list[dict[str, Any]] = []
+    for raw_record in output.split("\0\0"):
+        if not raw_record:
+            continue
+        record: dict[str, Any] = {
+            "path": "",
+            "head": "",
+            "branch": None,
+            "detached": False,
+            "bare": False,
+            "locked": False,
+            "lock_reason": "",
+            "prunable": False,
+            "prunable_reason": "",
+        }
+        for field in raw_record.split("\0"):
+            if field.startswith("worktree "):
+                record["path"] = field.removeprefix("worktree ")
+            elif field.startswith("HEAD "):
+                record["head"] = field.removeprefix("HEAD ")
+            elif field.startswith("branch "):
+                record["branch"] = field.removeprefix("branch ")
+            elif field == "detached":
+                record["detached"] = True
+            elif field == "bare":
+                record["bare"] = True
+            elif field == "locked" or field.startswith("locked "):
+                record["locked"] = True
+                record["lock_reason"] = field.removeprefix("locked").strip()
+            elif field == "prunable" or field.startswith("prunable "):
+                record["prunable"] = True
+                record["prunable_reason"] = field.removeprefix("prunable").strip()
+        if not record["path"]:
+            raise HarnessError("git worktree list returned a record without a path")
+        records.append(record)
+    if not records:
+        raise HarnessError("git worktree list returned no worktrees")
+    return records
+
+
+def list_worktrees(primary: Path, command_runner: Any) -> list[dict[str, Any]]:
+    result = worktree_git_result(
+        command_runner, ["worktree", "list", "--porcelain", "-z"], primary
+    )
+    if result.returncode:
+        raise HarnessError(f"git worktree list failed with exit {result.returncode}")
+    return parse_worktree_list(result.stdout)
+
+
+def same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+        os.path.abspath(right)
+    )
+
+
+def path_is_within(path: Path, parent: Path) -> bool:
+    path_text = os.path.normcase(os.path.abspath(path))
+    parent_text = os.path.normcase(os.path.abspath(parent))
+    try:
+        return os.path.commonpath([path_text, parent_text]) == parent_text
+    except ValueError:
+        return False
+
+
+def resolve_common_git_dir(primary: Path, command_runner: Any) -> Path:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--git-common-dir"], primary
+    )
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError("cannot resolve the repository's common Git directory")
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = primary / common
+    try:
+        return common.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(
+            f"cannot resolve common Git directory {common}: {exc}"
+        ) from exc
+
+
+def configured_worktree_remotes(
+    primary: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    result = worktree_git_result(command_runner, ["remote"], primary)
+    if result.returncode:
+        return [], f"git remote failed with exit {result.returncode}"
+    remotes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not remotes:
+        return [], "no configured remotes"
+    return sorted(set(remotes)), ""
+
+
+def refresh_worktree_remotes(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for remote in remotes:
+        result = worktree_git_result(
+            command_runner,
+            [
+                "fetch",
+                "--prune",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                remote,
+            ],
+            primary,
+        )
+        results.append(
+            {
+                "remote": remote,
+                "ok": result.returncode == 0,
+                "exit_code": result.returncode,
+            }
+        )
+    return results
+
+
+def remote_tracking_refs(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> tuple[dict[str, str], str]:
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"],
+        primary,
+    )
+    if result.returncode:
+        return {}, f"git for-each-ref failed with exit {result.returncode}"
+    prefixes = tuple(f"refs/remotes/{remote}/" for remote in remotes)
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return {}, "git for-each-ref returned an invalid record"
+        if not ref.startswith(prefixes) or ref.endswith("/HEAD"):
+            continue
+        refs[ref] = object_id.strip()
+    if not refs:
+        return {}, "fetch produced no remote-tracking refs"
+    return refs, ""
+
+
+def refs_containing_head(
+    primary: Path,
+    head: str,
+    refs: dict[str, str],
+    command_runner: Any,
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            f"--contains={head}",
+            "refs/remotes/",
+        ],
+        primary,
+    )
+    if result.returncode:
+        return [], f"reachability probe failed with exit {result.returncode}"
+    containing = []
+    for ref in result.stdout.splitlines():
+        ref = ref.strip()
+        if ref in refs:
+            containing.append({"ref": ref, "oid": refs[ref]})
+    return sorted(containing, key=lambda item: item["ref"]), ""
+
+
+def worktree_candidate_fingerprint(
+    candidate: dict[str, Any], common_git_dir: Path
+) -> str:
+    state = {
+        "path": candidate["path"],
+        "resolved_path": candidate.get("resolved_path"),
+        "common_git_dir": str(common_git_dir),
+        "head": candidate["head"],
+        "branch": candidate["branch"],
+        "detached": candidate["detached"],
+        "locked": candidate["locked"],
+        "lock_reason": candidate["lock_reason"],
+        "prunable": candidate["prunable"],
+        "prunable_reason": candidate["prunable_reason"],
+        "changes": candidate["changes"],
+        "ignored": candidate["ignored"],
+        "index_preservation_flags": candidate["index_preservation_flags"],
+        "containing_remote_refs": candidate["containing_remote_refs"],
+        "reasons": candidate["reasons"],
+    }
+    encoded = json.dumps(
+        state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def inspect_worktree_candidate(
+    record: dict[str, Any],
+    *,
+    primary: Path,
+    requested: Path,
+    process_cwd: Path,
+    worktree_dir: Path,
+    common_git_dir: Path,
+    remote_evidence_ready: bool,
+    remote_evidence_requested: bool,
+    refs: dict[str, str],
+    command_runner: Any,
+) -> tuple[dict[str, Any], bool]:
+    path = Path(record["path"])
+    if not path.is_absolute():
+        path = primary / path
+    absolute = Path(os.path.abspath(path))
+    candidate: dict[str, Any] = {
+        "path": str(absolute),
+        "resolved_path": None,
+        "head": record["head"],
+        "branch": record["branch"],
+        "detached": record["detached"],
+        "locked": record["locked"],
+        "lock_reason": record["lock_reason"],
+        "prunable": record["prunable"],
+        "prunable_reason": record["prunable_reason"],
+        "changes": [],
+        "ignored": [],
+        "index_preservation_flags": [],
+        "containing_remote_refs": [],
+        "reasons": [],
+        "verdict": "keep",
+        "fingerprint": "",
+        "revalidation": "not_requested",
+        "apply": "not_requested",
+    }
+    complete = True
+
+    if same_path(absolute, primary):
+        candidate["reasons"].append("primary_checkout")
+    if same_path(absolute, requested):
+        candidate["reasons"].append("requested_checkout")
+    if record["bare"]:
+        candidate["reasons"].append("bare_repository")
+    if record["locked"]:
+        candidate["reasons"].append("git_locked")
+    if record["prunable"]:
+        candidate["reasons"].append("prunable_metadata")
+
+    if not candidate["reasons"]:
+        if not path_is_within(absolute, worktree_dir) or same_path(
+            absolute, worktree_dir
+        ):
+            candidate["reasons"].append("outside_worktree_directory")
+        else:
+            try:
+                resolved = absolute.resolve(strict=True)
+                resolved_dir = worktree_dir.resolve(strict=True)
+                resolved_primary = primary.resolve(strict=True)
+                candidate["resolved_path"] = str(resolved)
+                if (
+                    path_is_alias(worktree_dir)
+                    or not path_is_within(resolved_dir, resolved_primary)
+                    or path_is_alias(absolute)
+                    or not path_is_within(resolved, resolved_dir)
+                ):
+                    candidate["reasons"].append("containment_alias_or_escape")
+                elif path_is_within(process_cwd, resolved):
+                    candidate["reasons"].append("process_cwd_occupied")
+            except (OSError, RuntimeError) as exc:
+                candidate["reasons"].append("path_unavailable")
+                candidate["path_error"] = type(exc).__name__
+                complete = False
+
+    if not candidate["reasons"]:
+        head_result = worktree_git_result(
+            command_runner, ["rev-parse", "HEAD"], absolute
+        )
+        if head_result.returncode or not head_result.stdout.strip():
+            candidate["reasons"].append("head_probe_failed")
+            complete = False
+        else:
+            measured_head = head_result.stdout.strip()
+            if measured_head != record["head"]:
+                candidate["reasons"].append("head_changed_during_audit")
+            candidate["head"] = measured_head
+
+    if not candidate["reasons"]:
+        status_result = worktree_git_result(
+            command_runner,
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            absolute,
+        )
+        if status_result.returncode:
+            candidate["reasons"].append("status_probe_failed")
+            complete = False
+        else:
+            entries = [entry for entry in status_result.stdout.split("\0") if entry]
+            candidate["ignored"] = [
+                entry.removeprefix("!! ")
+                for entry in entries
+                if entry.startswith("!! ")
+            ]
+            candidate["changes"] = [
+                entry for entry in entries if not entry.startswith("!! ")
+            ]
+            if candidate["changes"]:
+                candidate["reasons"].append("tracked_or_untracked_changes")
+            if candidate["ignored"]:
+                candidate["reasons"].append("ignored_files")
+            index_result = worktree_git_result(
+                command_runner, ["ls-files", "-v", "-z"], absolute
+            )
+            if index_result.returncode:
+                candidate["reasons"].append("index_probe_failed")
+                complete = False
+            else:
+                flagged = []
+                for entry in index_result.stdout.split("\0"):
+                    if len(entry) < 3 or entry[1] != " ":
+                        continue
+                    tag = entry[0]
+                    if tag == "S" or tag.islower():
+                        flagged.append(entry)
+                candidate["index_preservation_flags"] = flagged
+                if flagged:
+                    candidate["reasons"].append("index_preservation_flags")
+
+    if not candidate["reasons"]:
+        if not remote_evidence_ready:
+            candidate["reasons"].append(
+                "remote_refresh_failed"
+                if remote_evidence_requested
+                else "remote_evidence_not_refreshed"
+            )
+        else:
+            containing, reachability_error = refs_containing_head(
+                primary, candidate["head"], refs, command_runner
+            )
+            if reachability_error:
+                candidate["reasons"].append("reachability_probe_failed")
+                candidate["reachability_error"] = reachability_error
+                complete = False
+            elif not containing:
+                candidate["reasons"].append("head_not_on_fetched_remote_ref")
+            else:
+                candidate["containing_remote_refs"] = containing
+
+    if not candidate["reasons"]:
+        candidate["verdict"] = "remove"
+    candidate["fingerprint"] = worktree_candidate_fingerprint(candidate, common_git_dir)
+    return candidate, complete
+
+
+def worktree_plan(
+    repo: Path,
+    *,
+    refresh: bool,
+    command_runner: Any = worktree_git_runner,
+    process_cwd: Path | None = None,
+) -> dict[str, Any]:
+    requested = resolve_worktree_checkout(repo, command_runner)
+    records = list_worktrees(requested, command_runner)
+    primary = Path(records[0]["path"]).resolve(strict=True)
+    if records[0]["bare"]:
+        raise HarnessError("bare repositories have no removable worktree root")
+    common_git_dir = resolve_common_git_dir(primary, command_runner)
+    worktree_dir = Path(os.path.abspath(primary / ".worktrees"))
+    try:
+        current = Path(process_cwd or Path.cwd()).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(f"cannot resolve the harness process cwd: {exc}") from exc
+
+    remotes, remote_error = configured_worktree_remotes(primary, command_runner)
+    fetch_results: list[dict[str, Any]] = []
+    refs: dict[str, str] = {}
+    refresh_error = remote_error
+    if refresh and not refresh_error:
+        fetch_results = refresh_worktree_remotes(primary, remotes, command_runner)
+        failed = [item for item in fetch_results if not item["ok"]]
+        if failed:
+            names = ", ".join(item["remote"] for item in failed)
+            refresh_error = f"fetch failed for: {names}"
+        else:
+            refs, refresh_error = remote_tracking_refs(primary, remotes, command_runner)
+    remote_evidence_ready = refresh and not refresh_error
+
+    candidates = []
+    complete = not (refresh and refresh_error)
+    for record in records:
+        candidate, candidate_complete = inspect_worktree_candidate(
+            record,
+            primary=primary,
+            requested=requested,
+            process_cwd=current,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=remote_evidence_ready,
+            remote_evidence_requested=refresh,
+            refs=refs,
+            command_runner=command_runner,
+        )
+        candidates.append(candidate)
+        complete = complete and candidate_complete
+
+    return {
+        "schema_version": WORKTREE_PLAN_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "fingerprint_lease_seconds": WORKTREE_LEASE_SECONDS,
+        "repo": str(requested),
+        "primary": str(primary),
+        "common_git_dir": str(common_git_dir),
+        "worktree_directory": str(worktree_dir),
+        "refresh": {
+            "requested": refresh,
+            "ok": remote_evidence_ready,
+            "remotes": remotes,
+            "fetches": fetch_results,
+            "error": refresh_error,
+            "remote_refs": [
+                {"ref": ref, "oid": oid} for ref, oid in sorted(refs.items())
+            ],
+        },
+        "apply_requested": False,
+        "branch_deletion": "not_performed",
+        "prune": "not_requested",
+        "complete": complete,
+        "worktrees": candidates,
+        "summary": {},
+    }
+
+
+def find_worktree_record(
+    records: list[dict[str, Any]], candidate_path: Path
+) -> dict[str, Any] | None:
+    for record in records:
+        if same_path(Path(record["path"]), candidate_path):
+            return record
+    return None
+
+
+def apply_worktree_plan(
+    plan: dict[str, Any],
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+) -> bool:
+    """Apply one fresh plan; return false when any requested removal is refused."""
+
+    plan["apply_requested"] = True
+    if not plan["refresh"]["ok"]:
+        plan["apply_error"] = "remote_refresh_failed"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    primary = Path(plan["primary"])
+    requested = Path(plan["repo"])
+    common_git_dir = Path(plan["common_git_dir"])
+    worktree_dir = Path(plan["worktree_directory"])
+    try:
+        process_cwd = Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(f"cannot resolve the harness process cwd: {exc}") from exc
+    remotes = list(plan["refresh"]["remotes"])
+    lease_started = clock()
+    removed = 0
+    apply_ok = True
+
+    for candidate in plan["worktrees"]:
+        if candidate["verdict"] != "remove":
+            candidate["apply"] = "kept"
+            continue
+        if clock() - lease_started > WORKTREE_LEASE_SECONDS:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "fingerprint_lease_expired"
+            candidate["revalidation"] = "expired"
+            apply_ok = False
+            continue
+
+        current_records = list_worktrees(primary, command_runner)
+        current_record = find_worktree_record(current_records, Path(candidate["path"]))
+        refs, refs_error = remote_tracking_refs(primary, remotes, command_runner)
+        if current_record is None or refs_error:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = (
+                "worktree_disappeared" if current_record is None else "ref_probe_failed"
+            )
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        current, current_complete = inspect_worktree_candidate(
+            current_record,
+            primary=primary,
+            requested=requested,
+            process_cwd=process_cwd,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=True,
+            remote_evidence_requested=True,
+            refs=refs,
+            command_runner=command_runner,
+        )
+        if (
+            not current_complete
+            or current["verdict"] != "remove"
+            or current["fingerprint"] != candidate["fingerprint"]
+        ):
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "state_changed_since_audit"
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+
+        remove_result = worktree_git_result(
+            command_runner,
+            ["worktree", "remove", "--", candidate["resolved_path"]],
+            primary,
+        )
+        candidate["remove_exit_code"] = remove_result.returncode
+        candidate["revalidated_fingerprint"] = current["fingerprint"]
+        candidate["revalidation"] = "matched"
+        if remove_result.returncode:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "plain_remove_refused"
+            apply_ok = False
+        else:
+            candidate["apply"] = "removed"
+            removed += 1
+
+    if removed:
+        prune_result = worktree_git_result(
+            command_runner, ["worktree", "prune"], primary
+        )
+        if prune_result.returncode:
+            plan["prune"] = f"failed_exit_{prune_result.returncode}"
+            apply_ok = False
+        else:
+            plan["prune"] = "completed"
+    return apply_ok
+
+
+def summarize_worktree_plan(plan: dict[str, Any]) -> None:
+    candidates = plan["worktrees"]
+    plan["summary"] = {
+        "total": len(candidates),
+        "would_remove": sum(item["verdict"] == "remove" for item in candidates),
+        "kept": sum(item["verdict"] != "remove" for item in candidates),
+        "removed": sum(item["apply"] == "removed" for item in candidates),
+        "apply_refusals": sum(
+            item["apply"] == "kept" and item["verdict"] == "remove"
+            for item in candidates
+        ),
+    }
+
+
+def render_worktree_plan(plan: dict[str, Any]) -> None:
+    print(f"repo: {plan['repo']}")
+    print(f"worktree directory: {plan['worktree_directory']}")
+    refresh = plan["refresh"]
+    if refresh["requested"]:
+        state = "ok" if refresh["ok"] else "FAIL"
+        detail = refresh["error"] or f"{len(refresh['remote_refs'])} refs refreshed"
+        print(f"[{state}] remote evidence: {detail}")
+    else:
+        print("[read-only] remote evidence was not refreshed")
+    for candidate in plan["worktrees"]:
+        detail = ", ".join(candidate["reasons"]) or "safe after revalidation"
+        print(f"[{candidate['verdict']}] {candidate['path']}: {detail}")
+        if candidate["apply"] == "removed":
+            print("  applied: removed with plain git worktree remove")
+        elif candidate.get("apply_reason"):
+            print(f"  applied: kept ({candidate['apply_reason']})")
+    summary = plan["summary"]
+    print(
+        "summary: "
+        f"{summary['would_remove']} removable, {summary['kept']} kept, "
+        f"{summary['removed']} removed, {summary['apply_refusals']} apply refusals"
+    )
+
+
+def worktrees_command(
+    args: argparse.Namespace,
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+) -> int:
+    if args.apply and not args.refresh:
+        raise HarnessError("--apply requires --refresh")
+    plan = worktree_plan(
+        Path(args.repo), refresh=args.refresh, command_runner=command_runner
+    )
+    apply_ok = True
+    if args.apply:
+        apply_ok = apply_worktree_plan(plan, command_runner=command_runner, clock=clock)
+    summarize_worktree_plan(plan)
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        render_worktree_plan(plan)
+    return 0 if plan["complete"] and apply_ok else 1
 
 
 def codex_hook_source_status(
@@ -5293,6 +5992,25 @@ def parser() -> argparse.ArgumentParser:
         "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
+
+    worktrees = sub.add_parser(
+        "worktrees", help="audit or plainly remove proven-safe linked worktrees"
+    )
+    worktrees.add_argument(
+        "--repo", default=".", help="repository or linked worktree to inspect"
+    )
+    worktrees.add_argument(
+        "--refresh",
+        action="store_true",
+        help="fetch every configured remote before evaluating reachability",
+    )
+    worktrees.add_argument(
+        "--apply",
+        action="store_true",
+        help="remove revalidated safe candidates; requires --refresh",
+    )
+    worktrees.add_argument("--json", action="store_true")
+    worktrees.set_defaults(func=worktrees_command)
     return root
 
 
