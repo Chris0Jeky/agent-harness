@@ -54,9 +54,10 @@ ceremony is the bug — file it as an issue and keep working. Declared authority
    In a PR stack, merge the oldest first, never the newest; after a base lands, retarget its
    children and confirm via the API before merging them.
 5. Surface the repo's human-action file (HUMAN_TODO.md or its declared alias — see ESTATE.md)
-   in every summary. Only the human checks items off. When items accumulate or the human asks
-   to be guided, walk the backlog via the `guided-walkthrough` skill (numbered q-N items:
-   context + suggested action + step-by-step guide for human-only ones).
+   in every summary. Apply [`CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo`](CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo)
+   for evidence and completion. When items accumulate or the human asks to be guided, walk the
+   backlog via the `guided-walkthrough` skill (numbered q-N items: context + suggested action +
+   step-by-step guide for human-only ones).
 6. Questions: batch true blockers into ONE question; otherwise proceed on a named assumption
    ("Assumption: X. Reason: Y. Reversible by Z.").
 7. Worktrees: guard preamble is the first action; `$WT_PROJECT_DIR` paths only; create with
