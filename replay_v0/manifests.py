@@ -22,13 +22,11 @@ _RFC3339_UTC = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" r"(?:\.[0-9]+)?Z$"
 )
 _POLICY_KINDS = frozenset({"process", "recorded"})
-_DIFF_CLASSES = frozenset(
+RUN_GATE_CLASSES = frozenset(
     {
-        "unchanged",
         "newly-allowed",
         "newly-denied",
         "newly-indeterminate",
-        "resolved-indeterminate",
     }
 )
 
@@ -275,9 +273,9 @@ def _validate_fail_on(value: object) -> list[str]:
         raise ManifestError("RunManifest.fail_on: expected an array")
     result: list[str] = []
     for index, item in enumerate(value):
-        if not isinstance(item, str) or item not in _DIFF_CLASSES:
+        if not isinstance(item, str) or item not in RUN_GATE_CLASSES:
             raise ManifestError(
-                f"RunManifest.fail_on[{index}]: expected a replay diff class"
+                f"RunManifest.fail_on[{index}]: expected a replay gate class"
             )
         if item in result:
             raise ManifestError(f"RunManifest.fail_on[{index}]: duplicate class")
