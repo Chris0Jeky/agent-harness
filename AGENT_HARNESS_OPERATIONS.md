@@ -140,8 +140,10 @@ Owner: Cristian Tcaci
   group with bounded cleanup; descendants that remain in it cannot outlive replay. A descendant
   that calls `setpgid`/`setpgrp` to create another group in the same session, or `setsid` to create
   another session, leaves POSIX v0 containment and may continue from a deleted snapshot. Process
-  output remains disk-unbounded until the configured timeout. Callers requiring stronger
-  containment must isolate the process externally.
+  output has no byte quota. A POSIX descendant that escapes the root process group can retain its
+  temporary-file stream handles and continue consuming disk after timeout and after replay returns;
+  replay no longer observes or caps that output. Callers requiring stronger containment must
+  isolate the process externally.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash
@@ -240,9 +242,17 @@ python -m replay_v0.cli replay \
 }
 ```
 
-- **CONSTRAINT:** `run_id` is derived from runner version, policy-source digests, corpus-manifest digest, and gate configuration. It must not contain time or machine identity.
+- **CONSTRAINT:** `run_id` is derived from runner version, policy-source digests,
+  corpus-manifest digest, and gate configuration. Recorded-source identities are portable. A v9
+  process-source digest includes an opaque commitment to its selected snapshot parent, so a run ID
+  containing that digest is intentionally host/path-sensitive rather than a portable cross-host
+  correlation key.
 - **CONSTRAINT:** `generated_at` is informational and is excluded from semantic report comparisons.
-- **CONSTRAINT:** The manifest contains no absolute path, hostname, username, environment variable, or private repository identifier.
+- **CONSTRAINT:** The manifest contains no plaintext absolute path, hostname, username, environment
+  variable, or private repository identifier. A process-source snapshot-parent digest is
+  machine-derived data and can confirm an offline guess of a common temporary path; it prevents
+  direct disclosure, not inference. Do not publish a process-source manifest where temporary-root
+  secrecy is required.
 
 # Diff semantics and reports
 
@@ -276,11 +286,16 @@ python -m replay_v0.cli replay \
 
 # Determinism contract
 
-- **DECISION:** The same runner version, exact policy-source bytes, corpus bytes, and gate configuration must produce the same semantic JSON report.
+- **DECISION:** The same runner version, exact recorded-source bytes, corpus bytes, and gate
+  configuration produce the same semantic JSON report. A process source additionally requires the
+  same complete declared execution identity, including the snapshot-parent commitment, plus stable
+  documented external dependencies. V0 makes no cross-host or environment-replay guarantee for an
+  arbitrary process policy.
 - **CONSTRAINT:** Tests set `SOURCE_DATE_EPOCH` and normalise `generated_at` before byte comparison.
 - **CONSTRAINT:** The v0 fast lane performs no network access and no live legacy execution.
 - **CONSTRAINT:** Tests use temporary directories and fictional paths only.
-- **CONSTRAINT:** Running the same fixture twice must produce identical `run_id`, classifications, counts, event ordering, and semantic JSON content.
+- **CONSTRAINT:** Running the same fixture twice under the same declared execution identity must
+  produce identical `run_id`, classifications, counts, event ordering, and semantic JSON content.
 
 # Non-Goals
 
@@ -436,10 +451,13 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 - **Sequence:** Start after Tasks 4 and 5 define both policy-source identities.
 - **Objective:** Generate and validate corpus and run manifests using SHA-256.
 - **Paths touched:** `replay_v0/digests.py`, `replay_v0/manifests.py`, manifest fixtures, tests.
-- **Acceptance criteria:** Byte changes invalidate the digest; `run_id` is stable for identical inputs; absolute paths and host data are absent.
+- **Acceptance criteria:** Byte changes invalidate the digest; `run_id` is stable for identical
+  declared inputs; plaintext absolute paths and host data are absent. A process-source digest may
+  include the explicitly documented snapshot-parent commitment and is then host/path-sensitive.
 - **Verify:** `python -m pytest -q replay_v0/tests/unit/test_digests.py replay_v0/tests/unit/test_manifests.py`
 - **Out of scope:** Signatures, attestations, remote storage, content-addressed databases, or cryptographic identity systems.
-- **Stop condition:** Halt if a manifest proposal includes machine-specific environment data not required for reproducibility.
+- **Stop condition:** Halt if a manifest proposal includes plaintext machine-specific environment
+  data, or an undocumented machine-derived commitment, not required for trustworthy provenance.
 
 ## Task 7 — Implement the semantic diff and JSON report
 

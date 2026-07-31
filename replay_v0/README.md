@@ -66,7 +66,10 @@ regular-file bytes, and permission modes for the policy-parent root and entries,
 timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
 working-directory contract. It also binds an opaque SHA-256 digest of the selected resolved
 snapshot parent without writing that absolute path to the run manifest. Process identities are
-therefore conservatively host/path-sensitive when policy-visible temporary roots differ. V9 also
+therefore conservatively host/path-sensitive when policy-visible temporary roots differ. The digest
+is machine-derived data and can confirm an offline guess of a common temporary path; it avoids
+plaintext disclosure but is not a secrecy boundary. Process-source run IDs are host-context
+evidence, not portable cross-host correlation keys. V9 also
 binds the snapshot-mtime contract: every copied file and directory has modification time
 `946684800000000000` ns (2000-01-01T00:00:00Z). An
 executable alias and its target have distinct identities when their invocation names differ, while
@@ -101,19 +104,21 @@ A generic executable must be
 relocatable enough to run from the snapshot; adjacent loader libraries are copied as unbound
 runtime dependencies, and Python uses its host base prefix for its unbound standard library. If the
 captured executable cannot start, replay fails closed instead of falling back to the original path.
-External installed dependencies, files outside the policy tree, network responses, and host
+External installed dependencies, files outside the policy tree, network responses, and other host
 metadata remain outside the identity; access/change/birth times and filesystem object identities
 are not normalized. Callers that depend on them must isolate and record that environment.
 
-Policy standard streams are backed by temporary files, so a descendant retaining inherited stream
-handles cannot extend the configured timeout. On Windows an event-gated supervisor enters a
+Policy standard streams are backed by temporary files, so waiting for inherited pipe EOF cannot
+extend the configured timeout. On Windows an event-gated supervisor enters a
 kill-on-close Job Object before it can launch the policy and contains the policy process family. On
 POSIX the policy root starts in a new session and root process group; timeout and normal root
 completion send `SIGKILL` only to that root process group with bounded cleanup, so descendants that
 remain in it cannot outlive replay. A descendant that calls `setpgid`/`setpgrp` to create another
 group in the same session, or `setsid` to create another session, leaves POSIX v0 containment and
-may continue from a deleted snapshot. Process output also remains disk-unbounded until timeout.
-Callers requiring stronger containment must isolate the process externally.
+may continue from a deleted snapshot. Process output has no byte quota. An escaped POSIX descendant
+can retain its temporary-file stream handles and continue consuming disk after timeout and after
+replay returns; replay no longer observes or caps that output. Callers requiring stronger
+containment must isolate the process externally.
 
 The three report artifacts are fully staged before publication. Replacing an existing report set
 uses rollback: a publication error restores the prior complete set instead of leaving a new

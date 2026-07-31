@@ -8,6 +8,39 @@ import subprocess
 import sys
 import time
 
+SET_PGRP_CHILD = """
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+state_path = Path(sys.argv[1])
+trigger_path = Path(sys.argv[2])
+ack_path = Path(sys.argv[3])
+os.setpgrp()
+state_path.write_text(
+    json.dumps(
+        {
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "pgid": os.getpgrp(),
+            "sid": os.getsid(0),
+        }
+    ),
+    encoding="ascii",
+)
+deadline = time.monotonic() + 20
+while not trigger_path.is_file():
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.01)
+sys.stdout.write("escaped-output-after-return\\n")
+sys.stdout.flush()
+ack_path.write_text("wrote-after-return", encoding="ascii")
+time.sleep(30)
+"""
+
 
 def decision(event: dict[str, object]) -> dict[str, str]:
     effect = "deny" if "--force" in str(event["command"]) else "allow"
@@ -26,20 +59,16 @@ rows = [decision(event) for event in events]
 if mode in {"setpgrp-exit", "setpgrp-timeout"}:
     pid_path = Path(sys.argv[2])
     state_path = Path(sys.argv[3])
+    trigger_path = Path(sys.argv[4])
+    ack_path = Path(sys.argv[5])
     child = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            (
-                "import json, os, pathlib, sys, time; "
-                "os.setpgrp(); "
-                "pathlib.Path(sys.argv[1]).write_text("
-                "json.dumps({'pid': os.getpid(), 'ppid': os.getppid(), "
-                "'pgid': os.getpgrp(), "
-                "'sid': os.getsid(0)}), encoding='ascii'); "
-                "time.sleep(30)"
-            ),
+            SET_PGRP_CHILD,
             str(state_path),
+            str(trigger_path),
+            str(ack_path),
         ],
         close_fds=True,
     )

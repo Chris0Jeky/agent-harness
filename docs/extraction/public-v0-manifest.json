@@ -73,7 +73,7 @@
     {
       "path": "replay_v0/manifests.py",
       "kind": "source",
-      "sha256": "6702c0b613adcea223c67518b5a647dcb31bcad35779f6a5528d3f6511de8254"
+      "sha256": "41e8b8fbbad25d6993a60e23c31de532ab641d0bbcd0b8a2239137e44716f068"
     },
     {
       "path": "replay_v0/policy_sources.py",
@@ -83,7 +83,7 @@
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "852e64f113a67c6ffef78d1774b9223e9dda39c89d34721bad729bfa22255af9"
+      "sha256": "a9a253f3e7fa1bff9c0c7f1d87b1a6cfdaa3b4daf64c2323a2f0fee31ce8cf7b"
     },
     {
       "path": "replay_v0/reports.py",
@@ -133,7 +133,7 @@
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "3051dc569da91ee93a2a9fe1a4f834702a1154a77695253c24d7900024102fdf"
+      "sha256": "33de2eb3ccee6f1926a644e124f92623ae5b3d17b9ccf70e8b4b364ba97760d5"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
@@ -143,7 +143,7 @@
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
       "kind": "fixture",
-      "sha256": "366420b97708d0801fabb9c4293cd56e9dbc7f0dbad2cae4a35fe88d661c4568"
+      "sha256": "bd0fdc10831d33550b1961666591d27c542552c94122cbda5992056fa45e8189"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/reference_candidate.py",

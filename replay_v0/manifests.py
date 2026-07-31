@@ -1,4 +1,4 @@
-"""Strict corpus and replay-run manifests with portable identities."""
+"""Strict corpus and replay-run manifests with canonical field validation."""
 
 from __future__ import annotations
 

@@ -283,8 +283,18 @@ class ProcessSourceTests(unittest.TestCase):
             directory = Path(raw_directory)
             pid_path = directory / "child.pid"
             state_path = directory / "child.json"
+            trigger_path = directory / "write-output.trigger"
+            ack_path = directory / "write-output.ack"
             source = ProcessDecisionSource(
-                [sys.executable, str(FIXTURE), mode, str(pid_path), str(state_path)],
+                [
+                    sys.executable,
+                    str(FIXTURE),
+                    mode,
+                    str(pid_path),
+                    str(state_path),
+                    str(trigger_path),
+                    str(ack_path),
+                ],
                 timeout_seconds=timeout_seconds,
             )
             child_pid: int | None = None
@@ -299,6 +309,21 @@ class ProcessSourceTests(unittest.TestCase):
                 self.assertEqual(state["ppid"], state["sid"])
                 self.assertNotEqual(child_pid, state["sid"])
                 self.assertTrue(self._process_is_running(child_pid))
+                trigger_path.write_text("write", encoding="ascii")
+                deadline = time.monotonic() + 5
+                while not ack_path.is_file():
+                    if (
+                        not self._process_is_running(child_pid)
+                        or time.monotonic() >= deadline
+                    ):
+                        self.fail(
+                            "escaped descendant did not write through its retained "
+                            "stdout handle after replay returned"
+                        )
+                    time.sleep(0.01)
+                self.assertEqual(
+                    "wrote-after-return", ack_path.read_text(encoding="ascii")
+                )
                 return result, elapsed
             finally:
                 if child_pid is None:
