@@ -102,6 +102,13 @@ or never passes `--event pre --runtime codex`; a vendored dispatcher or wrapper 
 reported as inventory rather than a failure. Because Codex runs hook commands from the session
 cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root,
 and recorded as a cwd-dependency note in the audits where it does resolve.
+The same read-only layer walk checks the base user and active project MCP declarations. An exact
+server name that is active and command-backed at both scopes fails as a duplicate spawning
+topology, as does an active `docker mcp gateway run` declaration with neither `--servers` nor
+`--profile` (including Windows `docker.cmd` and `docker.bat` shims). Layered `enabled = false`
+suppresses a server; mixed layered command/URL transports fail closed. The check prints only
+canonical source paths and escaped server names, never command arguments, and does not inspect
+stored profiles, system/managed policy, CLI overrides, or runtime processes.
 That floor must be the canonical root
 `.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
