@@ -512,10 +512,10 @@ def toml_config(config_path: Path) -> dict[str, Any] | None:
     return config
 
 
-def active_command_mcp_servers(
+def mcp_server_patches(
     config_path: Path,
-) -> list[tuple[str, Path, str, tuple[str, ...]]]:
-    """Return active command-backed MCP declarations without exposing arguments."""
+) -> list[tuple[str, Path, dict[str, Any]]]:
+    """Return validated MCP fields needed to model layered spawning state."""
     config = toml_config(config_path)
     if config is None or "mcp_servers" not in config:
         return []
@@ -523,31 +523,76 @@ def active_command_mcp_servers(
     if not isinstance(servers, dict):
         raise HarnessError(f"mcp_servers in {config_path} must be a table")
 
-    declarations: list[tuple[str, Path, str, tuple[str, ...]]] = []
+    declarations: list[tuple[str, Path, dict[str, Any]]] = []
     for name, entry in servers.items():
         if not isinstance(entry, dict):
             raise HarnessError(f"mcp_servers.{name} in {config_path} must be a table")
-        enabled = entry.get("enabled", True)
-        if not isinstance(enabled, bool):
+        patch: dict[str, Any] = {}
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
             raise HarnessError(
                 f"mcp_servers.{name}.enabled in {config_path} must be a boolean"
             )
-        if not enabled or "command" not in entry:
-            continue
-        command = entry["command"]
-        if not isinstance(command, str) or not command.strip():
+        if "enabled" in entry:
+            patch["enabled"] = entry["enabled"]
+        if "command" in entry and "url" in entry:
+            raise HarnessError(
+                f"mcp_servers.{name} in {config_path} must not declare both command and url"
+            )
+        if "command" in entry and (
+            not isinstance(entry["command"], str) or not entry["command"].strip()
+        ):
             raise HarnessError(
                 f"mcp_servers.{name}.command in {config_path} must be a non-empty string"
             )
-        args = entry.get("args", [])
-        if not isinstance(args, list) or not all(
-            isinstance(argument, str) for argument in args
+        if "command" in entry:
+            patch["command"] = entry["command"]
+        if "url" in entry and (
+            not isinstance(entry["url"], str) or not entry["url"].strip()
+        ):
+            raise HarnessError(
+                f"mcp_servers.{name}.url in {config_path} must be a non-empty string"
+            )
+        if "url" in entry:
+            patch["url"] = entry["url"]
+        if "args" in entry and (
+            not isinstance(entry["args"], list)
+            or not all(isinstance(argument, str) for argument in entry["args"])
         ):
             raise HarnessError(
                 f"mcp_servers.{name}.args in {config_path} must be an array of strings"
             )
-        declarations.append((name, config_path, command, tuple(args)))
+        if "args" in entry:
+            patch["args"] = tuple(entry["args"])
+        declarations.append((name, config_path, patch))
     return declarations
+
+
+def layered_mcp_server_states(config_paths: list[Path]) -> dict[str, dict[str, Any]]:
+    """Merge relevant MCP fields in Codex's base-to-project layer order."""
+    states: dict[str, dict[str, Any]] = {}
+    for config_path in config_paths:
+        for name, source, patch in mcp_server_patches(config_path):
+            state = states.setdefault(
+                name,
+                {
+                    "enabled": True,
+                    "command": None,
+                    "args": (),
+                    "source": source,
+                },
+            )
+            if "enabled" in patch:
+                state["enabled"] = patch["enabled"]
+            if "command" in patch:
+                state["command"] = patch["command"]
+                state["source"] = source
+            if "url" in patch:
+                state["command"] = None
+                state["args"] = ()
+                state["source"] = source
+            if "args" in patch:
+                state["args"] = patch["args"]
+    return states
 
 
 def unbounded_docker_mcp_gateway(command: str, args: tuple[str, ...]) -> bool:
@@ -574,26 +619,36 @@ def codex_mcp_topology_status(
 ) -> tuple[bool, str]:
     """Check the static user/project MCP process-spawning topology."""
     user_path = codex_home / "config.toml"
-    user_declarations = active_command_mcp_servers(user_path)
     project_paths = list(dict.fromkeys(project_config_paths))
-    project_declarations = [
-        declaration
-        for config_path in project_paths
-        for declaration in active_command_mcp_servers(config_path)
-    ]
+    user_states = layered_mcp_server_states([user_path])
+    project_states = layered_mcp_server_states(project_paths)
+    effective_states = layered_mcp_server_states([user_path, *project_paths])
+    user_declarations = {
+        name: state
+        for name, state in user_states.items()
+        if state["enabled"] and state["command"] is not None
+    }
+    project_declarations = {
+        name: state
+        for name, state in project_states.items()
+        if state["enabled"] and state["command"] is not None
+    }
 
     findings: list[str] = []
-    user_by_name = {name: source for name, source, _command, _args in user_declarations}
-    for name, source, _command, _args in project_declarations:
-        if name in user_by_name:
+    for name in sorted(user_declarations.keys() & project_declarations.keys()):
+        findings.append(
+            f"active command-backed MCP server {name!r} is duplicated across "
+            f"user {user_declarations[name]['source']} and project "
+            f"{project_declarations[name]['source']}"
+        )
+    for name, state in effective_states.items():
+        if (
+            state["enabled"]
+            and state["command"] is not None
+            and unbounded_docker_mcp_gateway(state["command"], state["args"])
+        ):
             findings.append(
-                f"active command-backed MCP server {name!r} is duplicated across "
-                f"user {user_by_name[name]} and project {source}"
-            )
-    for name, source, command, args in user_declarations + project_declarations:
-        if unbounded_docker_mcp_gateway(command, args):
-            findings.append(
-                f"active Docker MCP gateway {name!r} in {source} has no "
+                f"active Docker MCP gateway {name!r} in {state['source']} has no "
                 "--servers or --profile bound"
             )
 

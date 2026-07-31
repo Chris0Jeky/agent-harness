@@ -4509,6 +4509,30 @@ allow_local_binding = true
         self.assertIn("active Docker MCP gateway 'MCP_DOCKER'", output)
         self.assertIn("has no --servers or --profile bound", output)
 
+    def test_project_disable_suppresses_same_user_mcp_server(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        (repo / ".codex" / "config.toml").write_text(
+            "[mcp_servers.MCP_DOCKER]\n" "enabled = false\n",
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[mcp_servers.MCP_DOCKER]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex MCP topology", output)
+        self.assertNotIn("active Docker MCP gateway", output)
+
     def test_doctor_accepts_bounded_disabled_and_url_mcp_entries(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
