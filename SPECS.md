@@ -532,8 +532,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition.
 - `harness.py worktrees --repo <path> [--refresh] [--apply] [--json]` — reports every registered
-  linked worktree and only removes a candidate after an explicit all-remote refresh, exact physical
-  containment under the primary checkout's `.worktrees/`, clean tracked/untracked/ignored status,
+  linked worktree and only removes a candidate after an explicit full-branch-namespace refresh for
+  every remote, exact physical containment under the primary checkout's `.worktrees/`, clean tracked/untracked/ignored status,
   no assume-unchanged/skip-worktree index flags, remote-ref reachability, and a same-run 60-second
   fingerprint revalidation. The default performs no fetch or mutation; `--apply` requires
   `--refresh` and uses only plain `git worktree remove`.
