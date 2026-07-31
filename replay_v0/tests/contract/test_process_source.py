@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -78,7 +79,7 @@ class ProcessSourceTests(unittest.TestCase):
         self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
         self.assertEqual(["process-timeout"], self.failure_codes(result))
 
-    def test_timeout_terminates_descendants_that_inherit_standard_streams(
+    def test_timeout_terminates_descendants_in_the_root_process_group(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -96,7 +97,9 @@ class ProcessSourceTests(unittest.TestCase):
         self.assertEqual(["process-timeout"], self.failure_codes(result))
         self.assert_process_stopped(child_pid)
 
-    def test_completed_parent_does_not_leave_a_descendant_running(self) -> None:
+    def test_completed_parent_terminates_descendants_in_the_root_process_group(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             pid_path = Path(raw_directory) / "child.pid"
             source = ProcessDecisionSource(
@@ -112,6 +115,31 @@ class ProcessSourceTests(unittest.TestCase):
         self.assertTrue(result.is_valid)
         self.assertEqual(["deny", "allow"], self.effects(result))
         self.assert_process_stopped(child_pid)
+
+    @unittest.skipUnless(
+        os.name != "nt" and hasattr(os, "setpgrp"),
+        "POSIX setpgrp semantics",
+    )
+    def test_completed_parent_does_not_contain_a_setpgrp_descendant(self) -> None:
+        result, elapsed = self.evaluate_setpgrp_escape(
+            "setpgrp-exit", timeout_seconds=2.0
+        )
+
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(result.is_valid)
+        self.assertEqual(["deny", "allow"], self.effects(result))
+
+    @unittest.skipUnless(
+        os.name != "nt" and hasattr(os, "setpgrp"),
+        "POSIX setpgrp semantics",
+    )
+    def test_timeout_does_not_contain_a_setpgrp_descendant(self) -> None:
+        result, elapsed = self.evaluate_setpgrp_escape(
+            "setpgrp-timeout", timeout_seconds=1.0
+        )
+
+        self.assertLess(elapsed, 3.0)
+        self.assertEqual(["process-timeout"], self.failure_codes(result))
 
     def test_malformed_output_does_not_hide_later_valid_decision(self) -> None:
         result = self.evaluate("malformed")
@@ -249,6 +277,48 @@ class ProcessSourceTests(unittest.TestCase):
     @staticmethod
     def failure_codes(result) -> list[str]:
         return [failure.code for failure in result.failures]
+
+    def evaluate_setpgrp_escape(self, mode: str, *, timeout_seconds: float):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            pid_path = directory / "child.pid"
+            state_path = directory / "child.json"
+            source = ProcessDecisionSource(
+                [sys.executable, str(FIXTURE), mode, str(pid_path), str(state_path)],
+                timeout_seconds=timeout_seconds,
+            )
+            child_pid: int | None = None
+            try:
+                started = time.monotonic()
+                result = source.evaluate(EVENTS)
+                elapsed = time.monotonic() - started
+                child_pid = int(pid_path.read_text(encoding="ascii"))
+                state = json.loads(state_path.read_text(encoding="ascii"))
+                self.assertEqual(child_pid, state["pid"])
+                self.assertEqual(child_pid, state["pgid"])
+                self.assertEqual(state["ppid"], state["sid"])
+                self.assertNotEqual(child_pid, state["sid"])
+                self.assertTrue(self._process_is_running(child_pid))
+                return result, elapsed
+            finally:
+                if child_pid is None:
+                    try:
+                        child_pid = int(pid_path.read_text(encoding="ascii"))
+                    except (FileNotFoundError, ValueError):
+                        try:
+                            child_pid = int(
+                                json.loads(state_path.read_text(encoding="ascii"))[
+                                    "pid"
+                                ]
+                            )
+                        except (FileNotFoundError, KeyError, ValueError, TypeError):
+                            pass
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    self.assert_process_stopped(child_pid)
 
     def assert_process_stopped(self, pid: int) -> None:
         for _attempt in range(100):

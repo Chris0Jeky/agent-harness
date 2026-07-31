@@ -83,7 +83,7 @@
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "6667bf704899f1489d43543ee48d02c86c1750740fe25a82a98737d1ed040fd0"
+      "sha256": "852e64f113a67c6ffef78d1774b9223e9dda39c89d34721bad729bfa22255af9"
     },
     {
       "path": "replay_v0/reports.py",
@@ -133,7 +133,7 @@
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "22c56185ce9479e17cc52c644803e638461012f0514d8a2232f6cf8de94bd2aa"
+      "sha256": "3051dc569da91ee93a2a9fe1a4f834702a1154a77695253c24d7900024102fdf"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
@@ -143,7 +143,7 @@
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
       "kind": "fixture",
-      "sha256": "9dea18d71cc2b17e5c88ca8244aff421984f12f755c5febaa5210e3cf68c49dd"
+      "sha256": "366420b97708d0801fabb9c4293cd56e9dbc7f0dbad2cae4a35fe88d661c4568"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/reference_candidate.py",

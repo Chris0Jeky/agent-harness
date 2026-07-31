@@ -107,11 +107,13 @@ are not normalized. Callers that depend on them must isolate and record that env
 
 Policy standard streams are backed by temporary files, so a descendant retaining inherited stream
 handles cannot extend the configured timeout. On Windows an event-gated supervisor enters a
-kill-on-close Job Object before it can launch the policy; on POSIX the policy starts in a new
-session. Timeout terminates the contained process family with bounded cleanup, and a completed root
-process cannot leave ordinary descendants running. A hostile POSIX descendant can still escape by
-creating a new session, and process output remains disk-unbounded until timeout; both are explicit
-v0 limitations rather than sandbox guarantees.
+kill-on-close Job Object before it can launch the policy and contains the policy process family. On
+POSIX the policy root starts in a new session and root process group; timeout and normal root
+completion send `SIGKILL` only to that root process group with bounded cleanup, so descendants that
+remain in it cannot outlive replay. A descendant that calls `setpgid`/`setpgrp` to create another
+group in the same session, or `setsid` to create another session, leaves POSIX v0 containment and
+may continue from a deleted snapshot. Process output also remains disk-unbounded until timeout.
+Callers requiring stronger containment must isolate the process externally.
 
 The three report artifacts are fully staged before publication. Replacing an existing report set
 uses rollback: a publication error restores the prior complete set instead of leaving a new

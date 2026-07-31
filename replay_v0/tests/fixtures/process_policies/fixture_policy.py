@@ -23,7 +23,38 @@ events = [json.loads(line) for line in sys.stdin if line.strip()]
 mode = sys.argv[1]
 rows = [decision(event) for event in events]
 
-if mode in {"descendant-exit", "descendant-timeout"}:
+if mode in {"setpgrp-exit", "setpgrp-timeout"}:
+    pid_path = Path(sys.argv[2])
+    state_path = Path(sys.argv[3])
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, os, pathlib, sys, time; "
+                "os.setpgrp(); "
+                "pathlib.Path(sys.argv[1]).write_text("
+                "json.dumps({'pid': os.getpid(), 'ppid': os.getppid(), "
+                "'pgid': os.getpgrp(), "
+                "'sid': os.getsid(0)}), encoding='ascii'); "
+                "time.sleep(30)"
+            ),
+            str(state_path),
+        ],
+        close_fds=True,
+    )
+    pid_path.write_text(str(child.pid), encoding="ascii")
+    deadline = time.monotonic() + 5
+    while not state_path.is_file():
+        if child.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("setpgrp child did not publish its state")
+        time.sleep(0.01)
+    if mode == "setpgrp-timeout":
+        time.sleep(30)
+    else:
+        for row in rows:
+            print(json.dumps(row, sort_keys=True, separators=(",", ":")))
+elif mode in {"descendant-exit", "descendant-timeout"}:
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(5)"],
         close_fds=False,

@@ -135,10 +135,13 @@ Owner: Cristian Tcaci
   back to its original path.
 - **CONSTRAINT:** Policy standard streams use temporary files rather than inherited pipes. On
   Windows an event-gated supervisor is assigned to a kill-on-close Job Object before it may launch
-  the policy; on POSIX the policy starts in a new session. Timeout terminates the contained process
-  family and performs only bounded cleanup, and a completed root process cannot leave ordinary
-  descendants running. A hostile POSIX descendant that creates a new session remains outside v0's
-  containment, and process output remains disk-unbounded until the configured timeout.
+  the policy and contains its process family. On POSIX the policy root starts in a new session and
+  root process group. Timeout and normal root completion send `SIGKILL` only to that root process
+  group with bounded cleanup; descendants that remain in it cannot outlive replay. A descendant
+  that calls `setpgid`/`setpgrp` to create another group in the same session, or `setsid` to create
+  another session, leaves POSIX v0 containment and may continue from a deleted snapshot. Process
+  output remains disk-unbounded until the configured timeout. Callers requiring stronger
+  containment must isolate the process externally.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash
