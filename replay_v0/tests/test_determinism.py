@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+from replay_v0.cli import main
+from replay_v0.digests import sha256_file
+
+ROOT = Path(__file__).parents[2]
+BASELINE = ROOT / "replay_v0" / "fixtures" / "legacy-decisions.jsonl"
+CANDIDATE = (
+    ROOT
+    / "replay_v0"
+    / "tests"
+    / "fixtures"
+    / "process_policies"
+    / "reference_candidate.py"
+)
+CORPUS = ROOT / "replay_v0" / "corpora" / "charter" / "events.jsonl"
+EXTRACTION_MANIFEST = ROOT / "docs" / "extraction" / "public-v0-manifest.json"
+
+
+class DeterminismTests(unittest.TestCase):
+    @staticmethod
+    def _stage_reference_inputs(root: Path) -> tuple[Path, Path, Path]:
+        baseline = root / "fixtures" / "legacy-decisions.jsonl"
+        baseline.parent.mkdir(parents=True)
+        shutil.copy2(BASELINE, baseline)
+        shutil.copy2(
+            Path(f"{BASELINE}.manifest.json"), Path(f"{baseline}.manifest.json")
+        )
+
+        candidate = root / "policies" / "reference_candidate.py"
+        candidate.parent.mkdir(parents=True)
+        shutil.copy2(CANDIDATE, candidate)
+
+        corpus = root / "corpora" / "charter"
+        shutil.copytree(CORPUS.parent, corpus)
+        return baseline, candidate, corpus / "events.jsonl"
+
+    def test_two_portable_reference_runs_match_and_finish_under_sixty_seconds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            temporary_root = Path(raw_directory)
+            first_inputs = self._stage_reference_inputs(
+                temporary_root / "fictional-alpha-checkout"
+            )
+            second_inputs = self._stage_reference_inputs(
+                temporary_root / "fictional-beta-checkout"
+            )
+            first_output = temporary_root / "alpha-artifacts" / "proof"
+            second_output = temporary_root / "beta-results" / "replay"
+
+            def run_once(inputs: tuple[Path, Path, Path], output: Path):
+                baseline, candidate, corpus = inputs
+                arguments = [
+                    "replay",
+                    "--baseline",
+                    f"recorded:{baseline}",
+                    "--candidate",
+                    f"process:{sys.executable},{candidate}",
+                    "--corpus",
+                    str(corpus),
+                    "--output",
+                    str(output),
+                ]
+                self.assertEqual(0, main(arguments))
+                return {
+                    name: (output / name).read_bytes()
+                    for name in ("run-manifest.json", "report.json", "report.md")
+                }
+
+            started = time.perf_counter()
+            with mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "0"}):
+                first = run_once(first_inputs, first_output)
+                second = run_once(second_inputs, second_output)
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 60)
+        self.assertEqual(first["run-manifest.json"], second["run-manifest.json"])
+        self.assertEqual(first["report.json"], second["report.json"])
+        self.assertNotEqual(first["report.md"], second["report.md"])
+        manifest = json.loads(first["run-manifest.json"])
+        report = json.loads(first["report.json"])
+        self.assertEqual(manifest["run_id"], report["run_id"])
+        self.assertEqual("1970-01-01T00:00:00Z", manifest["generated_at"])
+        self.assertNotIn("reproduction_command", report)
+        self.assertEqual(50, report["counts"]["unchanged"])
+        self.assertEqual("pass", report["gate"]["status"])
+        expected_ids = [
+            json.loads(line)["event_id"]
+            for line in CORPUS.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            expected_ids,
+            [row["event"]["event_id"] for row in report["results"]],
+        )
+        first_markdown = first["report.md"].decode("utf-8")
+        second_markdown = second["report.md"].decode("utf-8")
+        self.assertIn(str(first_output), first_markdown)
+        self.assertIn(str(second_output), second_markdown)
+
+    def test_public_extraction_manifest_is_exact_and_replay_only(self) -> None:
+        manifest = json.loads(EXTRACTION_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual("public-v0-extraction-manifest.v1", manifest["schema_version"])
+        self.assertEqual("owner-approved", manifest["status"])
+        self.assertEqual("Cristian Tcaci", manifest["approved_by"])
+        self.assertEqual("2026-07-30", manifest["approved_at"])
+        self.assertEqual(manifest["file_count"], len(manifest["files"]))
+
+        paths = [entry["path"] for entry in manifest["files"]]
+        self.assertEqual(len(paths), len(set(paths)))
+        disallowed = (
+            "legacy/",
+            "templates/",
+            "scripts/replay_corpus.py",
+            ".git/",
+            "HUMAN_TODO.md",
+        )
+        for entry in manifest["files"]:
+            with self.subTest(path=entry["path"]):
+                path = PurePosixPath(entry["path"])
+                self.assertFalse(path.is_absolute())
+                self.assertNotIn("..", path.parts)
+                self.assertTrue(entry["path"].startswith("replay_v0/"))
+                self.assertFalse(any(value in entry["path"] for value in disallowed))
+                target = ROOT.joinpath(*path.parts)
+                self.assertTrue(target.is_file())
+                self.assertEqual(entry["sha256"], sha256_file(target))
+                self.assertIn(
+                    entry["kind"],
+                    {"source", "schema", "corpus", "fixture", "test", "documentation"},
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

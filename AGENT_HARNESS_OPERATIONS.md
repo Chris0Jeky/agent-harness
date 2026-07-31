@@ -1,34 +1,43 @@
-Purpose: Authoritative freeze, extraction, and replay-kernel contract for the existing private `agent-harness` repository.
-Status: ACTIVE for freeze and extraction only; universal-parser feature development is stopped.
-Authority relationship: This document wins for the legacy dispatcher freeze, source-asset extraction, and replay-kernel technical contracts; `CLAUDE_CONFIG_OPERATIONS.md` wins for autonomy and evidence handling, while `REPLAY_TOOL_PRODUCT.md` wins for public naming, release, launch, and continuation decisions.
+Purpose: Authoritative legacy-freeze and replay-v0 technical contract inside the active public `agent-harness` workbench.
+Status: ACTIVE for the legacy freeze and the internal replay Policy Lab only; universal-parser feature expansion remains stopped.
+Authority relationship: `AGENT_HARNESS_AGENT_BRIEF.md` wins for repository mission and roadmap. This document wins only for the legacy dispatcher freeze, replay-v0 contracts, and the historical extraction record. `CLAUDE_CONFIG_OPERATIONS.md` wins for private Claude-config autonomy and evidence handling. `REPLAY_TOOL_PRODUCT.md` is a deferred AH-10 product brief, not an active launch instruction.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
-# OPEN items
+# Decision register
 
-- **OPEN AH-001:** Confirm the exact immutable legacy tag name. This document recommends `floor-v1-final`.
-- **OPEN AH-002:** Confirm the current paths of the legacy dispatcher, replay script, corpus fixtures, and test suites. The paths in this document are target paths and must be adapted without moving unrelated files.
-- **OPEN AH-003:** Confirm the existing repository test and lint commands. Agents must preserve current tooling and must not add a dependency without owner review.
+- **DECISION AH-001:** The immutable legacy tag is `floor-v1-final`; it was owner-approved, created, and pushed on 2026-07-30 at `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
+- **DECISION AH-002:** The current dispatcher, replay, fixture, and test paths are confirmed by `docs/extraction/inventory.md`; no legacy path was moved.
+- **DECISION AH-003:** The existing dependency-free `unittest` lanes are authoritative for this repository. Pytest 9.0.3 is also owner-approved as a development dependency and compatibility runner for the declared Pytest commands.
 - **OPEN AH-004:** Confirm whether the legacy dispatcher can execute in a clean isolated environment. The public baseline does not depend on this answer because recorded decisions are first-class.
-- **OPEN AH-005:** Confirm the launch calendar and 13-hour allocation for the tasks in this document. `REPLAY_TOOL_PRODUCT.md` owns the overall assumed 2026-08-16 deadline and 24-hour cap.
+- **DECISION AH-005:** The owner removed the calendar launch deadline. The original 13-hour replay
+  extraction allocation plus 11-hour public-product allocation is retained as historical
+  accounting for that programme. It is not a cap on the wider workbench mission.
 
 # Authority and operating decision
 
-- **DECISION:** The existing repository becomes a frozen evidence source and extraction workspace, not the public product repository.
+- **DECISION:** `agent-harness` is an active agent-operations workbench. `replay_v0` is its internal
+  Policy Lab and evidence centre, not the repository's entire mission.
+- **DECISION:** `Chris0Jeky/agent-harness` remains public for now. Every tracked artifact is treated as immediately public; a future visibility change must be verified from live host state and does not relax the private-input boundary.
 - **DECISION:** The legacy dispatcher is preserved at a reviewed commit and immutable tag; it is not rewritten, reformatted, or expanded to support new command shapes.
-- **DECISION:** The only active implementation scope is the decision-replay kernel defined below and the minimum extraction support needed to move it into the clean public repository.
+- **DECISION:** This document's implementation scope is the decision-replay kernel defined below.
+  Doctor v2, Pattern Guard v2, estate operations, adapters, measurement, and Claude-config
+  integration remain active workbench roadmap domains under `AGENT_HARNESS_AGENT_BRIEF.md`.
+- **DECISION:** No clean public replay repository is created now. Public extraction is deferred to
+  AH-10, after internal stability and demonstrated demand.
 - **CONSTRAINT:** Cross-repository autonomy, mandatory owner review, `HUMAN_TODO.md`, failure-ledger schema, and manual promotion policy are defined only in `CLAUDE_CONFIG_OPERATIONS.md`; agents must apply those rules by reference.
-- **CONSTRAINT:** Any discovered work outside this contract becomes a backlog proposal with an evidence trigger. It must not be implemented in this repository.
+- **CONSTRAINT:** Work outside this replay contract follows the workbench roadmap and active-plan
+  limits; this file does not defer or authorise it.
 - **CONSTRAINT:** A green legacy test suite does not reopen universal-parser development.
 
 # Freeze contract
 
-- **DECISION:** The recommended tag is `floor-v1-final` and must point to the last owner-reviewed universal-parser state.
+- **DECISION:** The immutable tag is `floor-v1-final` and points to the last owner-reviewed universal-parser state, `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
 - **CONSTRAINT:** Creating or pushing the tag requires owner review.
 - **CONSTRAINT:** After the tag, the legacy dispatcher path is read-only except for a security-critical preservation fix explicitly approved by the owner.
 - **CONSTRAINT:** New bypasses, false positives, and environment incompatibilities are recorded as evidence or corpus candidates; they are not automatically fixed in the legacy parser.
 - **CONSTRAINT:** The freeze record must contain the commit SHA, dispatcher path, line count, test command, known environment assumptions, known false-positive families, known false-negative families, and the location of recorded decisions.
-- **CONSTRAINT:** The public replay repository must not require the legacy code, its private configuration, or its machine environment at runtime.
+- **CONSTRAINT:** Any future public extraction must not require the legacy code, its private configuration, or its machine environment at runtime.
 
 # V0 product boundary
 
@@ -90,6 +99,26 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
+- **CONSTRAINT:** Process identity binds the executable bytes and four-octal-digit permission mode,
+  the entry-policy bytes, plus the relative names, exact regular-file bytes, and permission modes
+  for the policy-parent root and entries. A preserved permission difference therefore changes the
+  identity even when names, bytes, and execute bits are unchanged. Installed dependencies, files
+  outside that tree, network responses, and other host metadata remain outside the portable
+  identity, so callers that depend on them must isolate and record that environment.
+- **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
+  policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
+  executable, permission mode, and complete-tree digests against process identity v6 before and
+  after execution, and launches only the snapshot paths. The private root name is derived from the
+  process identity so policy-visible working, argument, and file paths are stable; a pre-existing
+  identity path fails closed and is neither reused nor removed. V0 does not serialize concurrent
+  evaluations of one identity, so overlapping evaluations may make one source fail closed and
+  should be run sequentially. Original-path drift, snapshot drift, or a copy mismatch yields
+  `indeterminate` decisions and exit `3`; cleanup failure is also source-failed. Cleanup may make
+  paths writable only inside the runner-created private snapshot so copied read-only inputs can be
+  removed; it never changes the original policy tree. The
+  snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
+  mutate-and-restore process, and a non-relocatable executable fails closed rather than falling
+  back to its original path.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash
@@ -103,15 +132,18 @@ python -m replay_v0.cli replay \
 
 - **DECISION:** A JSONL recording is a first-class policy source and is the default way to use the frozen legacy baseline.
 - **CONSTRAINT:** The recorded source file contains one `PolicyDecision` v1 object per corpus event and a sidecar manifest that identifies the original policy and commit.
+- **CONSTRAINT:** Source loading captures the sidecar and decision bytes once. Evaluation consumes
+  those exact validated bytes rather than reopening mutable paths, so a later matched-pair
+  replacement cannot execute under the earlier recorded-source identity.
 - **CONSTRAINT:** A missing `event_id`, duplicate `event_id`, invalid schema, or digest mismatch produces `indeterminate` for affected events and fails input validation.
 - **CONSTRAINT:** The legacy dispatcher never needs to execute in the public repository or demo.
 - **CONSTRAINT:** The reference source syntax is `recorded:<path>`.
 
 ## Legacy dispatcher wrapper
 
-- **DECISION:** The legacy wrapper exists only to generate or refresh a private decision recording from the pinned legacy environment.
+- **DECISION:** The legacy wrapper exists only to generate or refresh a private local decision recording from the pinned legacy environment.
 - **CONSTRAINT:** The wrapper must import or invoke the tagged dispatcher without modifying it.
-- **CONSTRAINT:** The wrapper reads the same `CommandEvent` stream and writes `PolicyDecision` records, but it may run only in the private repository or an owner-approved isolated environment.
+- **CONSTRAINT:** The wrapper reads the same `CommandEvent` stream and writes `PolicyDecision` records, but it may run only in an owner-controlled private workspace or an owner-approved isolated environment. Its output is never committed without privacy review.
 - **CONSTRAINT:** If the legacy dispatcher cannot process an event or cannot start, the wrapper emits `indeterminate`; it does not patch the dispatcher.
 - **CONSTRAINT:** The wrapper output must include a manifest with the exact legacy commit and environment notes before it can be used as a baseline recording.
 
@@ -161,7 +193,11 @@ python -m replay_v0.cli replay \
 ```
 
 - **CONSTRAINT:** Digests cover the exact committed bytes. Line-ending changes therefore require a manifest update.
-- **CONSTRAINT:** The runner validates all listed digests before invoking any policy source.
+- **CONSTRAINT:** `event_count` is positive. Empty event or case collections are input-invalid and
+  cannot create an all-zero passing comparison.
+- **CONSTRAINT:** The runner reads each listed corpus file once, validates the captured bytes, and
+  parses those same immutable bytes before invoking any policy source. A later path replacement
+  cannot change events or cases under the earlier corpus-manifest digest.
 
 ## Run manifest
 
@@ -196,6 +232,9 @@ python -m replay_v0.cli replay \
 - **CONSTRAINT:** The Markdown report begins with counts, gate result, policy identities, corpus identity, and the exact reproduction command.
 - **CONSTRAINT:** The JSON report contains every event result and remains the machine-readable source of truth.
 - **CONSTRAINT:** The report may describe a change; it may not claim that the original command was safe, executed, or reproduced.
+- **CONSTRAINT:** The manifest and both reports are staged as one publication set. If replacing an
+  existing artifact fails, the previous complete set is restored. This covers handled in-process
+  publication errors, not power loss or operating-system crashes.
 
 ## Exit codes
 
@@ -229,14 +268,16 @@ python -m replay_v0.cli replay \
 - **CONSTRAINT:** No universal shell parsing, recursive wrapper interpretation, variable expansion, repository-state inference, or network probes.
 - **CONSTRAINT:** No generic `ToolEvent`, file-edit event, MCP event, GitHub event, cloud event, or agent trajectory replay.
 - **CONSTRAINT:** No policy DSL, YAML rule compiler, rule precedence engine, risk profiles, approval workflow, or authorisation context.
-- **CONSTRAINT:** No Configuration Doctor, telemetry platform, failure clustering, promotion engine, blueprint plugin, fictional estate, or scheduler.
+- **CONSTRAINT:** Replay v0 itself contains no Configuration Doctor, telemetry platform, failure
+  clustering, promotion engine, blueprint plugin, fictional estate, or scheduler. This module
+  boundary does not abandon the separate Doctor, estate, adapter, or measurement roadmap domains.
 - **CONSTRAINT:** No academic benchmark claim, leaderboard, or broad safety claim.
 - **CONSTRAINT:** No external integration in core v0. The DCG compatibility demonstration belongs to `REPLAY_TOOL_PRODUCT.md` as an example shim.
 - **CONSTRAINT:** No new legacy-parser feature or broad refactor.
 
-# Repository layout for extraction work
+# Repository layout for the internal Policy Lab
 
-- **DECISION:** The private extraction workspace uses this bounded shape, adapted to existing paths where necessary:
+- **DECISION:** The internal Policy Lab uses this bounded shape, adapted to existing paths where necessary. Because this repository is public, private inputs and generated private outputs remain local and ignored:
 
 ```text
 agent-harness/
@@ -260,7 +301,9 @@ agent-harness/
 ```
 
 - **CONSTRAINT:** Do not move the legacy implementation merely to match this diagram if doing so risks history, imports, or tests. A reference path is acceptable.
-- **CONSTRAINT:** Only files approved by the extraction manifest are copied into the clean public repository.
+- **CONSTRAINT:** The completed extraction manifest is retained as reproducibility and privacy
+  evidence. If AH-10 later authorises a clean public repository, only manifest-approved files may
+  be considered for copying and must be re-reviewed against then-current source bytes.
 
 # Autonomy, evidence, and stop policy
 
@@ -271,8 +314,15 @@ agent-harness/
 
 # Quality gates
 
-- **OPEN:** Bind these commands to the repository's existing tooling during Task 1; do not add missing tools without owner review.
-- **DECISION:** The target commands are:
+- **DECISION:** The authoritative dependency-free repository lanes are:
+
+```bash
+python -m unittest discover -s replay_v0/tests/unit -v
+python -m unittest discover -s replay_v0/tests/contract -v
+python -m unittest discover -s replay_v0/tests -v
+```
+
+- **DECISION:** Pytest 9.0.3 is an owner-approved development dependency and compatibility runner. These declared commands are also required:
 
 ```bash
 python -m pytest -q replay_v0/tests
@@ -280,15 +330,19 @@ python -m ruff check replay_v0
 python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 ```
 
-- **CONSTRAINT:** The third command is the fast lane and must complete in under 60 seconds without network access or live legacy execution.
+- **CONSTRAINT:** The unit-plus-contract portion of both runner interfaces is the fast lane and must complete in under 60 seconds without network access or live legacy execution.
 - **CONSTRAINT:** Required CI checks before merging extraction work are `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
-- **CONSTRAINT:** If Pytest or Ruff is not already approved in the repository, the agent must route the tooling decision to `HUMAN_TODO.md`; it may use existing equivalents but must update this document through owner-reviewed PR before changing the command contract.
+- **CONSTRAINT:** `replay-fast` and `replay-tests` use the authoritative dependency-free `unittest` lanes. `operations-contract` installs the approved development requirements and proves the declared Pytest commands remain compatible.
 
-# Calendar and budget allocation
+# Historical replay-v0 task accounting
 
-- **OPEN:** The schedule below assumes the owner confirms the 2026-08-16 launch and 24-hour total cap.
-- **DECISION:** These ten tasks have a combined maximum of **13 hours**. `REPLAY_TOOL_PRODUCT.md` owns the remaining **11 hours**.
-- **CONSTRAINT:** When the cumulative logged time reaches 13 hours, the agent stops extraction work and presents the completed subset. Deferred polish does not consume the public-product allocation without owner approval.
+- **DECISION:** The ten tasks below record the completed replay-v0 extraction plan and its original
+  **13-hour** allocation; `REPLAY_TOOL_PRODUCT.md` recorded a separate **11-hour** public-product
+  allocation.
+- **CONSTRAINT:** The combined 13+11/24-hour figure remains historical programme accounting. It
+  does not cap AH-1 through AH-10 or make public extraction the next workstream.
+- **CONSTRAINT:** The task list is preserved as implementation provenance, not as authority to
+  create a clean repository or launch a public product.
 
 # First 10 tasks
 
@@ -296,7 +350,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-07-30 to 2026-08-02
+- **Sequence:** Start first.
 - **Objective:** Produce the freeze record and identify the exact commit proposed for `floor-v1-final` without creating or pushing the tag.
 - **Paths touched:** `docs/freeze/floor-v1-final.md`, `HUMAN_TODO.md`.
 - **Acceptance criteria:** The record contains commit SHA, dispatcher path, line count, known test command, environment assumptions, known limitation references, and a copy-paste tag command marked human-review-only.
@@ -308,7 +362,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-07-30 to 2026-08-02
+- **Sequence:** Start after Task 1 identifies the freeze candidate.
 - **Objective:** Identify existing replay code, tests, corpora, and legacy decision outputs that can seed v0.
 - **Paths touched:** `docs/extraction/inventory.md`; no source moves.
 - **Acceptance criteria:** Every candidate asset has current path, purpose, private-data risk, keep/rewrite/drop decision, and estimated extraction effort; a recorded baseline gap is explicit.
@@ -320,7 +374,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-03 to 2026-08-04
+- **Sequence:** Start after Task 2 confirms the extractable schema paths.
 - **Objective:** Implement the three minimal schemas: `CommandEvent`, `PolicyDecision`, and charter case.
 - **Paths touched:** `replay_v0/schemas/`, `replay_v0/corpus.py`, `replay_v0/tests/contract/`.
 - **Acceptance criteria:** Valid fixtures pass; missing required identity fields, extra event fields, invalid effects, and invalid timestamps fail with deterministic messages.
@@ -332,7 +386,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-04 to 2026-08-05
+- **Sequence:** Start after Task 3 fixes the decision schema.
 - **Objective:** Load a decision JSONL file by `event_id` and return `indeterminate` for missing records without executing a policy.
 - **Paths touched:** `replay_v0/policy_sources.py`, `replay_v0/fixtures/recorded/`, `replay_v0/tests/unit/test_recorded_source.py`.
 - **Acceptance criteria:** Complete, missing, duplicate, malformed, and mismatched recordings are covered; no legacy import occurs.
@@ -344,7 +398,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-05 to 2026-08-06
+- **Sequence:** Start after Task 3 fixes the event and decision schemas.
 - **Objective:** Implement shell-free JSONL stdin/stdout policy execution with timeout and missing-decision handling.
 - **Paths touched:** `replay_v0/policy_sources.py`, `replay_v0/tests/fixtures/process_policies/`, `replay_v0/tests/contract/test_process_source.py`.
 - **Acceptance criteria:** Ordered success, stderr diagnostics, non-zero exit, timeout, malformed output, duplicate event id, and partial output are deterministic; missing decisions become `indeterminate`.
@@ -356,7 +410,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1 hour
-- **Calendar slot:** 2026-08-06
+- **Sequence:** Start after Tasks 4 and 5 define both policy-source identities.
 - **Objective:** Generate and validate corpus and run manifests using SHA-256.
 - **Paths touched:** `replay_v0/digests.py`, `replay_v0/manifests.py`, manifest fixtures, tests.
 - **Acceptance criteria:** Byte changes invalidate the digest; `run_id` is stable for identical inputs; absolute paths and host data are absent.
@@ -368,7 +422,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-07 to 2026-08-08
+- **Sequence:** Start after Tasks 3, 4, and 5 provide validated decisions.
 - **Objective:** Compare baseline and candidate decisions and emit the complete machine-readable report.
 - **Paths touched:** `replay_v0/compare.py`, `replay_v0/reports.py`, `replay_v0/tests/unit/test_compare.py`, golden JSON fixtures.
 - **Acceptance criteria:** All five diff classes are covered; ordering follows the corpus; reasons are preserved; the report states decision replay limitations.
@@ -380,7 +434,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-08 to 2026-08-09
+- **Sequence:** Start after Tasks 6 and 7 fix manifests and comparison semantics.
 - **Objective:** Provide one reproducible command that writes JSON, Markdown, and run manifest and exits under the defined contract.
 - **Paths touched:** `replay_v0/cli.py`, `replay_v0/reports.py`, CLI tests, Markdown golden fixtures.
 - **Acceptance criteria:** Exit codes `0`–`3` are covered; `--fail-on` accepts only the three supported classes; the report prints a reproduction command; reports are written before exit `1`.
@@ -392,7 +446,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 
 - **Classification:** DECISION
 - **Time box:** 2 hours
-- **Calendar slot:** 2026-08-10 to 2026-08-12
+- **Sequence:** Start after the validators and both policy sources are complete.
 - **Objective:** Build the small reviewed charter corpus and a matching synthetic or redacted legacy-decision recording.
 - **Paths touched:** `replay_v0/corpora/charter/events.jsonl`, `cases.jsonl`, `corpus-manifest.json`, `replay_v0/fixtures/legacy-decisions.jsonl`, recording manifest.
 - **Acceptance criteria:** Approximately 20 dangerous, 20 benign, and 10 historical/opaque cases; unique ids; valid schemas; exact digests; no private identifiers; owner-review checklist generated.
@@ -400,12 +454,13 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 - **Out of scope:** Bulk conversion of the old test suite, live transcript ingestion, benchmark claims, or adding cases merely to increase count.
 - **Stop condition:** Halt when a case cannot be sanitised without changing the relevant command structure; keep it private and replace it with a synthetic case.
 
-## Task 10 — Prove determinism and create the extraction bundle
+## Task 10 — Prove determinism and create the internal extraction proof
 
 - **Classification:** DECISION
 - **Time box:** 1.5 hours
-- **Calendar slot:** 2026-08-12 to 2026-08-13
-- **Objective:** Run the full v0 fast gate twice and create an allowlisted source bundle for the clean public repository.
+- **Sequence:** Start after Tasks 1 through 9 are complete.
+- **Objective:** Run the full v0 fast gate twice and create an allowlisted local source bundle as
+  deterministic extraction and privacy evidence.
 - **Paths touched:** `replay_v0/tests/test_determinism.py`, `docs/extraction/public-v0-manifest.json`, generated local bundle under an ignored path.
 - **Acceptance criteria:** Two runs produce identical semantic JSON and `run_id`; fast lane remains under 60 seconds; the manifest lists only v0 source, schemas, synthetic corpus, tests, and approved documentation.
 - **Verify:** `python -m pytest -q replay_v0/tests && python -m replay_v0.cli replay --baseline recorded:replay_v0/fixtures/legacy-decisions.jsonl --candidate process:python,replay_v0/tests/fixtures/process_policies/reference_candidate.py --corpus replay_v0/corpora/charter/events.jsonl --output .local/replay-proof`
