@@ -2338,6 +2338,49 @@ _DOCKER_VALUE_GLOBAL_OPTIONS = frozenset(
 )
 _DOCKER_TERMINAL_GLOBAL_OPTIONS = frozenset({"-h", "--help", "-v", "--version"})
 _DOCKER_SHORT_VALUE_OPTIONS = ("-c", "-H", "-l")
+_DOCKER_TRUE_VALUES = frozenset({"1", "t", "true"})
+_DOCKER_FALSE_VALUES = frozenset({"0", "f", "false"})
+
+
+def _docker_boolean_value(value: str) -> bool | None:
+    """Parse the Boolean spellings accepted by Docker's root flags."""
+    normalized = value.casefold()
+    if normalized in _DOCKER_TRUE_VALUES:
+        return True
+    if normalized in _DOCKER_FALSE_VALUES:
+        return False
+    return None
+
+
+def _docker_short_options_next_index(
+    args: tuple[str, ...], index: int, argument: str
+) -> int | None:
+    """Consume one bounded Docker short-option token or reject it."""
+    name, separator, assigned_value = argument.partition("=")
+    shorthands = name[1:]
+    if not shorthands:
+        return None
+    for shorthand_index, character in enumerate(shorthands):
+        shorthand = f"-{character}"
+        is_last = shorthand_index + 1 == len(shorthands)
+        if shorthand in (
+            _DOCKER_BOOLEAN_GLOBAL_OPTIONS | _DOCKER_TERMINAL_GLOBAL_OPTIONS
+        ):
+            boolean_value = True
+            if is_last and separator:
+                parsed_value = _docker_boolean_value(assigned_value)
+                if parsed_value is None:
+                    return None
+                boolean_value = parsed_value
+            if shorthand in _DOCKER_TERMINAL_GLOBAL_OPTIONS and boolean_value:
+                return None
+            continue
+        if shorthand not in _DOCKER_SHORT_VALUE_OPTIONS:
+            return None
+        if not is_last or separator:
+            return index + 1
+        return index + 2 if index + 1 < len(args) else None
+    return index + 1
 
 
 def _docker_subcommand_index(args: tuple[str, ...]) -> int | None:
@@ -2358,32 +2401,30 @@ def _docker_subcommand_index(args: tuple[str, ...]) -> int | None:
                 return None
             index += 2
             continue
+        if argument.startswith("-") and not argument.startswith("--"):
+            next_index = _docker_short_options_next_index(args, index, argument)
+            if next_index is None:
+                return None
+            index = next_index
+            continue
         name, separator, value = argument.partition("=")
         if separator:
             if name in _DOCKER_TERMINAL_GLOBAL_OPTIONS:
-                if value.casefold() == "false":
+                if _docker_boolean_value(value) is False:
                     index += 1
                     continue
                 return None
-            if name in _DOCKER_BOOLEAN_GLOBAL_OPTIONS and value.casefold() in {
-                "true",
-                "false",
-            }:
+            if (
+                name in _DOCKER_BOOLEAN_GLOBAL_OPTIONS
+                and _docker_boolean_value(value) is not None
+            ):
                 index += 1
                 continue
-            if name in _DOCKER_VALUE_GLOBAL_OPTIONS and value:
+            if name in _DOCKER_VALUE_GLOBAL_OPTIONS:
                 index += 1
                 continue
             return None
         if argument.startswith("--"):
-            return None
-        if any(
-            argument.startswith(option) and len(argument) > len(option)
-            for option in _DOCKER_SHORT_VALUE_OPTIONS
-        ):
-            index += 1
-            continue
-        if argument.startswith("-"):
             return None
         return index
     return None

@@ -4573,6 +4573,26 @@ allow_local_binding = true
                 True,
             ),
             (
+                "combined short options",
+                ("-Dldebug", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "combined short terminal false assignment",
+                ("-Dv=0", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "numeric boolean assignment",
+                ("--debug=1", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "abbreviated boolean assignment",
+                ("--tls=t", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
                 "value global",
                 ("--context", "safe", "mcp", "gateway", "run"),
                 True,
@@ -4580,6 +4600,16 @@ allow_local_binding = true
             (
                 "attached long value",
                 ("--config=private-config", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "empty attached context",
+                ("--context=", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "empty attached config",
+                ("--config=", "mcp", "gateway", "run"),
                 True,
             ),
             (
@@ -4602,6 +4632,21 @@ allow_local_binding = true
                 ("--context", "mcp", "gateway", "run"),
                 False,
             ),
+            (
+                "missing clustered value",
+                ("-Dl", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "malformed boolean assignment",
+                ("--debug=yes", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "unknown shorthand",
+                ("-Dq", "mcp", "gateway", "run"),
+                False,
+            ),
             ("terminal global", ("--version", "mcp", "gateway", "run"), False),
             (
                 "false terminal assignment",
@@ -4609,10 +4654,21 @@ allow_local_binding = true
                 True,
             ),
             (
+                "numeric false terminal assignment",
+                ("--version=0", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "abbreviated false help assignment",
+                ("--help=f", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
                 "true terminal assignment",
                 ("--version=true", "mcp", "gateway", "run"),
                 False,
             ),
+            ("option terminator", ("--", "mcp", "gateway", "run"), True),
             (
                 "bounded gateway",
                 (
