@@ -535,6 +535,32 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   active-project MCP topology. It rejects active command-backed names duplicated across those
   scopes, layered mixed command/URL transports, and Docker MCP gateways with neither `--servers`
   nor `--profile`; it never renders arguments, mutates configuration, or probes runtime processes.
+- `harness.py worktree-lease --repo <linked-worktree> --action
+  <status|acquire|renew|release> [--claimant <id>]` — manages the cooperative owner record stored
+  in the linked worktree's Git administrative directory. Acquire requires absence, or
+  `--replace-stale` for a structurally valid expired record; renew and release require the same
+  self-declared claimant. The record is scoped to the canonical common-Git directory, canonical
+  worktree, and plain-removal operation, with bounded creation/renewal and expiry timestamps.
+- `harness.py worktrees --repo <path> [--refresh] [--claimant <id>] [--apply] [--json]` — reports
+  every registered linked worktree and only removes a candidate after an explicit complete branch
+  namespace refresh for every remote, one canonical physical identity from discovery through the
+  removal operand, exact containment under the primary checkout's `.worktrees/`, no configured
+  work-tree redirection, clean tracked/staged/untracked/ignored state, no
+  assume-unchanged/skip-worktree index flags, an unmodified commit graph, remote-ref reachability,
+  an active exactly scoped lease owned by the supplied claimant, and same-run fingerprint plus
+  lease revalidation while holding the lease-mutation lock through plain removal. Missing,
+  malformed, mismatched, stale, nearly expired, changed, differently
+  owned leases refuse safely. The default performs no fetch or mutation; `--apply` requires
+  `--refresh --claimant`, uses only plain `git worktree remove`, never prunes repository-wide
+  worktree metadata, and never deletes a branch. Git-locked, current, primary, outside, unavailable,
+  and cooperatively occupied worktrees are retained. Canonical identity collapses Windows
+  short/long paths and macOS `/var` aliases.
+
+The owner lease is coordination, not authentication or an OS lock. It proves nothing about a
+process that does not follow the protocol. A non-cooperating process or watcher may still write
+after revalidation, including an ignored file that plain removal would delete; text and JSON output
+carry that limitation, and the command does not claim arbitrary external-process occupancy
+detection.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
