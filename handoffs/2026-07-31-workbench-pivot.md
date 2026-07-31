@@ -2,134 +2,139 @@
 
 Refresh refs, PRs, issues, checks, reviews, comments, threads, worktrees, and tier declarations
 before acting. This is a factual checkpoint, not authority to reuse stale gate evidence. Root
-`HANDOFF.md` is historical pre-pivot context and must not be rewritten as current state.
+`HANDOFF.md` is historical pre-pivot context and was intentionally not rewritten.
 
 ## Objective and invariants
 
-- Operate `agent-harness` as the agent-operations workbench: frozen legacy floor, internal replay
-  Policy Lab, Doctor, estate operations, bounded Pattern Guard v2, measurement, adapters, and
-  private integration through small executable slices.
-- Authority at the post-PR #178 snapshot is T3 with `push: free` and `merge: free`. Preserve commits
-  with merge commits; never squash, use admin/auto merge, or delete a PR branch during merge.
-- Every changed head/base needs scoped proof, three-minute aging, one bounded review pipeline,
-  green required CI, and one comments/reviews/threads triage. Never post routine `@codex review`.
-- Keep at most two active workstreams and one writer per checkout.
+- Operate `agent-harness` as the agent-operations workbench: frozen legacy floor, internal Policy
+  Lab, Doctor, estate operations, bounded Pattern Guard v2, measurement, adapters, and private
+  integration through small executable slices.
+- Authority at this snapshot is T3 with `push: free` and `merge: free`. Preserve commits with merge
+  commits; never squash, use admin/auto merge, or delete a PR branch during merge.
+- Every changed head or base gets scoped proof, three-minute aging, one bounded review pipeline,
+  green required CI, and one final snapshot of reviews, threads, inline comments, and conversation
+  comments. Do not post routine `@codex review`.
+- Keep at most two active workstreams and one writer per checkout. Never race an occupied checkout.
 - Do not expand the universal parser, activate global blocking, start blueprint-plugin extraction,
   or create a public replay repository.
 - H-2 is the only open `HUMAN_TODO.md` item and is owner-parked. Do not restart estate-wide
   canaries or disable the harness.
 
+## Exact published checkpoint
+
+- `origin/main` was `a6a1c847392899ad0e6d0709c44ea2aa67760979`, the merge commit for PR #194.
+- PR #194 preserved head `5b5cfbfc6179ac577e157b6c520c2ebaf6258608` as its second parent;
+  `origin/main` contains that head; #167 is closed; run `30665083220` passed all nine jobs; the
+  one-time post-merge comments/reviews/threads refresh found no late feedback.
+- The protected `floor-v1-final` tag remains object
+  `5a939540bdce51e511d6b3bae98358e3e2ad9148`, peeled commit
+  `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
+- GitHub had 69 open issues and one open PR (#193). `ROADMAP.md` maps every open issue exactly once.
+  Refresh both counts before selecting work.
+- Canonical state: `docs/SYSTEM_STATE.md`; issue/PR ownership: `ROADMAP.md`; active work:
+  `plans/ACTIVE.md`; measurements: `docs/BENCHMARKS.md`; legacy limitations:
+  `FLOOR_LIMITATIONS.md`; human action: `HUMAN_TODO.md`.
+
 ## Completed and directly verified
 
-- PR #140 merged as `81125c57ec6d1a750ddd43b0110c6928f9f4a860`; `origin/main` contains
-  `fd87e06c1c55ceed5cef3c736710b513317f3c89`; #148/#149 closed; all 27 original threads were
-  resolved; the post-merge late-feedback check was empty.
-- PR #159 merged as `8d4b69d147b4f1e930b3388e5b3ce7d2661ab82e`, preserved head
-  `e0f8fa5ab75147085d3bfcc5aaa0d7ebcb8222f6`, passed run `30626399786`, and closed #153.
-- PR #161 merged as `bea61078937a93aa73e2015ac533f2c9d061f5e8`, preserved head
-  `416046b746280422348419619a9cab286fa75617`, passed run `30627690916`, and closed #87.
-- PR #163 merged as `347ab97cfc800dcc3621ffd15d041f4e949e3fd6`, preserved head
-  `d41d311e2a3a929dbd2724e9d62cc8140a825458`, passed run `30628366731`, and closed #144.
-- PR #162 merged as `bb20cdd2528d7191a74a4dd2486bb622d6e80df1`, preserved its guarded-closeout
-  commits, passed run `30629391405`, and closed #151. PR #169 repaired every confirmed late-review
-  preservation defect and merged as `27ec3b6b0c8430058b4aa2570b0f4a9dda66938f`, preserving head
-  `cb43065c6d06675e0cff1393628512778ec767ae`; run `30634860134` passed and #166 closed.
-- PR #173 merged continuity state as `c4fdbe897f4679d85a421b18d8097683fc7c58ce`, preserving
-  head `ff21787c0ef2d5cabf16353104fd3c4c50cedb71`; run `30636462032` passed.
-- PR #174 merged platform-valid replay reproduction as
-  `7f9134f517865c2b5f9ebf646ee82ce756e69ecf`, preserving head
-  `2ccf60dcbc2a6d394d9c009c8bae655cc42b7a8d`; run `30639136818` passed and #152 closed.
-- PR #175 merged shared MCP source identity as `82e8a16a9255c987c46dc408a8e35662d4fb6b9d`,
-  preserving head `c8863e002a46fe39fc2baa1f3b8404694c9509ef`; run `30640903741` passed and
-  #164 closed.
-- PR #176 merged PolicyDecision newline parity as
-  `5df147b0ec62d48902942a876073c180f9b0914c`, preserving head
-  `440492c10eb6743ce2636a8f6cb238f653bd832a`; run `30642286808` passed, #156 closed,
-  and bounded lone-surrogate follow-up #177 remains open.
-- PR #178 merged bounded Docker gateway subcommand recognition as
-  `576b540b0e856ed61dc1b062b1cdae0abbcd89dd`, with parents `5df147b` and `bdc3f1b`,
-  preserving both implementation commits `e53ed4d723a15dc962ef7f55f8929e82f7d6e578` and
-  `bdc3f1b5218c35e71dc696936f1e604f80e3bdb0`; #165 closed. Exact-head local gates passed
-  844 tests with 13 declared skips and 2237/2237 smoke cases. Run `30645532130` passed all nine
-  jobs after the Windows failed-job rerun. One HIGH review finding was fixed once; the final
-  fix-range review was clean; four connector threads were triaged and resolved; post-merge
-  feedback was checked once.
-- PR #180 merged complete fail-closed partial-apply reporting as
-  `e23e97b464208ee6035d4155ff7e9b5316f2efec`, with parents `576b540` and `c9e80c9`, preserving
-  implementation `c9e80c91e44cdf1b301fdab845560b75c486a96f`; #168 closed. Exact-head local gates
-  passed 846 tests with 13 declared skips, 38 closeout tests with one declared skip, and 2237/2237
-  smoke cases. Run `30649228936` passed all nine jobs. The independent review was clean; the sole
-  connector P2 was classified MEDIUM/non-blocking, declined, and resolved; post-merge feedback was
-  checked once. All mutation tests used disposable synthetic repositories; no live apply ran.
-- PRs #154/#155 were closed unmerged after independent exact inventory proved them stale,
-  conflicting, and superseded by #161/#162/#169/#175. Their remote branches and historical
-  threads were preserved; no branch was deleted.
-- The protected `floor-v1-final` tag remains object
-  `5a939540bdce51e511d6b3bae98358e3e2ad9148`, peeled
-  `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
+- PR #140 merged deterministic replay v0 as `81125c57ec6d1a750ddd43b0110c6928f9f4a860`;
+  `origin/main` contains `fd87e06c1c55ceed5cef3c736710b513317f3c89`; #148/#149 closed; all
+  original threads were resolved. Replay remains internal/experimental.
+- PRs #159/#161/#163/#162/#169 merged bounded replay, Doctor, and guarded-closeout foundations;
+  #153/#87/#144/#151/#166 closed. PRs #173–#180 then published continuity and closed
+  #152/#164/#156/#165/#168. Their exact commits, runs, limitations, and measurements remain in Git,
+  prior PR records, and `docs/BENCHMARKS.md`.
+- PR #181 merged the prior continuity checkpoint as
+  `914b2d4f9547a9f8efe64b0f5a65c6f2df510552`, preserving head
+  `a39cb3b7510a5cec499ba5d2fa2d05ab205a8810`; run `30650615847` passed.
+- PR #182 changed only the aggregate Verify timeout from 15 to 20 minutes, merged as
+  `c625e4b3d98114da67db70ffe435dc9f909d100f`, preserved head
+  `94c28e52c2d9cb1ba690ed3df719ea9f13b1177e`, passed run `30652837868`, and closed #179.
+  The 24-job Windows cohort measured median 11m18.5s, p95 12m34s, maximum 13m01s.
+- PR #183 replaced up to five reachability subprocesses with one stdin-fed `rev-list`, merged as
+  `7786386931cfbb204221832b102ed8bb1db8381a`, preserved head
+  `4c9389cab998c2a428eac5aa2783d1fbd2bd2016`, passed run `30655263274`, and closed #171.
+  Nine paired disposable runs preserved verdicts and measured a 4.99× median improvement.
+- PR #187 aligned PolicyDecision surrogate schema/runtime behavior, merged as
+  `9deb1eba9c70b8cf42dcc253e4ca6afa6be8853a`, preserved head
+  `35bacdb3799c2b506e9b22d8cc36f4ba4421fa01`, passed run `30660359254`, and closed #177.
+  Independent Draft 2020-12 `jsonschema` 4.26.0 proof matched 14/14 cases; the checked-in test remains
+  dependency-free, so engine portability is explicit rather than claimed.
+- PR #194 made closeout fingerprint expiry suspend-aware, detected and latched backwards UTC movement,
+  stopped later removals on any fingerprint invalidity, and sampled before/after final lease
+  inspection. It merged as `a6a1c847392899ad0e6d0709c44ea2aa67760979`, with parents `9deb1eb`
+  and `5b5cfbf`; #167 closed. Exact-head local proof passed 855 tests with 13 declared skips,
+  47 closeout tests with one expected NTFS skip, and 2237/2237 smoke cases. No live apply ran.
+- PRs #154/#155 were closed unmerged after exact inventory proved them stale/conflicting and
+  superseded. Their remote branches and historical threads were preserved; no branch was deleted.
 
-## Current state and canonical homes
+## Reproduced but owner-blocked
 
-- Published base for the final continuity slice: `origin/main@e23e97b464208ee6035d4155ff7e9b5316f2efec`.
-- Immediately after PR #180, GitHub had zero open PRs and 65 open issues. `ROADMAP.md` maps each
-  open issue exactly once; new #179 is primary AH-1 CI proving-substrate work.
-- Canonical state: `docs/SYSTEM_STATE.md`. Issue/PR ownership: `ROADMAP.md`. Active work:
-  `plans/ACTIVE.md`. Measurements: `docs/BENCHMARKS.md`. Legacy limitations:
-  `FLOOR_LIMITATIONS.md`. Human action: `HUMAN_TODO.md`.
-- Canonical/deployed floor bytes match after LF normalization at SHA-256
-  `EA4FB45DC71A44E80392E7EA423BC70DCB604538E956CB13CF34B750118974B5`; deployed raw CRLF
-  bytes are `E1A4E7714913788DD801F0FA43A3E5B30EA0433709F97142509B56B1C442EF68`.
-- Issue #179 records the exact-head Windows CI variance: attempt 1 canceled at 15m05s after
-  assertions had passed through replay; attempt 2 passed in 11m33s. Do not weaken a check; measure
-  recent distributions before changing the aggregate budget or stage topology.
+- Issue #160 validly reproduces when TOML string values are quoted: a layered server with effective
+  `enabled = false` still raises the redacted mixed-transport error. Existing tests do not define
+  precedence. No code, configuration, Docker, or runtime state was changed.
+- Recommended bounded rule: effective disablement suppresses only a cross-layer transport conflict;
+  same-table `command` plus `url` stays structurally invalid, and a later re-enable exposes the
+  retained conflict. The owner must choose the policy before implementation.
+- Evidence comment: https://github.com/Chris0Jeky/agent-harness/issues/160#issuecomment-5146563160
 
-## Active workstream
+## Occupied PR #193 — do not race
 
-### A — continuity docs (sole writer)
+- PR #193 (`fix(floor): close public push narrowing gaps`) is the sole open PR and maps to AH-3/#184.
+  Its writer checkout is `.worktrees/issue184-push-narrowing`; observed head was
+  `8648e5c7fb804fed4c991418401d411973350248`, with base/merge-base `a6a1c84`.
+- An independent first-head review found a HIGH one-shot configuration-probe fail-open; current head
+  `8648e5c` contains the bounded fix on the refreshed base. The connector review at superseded head
+  `b94732a` left four current threads (one P1 and three P2) plus one outdated P2. They still need
+  one-pass triage, and no current-head fix-diff review was recorded. New run `30666338126` had six
+  fast jobs green while the three aggregate Verify jobs were still running.
+- The owning writer must finish those findings and re-prove affected CI/review evidence. Do not
+  merge, edit, or remove this external checkout from another workstream.
+- #184 intentionally does not authorize live installation, trust/config mutation, or a NavSentinel
+  consumer sync; NavSentinel retired that repo-local harness in a newer owner-directed change.
 
-- Writer checkout: `.worktrees/workbench-continuity-final-20260731`.
-- Branch: `docs/workbench-continuity-final`; post-#180 merge commit `8f17839` contains base
-  `e23e97b` plus the continuity commit.
-- Scope is exactly the five canonical continuity files. Root `HANDOFF.md`, runtime behavior,
-  floor limitations, and H-2 remain untouched.
-- Before publication, prove the 65-entry issue map, document budgets, tier JSON, exact diff,
-  offline audit/Doctor, fresh review, hosted CI, aging, and discussion triage.
+## Occupied state to preserve
 
-## Occupied worktrees to preserve
-
-- Primary checkout: clean and at `e23e97b` when last checked; preserve user state and refresh rather
-  than assuming that remains current.
-- `crossproduct-gate`: tracked-clean historical test branch; remote branch is gone; ignored caches.
-- `issue27-temporal-config`: tracked-clean occupied historical floor branch; ignored caches.
+- Primary checkout was tracked-clean at `main@a6a1c84`; ignored IDE/test/worktree caches remain.
+- `crossproduct-gate`: tracked-clean historical branch; remote is gone; ignored caches remain.
+- `issue27-temporal-config`: tracked-clean occupied historical floor branch; ignored caches remain.
 - `replay-tool`: user-owned staged `scripts/replay_corpus.py`; never reset, restore, stash, or remove.
-- `replay-v0-freeze`: ignored `.local/` evidence/caches and recovery evidence; never remove without
-  separately proving and copying everything that must survive.
-- `workbench-continuity-final-20260731`: the sole current writer checkout.
-- Empty, unregistered `.worktrees/replay-platform-reproduction-20260731` may remain locked by an
-  external handle. It was verified empty and unregistered; leave it alone unless separately proving
-  it safe to remove.
+- `replay-v0-freeze`: ignored `.local/` evidence/recovery plus caches; never remove without separately
+  proving and copying everything that must survive.
+- `continuity-20260731`: sole writer for the five continuity documents until its PR merges.
+- Empty, unregistered `.worktrees/replay-platform-reproduction-20260731` remains externally locked;
+  leave it alone unless separately proving it safe to remove.
+- `C:\Users\Public\codex-shell-home\pr183-review-probe` and `pr183-review-probe-sha256` each retain
+  only a disposable `.git` directory after the floor refused agent cleanup. They are not evidence
+  inputs; do not bypass the floor to remove them.
 
-The completed #175/#176/#178/#180 writer worktrees were removed with plain `git worktree remove` only
-after tracked/untracked/ignored inspection found nothing except disposable caches. No parked branch
-was deleted. `replay-v0-freeze` and its ignored evidence were never touched.
+## Exact next safe slice — #172
 
-## Next safe queue
+Start only after PR #193 and this continuity PR have merged or parked, then use a fresh detached
+`origin/main` worktree and branch. The slice is additive AH-6 evidence, not estate mutation.
 
-Finish continuity first. Then #179 is the strongest new substrate candidate because a required
-gate was directly canceled by the measured 15-minute aggregate budget. Its first action is
-read-only duration inventory, not a timeout guess. Then re-rank #170/#171/#172 and #160 from
-refreshed evidence. #98 remains unsuitable
-until source-versus-deployed global-guidance provenance is resolved.
+- **Observable outcome:** guarded closeout retains a worktree whose direct `ORIG_HEAD` target is an
+  annotated-tag or blob object and reports its exact OID/type rather than treating it as absent.
+- **Evidence:** #172 records independent PR #169 reproduction; current commit-peeling loses tag
+  identity and treats a blob target as missing, while `git fsck` shows those objects may already be
+  unreachable before removal.
+- **In:** direct OID/type probe, one fingerprinted evidence field, fail-closed keep verdict,
+  annotated-tag/blob disposable fixtures, and preservation after synthetic apply.
+- **Out:** ordinary commit reachability, reflog parsing, garbage collection, ref pruning, force
+  removal, or live estate cleanup.
+- **Architecture seam:** `harness.py` guarded worktree recovery evidence and schema-v3 fingerprint.
+- **Tests/fixtures:** disposable linked worktrees with direct tag/blob `ORIG_HEAD`; assert audit
+  evidence, keep verdict, revalidation, and post-apply identity.
+- **Measurement:** correctness matrix only; record case counts and subprocess cost if measured, but
+  do not infer estate prevalence.
+- **Limitation:** these require deliberate noncanonical mutation and may point to objects already
+  outside ordinary Git reachability.
+- **Exact verification:** `py -3 -m unittest tests.test_harness.WorktreeCloseoutTests -v`, followed by
+  full unit, smoke, audit, Doctor, formatting, hosted CI, aging, and bounded review gates.
+- **Next handoff:** one PR closing only #172, with merge-commit preservation and no live apply.
 
-Exact #179 inventory command:
-
-```powershell
-gh run view <run-id> --repo Chris0Jeky/agent-harness --json status,conclusion,attempt,jobs
-```
-
-Do not combine #179 with product behavior, skip/allow-fail a check, or turn it into general CI
-architecture. Its outcome is only an evidence-backed budget or the smallest independent stage
-partition that preserves every assertion.
+Issue #170 remains useful but additionally requires a real mode-capable POSIX/WSL positive control.
+Issues #185/#186/#188–#192 are mapped follow-ups, not workbench-wide priorities.
 
 ## Refresh commands
 
