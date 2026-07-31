@@ -7421,6 +7421,25 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 return candidate
         raise AssertionError(f"missing worktree candidate: {path}")
 
+    @staticmethod
+    def fail_list_after_first_remove_runner():
+        calls: list[list[str]] = []
+        state = {"removals": 0, "failed_lists": 0}
+
+        def runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "list"] and state["removals"]:
+                state["failed_lists"] += 1
+                return subprocess.CompletedProcess(
+                    command, 6, "misleading", "controlled list failure"
+                )
+            result = harness.worktree_git_runner(command, cwd)
+            if command[1:3] == ["worktree", "remove"] and not result.returncode:
+                state["removals"] += 1
+            return result
+
+        return runner, calls, state
+
     def test_cooperative_lease_lifecycle_is_exclusive_explicit_and_expiring(
         self,
     ) -> None:
@@ -8272,6 +8291,93 @@ class WorktreeCloseoutTests(unittest.TestCase):
             "plain_remove_refused",
         )
         self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+
+    def test_partial_apply_list_failure_is_reported_in_json(self) -> None:
+        first = self.add_worktree("partial-json-01-removed")
+        current = self.add_worktree("partial-json-02-failing")
+        remaining = self.add_worktree("partial-json-03-remaining")
+        runner, calls, state = self.fail_list_after_first_remove_runner()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=True,
+                ),
+                command_runner=runner,
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["apply_error"], "partial_apply_revalidation_failed")
+        self.assertEqual(payload["summary"]["would_remove"], 3)
+        self.assertEqual(payload["summary"]["removed"], 1)
+        self.assertEqual(payload["summary"]["apply_refusals"], 2)
+        first_result = self.candidate(payload, first)
+        self.assertEqual(first_result["apply"], "removed")
+        self.assertEqual(first_result["revalidation"], "matched")
+        current_result = self.candidate(payload, current)
+        self.assertEqual(current_result["apply"], "kept")
+        self.assertEqual(current_result["revalidation"], "unavailable")
+        self.assertEqual(current_result["apply_reason"], "revalidation_probe_failed")
+        remaining_result = self.candidate(payload, remaining)
+        self.assertEqual(remaining_result["apply"], "kept")
+        self.assertEqual(remaining_result["revalidation"], "not_requested")
+        self.assertEqual(
+            remaining_result["apply_reason"],
+            "not_attempted_after_revalidation_failure",
+        )
+        self.assertEqual(state, {"removals": 1, "failed_lists": 1})
+        self.assertFalse(first.exists())
+        self.assertTrue(current.is_dir())
+        self.assertTrue(remaining.is_dir())
+        remove_calls = [call for call in calls if call[1:3] == ["worktree", "remove"]]
+        self.assertEqual(len(remove_calls), 1)
+        self.assertNotIn("--force", remove_calls[0])
+        self.assertNotIn("-f", remove_calls[0])
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+
+    def test_partial_apply_list_failure_is_reported_in_text(self) -> None:
+        first = self.add_worktree("partial-text-01-removed")
+        current = self.add_worktree("partial-text-02-failing")
+        remaining = self.add_worktree("partial-text-03-remaining")
+        runner, calls, state = self.fail_list_after_first_remove_runner()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=False,
+                ),
+                command_runner=runner,
+            )
+
+        text = output.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] apply: partial_apply_revalidation_failed", text)
+        self.assertIn("applied: removed with plain git worktree remove", text)
+        self.assertIn("applied: kept (revalidation_probe_failed)", text)
+        self.assertIn("applied: kept (not_attempted_after_revalidation_failure)", text)
+        self.assertIn("summary: 3 removable, 1 kept, 1 removed, 2 apply refusals", text)
+        self.assertEqual(state, {"removals": 1, "failed_lists": 1})
+        self.assertFalse(first.exists())
+        self.assertTrue(current.is_dir())
+        self.assertTrue(remaining.is_dir())
+        self.assertEqual(
+            len([call for call in calls if call[1:3] == ["worktree", "remove"]]),
+            1,
+        )
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
 
     def test_head_index_reachability_and_list_failures_block(self) -> None:
         worktree = self.add_worktree("probe-failures")
