@@ -24,24 +24,45 @@ py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
 py -3 .\harness.py worktrees --repo C:\path\to\repo
 py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --json
-py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --apply --json
+py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action acquire --claimant session-123
+py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action renew --claimant session-123
+py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --claimant session-123 --apply --json
 
 # Diff, then install global guidance, skills, and the shared dispatcher with backups.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 ```
 
-`worktrees` is a guarded closeout command. Its default is entirely read-only: it does not fetch,
-remove, prune, or delete branches, so otherwise-clean worktrees remain a keep verdict until
-remote evidence is explicitly refreshed. `--refresh` fetches and prunes every configured remote's
-complete branch namespace and accepts a candidate only when its HEAD is reachable from a resulting
-remote-tracking ref. `--apply`
-requires that same-run refresh, fingerprints each candidate, revalidates the fingerprint within
-60 seconds, and invokes plain `git worktree remove` only for a physically contained, unlocked,
-clean worktree under the primary checkout's `.worktrees/` directory. Tracked, untracked, and every
-ignored path are preservation blockers, as are index flags that can hide working-tree changes.
-A plain-removal refusal becomes a keep result; `--force` and branch deletion are not implemented.
-`--json` emits the complete evidence and result summary.
+`worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
+renew leases, remove worktrees, prune worktree metadata, or delete branches. An explicit
+`--refresh` fetches and prunes every configured remote's complete branch namespace, then accepts
+reachability only from the refreshed remote-tracking refs. A grafts file or any replace ref blocks
+the candidate, and the Git subprocess environment disables replace objects. A per-worktree
+`core.worktree` redirect also blocks the candidate rather than letting status inspect another
+directory.
+
+APPLY is a cooperative protocol. `worktree-lease --action acquire` creates a short-lived record in
+that linked worktree's Git administrative directory, scoped to one canonical physical common-Git
+directory and worktree path. The claimant is a stable, unique, self-declared session identity, not
+an authenticated principal; cooperating writers must not share it. Creation refuses any existing
+lease. The same claimant may renew or release it; an expired lease may be replaced only by an
+explicit `acquire --replace-stale`. Missing, malformed, wrong-schema, wrong-scope, wrong-path,
+expired, nearly expired, or differently owned records are keep verdicts. APPLY requires
+`--refresh --claimant <same-id> --apply`, at least ten seconds remaining on the lease, a fingerprint
+less than 60 seconds old, and immediate fingerprint plus lease revalidation.
+
+Every existing path is converted once to its physical canonical spelling and that identity is used
+for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
+collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
+untracked, ignored, assume-unchanged, and skip-worktree state blocks removal. The only destructive
+command is plain `git worktree remove -- <canonical-path>`; a refusal becomes keep. There is no
+`--force`, branch deletion, or repository-wide `git worktree prune`.
+
+The lease coordinates only participants that follow this contract. It cannot discover or stop a
+non-cooperating external process, watcher, or writer; such a process can still race after the last
+inspection, including by creating an ignored file. The command reports that limitation in text and
+JSON and does not claim arbitrary occupancy detection. `--json` emits the complete evidence and
+result summary.
 
 Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
 The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every

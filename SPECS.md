@@ -531,16 +531,31 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   removes only the obsolete managed global Codex matcher.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition.
-- `harness.py worktrees --repo <path> [--refresh] [--apply] [--json]` — reports every registered
-  linked worktree and only removes a candidate after an explicit full-branch-namespace refresh for
-  every remote, exact physical containment under the primary checkout's `.worktrees/`, clean tracked/untracked/ignored status,
-  no assume-unchanged/skip-worktree index flags, remote-ref reachability, and a same-run 60-second
-  fingerprint revalidation. The default performs no fetch or mutation; `--apply` requires
-  `--refresh` and uses only plain `git worktree remove`.
-  Git-locked worktrees and the requested/current checkout are retained. Arbitrary external-process
-  occupancy is not portable to prove, so a plain-removal refusal remains a keep verdict. Pruning
-  runs only after a successful removal; branch deletion and ignored-path exceptions are outside
-  this command.
+- `harness.py worktree-lease --repo <linked-worktree> --action
+  <status|acquire|renew|release> [--claimant <id>]` — manages the cooperative owner record stored
+  in the linked worktree's Git administrative directory. Acquire requires absence, or
+  `--replace-stale` for a structurally valid expired record; renew and release require the same
+  self-declared claimant. The record is scoped to the canonical common-Git directory, canonical
+  worktree, and plain-removal operation, with bounded creation/renewal and expiry timestamps.
+- `harness.py worktrees --repo <path> [--refresh] [--claimant <id>] [--apply] [--json]` — reports
+  every registered linked worktree and only removes a candidate after an explicit complete branch
+  namespace refresh for every remote, one canonical physical identity from discovery through the
+  removal operand, exact containment under the primary checkout's `.worktrees/`, no configured
+  work-tree redirection, clean tracked/staged/untracked/ignored state, no
+  assume-unchanged/skip-worktree index flags, an unmodified commit graph, remote-ref reachability,
+  an active exactly scoped lease owned by the supplied claimant, and same-run fingerprint plus
+  lease revalidation. Missing, malformed, mismatched, stale, nearly expired, changed, or differently
+  owned leases refuse safely. The default performs no fetch or mutation; `--apply` requires
+  `--refresh --claimant`, uses only plain `git worktree remove`, never prunes repository-wide
+  worktree metadata, and never deletes a branch. Git-locked, current, primary, outside, unavailable,
+  and cooperatively occupied worktrees are retained. Canonical identity collapses Windows
+  short/long paths and macOS `/var` aliases.
+
+The owner lease is coordination, not authentication or an OS lock. It proves nothing about a
+process that does not follow the protocol. A non-cooperating process or watcher may still write
+after revalidation, including an ignored file that plain removal would delete; text and JSON output
+carry that limitation, and the command does not claim arbitrary external-process occupancy
+detection.
 
 Deferred until earned by repeated use: `tier-up`, estate-wide mutation, and Gardener scheduling.
 
