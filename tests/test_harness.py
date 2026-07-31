@@ -7165,7 +7165,7 @@ class RealityCheckTests(unittest.TestCase):
 class WorktreeCloseoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp.name)
+        self.base = harness.canonical_worktree_path(Path(self.temp.name), strict=True)
         self.remote = self.base / "remote.git"
         self.repo = self.base / "repo"
         self.claimant = "test-session"
