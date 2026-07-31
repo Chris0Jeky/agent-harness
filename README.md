@@ -66,8 +66,9 @@ collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases.
 untracked, ignored, executable-mode-only, assume-unchanged, skip-worktree, and index resolve-undo
 state blocks removal. So do detached or non-local-branch HEADs, a pending `COMMIT_EDITMSG` that
 differs from the current commit message, worktree-local refs, non-baseline administrative/operation
-state, a non-regular HEAD reflog, and commits found on either side of a raw HEAD reflog record or in
-`ORIG_HEAD` that are not retained by a local branch or tag. Requiring an attached `refs/heads/*`
+state, a non-regular HEAD reflog, a direct non-commit `ORIG_HEAD` target, and commits found on either
+side of a raw HEAD reflog record or in `ORIG_HEAD` that are not retained by a local branch or tag.
+Requiring an attached `refs/heads/*`
 branch keeps current HEAD rooted in a local ref while plain removal runs.
 The only destructive command is plain `git worktree remove -- <canonical-path>`; a
 refusal becomes keep. There is no `--force`, branch deletion, or repository-wide

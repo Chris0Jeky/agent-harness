@@ -548,9 +548,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   work-tree redirection, clean tracked/staged/untracked/ignored state, no executable-mode-only
   difference, no assume-unchanged/skip-worktree index flags or resolve-undo recovery records, no
   pending `COMMIT_EDITMSG` differing from the current commit message, no worktree-local refs,
-  non-baseline administrative/operation state, or non-regular candidate HEAD reflog, no recovery
-  commit held only by either object-ID side of a raw candidate HEAD reflog record or by
-  `ORIG_HEAD`, an attached `refs/heads/*` local branch, an unmodified commit graph after scrubbing
+  non-baseline administrative/operation state, or non-regular candidate HEAD reflog, no direct
+  `ORIG_HEAD` target whose object type is not `commit`, no recovery commit held only by either
+  object-ID side of a raw candidate HEAD reflog record or by `ORIG_HEAD`, an attached
+  `refs/heads/*` local branch, an unmodified commit graph after scrubbing
   inherited graft
   overrides, remote-ref reachability, an active exactly scoped
   lease owned by the supplied claimant, and same-run fingerprint plus lease revalidation while
@@ -568,7 +569,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   traversal for an empty set.
   Canonical identity collapses Windows short/long paths and macOS `/var` aliases. JSON schema
   version 3 carries the mode, index-recovery, pending-message status, local-ref,
-  administrative-state, and recovery-retention evidence without emitting commit-message content.
+  administrative-state, direct-`ORIG_HEAD` object identity/type, and recovery-retention evidence
+  without emitting commit-message content.
 
 The owner lease is coordination, not authentication or an OS lock. It proves nothing about a
 process that does not follow the protocol. A non-cooperating process or watcher may still write

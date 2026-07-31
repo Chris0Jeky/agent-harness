@@ -1363,25 +1363,53 @@ def worktree_head_reflog_commits(git_dir: Path) -> tuple[list[str], str]:
     return sorted(set(commits)), ""
 
 
-def worktree_recovery_commits(
+def worktree_orig_head_object(
     path: Path, git_dir: Path, command_runner: Any
+) -> tuple[dict[str, str] | None, str]:
+    orig_head_path = git_dir / "ORIG_HEAD"
+    try:
+        orig_head_stat = orig_head_path.lstat()
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        return None, f"cannot inspect ORIG_HEAD: {type(exc).__name__}"
+    if not stat.S_ISREG(orig_head_stat.st_mode):
+        return None, "ORIG_HEAD is not a regular file"
+    try:
+        with orig_head_path.open("rb") as stream:
+            raw_object_id = stream.read(67)
+    except OSError as exc:
+        return None, f"cannot read ORIG_HEAD: {type(exc).__name__}"
+    if not re.fullmatch(
+        rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?:\r?\n)?", raw_object_id
+    ):
+        return None, "ORIG_HEAD contains an invalid object id"
+    object_id = raw_object_id.rstrip(b"\r\n").decode("ascii").lower()
+    object_type_result = worktree_git_result(
+        command_runner,
+        ["cat-file", "-t", object_id],
+        path,
+    )
+    if object_type_result.returncode:
+        return (
+            None,
+            "ORIG_HEAD object-type probe failed with exit "
+            f"{object_type_result.returncode}",
+        )
+    object_type = object_type_result.stdout.strip()
+    if object_type not in {"blob", "commit", "tag", "tree"}:
+        return None, "ORIG_HEAD object-type probe returned an invalid type"
+    return {"oid": object_id, "type": object_type}, ""
+
+
+def worktree_recovery_commits(
+    git_dir: Path, orig_head_object: dict[str, str] | None
 ) -> tuple[list[str], str]:
     commits, reflog_error = worktree_head_reflog_commits(git_dir)
     if reflog_error:
         return [], reflog_error
-
-    orig_head = worktree_git_result(
-        command_runner,
-        ["rev-parse", "--verify", "--quiet", "ORIG_HEAD^{commit}"],
-        path,
-    )
-    if orig_head.returncode not in (0, 1):
-        return [], f"ORIG_HEAD probe failed with exit {orig_head.returncode}"
-    if orig_head.returncode == 0:
-        object_id = orig_head.stdout.strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
-            return [], "ORIG_HEAD probe returned an invalid object id"
-        commits.append(object_id)
+    if orig_head_object is not None and orig_head_object["type"] == "commit":
+        commits.append(orig_head_object["oid"])
     return sorted(set(commits)), ""
 
 
@@ -1439,6 +1467,7 @@ def worktree_candidate_fingerprint(
         "tracked_mode_changes": candidate["tracked_mode_changes"],
         "worktree_local_refs": candidate["worktree_local_refs"],
         "worktree_administrative_state": candidate["worktree_administrative_state"],
+        "orig_head_object": candidate["orig_head_object"],
         "recovery_commits": candidate["recovery_commits"],
         "unretained_recovery_commits": candidate["unretained_recovery_commits"],
         "containing_remote_refs": candidate["containing_remote_refs"],
@@ -1489,6 +1518,7 @@ def inspect_worktree_candidate(
         "tracked_mode_changes": [],
         "worktree_local_refs": [],
         "worktree_administrative_state": [],
+        "orig_head_object": None,
         "recovery_commits": [],
         "unretained_recovery_commits": [],
         "containing_remote_refs": [],
@@ -1704,12 +1734,26 @@ def inspect_worktree_candidate(
         elif commit_editmsg_status == "differs_from_head":
             keep("commit_editmsg_uncommitted")
 
+    orig_head_error = ""
+    if git_dir is not None:
+        orig_head_object, orig_head_error = worktree_orig_head_object(
+            path, git_dir, command_runner
+        )
+        candidate["orig_head_object"] = orig_head_object
+        if orig_head_error:
+            keep("worktree_recovery_probe_failed")
+            candidate["worktree_recovery_error"] = orig_head_error
+            complete = False
+        elif orig_head_object is not None and orig_head_object["type"] != "commit":
+            keep("non_commit_orig_head")
+
     if (
         git_dir is not None
+        and not orig_head_error
         and "logs/HEAD" not in candidate["worktree_administrative_state"]
     ):
         recovery_commits, recovery_error = worktree_recovery_commits(
-            path, git_dir, command_runner
+            git_dir, candidate["orig_head_object"]
         )
         if recovery_error:
             keep("worktree_recovery_probe_failed")
