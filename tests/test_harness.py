@@ -4,13 +4,14 @@ import base64
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -7033,6 +7034,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.remote = self.base / "remote.git"
         self.repo = self.base / "repo"
+        self.claimant = "test-session"
         subprocess.run(["git", "init", "--bare", "-q", str(self.remote)], check=True)
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         self.git("config", "user.email", "test@example.com")
@@ -7060,7 +7062,9 @@ class WorktreeCloseoutTests(unittest.TestCase):
             check=check,
         )
 
-    def add_worktree(self, name: str, *, branch: str | None = None) -> Path:
+    def add_worktree(
+        self, name: str, *, branch: str | None = None, lease: bool = True
+    ) -> Path:
         worktree = self.repo / ".worktrees" / name
         args = ["worktree", "add"]
         if branch:
@@ -7069,22 +7073,181 @@ class WorktreeCloseoutTests(unittest.TestCase):
             args.append("--detach")
         args.extend([str(worktree), "origin/main"])
         self.git(*args)
+        if lease:
+            self.acquire_lease(worktree)
         return worktree
 
-    def plan(self, *, refresh: bool = True) -> dict[str, object]:
+    def acquire_lease(
+        self,
+        worktree: Path,
+        *,
+        claimant: str | None = None,
+        ttl_seconds: float = harness.WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+        replace_stale: bool = False,
+        now=None,
+    ) -> dict[str, object]:
+        kwargs = {}
+        if now is not None:
+            kwargs["now"] = now
+        return harness.mutate_worktree_lease(
+            worktree,
+            action="acquire",
+            claimant=claimant or self.claimant,
+            ttl_seconds=ttl_seconds,
+            replace_stale=replace_stale,
+            **kwargs,
+        )
+
+    def plan(
+        self, *, refresh: bool = True, claimant: str | None = None, **kwargs
+    ) -> dict[str, object]:
+        kwargs.setdefault("process_cwd", self.repo)
         return harness.worktree_plan(
             self.repo,
             refresh=refresh,
-            process_cwd=self.repo,
+            claimant=claimant or self.claimant,
+            **kwargs,
         )
 
     @staticmethod
     def candidate(plan: dict[str, object], path: Path) -> dict[str, object]:
-        expected = os.path.normcase(os.path.abspath(path))
+        expected_path = harness.canonical_worktree_path(path, strict=path.exists())
+        expected = harness.worktree_path_key(expected_path)
         for candidate in plan["worktrees"]:
-            if os.path.normcase(candidate["path"]) == expected:
+            if candidate["path_key"] == expected or (
+                candidate["path_key"] is None
+                and harness.worktree_path_key(Path(candidate["path"])) == expected
+            ):
                 return candidate
         raise AssertionError(f"missing worktree candidate: {path}")
+
+    def test_cooperative_lease_lifecycle_is_exclusive_explicit_and_expiring(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("lease-lifecycle", lease=False)
+        start = datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)
+        missing = self.candidate(self.plan(now=lambda: start), worktree)
+        self.assertIn("cooperative_lease_missing", missing["reasons"])
+
+        acquired = self.acquire_lease(worktree, ttl_seconds=30, now=lambda: start)
+        lease_id = acquired["lease"]["lease_id"]
+        owned = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=5)), worktree
+        )
+        self.assertEqual(owned["verdict"], "remove")
+
+        with self.assertRaisesRegex(harness.HarnessError, "renewal refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="renew",
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=10),
+            )
+        renewed = harness.mutate_worktree_lease(
+            worktree,
+            action="renew",
+            claimant=self.claimant,
+            ttl_seconds=50,
+            now=lambda: start + timedelta(seconds=10),
+        )
+        self.assertEqual(renewed["lease"]["lease_id"], lease_id)
+
+        occupied = self.candidate(
+            self.plan(
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=11),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_owned_by_other", occupied["reasons"])
+
+        expired = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=61)), worktree
+        )
+        self.assertIn("cooperative_lease_expired", expired["reasons"])
+        with self.assertRaisesRegex(harness.HarnessError, "replace-stale"):
+            self.acquire_lease(
+                worktree,
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=61),
+            )
+        replaced = self.acquire_lease(
+            worktree,
+            claimant="successor",
+            replace_stale=True,
+            now=lambda: start + timedelta(seconds=61),
+        )
+        self.assertNotEqual(replaced["lease"]["lease_id"], lease_id)
+        with self.assertRaisesRegex(harness.HarnessError, "release refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="release",
+                claimant=self.claimant,
+                now=lambda: start + timedelta(seconds=62),
+            )
+        released = harness.mutate_worktree_lease(
+            worktree,
+            action="release",
+            claimant="successor",
+            now=lambda: start + timedelta(seconds=62),
+        )
+        self.assertTrue(released["ok"])
+        after_release = self.candidate(
+            self.plan(
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=62),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_missing", after_release["reasons"])
+
+    def test_malformed_and_mismatched_leases_fail_closed(self) -> None:
+        worktree = self.add_worktree("bad-lease")
+        plan = self.plan()
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+
+        lease_path.write_text("{not json", encoding="utf-8")
+        malformed = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_malformed", malformed["reasons"])
+
+        lease_path.unlink()
+        acquired = self.acquire_lease(worktree)
+        record = acquired["lease"]["record"].copy()
+        record["worktree"] = str(self.repo)
+        harness.write_worktree_lease(lease_path, record)
+        mismatched = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_identity_mismatch", mismatched["reasons"])
+
+    def test_canonical_identity_collapses_aliases_and_drives_reported_path(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("canonical")
+        candidate = self.candidate(self.plan(), worktree)
+        canonical = harness.canonical_worktree_path(worktree)
+        self.assertEqual(candidate["path"], str(canonical))
+        self.assertEqual(candidate["path_key"], harness.worktree_path_key(canonical))
+
+        alias = self.base / "canonical-alias"
+        try:
+            alias.symlink_to(worktree, target_is_directory=True)
+        except OSError:
+            return
+        self.assertTrue(
+            harness.same_worktree_path(
+                harness.canonical_worktree_path(alias), canonical
+            )
+        )
+
+    def test_current_and_other_claimant_occupied_worktrees_are_retained(self) -> None:
+        current = self.add_worktree("current")
+        occupied = self.add_worktree("occupied", lease=False)
+        self.acquire_lease(occupied, claimant="another-agent")
+        plan = self.plan(process_cwd=current)
+        self.assertIn("process_cwd_occupied", self.candidate(plan, current)["reasons"])
+        self.assertIn(
+            "cooperative_lease_owned_by_other",
+            self.candidate(plan, occupied)["reasons"],
+        )
 
     def test_default_is_read_only_and_does_not_trust_stale_remote_refs(self) -> None:
         worktree = self.add_worktree("read-only")
@@ -7098,6 +7261,16 @@ class WorktreeCloseoutTests(unittest.TestCase):
             harness.worktrees_command(
                 SimpleNamespace(
                     repo=str(self.repo), refresh=False, apply=True, json=True
+                )
+            )
+        with self.assertRaisesRegex(harness.HarnessError, "requires --claimant"):
+            harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=None,
+                    json=True,
                 )
             )
 
@@ -7132,6 +7305,16 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 candidate = self.candidate(plan, path)
                 self.assertEqual(candidate["verdict"], "keep")
                 self.assertIn(reason, candidate["reasons"])
+
+    def test_staged_content_is_a_preservation_blocker(self) -> None:
+        staged = self.add_worktree("staged")
+        (staged / "staged.txt").write_text("keep\n", encoding="utf-8")
+        self.git("add", "staged.txt", cwd=staged)
+
+        candidate = self.candidate(self.plan(), staged)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("tracked_or_untracked_changes", candidate["reasons"])
+        self.assertTrue(any(entry.startswith("A ") for entry in candidate["changes"]))
 
     def test_clean_detached_commit_must_reach_a_remote_tracking_ref(self) -> None:
         worktree = self.add_worktree("unreachable")
@@ -7198,6 +7381,45 @@ class WorktreeCloseoutTests(unittest.TestCase):
             "",
         )
 
+    def test_core_worktree_redirection_refuses_the_registered_path(self) -> None:
+        worktree = self.add_worktree("redirected")
+        alternate = self.base / "alternate-worktree"
+        shutil.copytree(worktree, alternate, ignore=shutil.ignore_patterns(".git"))
+        self.git("config", "extensions.worktreeConfig", "true")
+        self.git(
+            "config",
+            "--worktree",
+            "core.worktree",
+            str(alternate),
+            cwd=worktree,
+        )
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_path_redirected", candidate["reasons"])
+        self.assertEqual(
+            harness.canonical_worktree_path(Path(candidate["measured_toplevel"])),
+            harness.canonical_worktree_path(alternate),
+        )
+
+    def test_grafts_and_replace_refs_cannot_supply_reachability(self) -> None:
+        worktree = self.add_worktree("rewritten-history")
+        grafts = self.repo / ".git" / "info" / "grafts"
+        grafts.write_text("# even presence is refused\n", encoding="utf-8")
+        grafted = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", grafted["reasons"])
+        self.assertTrue(grafted["history_rewrite"]["grafts_present"])
+
+        grafts.unlink()
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", f"refs/replace/{head}", head)
+        replaced = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", replaced["reasons"])
+        self.assertEqual(
+            replaced["history_rewrite"]["replace_refs"],
+            [f"refs/replace/{head}"],
+        )
+
     def test_primary_locked_and_outside_worktrees_are_never_candidates(self) -> None:
         locked = self.add_worktree("locked")
         outside = self.base / "outside"
@@ -7213,7 +7435,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
             "outside_worktree_directory", self.candidate(plan, outside)["reasons"]
         )
 
-    def test_apply_uses_plain_remove_prunes_after_success_and_keeps_branch(
+    def test_apply_uses_plain_remove_never_prunes_and_keeps_branch(
         self,
     ) -> None:
         worktree = self.add_worktree(
@@ -7249,26 +7471,26 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(len(remove_calls), 1)
         self.assertNotIn("--force", remove_calls[0])
         self.assertNotIn("-f", remove_calls[0])
-        self.assertGreater(
-            next(
-                i for i, call in enumerate(calls) if call[1:3] == ["worktree", "prune"]
-            ),
-            next(
-                i for i, call in enumerate(calls) if call[1:3] == ["worktree", "remove"]
-            ),
-        )
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
         self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+        self.assertEqual(
+            plan["administrative_cleanup"], "plain_remove_only_no_global_prune"
+        )
 
     def test_expired_fingerprint_lease_refuses_removal(self) -> None:
         worktree = self.add_worktree("expired")
-        plan = self.plan()
-        ticks = iter((0.0, harness.WORKTREE_LEASE_SECONDS + 1.0))
-        self.assertFalse(harness.apply_worktree_plan(plan, clock=lambda: next(ticks)))
+        plan = self.plan(clock=lambda: 0.0)
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1.0,
+            )
+        )
         candidate = self.candidate(plan, worktree)
         self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
         self.assertTrue(worktree.is_dir())
 
-    def test_state_change_between_plan_and_remove_is_revalidated(self) -> None:
+    def test_ignored_file_change_between_plan_and_remove_is_revalidated(self) -> None:
         worktree = self.add_worktree("race")
         plan = self.plan()
         changed = False
@@ -7283,7 +7505,9 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 and os.path.normcase(os.path.abspath(cwd))
                 == os.path.normcase(os.path.abspath(worktree))
             ):
-                (worktree / "late.txt").write_text("arrived late\n", encoding="utf-8")
+                (worktree / "private-report.md").write_text(
+                    "arrived late\n", encoding="utf-8"
+                )
                 changed = True
             return harness.worktree_git_runner(command, cwd)
 
@@ -7292,6 +7516,34 @@ class WorktreeCloseoutTests(unittest.TestCase):
         )
         candidate = self.candidate(plan, worktree)
         self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertTrue(worktree.is_dir())
+        self.assertTrue((worktree / "private-report.md").is_file())
+
+    def test_lease_change_during_revalidation_refuses_plain_removal(self) -> None:
+        worktree = self.add_worktree("lease-race")
+        plan = self.plan()
+        original_inspector = harness.inspect_worktree_lease
+        calls = 0
+
+        def changing_inspector(*args, **kwargs):
+            nonlocal calls
+            result = original_inspector(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                lease_path = Path(result[0]["path"])
+                record = result[0]["record"].copy()
+                record["lease_id"] = str(harness.uuid.uuid4())
+                harness.write_worktree_lease(lease_path, record)
+            return result
+
+        with mock.patch.object(
+            harness, "inspect_worktree_lease", side_effect=changing_inspector
+        ):
+            self.assertFalse(harness.apply_worktree_plan(plan))
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(
+            candidate["apply_reason"], "cooperative_lease_revalidation_failed"
+        )
         self.assertTrue(worktree.is_dir())
 
     def test_fetch_status_remove_and_prune_failures_are_not_parsed_as_success(
@@ -7318,7 +7570,11 @@ class WorktreeCloseoutTests(unittest.TestCase):
         with redirect_stdout(output):
             code = harness.worktrees_command(
                 SimpleNamespace(
-                    repo=str(self.repo), refresh=True, apply=True, json=True
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=True,
                 ),
                 command_runner=fetch_failure,
             )
@@ -7366,6 +7622,10 @@ class WorktreeCloseoutTests(unittest.TestCase):
             harness.apply_worktree_plan(good_plan, command_runner=remove_failure)
         )
         self.assertTrue(worktree.is_dir())
+        self.assertEqual(
+            self.candidate(good_plan, worktree)["apply_reason"],
+            "plain_remove_refused",
+        )
         self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
 
     def test_head_index_reachability_and_list_failures_block(self) -> None:
@@ -7429,22 +7689,23 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 process_cwd=self.repo,
             )
 
-    def test_prune_failure_is_reported_after_a_successful_plain_removal(self) -> None:
-        worktree = self.add_worktree("prune-failure")
-        plan = self.plan()
-
-        def prune_failure(
-            command: list[str], cwd: Path
-        ) -> subprocess.CompletedProcess[str]:
-            if command[1:3] == ["worktree", "prune"]:
-                return subprocess.CompletedProcess(command, 5, "", "failed")
-            return harness.worktree_git_runner(command, cwd)
-
-        self.assertFalse(
-            harness.apply_worktree_plan(plan, command_runner=prune_failure)
+    def test_removing_one_candidate_preserves_unavailable_worktree_metadata(
+        self,
+    ) -> None:
+        removable = self.add_worktree("remove-one")
+        unavailable = self.add_worktree("temporarily-unavailable")
+        unavailable_git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=unavailable).stdout.strip()
         )
-        self.assertFalse(worktree.exists())
-        self.assertEqual(plan["prune"], "failed_exit_5")
+        shutil.rmtree(unavailable)
+
+        plan = self.plan()
+        self.assertIn("path_unavailable", self.candidate(plan, unavailable)["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(removable.exists())
+        self.assertTrue(unavailable_git_dir.is_dir())
 
     def test_json_summary_is_machine_readable(self) -> None:
         self.add_worktree("json")
@@ -7457,13 +7718,18 @@ class WorktreeCloseoutTests(unittest.TestCase):
             )
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(
-            payload["fingerprint_lease_seconds"], harness.WORKTREE_LEASE_SECONDS
+            payload["fingerprint_lease_seconds"],
+            harness.WORKTREE_FINGERPRINT_LEASE_SECONDS,
         )
         self.assertIn("worktrees", payload)
         self.assertEqual(payload["summary"]["removed"], 0)
         self.assertEqual(payload["branch_deletion"], "not_performed")
+        self.assertFalse(
+            payload["cooperative_lease"]["noncooperating_processes_detected"]
+        )
+        self.assertNotIn("_fingerprint_created_monotonic", payload)
 
     def test_git_runner_clears_repository_redirecting_environment(self) -> None:
         completed = subprocess.CompletedProcess(["git", "status"], 0, "", "")
@@ -7492,6 +7758,8 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertNotIn("GIT_CONFIG_KEY_0", environment)
         self.assertNotIn("GIT_CONFIG_VALUE_0", environment)
         self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
 
 
 if __name__ == "__main__":

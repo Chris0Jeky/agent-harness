@@ -22,16 +22,23 @@ import sys
 import tomllib
 import uuid
 from collections.abc import Mapping
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
 
-WORKTREE_PLAN_SCHEMA_VERSION = 1
-WORKTREE_LEASE_SECONDS = 60.0
+WORKTREE_PLAN_SCHEMA_VERSION = 2
+WORKTREE_FINGERPRINT_LEASE_SECONDS = 60.0
 WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
+WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION = 1
+WORKTREE_OWNERSHIP_LEASE_SCOPE = "exclusive-plain-worktree-remove"
+WORKTREE_OWNERSHIP_LEASE_FILENAME = "agent-harness-closeout-lease.json"
+WORKTREE_OWNERSHIP_LOCK_DIRECTORY = "agent-harness-closeout-lease.lock"
+WORKTREE_OWNERSHIP_DEFAULT_SECONDS = 300.0
+WORKTREE_OWNERSHIP_MAX_SECONDS = 3600.0
+WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS = 10.0
 WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -45,6 +52,7 @@ WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_NAMESPACE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
     "GIT_WORK_TREE",
 )
 
@@ -464,6 +472,11 @@ def worktree_git_environment() -> dict[str, str]:
             ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
         ):
             environment.pop(name, None)
+    # Reachability must use the stored commit graph, never replace refs inherited
+    # from the caller. Grafts are rejected separately because Git has no
+    # equivalent process-level switch for them.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
     return environment
 
 
@@ -504,20 +517,35 @@ def worktree_git_result(
     return result
 
 
-def resolve_worktree_checkout(path: Path, command_runner: Any) -> Path:
-    requested = Path(os.path.abspath(path.expanduser()))
-    result = worktree_git_result(
-        command_runner, ["rev-parse", "--show-toplevel"], requested
-    )
-    if result.returncode or not result.stdout.strip():
-        raise HarnessError(f"not a Git worktree: {requested}")
-    root = Path(result.stdout.strip())
-    if not root.is_absolute():
-        root = requested / root
+def canonical_worktree_path(path: Path, *, strict: bool = True) -> Path:
+    """Return the one physical path spelling used by the closeout workflow."""
+
+    absolute = Path(os.path.abspath(path.expanduser()))
     try:
-        return root.resolve(strict=True)
+        return absolute.resolve(strict=strict)
     except (OSError, RuntimeError) as exc:
-        raise HarnessError(f"cannot resolve Git worktree {root}: {exc}") from exc
+        raise HarnessError(
+            f"cannot canonicalize worktree path {absolute}: {exc}"
+        ) from exc
+
+
+def worktree_path_key(path: Path) -> str:
+    """Return a comparison key for an already-canonical physical path."""
+
+    return os.path.normcase(str(path))
+
+
+def same_worktree_path(left: Path, right: Path) -> bool:
+    return worktree_path_key(left) == worktree_path_key(right)
+
+
+def worktree_path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        return os.path.commonpath(
+            [worktree_path_key(path), worktree_path_key(parent)]
+        ) == worktree_path_key(parent)
+    except ValueError:
+        return False
 
 
 def parse_worktree_list(output: str) -> list[dict[str, Any]]:
@@ -572,19 +600,60 @@ def list_worktrees(primary: Path, command_runner: Any) -> list[dict[str, Any]]:
     return parse_worktree_list(result.stdout)
 
 
-def same_path(left: Path, right: Path) -> bool:
-    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
-        os.path.abspath(right)
+def canonicalize_worktree_records(
+    records: list[dict[str, Any]], *, relative_to: Path
+) -> list[dict[str, Any]]:
+    canonical_records: list[dict[str, Any]] = []
+    for source in records:
+        record = source.copy()
+        raw_path = Path(record["path"])
+        if not raw_path.is_absolute():
+            raw_path = relative_to / raw_path
+        try:
+            canonical = canonical_worktree_path(raw_path)
+            record["path"] = str(canonical)
+            record["path_key"] = worktree_path_key(canonical)
+            record["path_error"] = ""
+        except HarnessError as exc:
+            record["path"] = str(canonical_worktree_path(raw_path, strict=False))
+            record["path_key"] = None
+            record["path_error"] = str(exc)
+        canonical_records.append(record)
+    return canonical_records
+
+
+def registered_worktree_context(
+    path: Path, command_runner: Any
+) -> tuple[Path, Path, Path, list[dict[str, Any]]]:
+    """Resolve a requested path without trusting configurable core.worktree."""
+
+    requested_input = canonical_worktree_path(path)
+    records = canonicalize_worktree_records(
+        list_worktrees(requested_input, command_runner), relative_to=requested_input
     )
+    if records[0]["bare"] or records[0]["path_key"] is None:
+        raise HarnessError("bare or unavailable repositories have no worktree root")
+    primary = Path(records[0]["path"])
+    matches = [
+        Path(record["path"])
+        for record in records
+        if record["path_key"] is not None
+        and worktree_path_is_within(requested_input, Path(record["path"]))
+    ]
+    if not matches:
+        raise HarnessError(
+            f"requested path is not inside a registered Git worktree: {requested_input}"
+        )
+    requested = max(matches, key=lambda item: len(worktree_path_key(item)))
+    common_git_dir = resolve_common_git_dir(primary, command_runner)
+    return requested, primary, common_git_dir, records
 
 
-def path_is_within(path: Path, parent: Path) -> bool:
-    path_text = os.path.normcase(os.path.abspath(path))
-    parent_text = os.path.normcase(os.path.abspath(parent))
-    try:
-        return os.path.commonpath([path_text, parent_text]) == parent_text
-    except ValueError:
-        return False
+def resolve_worktree_checkout(path: Path, command_runner: Any) -> Path:
+    requested, _primary, _common_git_dir, _records = registered_worktree_context(
+        path, command_runner
+    )
+    return requested
 
 
 def resolve_common_git_dir(primary: Path, command_runner: Any) -> Path:
@@ -596,12 +665,417 @@ def resolve_common_git_dir(primary: Path, command_runner: Any) -> Path:
     common = Path(result.stdout.strip())
     if not common.is_absolute():
         common = primary / common
+    return canonical_worktree_path(common)
+
+
+def registered_worktree_toplevel(
+    path: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(command_runner, ["rev-parse", "--show-toplevel"], path)
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --show-toplevel failed with exit {result.returncode}",
+        )
+    top = Path(result.stdout.strip())
+    if not top.is_absolute():
+        top = path / top
     try:
-        return common.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+        return canonical_worktree_path(top), ""
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+def linked_worktree_git_dir(
+    path: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--absolute-git-dir"], path
+    )
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --absolute-git-dir failed with exit {result.returncode}",
+        )
+    try:
+        git_dir = canonical_worktree_path(Path(result.stdout.strip()))
+        worktrees_admin = canonical_worktree_path(common_git_dir / "worktrees")
+    except HarnessError as exc:
+        return None, str(exc)
+    if same_worktree_path(git_dir, common_git_dir) or not worktree_path_is_within(
+        git_dir, worktrees_admin
+    ):
+        return None, "candidate does not have linked-worktree administrative metadata"
+    return git_dir, ""
+
+
+def worktree_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def validate_worktree_claimant(claimant: str | None) -> str:
+    if claimant is None:
+        raise HarnessError("a cooperative lease claimant is required")
+    normalized = claimant.strip()
+    if (
+        not normalized
+        or len(normalized) > 200
+        or not normalized.isprintable()
+        or any(character in normalized for character in "\r\n\0")
+    ):
+        raise HarnessError("claimant must be 1-200 printable single-line characters")
+    return normalized
+
+
+def parse_worktree_lease_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def render_worktree_lease_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def worktree_lease_digest(record: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_worktree_lease(path: Path) -> tuple[dict[str, Any] | None, str, bool]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "cooperative_lease_missing", True
+    except (OSError, UnicodeError):
+        return None, "cooperative_lease_probe_failed", False
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        return None, "cooperative_lease_malformed", True
+    if not isinstance(value, dict):
+        return None, "cooperative_lease_malformed", True
+    return value, "", True
+
+
+def inspect_worktree_lease(
+    path: Path,
+    *,
+    claimant: str | None,
+    common_git_dir: Path,
+    worktree: Path,
+    now: datetime,
+    minimum_remaining_seconds: float = WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS,
+) -> tuple[dict[str, Any], str, bool]:
+    """Validate one cooperative ownership record without authenticating its claim."""
+
+    info: dict[str, Any] = {
+        "path": str(path),
+        "status": "unknown",
+        "claimant": None,
+        "lease_id": None,
+        "expires_at": None,
+        "remaining_seconds": None,
+        "digest": None,
+    }
+    record, reason, complete = load_worktree_lease(path)
+    if record is None:
+        info["status"] = reason
+        return info, reason, complete
+
+    expected_fields = {
+        "schema_version",
+        "lease_id",
+        "claimant",
+        "scope",
+        "common_git_dir",
+        "worktree",
+        "created_at",
+        "renewed_at",
+        "expires_at",
+    }
+    if set(record) != expected_fields:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("schema_version") != WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION:
+        info["status"] = "cooperative_lease_schema_mismatch"
+        return info, "cooperative_lease_schema_mismatch", True
+    try:
+        uuid.UUID(str(record.get("lease_id")))
+    except (ValueError, AttributeError, TypeError):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    record_claimant = record.get("claimant")
+    try:
+        normalized_claimant = validate_worktree_claimant(record_claimant)
+    except HarnessError:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("scope") != WORKTREE_OWNERSHIP_LEASE_SCOPE:
+        info["status"] = "cooperative_lease_scope_mismatch"
+        return info, "cooperative_lease_scope_mismatch", True
+    if record.get("common_git_dir") != str(common_git_dir) or record.get(
+        "worktree"
+    ) != str(worktree):
+        info["status"] = "cooperative_lease_identity_mismatch"
+        return info, "cooperative_lease_identity_mismatch", True
+
+    created = parse_worktree_lease_timestamp(record.get("created_at"))
+    renewed = parse_worktree_lease_timestamp(record.get("renewed_at"))
+    expires = parse_worktree_lease_timestamp(record.get("expires_at"))
+    if (
+        created is None
+        or renewed is None
+        or expires is None
+        or not (created <= renewed < expires)
+        or (expires - renewed).total_seconds() > WORKTREE_OWNERSHIP_MAX_SECONDS
+    ):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+
+    current = now.astimezone(timezone.utc)
+    remaining = (expires - current).total_seconds()
+    info.update(
+        {
+            "claimant": normalized_claimant,
+            "lease_id": record["lease_id"],
+            "expires_at": render_worktree_lease_timestamp(expires),
+            "remaining_seconds": max(0.0, remaining),
+            "digest": worktree_lease_digest(record),
+            "record": record,
+        }
+    )
+    if renewed > current:
+        reason = "cooperative_lease_not_yet_valid"
+    elif remaining <= 0:
+        reason = "cooperative_lease_expired"
+    elif claimant is None:
+        reason = "cooperative_lease_claimant_not_supplied"
+    elif normalized_claimant != claimant:
+        reason = "cooperative_lease_owned_by_other"
+    elif remaining < minimum_remaining_seconds:
+        reason = "cooperative_lease_expires_too_soon"
+    else:
+        reason = ""
+    info["status"] = reason or "active_owned"
+    return info, reason, True
+
+
+def worktree_lease_target(repo: Path, command_runner: Any) -> tuple[Path, Path, Path]:
+    requested, primary, common_git_dir, _records = registered_worktree_context(
+        repo, command_runner
+    )
+    if same_worktree_path(requested, primary):
+        raise HarnessError("the primary checkout cannot hold a closeout lease")
+    worktree_directory = canonical_worktree_path(primary / ".worktrees")
+    if (
+        not worktree_path_is_within(worktree_directory, primary)
+        or same_worktree_path(worktree_directory, primary)
+        or not worktree_path_is_within(requested, worktree_directory)
+        or same_worktree_path(requested, worktree_directory)
+    ):
         raise HarnessError(
-            f"cannot resolve common Git directory {common}: {exc}"
+            "worktree is outside the primary checkout's .worktrees directory"
+        )
+    top, top_error = registered_worktree_toplevel(requested, command_runner)
+    if top_error or top is None or not same_worktree_path(top, requested):
+        raise HarnessError(
+            "Git work-tree configuration redirects away from the registered path"
+        )
+    git_dir, git_dir_error = linked_worktree_git_dir(
+        requested, common_git_dir, command_runner
+    )
+    if git_dir is None:
+        raise HarnessError(f"cannot resolve linked-worktree metadata: {git_dir_error}")
+    return requested, common_git_dir, git_dir
+
+
+def write_worktree_lease(path: Path, record: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(record, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def mutate_worktree_lease(
+    repo: Path,
+    *,
+    action: str,
+    claimant: str | None,
+    ttl_seconds: float = WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    replace_stale: bool = False,
+    command_runner: Any = worktree_git_runner,
+    now: Any = worktree_utc_now,
+) -> dict[str, Any]:
+    """Create, renew, release, or inspect one cooperative ownership lease."""
+
+    if action not in {"status", "acquire", "renew", "release"}:
+        raise HarnessError(f"unsupported worktree lease action: {action}")
+    if replace_stale and action != "acquire":
+        raise HarnessError("--replace-stale is valid only with --action acquire")
+    if action != "status":
+        claimant = validate_worktree_claimant(claimant)
+    elif claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    if not (1.0 <= ttl_seconds <= WORKTREE_OWNERSHIP_MAX_SECONDS):
+        raise HarnessError(
+            f"lease TTL must be between 1 and {WORKTREE_OWNERSHIP_MAX_SECONDS:g} seconds"
+        )
+
+    worktree, common_git_dir, git_dir = worktree_lease_target(repo, command_runner)
+    lease_path = git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME
+    current_time = now().astimezone(timezone.utc)
+    if action == "status":
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        status_without_claimant = (
+            claimant is None and reason == "cooperative_lease_claimant_not_supplied"
+        )
+        if status_without_claimant:
+            info["status"] = "active"
+            reason = ""
+        return {
+            "action": action,
+            "ok": complete and not reason,
+            "reason": reason,
+            "worktree": str(worktree),
+            "common_git_dir": str(common_git_dir),
+            "lease": info,
+        }
+
+    lock_directory = git_dir / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+    try:
+        lock_directory.mkdir()
+    except FileExistsError as exc:
+        raise HarnessError(
+            "lease mutation lock already exists; inspect it before any manual recovery"
         ) from exc
+    try:
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        if not complete:
+            raise HarnessError("cannot safely read the existing cooperative lease")
+        existing = info.get("record")
+
+        if action == "acquire":
+            if existing is not None and not (
+                reason == "cooperative_lease_expired" and replace_stale
+            ):
+                raise HarnessError(
+                    "lease already exists; only explicit --replace-stale may replace an expired lease"
+                )
+            if existing is None and reason != "cooperative_lease_missing":
+                raise HarnessError(f"cannot replace unsafe lease state: {reason}")
+            record = {
+                "schema_version": WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION,
+                "lease_id": str(uuid.uuid4()),
+                "claimant": claimant,
+                "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+                "common_git_dir": str(common_git_dir),
+                "worktree": str(worktree),
+                "created_at": render_worktree_lease_timestamp(current_time),
+                "renewed_at": render_worktree_lease_timestamp(current_time),
+                "expires_at": render_worktree_lease_timestamp(
+                    current_time + timedelta(seconds=ttl_seconds)
+                ),
+            }
+            write_worktree_lease(lease_path, record)
+        elif action == "renew":
+            if reason:
+                raise HarnessError(f"lease renewal refused: {reason}")
+            assert existing is not None
+            record = existing.copy()
+            record["renewed_at"] = render_worktree_lease_timestamp(current_time)
+            record["expires_at"] = render_worktree_lease_timestamp(
+                current_time + timedelta(seconds=ttl_seconds)
+            )
+            write_worktree_lease(lease_path, record)
+        else:
+            if existing is None or info.get("claimant") != claimant:
+                raise HarnessError(f"lease release refused: {reason}")
+            if reason not in {
+                "",
+                "cooperative_lease_expired",
+                "cooperative_lease_expires_too_soon",
+            }:
+                raise HarnessError(f"lease release refused: {reason}")
+            lease_path.unlink()
+            return {
+                "action": action,
+                "ok": True,
+                "reason": "",
+                "worktree": str(worktree),
+                "common_git_dir": str(common_git_dir),
+                "lease": {"path": str(lease_path), "status": "released"},
+            }
+    finally:
+        try:
+            lock_directory.rmdir()
+        except FileNotFoundError:
+            pass
+
+    verified, verified_reason, verified_complete = inspect_worktree_lease(
+        lease_path,
+        claimant=claimant,
+        common_git_dir=common_git_dir,
+        worktree=worktree,
+        now=current_time,
+        minimum_remaining_seconds=0.0,
+    )
+    return {
+        "action": action,
+        "ok": verified_complete and not verified_reason,
+        "reason": verified_reason,
+        "worktree": str(worktree),
+        "common_git_dir": str(common_git_dir),
+        "lease": verified,
+    }
+
+
+def worktree_lease_command(args: argparse.Namespace) -> int:
+    result = mutate_worktree_lease(
+        Path(args.repo),
+        action=args.action,
+        claimant=args.claimant,
+        ttl_seconds=args.ttl_seconds,
+        replace_stale=args.replace_stale,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        state = "ok" if result["ok"] else "keep"
+        detail = result["reason"] or result["lease"]["status"]
+        print(f"[{state}] {result['worktree']}: {detail}")
+    return 0 if result["ok"] else 1
 
 
 def configured_worktree_remotes(
@@ -670,6 +1144,36 @@ def remote_tracking_refs(
     return refs, ""
 
 
+def worktree_history_rewrite_evidence(
+    primary: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[dict[str, Any], bool]:
+    evidence: dict[str, Any] = {
+        "ok": False,
+        "grafts_file": str(common_git_dir / "info" / "grafts"),
+        "grafts_present": False,
+        "replace_refs": [],
+        "error": "",
+    }
+    try:
+        evidence["grafts_present"] = (common_git_dir / "info" / "grafts").exists()
+    except OSError as exc:
+        evidence["error"] = f"cannot inspect grafts metadata: {type(exc).__name__}"
+        return evidence, False
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname)", "refs/replace/"],
+        primary,
+    )
+    if result.returncode:
+        evidence["error"] = f"replace-ref probe failed with exit {result.returncode}"
+        return evidence, False
+    evidence["replace_refs"] = sorted(
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    )
+    evidence["ok"] = not evidence["grafts_present"] and not evidence["replace_refs"]
+    return evidence, True
+
+
 def refs_containing_head(
     primary: Path,
     head: str,
@@ -701,7 +1205,7 @@ def worktree_candidate_fingerprint(
 ) -> str:
     state = {
         "path": candidate["path"],
-        "resolved_path": candidate.get("resolved_path"),
+        "path_key": candidate.get("path_key"),
         "common_git_dir": str(common_git_dir),
         "head": candidate["head"],
         "branch": candidate["branch"],
@@ -714,6 +1218,9 @@ def worktree_candidate_fingerprint(
         "ignored": candidate["ignored"],
         "index_preservation_flags": candidate["index_preservation_flags"],
         "containing_remote_refs": candidate["containing_remote_refs"],
+        "history_rewrite": candidate["history_rewrite"],
+        "lease_digest": candidate["lease"].get("digest"),
+        "lease_status": candidate["lease"].get("status"),
         "reasons": candidate["reasons"],
     }
     encoded = json.dumps(
@@ -733,15 +1240,16 @@ def inspect_worktree_candidate(
     remote_evidence_ready: bool,
     remote_evidence_requested: bool,
     refs: dict[str, str],
+    history_rewrite: dict[str, Any],
+    history_rewrite_complete: bool,
+    claimant: str | None,
     command_runner: Any,
+    now: datetime,
 ) -> tuple[dict[str, Any], bool]:
     path = Path(record["path"])
-    if not path.is_absolute():
-        path = primary / path
-    absolute = Path(os.path.abspath(path))
     candidate: dict[str, Any] = {
-        "path": str(absolute),
-        "resolved_path": None,
+        "path": str(path),
+        "path_key": record.get("path_key"),
         "head": record["head"],
         "branch": record["branch"],
         "detached": record["detached"],
@@ -753,6 +1261,16 @@ def inspect_worktree_candidate(
         "ignored": [],
         "index_preservation_flags": [],
         "containing_remote_refs": [],
+        "history_rewrite": history_rewrite.copy(),
+        "lease": {
+            "path": None,
+            "status": "not_inspected",
+            "claimant": None,
+            "lease_id": None,
+            "expires_at": None,
+            "remaining_seconds": None,
+            "digest": None,
+        },
         "reasons": [],
         "verdict": "keep",
         "fingerprint": "",
@@ -761,56 +1279,65 @@ def inspect_worktree_candidate(
     }
     complete = True
 
-    if same_path(absolute, primary):
-        candidate["reasons"].append("primary_checkout")
-    if same_path(absolute, requested):
-        candidate["reasons"].append("requested_checkout")
+    def keep(reason: str) -> None:
+        if reason not in candidate["reasons"]:
+            candidate["reasons"].append(reason)
+
+    if record.get("path_key") is None:
+        keep("path_unavailable")
+        candidate["path_error"] = record.get("path_error", "")
+        complete = False
+    if record.get("path_key") is not None and same_worktree_path(path, primary):
+        keep("primary_checkout")
+    if record.get("path_key") is not None and same_worktree_path(path, requested):
+        keep("requested_checkout")
     if record["bare"]:
-        candidate["reasons"].append("bare_repository")
+        keep("bare_repository")
     if record["locked"]:
-        candidate["reasons"].append("git_locked")
+        keep("git_locked")
     if record["prunable"]:
-        candidate["reasons"].append("prunable_metadata")
+        keep("prunable_metadata")
 
-    if not candidate["reasons"]:
-        if not path_is_within(absolute, worktree_dir) or same_path(
-            absolute, worktree_dir
+    shape_is_probeable = record.get("path_key") is not None and not record["bare"]
+    contained = False
+    if shape_is_probeable and not same_worktree_path(path, primary):
+        if (
+            not worktree_path_is_within(worktree_dir, primary)
+            or same_worktree_path(worktree_dir, primary)
+            or not worktree_path_is_within(path, worktree_dir)
+            or same_worktree_path(path, worktree_dir)
         ):
-            candidate["reasons"].append("outside_worktree_directory")
+            keep("outside_worktree_directory")
         else:
-            try:
-                resolved = absolute.resolve(strict=True)
-                resolved_dir = worktree_dir.resolve(strict=True)
-                resolved_primary = primary.resolve(strict=True)
-                candidate["resolved_path"] = str(resolved)
-                if (
-                    path_is_alias(worktree_dir)
-                    or not path_is_within(resolved_dir, resolved_primary)
-                    or path_is_alias(absolute)
-                    or not path_is_within(resolved, resolved_dir)
-                ):
-                    candidate["reasons"].append("containment_alias_or_escape")
-                elif path_is_within(process_cwd, resolved):
-                    candidate["reasons"].append("process_cwd_occupied")
-            except (OSError, RuntimeError) as exc:
-                candidate["reasons"].append("path_unavailable")
-                candidate["path_error"] = type(exc).__name__
-                complete = False
+            contained = True
+            if worktree_path_is_within(process_cwd, path):
+                keep("process_cwd_occupied")
 
-    if not candidate["reasons"]:
-        head_result = worktree_git_result(
-            command_runner, ["rev-parse", "HEAD"], absolute
-        )
+    top_matches = False
+    if contained:
+        measured_top, top_error = registered_worktree_toplevel(path, command_runner)
+        if top_error or measured_top is None:
+            keep("worktree_toplevel_probe_failed")
+            candidate["worktree_toplevel_error"] = top_error
+            complete = False
+        elif not same_worktree_path(measured_top, path):
+            keep("worktree_path_redirected")
+            candidate["measured_toplevel"] = str(measured_top)
+        else:
+            top_matches = True
+
+    if top_matches:
+        head_result = worktree_git_result(command_runner, ["rev-parse", "HEAD"], path)
         if head_result.returncode or not head_result.stdout.strip():
-            candidate["reasons"].append("head_probe_failed")
+            keep("head_probe_failed")
             complete = False
         else:
             measured_head = head_result.stdout.strip()
             if measured_head != record["head"]:
-                candidate["reasons"].append("head_changed_during_audit")
+                keep("head_changed_during_audit")
             candidate["head"] = measured_head
 
-    if not candidate["reasons"]:
+    if top_matches:
         status_result = worktree_git_result(
             command_runner,
             [
@@ -821,10 +1348,10 @@ def inspect_worktree_candidate(
                 "--untracked-files=all",
                 "--ignore-submodules=none",
             ],
-            absolute,
+            path,
         )
         if status_result.returncode:
-            candidate["reasons"].append("status_probe_failed")
+            keep("status_probe_failed")
             complete = False
         else:
             entries = [entry for entry in status_result.stdout.split("\0") if entry]
@@ -837,14 +1364,14 @@ def inspect_worktree_candidate(
                 entry for entry in entries if not entry.startswith("!! ")
             ]
             if candidate["changes"]:
-                candidate["reasons"].append("tracked_or_untracked_changes")
+                keep("tracked_or_untracked_changes")
             if candidate["ignored"]:
-                candidate["reasons"].append("ignored_files")
+                keep("ignored_files")
             index_result = worktree_git_result(
-                command_runner, ["ls-files", "-v", "-z"], absolute
+                command_runner, ["ls-files", "-v", "-z"], path
             )
             if index_result.returncode:
-                candidate["reasons"].append("index_probe_failed")
+                keep("index_probe_failed")
                 complete = False
             else:
                 flagged = []
@@ -856,27 +1383,54 @@ def inspect_worktree_candidate(
                         flagged.append(entry)
                 candidate["index_preservation_flags"] = flagged
                 if flagged:
-                    candidate["reasons"].append("index_preservation_flags")
+                    keep("index_preservation_flags")
 
-    if not candidate["reasons"]:
+    if top_matches:
         if not remote_evidence_ready:
-            candidate["reasons"].append(
+            keep(
                 "remote_refresh_failed"
                 if remote_evidence_requested
                 else "remote_evidence_not_refreshed"
             )
+        elif not history_rewrite_complete:
+            keep("history_rewrite_probe_failed")
+            complete = False
+        elif not history_rewrite["ok"]:
+            keep("history_rewrite_metadata_present")
         else:
             containing, reachability_error = refs_containing_head(
                 primary, candidate["head"], refs, command_runner
             )
             if reachability_error:
-                candidate["reasons"].append("reachability_probe_failed")
+                keep("reachability_probe_failed")
                 candidate["reachability_error"] = reachability_error
                 complete = False
             elif not containing:
-                candidate["reasons"].append("head_not_on_fetched_remote_ref")
+                keep("head_not_on_fetched_remote_ref")
             else:
                 candidate["containing_remote_refs"] = containing
+
+    if top_matches:
+        git_dir, git_dir_error = linked_worktree_git_dir(
+            path, common_git_dir, command_runner
+        )
+        if git_dir is None:
+            keep("cooperative_lease_probe_failed")
+            candidate["lease"]["status"] = "cooperative_lease_probe_failed"
+            candidate["lease_error"] = git_dir_error
+            complete = False
+        else:
+            lease_info, lease_reason, lease_complete = inspect_worktree_lease(
+                git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME,
+                claimant=claimant,
+                common_git_dir=common_git_dir,
+                worktree=path,
+                now=now,
+            )
+            candidate["lease"] = lease_info
+            if lease_reason:
+                keep(lease_reason)
+            complete = complete and lease_complete
 
     if not candidate["reasons"]:
         candidate["verdict"] = "remove"
@@ -888,20 +1442,21 @@ def worktree_plan(
     repo: Path,
     *,
     refresh: bool,
+    claimant: str | None = None,
     command_runner: Any = worktree_git_runner,
     process_cwd: Path | None = None,
+    clock: Any = monotonic,
+    now: Any = worktree_utc_now,
 ) -> dict[str, Any]:
-    requested = resolve_worktree_checkout(repo, command_runner)
-    records = list_worktrees(requested, command_runner)
-    primary = Path(records[0]["path"]).resolve(strict=True)
-    if records[0]["bare"]:
-        raise HarnessError("bare repositories have no removable worktree root")
-    common_git_dir = resolve_common_git_dir(primary, command_runner)
-    worktree_dir = Path(os.path.abspath(primary / ".worktrees"))
-    try:
-        current = Path(process_cwd or Path.cwd()).resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise HarnessError(f"cannot resolve the harness process cwd: {exc}") from exc
+    if claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    requested, primary, common_git_dir, records = registered_worktree_context(
+        repo, command_runner
+    )
+    worktree_dir = canonical_worktree_path(primary / ".worktrees", strict=False)
+    current = canonical_worktree_path(process_cwd or Path.cwd())
+    generated_monotonic = clock()
+    generated_time = now().astimezone(timezone.utc)
 
     remotes, remote_error = configured_worktree_remotes(primary, command_runner)
     fetch_results: list[dict[str, Any]] = []
@@ -916,6 +1471,9 @@ def worktree_plan(
         else:
             refs, refresh_error = remote_tracking_refs(primary, remotes, command_runner)
     remote_evidence_ready = refresh and not refresh_error
+    history_rewrite, history_rewrite_complete = worktree_history_rewrite_evidence(
+        primary, common_git_dir, command_runner
+    )
 
     candidates = []
     complete = not (refresh and refresh_error)
@@ -930,15 +1488,27 @@ def worktree_plan(
             remote_evidence_ready=remote_evidence_ready,
             remote_evidence_requested=refresh,
             refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_rewrite_complete,
+            claimant=claimant,
             command_runner=command_runner,
+            now=generated_time,
         )
         candidates.append(candidate)
         complete = complete and candidate_complete
 
     return {
         "schema_version": WORKTREE_PLAN_SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "fingerprint_lease_seconds": WORKTREE_LEASE_SECONDS,
+        "generated_at": render_worktree_lease_timestamp(generated_time),
+        "fingerprint_lease_seconds": WORKTREE_FINGERPRINT_LEASE_SECONDS,
+        "cooperative_lease": {
+            "claimant": claimant,
+            "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+            "minimum_apply_remaining_seconds": (
+                WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS
+            ),
+            "noncooperating_processes_detected": False,
+        },
         "repo": str(requested),
         "primary": str(primary),
         "common_git_dir": str(common_git_dir),
@@ -953,12 +1523,14 @@ def worktree_plan(
                 {"ref": ref, "oid": oid} for ref, oid in sorted(refs.items())
             ],
         },
+        "history_rewrite": history_rewrite,
         "apply_requested": False,
         "branch_deletion": "not_performed",
-        "prune": "not_requested",
+        "administrative_cleanup": "plain_remove_only_no_global_prune",
         "complete": complete,
         "worktrees": candidates,
         "summary": {},
+        "_fingerprint_created_monotonic": generated_monotonic,
     }
 
 
@@ -966,7 +1538,7 @@ def find_worktree_record(
     records: list[dict[str, Any]], candidate_path: Path
 ) -> dict[str, Any] | None:
     for record in records:
-        if same_path(Path(record["path"]), candidate_path):
+        if record.get("path_key") == worktree_path_key(candidate_path):
             return record
     return None
 
@@ -985,31 +1557,43 @@ def apply_worktree_plan(
         for candidate in plan["worktrees"]:
             candidate["apply"] = "kept"
         return False
+    if not plan["complete"]:
+        plan["apply_error"] = "audit_incomplete"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    claimant = plan.get("cooperative_lease", {}).get("claimant")
+    if not claimant:
+        plan["apply_error"] = "cooperative_lease_claimant_required"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
     primary = Path(plan["primary"])
     requested = Path(plan["repo"])
     common_git_dir = Path(plan["common_git_dir"])
     worktree_dir = Path(plan["worktree_directory"])
-    try:
-        process_cwd = Path.cwd().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise HarnessError(f"cannot resolve the harness process cwd: {exc}") from exc
+    process_cwd = canonical_worktree_path(Path.cwd())
     remotes = list(plan["refresh"]["remotes"])
-    lease_started = clock()
-    removed = 0
+    fingerprint_started = plan.get("_fingerprint_created_monotonic")
+    if not isinstance(fingerprint_started, (int, float)):
+        plan["apply_error"] = "fingerprint_origin_missing"
+        return False
     apply_ok = True
 
     for candidate in plan["worktrees"]:
         if candidate["verdict"] != "remove":
             candidate["apply"] = "kept"
             continue
-        if clock() - lease_started > WORKTREE_LEASE_SECONDS:
+        if clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS:
             candidate["apply"] = "kept"
             candidate["apply_reason"] = "fingerprint_lease_expired"
             candidate["revalidation"] = "expired"
             apply_ok = False
             continue
 
-        current_records = list_worktrees(primary, command_runner)
+        current_records = canonicalize_worktree_records(
+            list_worktrees(primary, command_runner), relative_to=primary
+        )
         current_record = find_worktree_record(current_records, Path(candidate["path"]))
         refs, refs_error = remote_tracking_refs(primary, remotes, command_runner)
         if current_record is None or refs_error:
@@ -1020,6 +1604,9 @@ def apply_worktree_plan(
             candidate["revalidation"] = "unavailable"
             apply_ok = False
             continue
+        history_rewrite, history_complete = worktree_history_rewrite_evidence(
+            primary, common_git_dir, command_runner
+        )
         current, current_complete = inspect_worktree_candidate(
             current_record,
             primary=primary,
@@ -1030,7 +1617,11 @@ def apply_worktree_plan(
             remote_evidence_ready=True,
             remote_evidence_requested=True,
             refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_complete,
+            claimant=claimant,
             command_runner=command_runner,
+            now=worktree_utc_now(),
         )
         if (
             not current_complete
@@ -1044,9 +1635,35 @@ def apply_worktree_plan(
             apply_ok = False
             continue
 
+        final_lease_path = current["lease"].get("path")
+        if not final_lease_path:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+        final_lease, final_lease_reason, final_lease_complete = inspect_worktree_lease(
+            Path(final_lease_path),
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=Path(current["path"]),
+            now=worktree_utc_now(),
+        )
+        if (
+            not final_lease_complete
+            or final_lease_reason
+            or final_lease.get("digest") != current["lease"].get("digest")
+            or clock() - fingerprint_started > WORKTREE_FINGERPRINT_LEASE_SECONDS
+        ):
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+
         remove_result = worktree_git_result(
             command_runner,
-            ["worktree", "remove", "--", candidate["resolved_path"]],
+            ["worktree", "remove", "--", current["path"]],
             primary,
         )
         candidate["remove_exit_code"] = remove_result.returncode
@@ -1058,17 +1675,6 @@ def apply_worktree_plan(
             apply_ok = False
         else:
             candidate["apply"] = "removed"
-            removed += 1
-
-    if removed:
-        prune_result = worktree_git_result(
-            command_runner, ["worktree", "prune"], primary
-        )
-        if prune_result.returncode:
-            plan["prune"] = f"failed_exit_{prune_result.returncode}"
-            apply_ok = False
-        else:
-            plan["prune"] = "completed"
     return apply_ok
 
 
@@ -1089,6 +1695,15 @@ def summarize_worktree_plan(plan: dict[str, Any]) -> None:
 def render_worktree_plan(plan: dict[str, Any]) -> None:
     print(f"repo: {plan['repo']}")
     print(f"worktree directory: {plan['worktree_directory']}")
+    claimant = plan["cooperative_lease"]["claimant"]
+    if claimant:
+        print(f"cooperative claimant: {claimant}")
+    else:
+        print("[read-only] no cooperative claimant was supplied")
+    print(
+        "[limit] non-cooperating external processes are not detected; "
+        "their writes can still race plain removal"
+    )
     refresh = plan["refresh"]
     if refresh["requested"]:
         state = "ok" if refresh["ok"] else "FAIL"
@@ -1119,13 +1734,23 @@ def worktrees_command(
 ) -> int:
     if args.apply and not args.refresh:
         raise HarnessError("--apply requires --refresh")
+    claimant = getattr(args, "claimant", None)
+    if args.apply and not claimant:
+        raise HarnessError(
+            "--apply requires --claimant with an active cooperative lease"
+        )
     plan = worktree_plan(
-        Path(args.repo), refresh=args.refresh, command_runner=command_runner
+        Path(args.repo),
+        refresh=args.refresh,
+        claimant=claimant,
+        command_runner=command_runner,
+        clock=clock,
     )
     apply_ok = True
     if args.apply:
         apply_ok = apply_worktree_plan(plan, command_runner=command_runner, clock=clock)
     summarize_worktree_plan(plan)
+    plan.pop("_fingerprint_created_monotonic", None)
     if args.json:
         print(json.dumps(plan, indent=2))
     else:
@@ -6010,10 +6635,37 @@ def parser() -> argparse.ArgumentParser:
     worktrees.add_argument(
         "--apply",
         action="store_true",
-        help="remove revalidated safe candidates; requires --refresh",
+        help="remove revalidated safe candidates; requires --refresh and --claimant",
+    )
+    worktrees.add_argument(
+        "--claimant",
+        help="self-declared identity that must own each active cooperative lease",
     )
     worktrees.add_argument("--json", action="store_true")
     worktrees.set_defaults(func=worktrees_command)
+
+    lease = sub.add_parser(
+        "worktree-lease", help="manage a cooperative linked-worktree ownership lease"
+    )
+    lease.add_argument(
+        "--repo", default=".", help="the exact linked worktree that owns the lease"
+    )
+    lease.add_argument(
+        "--action", choices=("status", "acquire", "renew", "release"), required=True
+    )
+    lease.add_argument("--claimant", help="stable identity of the cooperating owner")
+    lease.add_argument(
+        "--ttl-seconds",
+        type=float,
+        default=WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    )
+    lease.add_argument(
+        "--replace-stale",
+        action="store_true",
+        help="allow acquire to replace only a structurally valid expired lease",
+    )
+    lease.add_argument("--json", action="store_true")
+    lease.set_defaults(func=worktree_lease_command)
     return root
 
 
