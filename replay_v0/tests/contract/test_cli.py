@@ -827,6 +827,45 @@ for index, event in enumerate(events):
             [failure.code for failure in result.failures],
         )
 
+    @unittest.skipIf(os.name == "nt", "Windows directory modes are not portable")
+    def test_process_snapshot_cleans_read_only_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            nested = directory / "nested"
+            nested.mkdir()
+            (nested / "fixture.txt").write_bytes(b"same bytes\n")
+            policy = directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            os.chmod(nested, 0o555)
+            os.chmod(directory, 0o555)
+            snapshot_roots: list[Path] = []
+            try:
+                loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+                original_prepare = loaded.source._prepare_input_snapshot
+
+                def remember_snapshot(events):
+                    snapshot = original_prepare(events)
+                    self.assertIsNotNone(snapshot)
+                    self.assertNotIsInstance(snapshot, PolicySourceResult)
+                    snapshot_roots.append(snapshot.root)
+                    return snapshot
+
+                with mock.patch.object(
+                    loaded.source,
+                    "_prepare_input_snapshot",
+                    side_effect=remember_snapshot,
+                ):
+                    result = loaded.source.evaluate(EVENTS)
+            finally:
+                os.chmod(directory, 0o755)
+                os.chmod(nested, 0o755)
+
+        self.assertEqual((), result.failures)
+        self.assertEqual(1, len(snapshot_roots))
+        self.assertFalse(snapshot_roots[0].exists())
+
     def test_process_snapshot_change_during_launch_invalidates_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)

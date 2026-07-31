@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
@@ -71,19 +72,51 @@ class PolicySourceResult:
 
 
 def _cleanup_snapshot_root(root: Path) -> SourceFailure | None:
+    def is_link_or_reparse(metadata: os.stat_result) -> bool:
+        return stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
+
+    def make_tree_writable(directory: Path) -> None:
+        metadata = directory.lstat()
+        if is_link_or_reparse(metadata):
+            raise OSError("private snapshot root became a link")
+        directory.chmod(stat.S_IRWXU)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if is_link_or_reparse(metadata):
+                    continue
+                path = Path(entry.path)
+                if stat.S_ISDIR(metadata.st_mode):
+                    make_tree_writable(path)
+                else:
+                    path.chmod(stat.S_IRWXU)
+
     def make_writable_and_retry(function, raw_path, _exc_info) -> None:
         path = Path(raw_path)
-        if path.is_symlink():
-            path.unlink()
+        metadata = path.lstat()
+        if is_link_or_reparse(metadata):
+            if stat.S_ISDIR(metadata.st_mode):
+                path.rmdir()
+            else:
+                path.unlink()
             return
         path.chmod(stat.S_IRWXU)
         function(raw_path)
 
     try:
+        make_tree_writable(root)
         shutil.rmtree(root, onerror=make_writable_and_retry)
     except FileNotFoundError:
-        return None
+        pass
     except OSError:
+        pass
+    if os.path.lexists(root):
         return SourceFailure(
             "process-snapshot-cleanup-failed",
             "The private policy process snapshot could not be removed.",
