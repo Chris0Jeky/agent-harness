@@ -11,8 +11,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -28,6 +30,314 @@ from replay_v0.digests import permission_bits, sha256_file, sha256_tree
 RECORDED_MANIFEST_VERSION = "recorded-policy-manifest.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_PROCESS_CLEANUP_GRACE_SECONDS = 1.0
+_RUNNER_DIRECTORY_MODE = 0o700
+_WINDOWS_EXEC_FAILURE_PREFIX = b"replay-wrapper-exec-failed:"
+_WINDOWS_POLICY_WRAPPER = r"""
+import ctypes
+import json
+import os
+import subprocess
+import sys
+
+event_handle = int(sys.argv[1])
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+kernel32.CloseHandle.restype = ctypes.c_int
+try:
+    if kernel32.WaitForSingleObject(event_handle, 0xFFFFFFFF) != 0:
+        raise OSError("policy wrapper start event failed")
+finally:
+    kernel32.CloseHandle(event_handle)
+
+cwd = json.loads(sys.argv[2])
+environment = json.loads(sys.argv[3])
+if cwd is not None:
+    os.chdir(cwd)
+try:
+    process = subprocess.Popen(
+        sys.argv[4:],
+        stdin=sys.stdin.buffer,
+        stdout=sys.stdout.buffer,
+        stderr=sys.stderr.buffer,
+        close_fds=True,
+        shell=False,
+        env=None if environment is None else environment,
+    )
+except OSError as exc:
+    sys.stderr.write(f"replay-wrapper-exec-failed:{exc.__class__.__name__}\n")
+    sys.stderr.flush()
+    os._exit(127)
+os._exit(process.wait())
+"""
+
+
+def _read_process_stream(stream) -> bytes:
+    stream.flush()
+    stream.seek(0)
+    return stream.read()
+
+
+def _run_posix_policy_process(
+    argv: Sequence[str],
+    *,
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+    timeout_seconds: float,
+    cwd: str | None,
+    environment: Mapping[str, str] | None,
+) -> tuple[int, bool]:
+    process = subprocess.Popen(
+        list(argv),
+        stdin=stdin_stream,
+        stdout=stdout_stream,
+        stderr=stderr_stream,
+        start_new_session=True,
+        shell=False,
+        cwd=cwd,
+        env=environment,
+    )
+    timed_out = False
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise OSError("policy process group did not terminate") from exc
+    return process.returncode, timed_out
+
+
+def _windows_kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CreateEventW.argtypes = (
+        ctypes.c_void_p,
+        wintypes.BOOL,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    )
+    kernel32.CreateEventW.restype = wintypes.HANDLE
+    kernel32.SetEvent.argtypes = (wintypes.HANDLE,)
+    kernel32.SetEvent.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _create_windows_kill_job(kernel32):
+    import ctypes
+    from ctypes import wintypes
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = (
+            ("read_operation_count", ctypes.c_uint64),
+            ("write_operation_count", ctypes.c_uint64),
+            ("other_operation_count", ctypes.c_uint64),
+            ("read_transfer_count", ctypes.c_uint64),
+            ("write_transfer_count", ctypes.c_uint64),
+            ("other_transfer_count", ctypes.c_uint64),
+        )
+
+    class _BasicLimitInformation(ctypes.Structure):
+        _fields_ = (
+            ("per_process_user_time_limit", ctypes.c_int64),
+            ("per_job_user_time_limit", ctypes.c_int64),
+            ("limit_flags", wintypes.DWORD),
+            ("minimum_working_set_size", ctypes.c_size_t),
+            ("maximum_working_set_size", ctypes.c_size_t),
+            ("active_process_limit", wintypes.DWORD),
+            ("affinity", ctypes.c_size_t),
+            ("priority_class", wintypes.DWORD),
+            ("scheduling_class", wintypes.DWORD),
+        )
+
+    class _ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = (
+            ("basic_limit_information", _BasicLimitInformation),
+            ("io_info", _IoCounters),
+            ("process_memory_limit", ctypes.c_size_t),
+            ("job_memory_limit", ctypes.c_size_t),
+            ("peak_process_memory_used", ctypes.c_size_t),
+            ("peak_job_memory_used", ctypes.c_size_t),
+        )
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    information = _ExtendedLimitInformation()
+    information.basic_limit_information.limit_flags = 0x00002000
+    if not kernel32.SetInformationJobObject(
+        job,
+        9,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        error = ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(job)
+        raise error
+    return job
+
+
+def _run_windows_policy_process(
+    argv: Sequence[str],
+    *,
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+    timeout_seconds: float,
+    cwd: str | None,
+    environment: Mapping[str, str] | None,
+) -> tuple[int, bool]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_kernel32()
+    job = _create_windows_kill_job(kernel32)
+    event = kernel32.CreateEventW(None, True, False, None)
+    if not event:
+        error = ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(job)
+        raise error
+    process: subprocess.Popen[bytes] | None = None
+    assigned = False
+    timed_out = False
+    try:
+        os.set_handle_inheritable(int(event), True)
+        startup = subprocess.STARTUPINFO()
+        startup.lpAttributeList = {"handle_list": [int(event)]}
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    _WINDOWS_POLICY_WRAPPER,
+                    str(int(event)),
+                    json.dumps(cwd),
+                    json.dumps(
+                        None if environment is None else dict(environment),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    *argv,
+                ],
+                stdin=stdin_stream,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                close_fds=True,
+                startupinfo=startup,
+                shell=False,
+            )
+        finally:
+            os.set_handle_inheritable(int(event), False)
+        if not kernel32.AssignProcessToJobObject(
+            job, wintypes.HANDLE(int(process._handle))
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assigned = True
+        if not kernel32.SetEvent(event):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        if not kernel32.TerminateJobObject(job, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+        wait_result = kernel32.WaitForSingleObject(
+            job, max(1, math.ceil(_PROCESS_CLEANUP_GRACE_SECONDS * 1000))
+        )
+        if wait_result == 0xFFFFFFFF:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if wait_result == 0x00000102:
+            raise OSError("policy process job did not terminate")
+        if process.poll() is None:
+            process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+        return process.returncode, timed_out
+    finally:
+        if process is not None and process.poll() is None:
+            if assigned:
+                kernel32.TerminateJobObject(job, 1)
+            else:
+                process.kill()
+            try:
+                process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        kernel32.CloseHandle(event)
+        kernel32.CloseHandle(job)
+
+
+def _run_policy_process(
+    argv: Sequence[str],
+    input_bytes: bytes,
+    *,
+    timeout_seconds: float,
+    cwd: str | None,
+    environment: Mapping[str, str] | None,
+) -> subprocess.CompletedProcess[bytes]:
+    with (
+        tempfile.TemporaryFile() as stdin_stream,
+        tempfile.TemporaryFile() as stdout_stream,
+        tempfile.TemporaryFile() as stderr_stream,
+    ):
+        stdin_stream.write(input_bytes)
+        stdin_stream.seek(0)
+        if os.name == "nt":
+            returncode, timed_out = _run_windows_policy_process(
+                argv,
+                stdin_stream=stdin_stream,
+                stdout_stream=stdout_stream,
+                stderr_stream=stderr_stream,
+                timeout_seconds=timeout_seconds,
+                cwd=cwd,
+                environment=environment,
+            )
+        else:
+            returncode, timed_out = _run_posix_policy_process(
+                argv,
+                stdin_stream=stdin_stream,
+                stdout_stream=stdout_stream,
+                stderr_stream=stderr_stream,
+                timeout_seconds=timeout_seconds,
+                cwd=cwd,
+                environment=environment,
+            )
+        if timed_out:
+            raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
+        stdout = _read_process_stream(stdout_stream)
+        stderr = _read_process_stream(stderr_stream)
+        if returncode == 127 and stderr.startswith(_WINDOWS_EXEC_FAILURE_PREFIX):
+            raise OSError("policy process executable could not start")
+        return subprocess.CompletedProcess(list(argv), returncode, stdout, stderr)
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -509,7 +819,7 @@ class ProcessDecisionSource:
         self.timeout_seconds = float(timeout_seconds)
         self.cwd: str | None = None
         self.environment: dict[str, str] | None = None
-        self.executable_binding: tuple[Path, str, str] | None = None
+        self.executable_binding: tuple[Path, str, str, str] | None = None
         self.policy_tree_binding: tuple[Path, str, str] | None = None
         self.snapshot_identity: str | None = None
 
@@ -534,6 +844,7 @@ class ProcessDecisionSource:
         self,
         *,
         executable_path: str | Path,
+        executable_invocation_name: str,
         executable_sha256: str,
         executable_permissions: str,
         policy_tree_path: str | Path,
@@ -554,8 +865,19 @@ class ProcessDecisionSource:
             raise ValueError(
                 "process executable binding requires four octal permission digits"
             )
+        if (
+            not executable_invocation_name
+            or executable_invocation_name in {".", ".."}
+            or "/" in executable_invocation_name
+            or "\\" in executable_invocation_name
+            or "\0" in executable_invocation_name
+        ):
+            raise ValueError(
+                "process executable invocation name must be one path component"
+            )
         self.executable_binding = (
             Path(executable_path),
+            executable_invocation_name,
             executable_sha256,
             executable_permissions,
         )
@@ -607,27 +929,55 @@ class ProcessDecisionSource:
                 message="Policy process input bindings are incomplete.",
             )
 
-        executable_path, expected_executable, expected_executable_permissions = (
-            self.executable_binding
-        )
+        (
+            executable_path,
+            executable_invocation_name,
+            expected_executable,
+            expected_executable_permissions,
+        ) = self.executable_binding
         policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
+        snapshot_root = Path(tempfile.gettempdir()) / (
+            f"replay-process-inputs-{self.snapshot_identity}"
+        )
         try:
-            snapshot_root = Path(tempfile.gettempdir()) / (
-                f"replay-process-inputs-{self.snapshot_identity}"
-            )
-            snapshot_root.mkdir(mode=0o700)
-        except OSError:
+            resolved_policy_tree = policy_tree_path.resolve()
+            resolved_snapshot_root = snapshot_root.resolve(strict=False)
+            if resolved_snapshot_root == resolved_policy_tree or (
+                resolved_policy_tree in resolved_snapshot_root.parents
+            ):
+                return self._snapshot_failure(
+                    events,
+                    code="process-snapshot-overlaps-input",
+                    message=(
+                        "The private policy process snapshot would overlap the "
+                        "bound policy tree."
+                    ),
+                )
+            snapshot_root.mkdir(mode=_RUNNER_DIRECTORY_MODE)
+        except (OSError, RuntimeError):
             return self._snapshot_failure(
                 events,
                 code="process-snapshot-unavailable",
                 message="A private policy process snapshot could not be created.",
             )
+        try:
+            if os.name != "nt":
+                snapshot_root.chmod(_RUNNER_DIRECTORY_MODE)
+        except OSError:
+            return self._snapshot_failure(
+                events,
+                code="process-snapshot-unavailable",
+                message="A private policy process snapshot could not be secured.",
+                snapshot_root=snapshot_root,
+            )
 
-        snapshot_executable = snapshot_root / "executable" / executable_path.name
+        snapshot_executable = snapshot_root / "executable" / executable_invocation_name
         snapshot_policy_tree = snapshot_root / "policy"
         snapshot_policy = snapshot_policy_tree / self.argv[-1]
         try:
-            snapshot_executable.parent.mkdir()
+            snapshot_executable.parent.mkdir(mode=_RUNNER_DIRECTORY_MODE)
+            if os.name != "nt":
+                snapshot_executable.parent.chmod(_RUNNER_DIRECTORY_MODE)
             shutil.copy2(executable_path, snapshot_executable)
             for companion in executable_path.parent.iterdir():
                 companion_name = companion.name.lower()
@@ -701,16 +1051,12 @@ class ProcessDecisionSource:
             for event in events
         ).encode("utf-8")
         try:
-            completed = subprocess.run(
+            completed = _run_policy_process(
                 list(argv),
-                input=input_bytes,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self.timeout_seconds,
-                check=False,
-                shell=False,
+                input_bytes,
+                timeout_seconds=self.timeout_seconds,
                 cwd=cwd,
-                env=self.environment,
+                environment=self.environment,
             )
         except subprocess.TimeoutExpired:
             failure = SourceFailure(

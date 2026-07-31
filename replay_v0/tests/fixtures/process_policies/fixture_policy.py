@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -21,7 +23,18 @@ events = [json.loads(line) for line in sys.stdin if line.strip()]
 mode = sys.argv[1]
 rows = [decision(event) for event in events]
 
-if mode == "timeout":
+if mode in {"descendant-exit", "descendant-timeout"}:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        close_fds=False,
+    )
+    Path(sys.argv[2]).write_text(str(child.pid), encoding="ascii")
+    if mode == "descendant-timeout":
+        time.sleep(5)
+    else:
+        for row in rows:
+            print(json.dumps(row, sort_keys=True, separators=(",", ":")))
+elif mode == "timeout":
     time.sleep(2)
 elif mode == "malformed":
     print("{not-json")

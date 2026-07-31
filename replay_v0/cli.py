@@ -53,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v6"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v7"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -237,11 +237,13 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     lexical_policy_path = policy_path.absolute()
     if argv[0] in {"python", "python3"}:
         executable_path = Path(sys.executable)
+        invocation_name = executable_path.name
     else:
         resolved_executable = shutil.which(argv[0])
         executable_path = (
             Path(resolved_executable) if resolved_executable else Path(argv[0])
         )
+        invocation_name = executable_path.name
     if not executable_path.is_file():
         raise ReplayInputError("process executable could not be resolved to a file")
     bound_executable_path = executable_path.resolve()
@@ -263,7 +265,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         "schema_version": PROCESS_IDENTITY_VERSION,
         "executable": {
             "permission_bits": executable_permissions,
-            "name": bound_executable_path.name,
+            "name": invocation_name,
             "sha256": executable_digest,
         },
         "arguments": argv[1:-1],
@@ -274,6 +276,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         },
         "environment": normalized_environment,
         "execution_inputs": "private-validated-identity-path-snapshot",
+        "runner_directory_permission_bits": "0700",
         "working_directory": "identity-derived-snapshot-policy-parent",
     }
     execution_argv = [
@@ -292,6 +295,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         identity_sha256 = sha256_bytes(canonical_json_bytes(normalized_identity))
         source.with_input_binding(
             executable_path=bound_executable_path,
+            executable_invocation_name=invocation_name,
             executable_sha256=executable_digest,
             executable_permissions=executable_permissions,
             policy_tree_path=lexical_policy_path.parent,

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from unittest import mock
 
+import replay_v0.policy_sources as policy_sources
 from replay_v0.corpus import ValidationError
 from replay_v0.policy_sources import ProcessDecisionSource
 
@@ -53,12 +57,13 @@ class ProcessSourceTests(unittest.TestCase):
 
     def test_invocation_is_an_argv_list_without_a_shell(self) -> None:
         with mock.patch(
-            "replay_v0.policy_sources.subprocess.run", wraps=subprocess.run
+            "replay_v0.policy_sources._run_policy_process",
+            wraps=policy_sources._run_policy_process,
         ) as run:
             result = self.evaluate("success")
         self.assertTrue(result.is_valid)
         self.assertIsInstance(run.call_args.args[0], list)
-        self.assertIs(run.call_args.kwargs["shell"], False)
+        self.assertNotIn("shell", run.call_args.kwargs)
 
     def test_nonzero_exit_keeps_valid_output_and_fills_missing_decision(self) -> None:
         result = self.evaluate("nonzero")
@@ -72,6 +77,41 @@ class ProcessSourceTests(unittest.TestCase):
         result = self.evaluate("timeout", timeout_seconds=0.05)
         self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
         self.assertEqual(["process-timeout"], self.failure_codes(result))
+
+    def test_timeout_terminates_descendants_that_inherit_standard_streams(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            pid_path = Path(raw_directory) / "child.pid"
+            source = ProcessDecisionSource(
+                [sys.executable, str(FIXTURE), "descendant-timeout", str(pid_path)],
+                timeout_seconds=0.5,
+            )
+            started = time.monotonic()
+            result = source.evaluate(EVENTS)
+            elapsed = time.monotonic() - started
+            child_pid = int(pid_path.read_text(encoding="ascii"))
+
+        self.assertLess(elapsed, 2.5)
+        self.assertEqual(["process-timeout"], self.failure_codes(result))
+        self.assert_process_stopped(child_pid)
+
+    def test_completed_parent_does_not_leave_a_descendant_running(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            pid_path = Path(raw_directory) / "child.pid"
+            source = ProcessDecisionSource(
+                [sys.executable, str(FIXTURE), "descendant-exit", str(pid_path)],
+                timeout_seconds=2.0,
+            )
+            started = time.monotonic()
+            result = source.evaluate(EVENTS)
+            elapsed = time.monotonic() - started
+            child_pid = int(pid_path.read_text(encoding="ascii"))
+
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(result.is_valid)
+        self.assertEqual(["deny", "allow"], self.effects(result))
+        self.assert_process_stopped(child_pid)
 
     def test_malformed_output_does_not_hide_later_valid_decision(self) -> None:
         result = self.evaluate("malformed")
@@ -92,7 +132,7 @@ class ProcessSourceTests(unittest.TestCase):
         )
         source = ProcessDecisionSource([sys.executable])
         with mock.patch(
-            "replay_v0.policy_sources.subprocess.run", return_value=completed
+            "replay_v0.policy_sources._run_policy_process", return_value=completed
         ):
             result = source.evaluate(EVENTS)
 
@@ -125,7 +165,7 @@ class ProcessSourceTests(unittest.TestCase):
         )
         source = ProcessDecisionSource([sys.executable])
         with mock.patch(
-            "replay_v0.policy_sources.subprocess.run", return_value=completed
+            "replay_v0.policy_sources._run_policy_process", return_value=completed
         ):
             result = source.evaluate(EVENTS)
 
@@ -156,7 +196,7 @@ class ProcessSourceTests(unittest.TestCase):
         )
         source = ProcessDecisionSource([sys.executable])
         with mock.patch(
-            "replay_v0.policy_sources.subprocess.run", return_value=completed
+            "replay_v0.policy_sources._run_policy_process", return_value=completed
         ):
             result = source.evaluate(EVENTS[:1])
 
@@ -191,7 +231,7 @@ class ProcessSourceTests(unittest.TestCase):
             "_prepare_input_snapshot",
             side_effect=AssertionError("snapshot prepared"),
         ) as prepare_snapshot, mock.patch(
-            "replay_v0.policy_sources.subprocess.run",
+            "replay_v0.policy_sources._run_policy_process",
             side_effect=AssertionError("process executed"),
         ) as process_run:
             with self.assertRaisesRegex(
@@ -209,6 +249,50 @@ class ProcessSourceTests(unittest.TestCase):
     @staticmethod
     def failure_codes(result) -> list[str]:
         return [failure.code for failure in result.failures]
+
+    def assert_process_stopped(self, pid: int) -> None:
+        for _attempt in range(100):
+            if not self._process_is_running(pid):
+                return
+            time.sleep(0.01)
+        self.fail(f"descendant process {pid} remained active")
+
+    @staticmethod
+    def _process_is_running(pid: int) -> bool:
+        if os.name != "nt":
+            proc_status = Path("/proc") / str(pid) / "stat"
+            try:
+                if proc_status.read_text(encoding="ascii").split()[2] in {"X", "Z"}:
+                    return False
+            except (FileNotFoundError, IndexError, OSError):
+                pass
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        process = kernel32.OpenProcess(0x00100000, False, pid)
+        if not process:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(process, 0) == 0x00000102
+        finally:
+            kernel32.CloseHandle(process)
 
 
 if __name__ == "__main__":

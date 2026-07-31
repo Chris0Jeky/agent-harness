@@ -99,26 +99,37 @@ Owner: Cristian Tcaci
 - **CONSTRAINT:** Standard output contains decisions only. Diagnostics go to standard error.
 - **CONSTRAINT:** Exit code `0` means the process completed its stream. Any non-zero exit causes every missing decision to become `indeterminate`; the runner still writes a report and returns the runner exit code defined below.
 - **CONSTRAINT:** The process contract is invoked through a shell-free argv list in implementation code. A single shell command string must not be passed to `shell=True`.
-- **CONSTRAINT:** Process identity binds the executable bytes and four-octal-digit permission mode,
-  the entry-policy bytes, plus the relative names, exact regular-file bytes, and permission modes
-  for the policy-parent root and entries. A preserved permission difference therefore changes the
-  identity even when names, bytes, and execute bits are unchanged. Installed dependencies, files
-  outside that tree, network responses, and other host metadata remain outside the portable
-  identity, so callers that depend on them must isolate and record that environment.
+- **CONSTRAINT:** Process identity v7 binds the executable's lexical invocation basename and the
+  resolved target's bytes and four-octal-digit permission mode, the entry-policy bytes, plus the
+  relative names, exact regular-file bytes, and permission modes for the policy-parent root and
+  entries. An executable alias and its target therefore have distinct identities when their
+  invocation names differ, while the copied bytes remain bound to the resolved target. A preserved
+  permission difference changes the identity even when names, bytes, and execute bits are
+  unchanged. Installed dependencies, files outside that tree, network responses, and other host
+  metadata remain outside the portable identity, so callers that depend on them must isolate and
+  record that environment.
 - **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
   policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
-  executable, permission mode, and complete-tree digests against process identity v6 before and
-  after execution, and launches only the snapshot paths. The private root name is derived from the
-  process identity so policy-visible working, argument, and file paths are stable; a pre-existing
-  identity path fails closed and is neither reused nor removed. V0 does not serialize concurrent
-  evaluations of one identity, so overlapping evaluations may make one source fail closed and
-  should be run sequentially. Original-path drift, snapshot drift, or a copy mismatch yields
-  `indeterminate` decisions and exit `3`; cleanup failure is also source-failed. Cleanup may make
-  paths writable only inside the runner-created private snapshot so copied read-only inputs can be
-  removed; it never changes the original policy tree. The
+  executable, permission mode, and complete-tree digests against process identity v7 before and
+  after execution, and launches the policy only from the snapshot paths. Runner-owned snapshot and
+  executable directories have fixed `0700` permissions on POSIX. The private root name is derived
+  from the process identity so policy-visible working, argument, and file paths are stable; a
+  pre-existing identity path fails closed and is neither reused nor removed. A candidate snapshot
+  equal to or below the resolved policy tree fails closed before creation or copy. V0 does not
+  serialize concurrent evaluations of one identity, so overlapping evaluations may make one
+  source fail closed and should be run sequentially. Original-path drift, snapshot drift, or a
+  copy mismatch yields `indeterminate` decisions and exit `3`; cleanup failure is also
+  source-failed. Cleanup may make paths writable only inside the runner-created private snapshot so
+  copied read-only inputs can be removed; it never changes the original policy tree. The
   snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
   mutate-and-restore process, and a non-relocatable executable fails closed rather than falling
   back to its original path.
+- **CONSTRAINT:** Policy standard streams use temporary files rather than inherited pipes. On
+  Windows an event-gated supervisor is assigned to a kill-on-close Job Object before it may launch
+  the policy; on POSIX the policy starts in a new session. Timeout terminates the contained process
+  family and performs only bounded cleanup, and a completed root process cannot leave ordinary
+  descendants running. A hostile POSIX descendant that creates a new session remains outside v0's
+  containment, and process output remains disk-unbounded until the configured timeout.
 - **CONSTRAINT:** The reference invocation shape is:
 
 ```bash

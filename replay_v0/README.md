@@ -60,18 +60,22 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v6 includes the executable bytes and four-octal-digit permission mode, normalized
-invocation, entry-policy bytes, the relative names, exact regular-file bytes, and permission modes
-for the policy-parent root and entries, configured timeout, fixed environment, and policy-parent
-working-directory contract without writing absolute paths to the run manifest. Immediately before
-each process runs, the runner copies the bound executable and complete policy-parent tree into a
-private temporary snapshot, verifies that the snapshot's entry-policy bytes, executable bytes and
-permission mode, and complete tree digest exactly match the identity before and after execution,
-and launches only the snapshot paths. The private root name is derived from the process identity,
-so `cwd`, `argv[0]`, and policy-file paths exposed by a successful run remain stable for that
-identity instead of containing fresh random names. A pre-existing identity path fails closed and
-is neither reused nor removed. V0 does not serialize concurrent evaluations of the same identity,
-so overlapping evaluations can make one source fail closed and should be run sequentially.
+identity v7 includes the executable's lexical invocation basename, the resolved executable target's
+bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
+regular-file bytes, and permission modes for the policy-parent root and entries, configured
+timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
+working-directory contract without writing absolute paths to the run manifest. An executable alias
+and its target therefore have distinct identities when their invocation names differ, while the
+snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
+copies the bound executable and complete policy-parent tree into a private temporary snapshot,
+verifies that the snapshot's entry-policy bytes, executable bytes and permission mode, and complete
+tree digest exactly match the identity before and after execution, and launches the policy only
+from the snapshot paths. The private root name is derived from the process identity, so `cwd`,
+`argv[0]`, and policy-file paths exposed by a successful run remain stable for that identity instead
+of containing fresh random names. A pre-existing identity path fails closed and is neither reused
+nor removed. A candidate snapshot equal to or below the resolved policy tree fails closed before
+creation or copy. V0 does not serialize concurrent evaluations of the same identity, so overlapping
+evaluations can make one source fail closed and should be run sequentially.
 Permission differences preserved by the copy therefore
 produce distinct identities and run IDs even when names, bytes, and execute bits are unchanged.
 Changing or removing an original path after snapshot preparation therefore cannot change what the
@@ -92,6 +96,14 @@ captured executable cannot start, replay fails closed instead of falling back to
 External installed dependencies, files outside the policy tree, network responses, and host
 metadata remain outside the portable identity; callers that depend on them must isolate and record
 that environment.
+
+Policy standard streams are backed by temporary files, so a descendant retaining inherited stream
+handles cannot extend the configured timeout. On Windows an event-gated supervisor enters a
+kill-on-close Job Object before it can launch the policy; on POSIX the policy starts in a new
+session. Timeout terminates the contained process family with bounded cleanup, and a completed root
+process cannot leave ordinary descendants running. A hostile POSIX descendant can still escape by
+creating a new session, and process output remains disk-unbounded until timeout; both are explicit
+v0 limitations rather than sandbox guarantees.
 
 The three report artifacts are fully staged before publication. Replacing an existing report set
 uses rollback: a publication error restores the prior complete set instead of leaving a new

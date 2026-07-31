@@ -489,6 +489,110 @@ for index, event in enumerate(events):
         self.assertNotEqual(first_manifest["run_id"], second_manifest["run_id"])
         self.assertNotEqual(first_manifest["run_id"], longer_timeout_manifest["run_id"])
 
+    def test_process_executable_alias_name_is_bound_before_target_resolution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            alias = directory / (
+                "policy-alias.exe" if os.name == "nt" else "policy-alias"
+            )
+            alias.write_bytes(b"lexical alias placeholder\n")
+            policy = directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            target = Path(sys.executable).resolve()
+            original_resolve = Path.resolve
+
+            def redirected_resolve(path, *args, **kwargs):
+                if path == alias:
+                    return target
+                return original_resolve(path, *args, **kwargs)
+
+            def resolved_command(command):
+                return str(alias if command == "policy-alias" else target)
+
+            with mock.patch(
+                "replay_v0.cli.shutil.which", side_effect=resolved_command
+            ), mock.patch.object(
+                Path, "resolve", autospec=True, side_effect=redirected_resolve
+            ):
+                alias_source = _load_process_source(f"policy-alias,{policy}", 5.0)
+                target_source = _load_process_source(f"{target},{policy}", 5.0)
+
+            with mock.patch(
+                "replay_v0.policy_sources._run_policy_process",
+                wraps=policy_sources._run_policy_process,
+            ) as process_run:
+                result = alias_source.source.evaluate(EVENTS)
+
+        self.assertEqual((), result.failures)
+        self.assertNotEqual(alias_source.identity, target_source.identity)
+        self.assertEqual(alias.name, Path(process_run.call_args.args[0][0]).name)
+        self.assertEqual(target, alias_source.source.executable_binding[0])
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable symlink semantics")
+    def test_process_executable_symlink_keeps_direct_invocation_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            executable_directory = directory / "bin"
+            policy_directory = directory / "policy"
+            executable_directory.mkdir()
+            policy_directory.mkdir()
+            target = executable_directory / "target-policy"
+            alias = executable_directory / "alias-policy"
+            target.write_text(
+                f"#!{sys.executable}\n"
+                "import json\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "effect = 'allow' if Path(sys.argv[0]).name == 'alias-policy' else 'deny'\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                "    print(json.dumps({'schema_version': 'policy-decision.v1', "
+                "'event_id': event['event_id'], 'effect': effect, "
+                "'reason': Path(sys.argv[0]).name}))\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            os.chmod(target, 0o755)
+            alias.symlink_to(target)
+            policy = policy_directory / "policy.txt"
+            policy.write_text("bound policy\n", encoding="utf-8", newline="\n")
+            input_bytes = "".join(
+                f"{json.dumps(event, sort_keys=True, separators=(',', ':'))}\n"
+                for event in EVENTS
+            ).encode("utf-8")
+
+            direct_alias = subprocess.run(
+                [str(alias), str(policy)],
+                input=input_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            direct_target = subprocess.run(
+                [str(target), str(policy)],
+                input=input_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            alias_source = _load_process_source(f"{alias},{policy}", 5.0)
+            target_source = _load_process_source(f"{target},{policy}", 5.0)
+            replay_alias = alias_source.source.evaluate(EVENTS)
+            replay_target = target_source.source.evaluate(EVENTS)
+
+        self.assertIn(b'"effect": "allow"', direct_alias.stdout)
+        self.assertIn(b'"effect": "deny"', direct_target.stdout)
+        self.assertEqual(
+            ["allow", "allow"], [row["effect"] for row in replay_alias.decisions]
+        )
+        self.assertEqual(
+            ["deny", "deny"], [row["effect"] for row in replay_target.decisions]
+        )
+        self.assertNotEqual(alias_source.identity, target_source.identity)
+
     def test_process_policy_parent_tree_changes_identity_and_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -672,7 +776,9 @@ for index, event in enumerate(events):
             loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
 
             os.chmod(helper, 0o444)
-            with mock.patch("replay_v0.policy_sources.subprocess.run") as process_run:
+            with mock.patch(
+                "replay_v0.policy_sources._run_policy_process"
+            ) as process_run:
                 result = loaded.source.evaluate(EVENTS)
 
         process_run.assert_not_called()
@@ -771,7 +877,8 @@ for index, event in enumerate(events):
                 "_evaluate_runtime",
                 side_effect=mutate_before_real_launch,
             ), mock.patch(
-                "replay_v0.policy_sources.subprocess.run", wraps=subprocess.run
+                "replay_v0.policy_sources._run_policy_process",
+                wraps=policy_sources._run_policy_process,
             ) as process_run:
                 result = loaded.source.evaluate(EVENTS)
             writer.join(timeout=5.0)
@@ -785,7 +892,7 @@ for index, event in enumerate(events):
         )
         self.assertEqual(1, len(snapshot_roots))
         self.assertEqual(
-            snapshot_roots[0] / "executable" / Path(loaded.source.argv[0]).name,
+            snapshot_roots[0] / "executable" / loaded.source.executable_binding[1],
             Path(launched_argv[0]),
         )
         self.assertEqual(snapshot_roots[0] / "policy", launched_cwd)
@@ -840,6 +947,76 @@ for index, event in enumerate(events):
         self.assertIn(str(snapshot_root), first.decisions[0]["reason"])
         self.assertFalse(snapshot_root.exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX umask controls directory modes")
+    def test_process_snapshot_runner_directory_modes_ignore_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy = directory / "policy.py"
+            policy.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "import stat\n"
+                "import sys\n"
+                "executable_dir = Path(sys.executable).parent\n"
+                "visible = ':'.join(f'{stat.S_IMODE(path.stat().st_mode):04o}' "
+                "for path in (executable_dir.parent, executable_dir))\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                "    print(json.dumps({'schema_version': 'policy-decision.v1', "
+                "'event_id': event['event_id'], 'effect': 'deny', 'reason': visible}))\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            outcomes = []
+            for mask in (0o022, 0o077):
+                previous = os.umask(mask)
+                try:
+                    loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+                    result = loaded.source.evaluate(EVENTS)
+                finally:
+                    os.umask(previous)
+                outcomes.append((loaded.identity, result))
+
+        self.assertEqual(outcomes[0][0], outcomes[1][0])
+        self.assertEqual(outcomes[0][1].decisions, outcomes[1][1].decisions)
+        self.assertEqual((), outcomes[0][1].failures)
+        self.assertEqual((), outcomes[1][1].failures)
+        self.assertEqual("0700:0700", outcomes[0][1].decisions[0]["reason"])
+
+    def test_process_snapshot_rejects_overlap_with_bound_policy_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            policy_directory = Path(raw_directory)
+            policy = policy_directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot_root = policy_directory / (
+                f"replay-process-inputs-{loaded.identity['sha256']}"
+            )
+
+            with mock.patch(
+                "replay_v0.policy_sources.tempfile.gettempdir",
+                return_value=str(policy_directory),
+            ), mock.patch(
+                "replay_v0.policy_sources.shutil.copytree"
+            ) as copytree, mock.patch(
+                "replay_v0.policy_sources._run_policy_process"
+            ) as process_run:
+                result = loaded.source.evaluate(EVENTS)
+
+        copytree.assert_not_called()
+        process_run.assert_not_called()
+        self.assertFalse(snapshot_root.exists())
+        self.assertEqual(
+            ["process-snapshot-overlaps-input"],
+            [failure.code for failure in result.failures],
+        )
+        self.assertEqual(
+            ["indeterminate", "indeterminate"],
+            [decision["effect"] for decision in result.decisions],
+        )
+
     def test_process_snapshot_does_not_reuse_an_existing_identity_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -862,7 +1039,9 @@ for index, event in enumerate(events):
             with mock.patch(
                 "replay_v0.policy_sources.tempfile.gettempdir",
                 return_value=str(snapshot_parent),
-            ), mock.patch("replay_v0.policy_sources.subprocess.run") as process_run:
+            ), mock.patch(
+                "replay_v0.policy_sources._run_policy_process"
+            ) as process_run:
                 result = loaded.source.evaluate(EVENTS)
 
             process_run.assert_not_called()
