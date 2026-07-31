@@ -7520,8 +7520,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
             if (
                 not changed
                 and command[1:4] == ["status", "--porcelain=v1", "-z"]
-                and os.path.normcase(os.path.abspath(cwd))
-                == os.path.normcase(os.path.abspath(worktree))
+                and harness.same_worktree_path(cwd, worktree)
             ):
                 (worktree / "private-report.md").write_text(
                     "arrived late\n", encoding="utf-8"
@@ -7532,6 +7531,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertFalse(
             harness.apply_worktree_plan(plan, command_runner=racing_runner)
         )
+        self.assertTrue(changed)
         candidate = self.candidate(plan, worktree)
         self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
         self.assertTrue(worktree.is_dir())
@@ -7601,19 +7601,18 @@ class WorktreeCloseoutTests(unittest.TestCase):
             json.loads(output.getvalue())["apply_error"], "remote_refresh_failed"
         )
 
+        status_injected = False
+
         def status_failure(
             command: list[str], cwd: Path
         ) -> subprocess.CompletedProcess[str]:
-            if command[1:2] == ["status"] and same_fixture_path(cwd, worktree):
+            nonlocal status_injected
+            if command[1:2] == ["status"] and harness.same_worktree_path(cwd, worktree):
+                status_injected = True
                 return subprocess.CompletedProcess(
                     command, 8, "?? misleading", "failed"
                 )
             return harness.worktree_git_runner(command, cwd)
-
-        def same_fixture_path(left: Path, right: Path) -> bool:
-            return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
-                os.path.abspath(right)
-            )
 
         status_plan = harness.worktree_plan(
             self.repo,
@@ -7622,6 +7621,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
             process_cwd=self.repo,
         )
         status_candidate = self.candidate(status_plan, worktree)
+        self.assertTrue(status_injected)
         self.assertIn("status_probe_failed", status_candidate["reasons"])
         self.assertFalse(status_plan["complete"])
 
@@ -7650,27 +7650,30 @@ class WorktreeCloseoutTests(unittest.TestCase):
         worktree = self.add_worktree("probe-failures")
 
         def runner_failing(predicate):
+            injected: list[list[str]] = []
+
             def failing_runner(
                 command: list[str], cwd: Path
             ) -> subprocess.CompletedProcess[str]:
                 if predicate(command, cwd):
+                    injected.append(command.copy())
                     return subprocess.CompletedProcess(
                         command, 6, "misleading", "failed"
                     )
                 return harness.worktree_git_runner(command, cwd)
 
-            return failing_runner
+            return failing_runner, injected
 
         cases = (
             (
                 "head_probe_failed",
                 lambda command, cwd: command[1:3] == ["rev-parse", "HEAD"]
-                and same_path(cwd, worktree),
+                and harness.same_worktree_path(cwd, worktree),
             ),
             (
                 "index_probe_failed",
                 lambda command, cwd: command[1:3] == ["ls-files", "-v"]
-                and same_path(cwd, worktree),
+                and harness.same_worktree_path(cwd, worktree),
             ),
             (
                 "reachability_probe_failed",
@@ -7680,23 +7683,20 @@ class WorktreeCloseoutTests(unittest.TestCase):
             ),
         )
 
-        def same_path(left: Path, right: Path) -> bool:
-            return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
-                os.path.abspath(right)
-            )
-
         for reason, predicate in cases:
             with self.subTest(reason=reason):
+                failing_runner, injected = runner_failing(predicate)
                 plan = harness.worktree_plan(
                     self.repo,
                     refresh=True,
-                    command_runner=runner_failing(predicate),
+                    command_runner=failing_runner,
                     process_cwd=self.repo,
                 )
+                self.assertTrue(injected)
                 self.assertIn(reason, self.candidate(plan, worktree)["reasons"])
                 self.assertFalse(plan["complete"])
 
-        list_failure = runner_failing(
+        list_failure, list_injected = runner_failing(
             lambda command, _cwd: command[1:3] == ["worktree", "list"]
         )
         with self.assertRaisesRegex(harness.HarnessError, "worktree list failed"):
@@ -7706,6 +7706,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 command_runner=list_failure,
                 process_cwd=self.repo,
             )
+        self.assertTrue(list_injected)
 
     def test_removing_one_candidate_preserves_unavailable_worktree_metadata(
         self,
