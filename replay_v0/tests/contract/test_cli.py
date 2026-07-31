@@ -797,6 +797,85 @@ for index, event in enumerate(events):
             str(snapshot_roots[0]), json.dumps(result.failures, default=str)
         )
 
+    def test_process_snapshot_paths_are_stable_for_one_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy_directory = directory / "source"
+            snapshot_parent = directory / "snapshots"
+            policy_directory.mkdir()
+            snapshot_parent.mkdir()
+            policy = policy_directory / "policy.py"
+            policy.write_text(
+                "import hashlib\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "visible = '|'.join((os.getcwd(), sys.argv[0], __file__))\n"
+                "effect = ('allow' if hashlib.sha256(visible.encode('utf-8')).digest()[0] & 1 "
+                "else 'deny')\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                "    print(json.dumps({'schema_version': 'policy-decision.v1', "
+                "'event_id': event['event_id'], 'effect': effect, 'reason': visible}))\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            first_source = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            second_source = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot_root = snapshot_parent / (
+                f"replay-process-inputs-{first_source.identity['sha256']}"
+            )
+
+            with mock.patch(
+                "replay_v0.policy_sources.tempfile.gettempdir",
+                return_value=str(snapshot_parent),
+            ):
+                first = first_source.source.evaluate(EVENTS)
+                self.assertFalse(snapshot_root.exists())
+                second = second_source.source.evaluate(EVENTS)
+
+        self.assertEqual(first_source.identity, second_source.identity)
+        self.assertEqual((), first.failures)
+        self.assertEqual((), second.failures)
+        self.assertEqual(first.decisions, second.decisions)
+        self.assertIn(str(snapshot_root), first.decisions[0]["reason"])
+        self.assertFalse(snapshot_root.exists())
+
+    def test_process_snapshot_does_not_reuse_an_existing_identity_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            policy_directory = directory / "source"
+            snapshot_parent = directory / "snapshots"
+            policy_directory.mkdir()
+            snapshot_parent.mkdir()
+            policy = policy_directory / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot_root = snapshot_parent / (
+                f"replay-process-inputs-{loaded.identity['sha256']}"
+            )
+            snapshot_root.mkdir()
+            sentinel = snapshot_root / "not-owned.txt"
+            sentinel.write_bytes(b"do not remove\n")
+
+            with mock.patch(
+                "replay_v0.policy_sources.tempfile.gettempdir",
+                return_value=str(snapshot_parent),
+            ), mock.patch("replay_v0.policy_sources.subprocess.run") as process_run:
+                result = loaded.source.evaluate(EVENTS)
+
+            process_run.assert_not_called()
+            self.assertEqual(
+                ["process-snapshot-unavailable"],
+                [failure.code for failure in result.failures],
+            )
+            self.assertEqual(
+                ["indeterminate", "indeterminate"],
+                [decision["effect"] for decision in result.decisions],
+            )
+            self.assertEqual(b"do not remove\n", sentinel.read_bytes())
+
     def test_process_snapshot_cleanup_failure_is_a_source_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)

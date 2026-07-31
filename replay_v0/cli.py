@@ -53,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v5"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v6"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -273,8 +273,8 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             "parent_tree_sha256": policy_tree_digest,
         },
         "environment": normalized_environment,
-        "execution_inputs": "private-validated-snapshot",
-        "working_directory": "snapshot-policy-parent",
+        "execution_inputs": "private-validated-identity-path-snapshot",
+        "working_directory": "identity-derived-snapshot-policy-parent",
     }
     execution_argv = [
         str(bound_executable_path),
@@ -282,31 +282,32 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         lexical_policy_path.name,
     ]
     try:
-        source = (
-            ProcessDecisionSource(execution_argv, timeout_seconds=timeout)
-            .with_runtime(
-                cwd=lexical_policy_path.parent,
-                environment=runtime_environment,
-            )
-            .with_input_binding(
-                executable_path=bound_executable_path,
-                executable_sha256=executable_digest,
-                executable_permissions=executable_permissions,
-                policy_tree_path=lexical_policy_path.parent,
-                policy_sha256=policy_digest,
-                policy_tree_sha256=policy_tree_digest,
-            )
+        source = ProcessDecisionSource(
+            execution_argv, timeout_seconds=timeout
+        ).with_runtime(
+            cwd=lexical_policy_path.parent,
+            environment=runtime_environment,
+        )
+        normalized_identity["timeout_seconds"] = source.timeout_seconds
+        identity_sha256 = sha256_bytes(canonical_json_bytes(normalized_identity))
+        source.with_input_binding(
+            executable_path=bound_executable_path,
+            executable_sha256=executable_digest,
+            executable_permissions=executable_permissions,
+            policy_tree_path=lexical_policy_path.parent,
+            policy_sha256=policy_digest,
+            policy_tree_sha256=policy_tree_digest,
+            snapshot_identity=identity_sha256,
         )
     except ValueError as exc:
         raise ReplayInputError(str(exc)) from exc
-    normalized_identity["timeout_seconds"] = source.timeout_seconds
     return LoadedPolicySource(
         kind="process",
         source=source,
         identity={
             "kind": "process",
             "id": lexical_policy_path.stem,
-            "sha256": sha256_bytes(canonical_json_bytes(normalized_identity)),
+            "sha256": identity_sha256,
         },
     )
 

@@ -107,11 +107,15 @@ Owner: Cristian Tcaci
   identity, so callers that depend on them must isolate and record that environment.
 - **CONSTRAINT:** Immediately before process start, the runner copies the bound executable and
   policy-parent tree into a private temporary snapshot, verifies the snapshot's entry-policy,
-  executable, permission mode, and complete-tree digests against process identity v5 before and
-  after execution, and launches only the snapshot paths. Original-path drift, snapshot drift, or a
-  copy mismatch yields `indeterminate` decisions and exit `3`; cleanup failure is also
-  source-failed. Cleanup may make paths writable only inside the runner-created private snapshot
-  so copied read-only inputs can be removed; it never changes the original policy tree. The
+  executable, permission mode, and complete-tree digests against process identity v6 before and
+  after execution, and launches only the snapshot paths. The private root name is derived from the
+  process identity so policy-visible working, argument, and file paths are stable; a pre-existing
+  identity path fails closed and is neither reused nor removed. V0 does not serialize concurrent
+  evaluations of one identity, so overlapping evaluations may make one source fail closed and
+  should be run sequentially. Original-path drift, snapshot drift, or a copy mismatch yields
+  `indeterminate` decisions and exit `3`; cleanup failure is also source-failed. Cleanup may make
+  paths writable only inside the runner-created private snapshot so copied read-only inputs can be
+  removed; it never changes the original policy tree. The
   snapshot is reproducibility containment, not an atomic sandbox against a hostile same-user
   mutate-and-restore process, and a non-relocatable executable fails closed rather than falling
   back to its original path.

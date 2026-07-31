@@ -511,6 +511,7 @@ class ProcessDecisionSource:
         self.environment: dict[str, str] | None = None
         self.executable_binding: tuple[Path, str, str] | None = None
         self.policy_tree_binding: tuple[Path, str, str] | None = None
+        self.snapshot_identity: str | None = None
 
     def with_runtime(
         self,
@@ -538,6 +539,7 @@ class ProcessDecisionSource:
         policy_tree_path: str | Path,
         policy_sha256: str,
         policy_tree_sha256: str,
+        snapshot_identity: str,
     ) -> ProcessDecisionSource:
         """Bind the executable and policy tree copied into a validated snapshot."""
 
@@ -545,6 +547,7 @@ class ProcessDecisionSource:
             not _SHA256.fullmatch(executable_sha256)
             or not _SHA256.fullmatch(policy_sha256)
             or not _SHA256.fullmatch(policy_tree_sha256)
+            or not _SHA256.fullmatch(snapshot_identity)
         ):
             raise ValueError("process input bindings require lowercase SHA-256 digests")
         if not re.fullmatch(r"[0-7]{4}", executable_permissions):
@@ -561,6 +564,7 @@ class ProcessDecisionSource:
             policy_sha256,
             policy_tree_sha256,
         )
+        self.snapshot_identity = snapshot_identity
         return self
 
     @staticmethod
@@ -592,6 +596,7 @@ class ProcessDecisionSource:
         if (
             self.executable_binding is None
             or self.policy_tree_binding is None
+            or self.snapshot_identity is None
             or self.cwd is None
             or len(self.argv) < 2
             or Path(self.argv[-1]).name != self.argv[-1]
@@ -607,7 +612,10 @@ class ProcessDecisionSource:
         )
         policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
         try:
-            snapshot_root = Path(tempfile.mkdtemp(prefix="replay-process-inputs-"))
+            snapshot_root = Path(tempfile.gettempdir()) / (
+                f"replay-process-inputs-{self.snapshot_identity}"
+            )
+            snapshot_root.mkdir(mode=0o700)
         except OSError:
             return self._snapshot_failure(
                 events,
