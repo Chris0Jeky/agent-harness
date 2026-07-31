@@ -562,6 +562,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   detached, administratively stateful, and cooperatively occupied worktrees are retained.
   If a later candidate's fresh registry revalidation fails after an earlier removal, APPLY stops,
   retains current and remaining candidates, reports the partial result, and never retries or rolls back.
+  Recovery reachability uses one bounded stdin-fed Git traversal for a non-empty object set and no
+  traversal for an empty set.
   Canonical identity collapses Windows short/long paths and macOS `/var` aliases. JSON schema
   version 3 carries the mode, index-recovery, pending-message status, local-ref,
   administrative-state, and recovery-retention evidence without emitting commit-message content.

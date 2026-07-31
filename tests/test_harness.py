@@ -7426,14 +7426,16 @@ class WorktreeCloseoutTests(unittest.TestCase):
         calls: list[list[str]] = []
         state = {"removals": 0, "failed_lists": 0}
 
-        def runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
             calls.append(command.copy())
             if command[1:3] == ["worktree", "list"] and state["removals"]:
                 state["failed_lists"] += 1
                 return subprocess.CompletedProcess(
                     command, 6, "misleading", "controlled list failure"
                 )
-            result = harness.worktree_git_runner(command, cwd)
+            result = harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
             if command[1:3] == ["worktree", "remove"] and not result.returncode:
                 state["removals"] += 1
             return result
@@ -7746,6 +7748,89 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertTrue(harness.apply_worktree_plan(plan))
         self.assertTrue(worktree.is_dir())
 
+    def test_recovery_reachability_uses_one_stdin_query(self) -> None:
+        commits = [f"{value:040x}" for value in range(1, 260)]
+        expected_unretained = [commits[0], commits[-1]]
+        calls: list[tuple[list[str], Path, str | None]] = []
+
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command.copy(), cwd, stdin_text))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"{expected_unretained[-1].upper()}\n{expected_unretained[0]}\n"
+                f"{expected_unretained[-1]}\n",
+                "",
+            )
+
+        unretained, error = harness.commits_without_local_retention(
+            self.repo, commits, runner
+        )
+
+        self.assertEqual(error, "")
+        self.assertEqual(unretained, expected_unretained)
+        self.assertEqual(len(calls), 1)
+        command, cwd, stdin_text = calls[0]
+        self.assertEqual(
+            command,
+            [
+                "git",
+                "rev-list",
+                "--no-walk",
+                "--stdin",
+                "--not",
+                "--branches",
+                "--tags",
+            ],
+        )
+        self.assertTrue(harness.same_worktree_path(cwd, self.repo))
+        self.assertEqual(stdin_text, "".join(f"{object_id}\n" for object_id in commits))
+
+    def test_empty_recovery_set_launches_no_reachability_query(self) -> None:
+        calls = 0
+
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        unretained, error = harness.commits_without_local_retention(
+            self.repo, [], runner
+        )
+
+        self.assertEqual((unretained, error), ([], ""))
+        self.assertEqual(calls, 0)
+
+    def test_recovery_reachability_query_fails_closed(self) -> None:
+        commit = "a" * 40
+        cases = (
+            (7, "", "recovery reachability probe failed with exit 7"),
+            (0, "not-an-object-id\n", "invalid object id"),
+        )
+        for returncode, stdout, expected_error in cases:
+            with self.subTest(returncode=returncode, stdout=stdout):
+
+                def runner(
+                    command: list[str],
+                    cwd: Path,
+                    *,
+                    stdin_text: str | None = None,
+                ) -> subprocess.CompletedProcess[str]:
+                    self.assertEqual(stdin_text, f"{commit}\n")
+                    return subprocess.CompletedProcess(
+                        command, returncode, stdout, "controlled failure"
+                    )
+
+                unretained, error = harness.commits_without_local_retention(
+                    self.repo, [commit], runner
+                )
+                self.assertEqual(unretained, [])
+                self.assertIn(expected_error, error)
+
     def test_worktree_local_state_and_unique_reflog_are_preserved(self) -> None:
         worktree = self.add_worktree("local-state")
         (worktree / "unique.txt").write_text("only here\n", encoding="utf-8")
@@ -8031,7 +8116,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         reclaim_was_refused = False
 
         def recording_runner(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             nonlocal reclaim_was_refused
             calls.append(command.copy())
@@ -8048,7 +8133,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                         now=lambda: harness.worktree_utc_now() + timedelta(hours=2),
                     )
                 reclaim_was_refused = True
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         self.assertTrue(
             harness.apply_worktree_plan(plan, command_runner=recording_runner)
@@ -8097,7 +8182,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         changed = False
 
         def racing_runner(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             nonlocal changed
             if (
@@ -8109,7 +8194,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                     "arrived late\n", encoding="utf-8"
                 )
                 changed = True
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         self.assertFalse(
             harness.apply_worktree_plan(plan, command_runner=racing_runner)
@@ -8126,7 +8211,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         changed = False
 
         def racing_runner(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             nonlocal changed
             if (
@@ -8141,7 +8226,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 )
                 (git_dir / "sequencer").mkdir()
                 changed = True
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         self.assertFalse(
             harness.apply_worktree_plan(plan, command_runner=racing_runner)
@@ -8216,11 +8301,11 @@ class WorktreeCloseoutTests(unittest.TestCase):
         worktree = self.add_worktree("failures")
 
         def fetch_failure(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             if command[1:2] == ["fetch"]:
                 return subprocess.CompletedProcess(command, 9, "stale output", "failed")
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         fetch_plan = harness.worktree_plan(
             self.repo,
@@ -8250,7 +8335,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
         status_injected = False
 
         def status_failure(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             nonlocal status_injected
             if command[1:2] == ["status"] and harness.same_worktree_path(cwd, worktree):
@@ -8258,7 +8343,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     command, 8, "?? misleading", "failed"
                 )
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         status_plan = harness.worktree_plan(
             self.repo,
@@ -8275,12 +8360,12 @@ class WorktreeCloseoutTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def remove_failure(
-            command: list[str], cwd: Path
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
         ) -> subprocess.CompletedProcess[str]:
             calls.append(command.copy())
             if command[1:3] == ["worktree", "remove"]:
                 return subprocess.CompletedProcess(command, 7, "", "refused")
-            return harness.worktree_git_runner(command, cwd)
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
         self.assertFalse(
             harness.apply_worktree_plan(good_plan, command_runner=remove_failure)
@@ -8386,14 +8471,14 @@ class WorktreeCloseoutTests(unittest.TestCase):
             injected: list[list[str]] = []
 
             def failing_runner(
-                command: list[str], cwd: Path
+                command: list[str], cwd: Path, *, stdin_text: str | None = None
             ) -> subprocess.CompletedProcess[str]:
                 if predicate(command, cwd):
                     injected.append(command.copy())
                     return subprocess.CompletedProcess(
                         command, 6, "misleading", "failed"
                     )
-                return harness.worktree_git_runner(command, cwd)
+                return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
 
             return failing_runner, injected
 
@@ -8546,8 +8631,11 @@ class WorktreeCloseoutTests(unittest.TestCase):
                 with mock.patch.object(
                     harness.subprocess, "run", return_value=completed
                 ) as spawn:
-                    result = harness.worktree_git_runner(["git", "status"], self.repo)
+                    result = harness.worktree_git_runner(
+                        ["git", "status"], self.repo, stdin_text="object-id\n"
+                    )
         self.assertEqual(result.returncode, 0)
+        self.assertEqual(spawn.call_args.kwargs["input"], "object-id\n")
         environment = spawn.call_args.kwargs["env"]
         for name in harness.WORKTREE_GIT_CONTEXT_ENV:
             self.assertNotIn(name, environment)
