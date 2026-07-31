@@ -53,7 +53,7 @@ EXIT_SOURCE_FAILED = 3
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 SUPPORTED_FAIL_ON = frozenset({"newly-allowed", "newly-denied", "newly-indeterminate"})
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v7"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v8"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -252,6 +252,10 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         raise ReplayInputError(
             "process executable or policy file could not be read"
         ) from exc
+    try:
+        snapshot_parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ReplayInputError("process snapshot parent could not be resolved") from exc
     runtime_environment = dict(PROCESS_ENVIRONMENT)
     normalized_environment = dict(PROCESS_ENVIRONMENT)
     if bound_executable_path == Path(sys.executable).resolve():
@@ -273,7 +277,8 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         "environment": normalized_environment,
         "execution_inputs": "private-validated-identity-path-snapshot",
         "runner_directory_permission_bits": "0700",
-        "working_directory": "identity-derived-snapshot-policy-parent",
+        "snapshot_parent_sha256": sha256_bytes(os.fsencode(snapshot_parent)),
+        "working_directory": "identity-bound-parent-and-derived-snapshot-policy-parent",
     }
     execution_argv = [
         str(bound_executable_path),
@@ -298,6 +303,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
             policy_sha256=policy_digest,
             policy_tree_sha256=policy_tree_digest,
             snapshot_identity=identity_sha256,
+            snapshot_parent_path=snapshot_parent,
         )
     except ValueError as exc:
         raise ReplayInputError(str(exc)) from exc

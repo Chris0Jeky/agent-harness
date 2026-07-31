@@ -60,22 +60,26 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v7 includes the executable's lexical invocation basename, the resolved executable target's
+identity v8 includes the executable's lexical invocation basename, the resolved executable target's
 bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
 regular-file bytes, and permission modes for the policy-parent root and entries, configured
 timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
-working-directory contract without writing absolute paths to the run manifest. An executable alias
-and its target therefore have distinct identities when their invocation names differ, while the
-snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
+working-directory contract. It also binds an opaque SHA-256 digest of the selected resolved
+snapshot parent without writing that absolute path to the run manifest. Process identities are
+therefore conservatively host/path-sensitive when policy-visible temporary roots differ. An
+executable alias and its target have distinct identities when their invocation names differ, while
+the snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
 copies the bound executable and complete policy-parent tree into a private temporary snapshot,
 verifies that the snapshot's entry-policy bytes, executable bytes and permission mode, and complete
 tree digest exactly match the identity before and after execution, and launches the policy only
-from the snapshot paths. The private root name is derived from the process identity, so `cwd`,
-`argv[0]`, and policy-file paths exposed by a successful run remain stable for that identity instead
-of containing fresh random names. A pre-existing identity path fails closed and is neither reused
-nor removed. A candidate snapshot equal to or below the resolved policy tree fails closed before
-creation or copy. V0 does not serialize concurrent evaluations of the same identity, so overlapping
-evaluations can make one source fail closed and should be run sequentially.
+from the snapshot paths. The resolved parent is captured once while the source is loaded and reused
+during evaluation; the private root suffix is derived from the process identity. Consequently,
+`cwd`, `argv[0]`, and policy-file paths exposed by a successful run remain stable for that identity,
+and changing the selected parent changes the identity and run ID. A missing parent or pre-existing
+identity path fails closed; a pre-existing path is neither reused nor removed. A candidate snapshot
+equal to or below the resolved policy tree fails closed before creation or copy. V0 does not
+serialize concurrent evaluations of the same identity, so overlapping evaluations can make one
+source fail closed and should be run sequentially.
 Permission differences preserved by the copy therefore
 produce distinct identities and run IDs even when names, bytes, and execute bits are unchanged.
 Changing or removing an original path after snapshot preparation therefore cannot change what the

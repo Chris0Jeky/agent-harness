@@ -822,6 +822,7 @@ class ProcessDecisionSource:
         self.executable_binding: tuple[Path, str, str, str] | None = None
         self.policy_tree_binding: tuple[Path, str, str] | None = None
         self.snapshot_identity: str | None = None
+        self.snapshot_parent: Path | None = None
 
     def with_runtime(
         self,
@@ -851,6 +852,7 @@ class ProcessDecisionSource:
         policy_sha256: str,
         policy_tree_sha256: str,
         snapshot_identity: str,
+        snapshot_parent_path: str | Path,
     ) -> ProcessDecisionSource:
         """Bind the executable and policy tree copied into a validated snapshot."""
 
@@ -886,7 +888,21 @@ class ProcessDecisionSource:
             policy_sha256,
             policy_tree_sha256,
         )
+        bound_snapshot_parent = Path(snapshot_parent_path)
+        try:
+            resolved_snapshot_parent = bound_snapshot_parent.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                "process snapshot parent must be a resolved directory"
+            ) from exc
+        if (
+            not bound_snapshot_parent.is_absolute()
+            or bound_snapshot_parent != resolved_snapshot_parent
+            or not bound_snapshot_parent.is_dir()
+        ):
+            raise ValueError("process snapshot parent must be a resolved directory")
         self.snapshot_identity = snapshot_identity
+        self.snapshot_parent = bound_snapshot_parent
         return self
 
     @staticmethod
@@ -919,6 +935,7 @@ class ProcessDecisionSource:
             self.executable_binding is None
             or self.policy_tree_binding is None
             or self.snapshot_identity is None
+            or self.snapshot_parent is None
             or self.cwd is None
             or len(self.argv) < 2
             or Path(self.argv[-1]).name != self.argv[-1]
@@ -936,7 +953,19 @@ class ProcessDecisionSource:
             expected_executable_permissions,
         ) = self.executable_binding
         policy_tree_path, expected_policy, expected_tree = self.policy_tree_binding
-        snapshot_root = Path(tempfile.gettempdir()) / (
+        try:
+            if (
+                self.snapshot_parent.resolve(strict=True) != self.snapshot_parent
+                or not self.snapshot_parent.is_dir()
+            ):
+                raise OSError
+        except (OSError, RuntimeError):
+            return self._snapshot_failure(
+                events,
+                code="process-snapshot-unavailable",
+                message="The private policy process snapshot parent became unavailable.",
+            )
+        snapshot_root = self.snapshot_parent / (
             f"replay-process-inputs-{self.snapshot_identity}"
         )
         try:
