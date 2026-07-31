@@ -495,7 +495,7 @@ def worktree_git_environment() -> dict[str, str]:
 
 
 def worktree_git_runner(
-    command: list[str], cwd: Path
+    command: list[str], cwd: Path, *, stdin_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run one bounded Git command for the guarded worktree workflow."""
 
@@ -510,6 +510,7 @@ def worktree_git_runner(
             cwd=cwd,
             capture_output=True,
             text=True,
+            input=stdin_text,
             check=False,
             timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             env=worktree_git_environment(),
@@ -523,9 +524,17 @@ def worktree_git_runner(
 
 
 def worktree_git_result(
-    command_runner: Any, args: list[str], cwd: Path
+    command_runner: Any,
+    args: list[str],
+    cwd: Path,
+    *,
+    stdin_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    result = command_runner(["git", *args], cwd)
+    command = ["git", *args]
+    if stdin_text is None:
+        result = command_runner(command, cwd)
+    else:
+        result = command_runner(command, cwd, stdin_text=stdin_text)
     if not isinstance(result, subprocess.CompletedProcess):
         raise HarnessError("worktree command runner returned an invalid result")
     return result
@@ -1379,31 +1388,32 @@ def worktree_recovery_commits(
 def commits_without_local_retention(
     primary: Path, commits: list[str], command_runner: Any
 ) -> tuple[list[str], str]:
-    unreachable: list[str] = []
-    for offset in range(0, len(commits), 64):
-        batch = commits[offset : offset + 64]
-        result = worktree_git_result(
-            command_runner,
-            [
-                "rev-list",
-                "--no-walk",
-                *batch,
-                "--not",
-                "--branches",
-                "--tags",
-            ],
-            primary,
+    if not commits:
+        return [], ""
+    result = worktree_git_result(
+        command_runner,
+        [
+            "rev-list",
+            "--no-walk",
+            "--stdin",
+            "--not",
+            "--branches",
+            "--tags",
+        ],
+        primary,
+        stdin_text="".join(f"{object_id}\n" for object_id in commits),
+    )
+    if result.returncode:
+        return (
+            [],
+            f"recovery reachability probe failed with exit {result.returncode}",
         )
-        if result.returncode:
-            return (
-                [],
-                f"recovery reachability probe failed with exit {result.returncode}",
-            )
-        for line in result.stdout.splitlines():
-            object_id = line.strip().lower()
-            if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
-                return [], "recovery reachability probe returned an invalid object id"
-            unreachable.append(object_id)
+    unreachable: list[str] = []
+    for line in result.stdout.splitlines():
+        object_id = line.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "recovery reachability probe returned an invalid object id"
+        unreachable.append(object_id)
     return sorted(set(unreachable)), ""
 
 
