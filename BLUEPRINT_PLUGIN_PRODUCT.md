@@ -1,6 +1,9 @@
 Purpose: Locked operating brief for a future public blueprint plugin extracted from proven private `claude-config` components.
 Status: DEFERRED AND LOCKED; no implementation task is authorised until every precondition in this document is satisfied and the owner records an explicit unlock.
-Authority relationship: This document wins only for blueprint-plugin unlock conditions, extraction allowlist format, fictional-estate scope, and candidate evidence; `CLAUDE_CONFIG_OPERATIONS.md` wins for private operation and supervision, and `REPLAY_TOOL_PRODUCT.md` wins for the current public-product effort.
+Authority relationship: This document wins only for blueprint-plugin unlock conditions,
+extraction allowlist format, fictional-estate scope, and candidate evidence;
+`CLAUDE_CONFIG_OPERATIONS.md` wins for private operation and supervision. The replay public-product
+brief is deferred under AH-10 and does not weaken this document's conjunctive unlock.
 Last-reviewed date: 2026-07-30
 Owner: Cristian Tcaci
 
@@ -16,13 +19,16 @@ Owner: Cristian Tcaci
 
 - **CONSTRAINT:** Any agent starting implementation, extraction, fictional-estate construction, repository creation, packaging, or publication before every precondition below holds is out of policy.
 - **CONSTRAINT:** An out-of-policy attempt must stop immediately, append a redacted failure record using `CLAUDE_CONFIG_OPERATIONS.md#failure-and-friction-ledger`, and route the proposed work to `HUMAN_TODO.md`.
-- **CONSTRAINT:** Planning or polishing this product is not a substitute for completing the replay-tool launch and continuation review.
+- **CONSTRAINT:** Planning or polishing this product is not a substitute for the active
+`agent-harness` workbench mission. No replay launch or date independently unlocks it.
 
 # Preconditions: all must hold
 
 - **DEFERRED BP-PRE-01:** `CharterReplay` or its final-name equivalent has a clean public `v0.1.0` release and satisfies the portfolio-completion criteria in `REPLAY_TOOL_PRODUCT.md`.
 - **DEFERRED BP-PRE-02:** The confirmed continuation review has occurred on or after 2026-09-30, or the owner has explicitly waived that date after recording why the blueprint has higher priority.
-- **DEFERRED BP-PRE-03:** `claude-config` maintenance-only mode has been explicitly lifted by the owner.
+- **SATISFIED BP-PRE-03:** The owner explicitly lifted `claude-config` maintenance-only mode on
+  2026-07-30. This satisfies only BP-PRE-03 and does not unlock blueprint implementation while any
+  other precondition remains unsatisfied.
 - **DEFERRED BP-PRE-04:** At least two candidate components have each solved the same problem class in at least two distinct repositories or contexts.
 - **DEFERRED BP-PRE-05:** Each candidate has measured or directly reviewed net benefit, a bounded trigger, a removal condition, and no unresolved private-data dependency.
 - **DEFERRED BP-PRE-06:** At least one manual Gardener cycle and one manual promotion review have produced a useful owner-approved outcome without automatic installation.
