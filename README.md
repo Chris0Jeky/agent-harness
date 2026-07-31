@@ -1,11 +1,17 @@
 # agent-harness
 
-The reusable, tiered blueprint and portable tooling for how AI agents are configured across
-every repo and machine Chris works on. Codex and Claude share policy; runtime adapters remain
-explicit where their hook/config contracts differ.
+An active agent-operations workbench for measuring, diagnosing, and improving the policies and
+configuration used across Chris's Codex and Claude repositories. The frozen legacy deny floor,
+the internal replay Policy Lab, Doctor, estate operations, measurements, and runtime adapters
+share one repository while keeping their contracts explicit.
 
 | File | What it is |
 |---|---|
+| `AGENT_HARNESS_AGENT_BRIEF.md` | Current mission, workbench architecture, and AH-1 through AH-10 direction |
+| `docs/SYSTEM_STATE.md` | Verified current state and evidence level by capability |
+| `ROADMAP.md` | Epic dependencies, issue/PR ownership, evidence, and outcome state |
+| `plans/ACTIVE.md` | At most two active, executable workstreams |
+| `docs/BENCHMARKS.md` | Measured baselines and their reproducibility limits |
 | `BLUEPRINT.md` | The law: tier ladder (T0 tombstone → T4 live wire), the twelve laws, regions, the Gardener loop, model/effort routing, estate migration map |
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
@@ -123,21 +129,19 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Status (2026-07-24): the blueprint, shared deny floor (`FLOOR_VERSION` in `templates/hooks/dispatch.py`), project-local Codex adapter model,
-portable CLI, and versioned global guidance layer are implemented. The bounded matrix hardens supported Bash,
-PowerShell, and cmd forms across authority resolution, quoting, wrappers, nested interpreters,
-pipelines, git push safety, and secret-file mutations. It remains a defense-in-depth tripwire,
-not an exhaustive shell sandbox. Its guarantee is scoped to command-line argv it can parse: it
-does NOT intercept `apply_patch`, Edit/Write, or MCP tool surfaces (those are separate matchers the
-runtime must expose), it cannot recover program text passed through arbitrary interpreters or
-stdin, and it cannot repair a runtime that fails open on hook spawn/timeout/crash. Those remain
-Codex-engine limitations, not floor guarantees. Gardener scheduling remains intentionally deferred
-until the bootstrap/audit loop has earned trust through real use.
+Current state (2026-07-31): the shared floor is feature-frozen at `FLOOR_VERSION` 1.6.21,
+and its canonical and deployed Claude-hook bytes match on the measured workstation. Replay v0
+is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
+charter; it is not a live enforcement product. The CLI, static Doctor/audit checks, and estate
+seed/sync foundations are implemented, while Doctor v2, bounded Pattern Guard v2, integrated
+measurement, and private `claude-config` integration remain roadmap work. Public replay or
+blueprint-plugin extraction is deferred under AH-10.
 
-Release provenance (v1.5.4, 2026-07-24): combines PR #15's Windows recursive-delete
-fallback and protected Git-config mutation hardening with PR #16's value-aware sequencer
-terminal-flow parsing and self-cleaning neutral smoke fixtures. Both surfaces retain their
-focused regressions in the self-counting matrix and harness unit suite.
+The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
+Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
+boundaries stay in `docs/SYSTEM_STATE.md`. The only open human action is H-2's owner-parked,
+fresh-session Codex trust/canary evidence. Do not infer that static byte equality proves live
+runtime activation.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
