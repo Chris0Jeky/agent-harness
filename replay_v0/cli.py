@@ -235,15 +235,11 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
     if not policy_path.is_file():
         raise ReplayInputError("process source must end in a readable policy file")
     lexical_policy_path = policy_path.absolute()
-    if argv[0] in {"python", "python3"}:
-        executable_path = Path(sys.executable)
-        invocation_name = executable_path.name
-    else:
-        resolved_executable = shutil.which(argv[0])
-        executable_path = (
-            Path(resolved_executable) if resolved_executable else Path(argv[0])
-        )
-        invocation_name = executable_path.name
+    resolved_executable = shutil.which(argv[0])
+    executable_path = (
+        Path(resolved_executable) if resolved_executable else Path(argv[0])
+    )
+    invocation_name = executable_path.name
     if not executable_path.is_file():
         raise ReplayInputError("process executable could not be resolved to a file")
     bound_executable_path = executable_path.resolve()

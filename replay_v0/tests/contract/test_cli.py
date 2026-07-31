@@ -532,6 +532,38 @@ for index, event in enumerate(events):
         self.assertEqual(alias.name, Path(process_run.call_args.args[0][0]).name)
         self.assertEqual(target, alias_source.source.executable_binding[0])
 
+    def test_python_and_python3_resolve_to_their_requested_path_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            python_target = directory / (
+                "python-target.exe" if os.name == "nt" else "python-target"
+            )
+            python3_target = directory / (
+                "python3-target.exe" if os.name == "nt" else "python3-target"
+            )
+            python_target.write_bytes(b"synthetic python executable\n")
+            python3_target.write_bytes(b"different synthetic python3 executable\n")
+            policy = directory / "policy.py"
+            policy.write_text("pass\n", encoding="utf-8", newline="\n")
+            resolved = {
+                "python": str(python_target),
+                "python3": str(python3_target),
+            }
+
+            with mock.patch(
+                "replay_v0.cli.shutil.which", side_effect=resolved.__getitem__
+            ):
+                python_source = _load_process_source(f"python,{policy}", 5.0)
+                python3_source = _load_process_source(f"python3,{policy}", 5.0)
+
+        self.assertEqual(
+            python_target.resolve(), python_source.source.executable_binding[0]
+        )
+        self.assertEqual(
+            python3_target.resolve(), python3_source.source.executable_binding[0]
+        )
+        self.assertNotEqual(python_source.identity, python3_source.identity)
+
     @unittest.skipIf(os.name == "nt", "POSIX executable symlink semantics")
     def test_process_executable_symlink_keeps_direct_invocation_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
