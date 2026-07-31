@@ -23,8 +23,9 @@ One workstream is active; the second slot is free.
 - **Limitation:** deployed global floor remains 1.6.21 while canonical source is 1.6.22. Static
   Doctor cannot prove fresh-session trust; GitHub state can change after this dated snapshot.
 - **Exact verification:** `py -3 -B harness.py audit . --offline`; `py -3 -B harness.py doctor
-  --repo . --offline`; prove 69/69 live issue mapping; parse tier JSON; `git diff --check
-  origin/main...HEAD`.
+  --repo . --offline` (expected exit 1 only for canonical 1.6.22 versus deployed 1.6.21 shared-floor
+  drift; any other failure blocks); prove 69/69 live issue mapping; parse tier JSON; `git diff
+  --check origin/main...HEAD`.
 - **Next executable handoff:** push the base-refresh fix, verify the exact head against `b2c2fd4`,
   require all nine hosted jobs green, finish one fix-diff review, age/triage once, and merge-commit.
 

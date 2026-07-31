@@ -88,7 +88,8 @@ before acting. This is a factual checkpoint, not authority to reuse stale gate e
 ## PR #193 post-merge boundary
 
 - Canonical floor source is now 1.6.22, but deployed global Claude bytes remain measured 1.6.21.
-  No live install, trust/config mutation, or consumer sync was authorized or performed.
+  Offline Doctor therefore exits 1 with exactly the shared-dispatcher drift finding. No live install,
+  trust/config mutation, or consumer sync was authorized or performed.
 - Issue #196 owns the six fail-closed usability findings: branch-name ambiguity, submodule topology,
   empty boolean, subdirectory common-dir resolution, tracking alias, and explicit
   `--no-follow-tags` precedence. Do not reopen #193 or expand #196 into universal-parser work.
