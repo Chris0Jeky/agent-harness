@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from replay_v0.compare import ComparisonError, compare_decisions
@@ -7,6 +8,7 @@ from replay_v0.reports import (
     DECISION_REPLAY_LIMITATION,
     build_json_report,
     render_markdown_report,
+    report_json_bytes,
 )
 
 EFFECTS = [
@@ -166,6 +168,64 @@ class ComparisonTests(unittest.TestCase):
             self.assertIn(expected, opening)
         self.assertIn(command, opening)
         self.assertIn(DECISION_REPLAY_LIMITATION, markdown)
+
+    def test_markdown_table_renders_policy_text_literally_without_changing_json(
+        self,
+    ) -> None:
+        hostile_id = "evt<!--"
+        later_id = "later-event"
+        hostile_reason = (
+            'policy returned allow <img src="https://example.invalid/pixel"> & ok.'
+        )
+        events = [event(hostile_id), event(later_id)]
+        baseline = [
+            {**decision(hostile_id, "allow", "baseline"), "reason": hostile_reason},
+            decision(later_id, "allow", "baseline"),
+        ]
+        candidate = [
+            {**decision(hostile_id, "allow", "candidate"), "reason": hostile_reason},
+            decision(later_id, "allow", "candidate"),
+        ]
+        comparison = compare_decisions(events, baseline, candidate)
+        manifest = {
+            "run_id": "f" * 64,
+            "generated_at": "2026-07-30T12:00:00Z",
+            "baseline": {
+                "kind": "recorded",
+                "id": "floor-v1-final",
+                "sha256": "1" * 64,
+            },
+            "candidate": {
+                "kind": "recorded",
+                "id": "candidate-policy",
+                "sha256": "2" * 64,
+            },
+            "corpus": {
+                "id": "hostile-markdown-fixture",
+                "manifest_sha256": "3" * 64,
+                "event_count": len(events),
+            },
+            "fail_on": ["newly-allowed"],
+        }
+
+        report = build_json_report(comparison, manifest)
+        serialized_report = json.loads(report_json_bytes(report))
+        markdown = render_markdown_report(report, reproduction_command="replay fixture")
+
+        self.assertEqual(
+            hostile_id, serialized_report["results"][0]["event"]["event_id"]
+        )
+        self.assertEqual(
+            hostile_reason, serialized_report["results"][0]["baseline"]["reason"]
+        )
+        self.assertNotIn("<!--", markdown)
+        self.assertNotIn("<img", markdown)
+        self.assertIn("evt&lt;!--", markdown)
+        self.assertIn(
+            'allow: policy returned allow &lt;img src="https://example.invalid/pixel"&gt; &amp; ok.',
+            markdown,
+        )
+        self.assertLess(markdown.index(later_id), markdown.index("## Limitations"))
 
 
 if __name__ == "__main__":
