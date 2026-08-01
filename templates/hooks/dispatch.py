@@ -8956,11 +8956,28 @@ def sensitive_push_narrowing_status(
     if os.path.normcase(primary_checkout) != os.path.normcase(common_parent):
         # An ordinary submodule and `git init --separate-git-dir` both report
         # the Git storage itself as the first worktree record. A submodule is
-        # distinguishable without trusting core.worktree alone: its one
-        # core.worktree resolves from the common dir back to THIS toplevel, and
-        # Git can name its superproject. A separate-Git-dir linked worktree can
-        # configure core.worktree to the outside checkout, so that value by
-        # itself must never unlock the exemption.
+        # distinguishable without trusting core.worktree alone: its active Git
+        # dir IS the common dir. A separate-Git-dir repository can place its
+        # common dir under a benign superproject and configure a linked
+        # worktree to look like the submodule, but that linked worktree's active
+        # Git dir remains below <common>/worktrees. It must not earn exemption.
+        active_git_dir = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not os.path.isabs(active_git_dir) or os.path.normcase(
+            os.path.abspath(active_git_dir)
+        ) != os.path.normcase(common_dir):
+            return False, "a separate Git directory hides the primary checkout"
         core_worktrees = config_values.get("core.worktree", [])
         submodule_primary = ""
         superproject = ""

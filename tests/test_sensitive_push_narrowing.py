@@ -729,6 +729,94 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed, detail)
         self.assertIn("separate Git directory", detail)
 
+    def test_separate_git_dir_cannot_impersonate_an_ordinary_submodule(self):
+        superproject = os.path.join(self.root, "spoofed-submodule-superproject")
+        primary = os.path.join(self.sensitive_root, "spoofed-submodule-primary")
+        module = os.path.join(superproject, "module")
+        git_dir = os.path.join(superproject, ".git", "modules", "module")
+        self._make_repo(superproject, {"tier": 2, "flags": {"sensitive_data": False}})
+        os.makedirs(os.path.dirname(git_dir), exist_ok=True)
+        os.makedirs(primary)
+        self._git(
+            self.root,
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            git_dir,
+            primary,
+        )
+        with open(os.path.join(primary, "seed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("seed\n")
+        os.makedirs(os.path.join(primary, ".agent-harness"))
+        with open(
+            os.path.join(primary, ".agent-harness", "tier.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump({"tier": 2, "flags": {"sensitive_data": False}}, handle)
+        self._git(primary, "add", "seed.txt", ".agent-harness/tier.json")
+        self._git(primary, "commit", "-m", "seed impersonating repository")
+        self._git(
+            primary,
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+        commit_id = self._git(primary, "rev-parse", "HEAD")
+        self._git(
+            superproject,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{commit_id},module",
+        )
+        self._git(superproject, "commit", "-m", "register impersonating gitlink")
+        self._git(primary, "worktree", "add", "--detach", module, "main")
+        self._git(module, "switch", "-c", "impersonating-submodule")
+        self._git(module, "config", "core.worktree", module)
+
+        self.assertEqual(
+            os.path.normcase(
+                self._git(module, "rev-parse", "--show-superproject-working-tree")
+            ),
+            os.path.normcase(os.path.abspath(superproject)),
+        )
+        self.assertGreater(
+            len(
+                [
+                    line
+                    for line in self._git(
+                        module, "worktree", "list", "--porcelain"
+                    ).splitlines()
+                    if line.startswith("worktree ")
+                ]
+            ),
+            1,
+            "the impersonation depends on a second registered worktree",
+        )
+        active_git_dir = self._git(
+            module, "rev-parse", "--path-format=absolute", "--git-dir"
+        )
+        common_dir = self._git(
+            module, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        self.assertNotEqual(
+            os.path.normcase(os.path.abspath(active_git_dir)),
+            os.path.normcase(os.path.abspath(common_dir)),
+        )
+
+        allowed, detail = self.narrowing(["origin", "impersonating-submodule"], module)
+        self.assertFalse(allowed, detail)
+        self.assertIn("separate Git directory", detail)
+        decision, reason = checked(
+            f'git -C "{module}" push origin impersonating-submodule',
+            self.sensitive_root,
+            remote_resolver=_public_resolver,
+        )
+        self.assertEqual(decision, "deny", reason)
+
     def test_ordinary_submodule_has_a_provable_primary_checkout(self):
         source = os.path.join(self.root, "submodule-source")
         superproject = os.path.join(self.root, "submodule-superproject")
@@ -757,6 +845,13 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         common_dir = self._git(submodule, "rev-parse", "--git-common-dir")
         if not os.path.isabs(common_dir):
             common_dir = os.path.join(submodule, common_dir)
+        active_git_dir = self._git(
+            submodule, "rev-parse", "--path-format=absolute", "--git-dir"
+        )
+        self.assertEqual(
+            os.path.normcase(os.path.abspath(active_git_dir)),
+            os.path.normcase(os.path.abspath(common_dir)),
+        )
         primary_record = self._git(
             submodule, "worktree", "list", "--porcelain"
         ).splitlines()[0]
