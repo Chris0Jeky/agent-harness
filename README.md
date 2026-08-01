@@ -63,11 +63,15 @@ so a cooperating successor cannot reclaim an expiring lease mid-removal.
 Every existing path is converted once to its physical canonical spelling and that identity is used
 for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
 collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
-untracked, ignored, executable-mode-only, assume-unchanged, skip-worktree, and index resolve-undo
-state blocks removal. So do detached or non-local-branch HEADs, a pending `COMMIT_EDITMSG` that
-differs from the current commit message, worktree-local refs, non-baseline administrative/operation
-state, a non-regular HEAD reflog, a direct non-commit `ORIG_HEAD` target, and commits found on either
-side of a raw HEAD reflog record or in `ORIG_HEAD` that are not retained by a local branch or tag.
+untracked, ignored, observable executable-mode-only, assume-unchanged, skip-worktree, and index
+resolve-undo state blocks removal. Native Windows omits only the forced executable-mode comparison:
+Git for Windows otherwise reports a clean tracked `100755` baseline as a synthetic `100644`
+working-tree mode. POSIX keeps the forced comparison even when `core.fileMode=false`, so a real mode
+change remains a preservation blocker. So do detached or non-local-branch HEADs, a pending
+`COMMIT_EDITMSG` that differs from the current commit message, worktree-local refs, non-baseline
+administrative/operation state, a non-regular HEAD reflog, a direct non-commit `ORIG_HEAD` target,
+and commits found on either side of a raw HEAD reflog record or in `ORIG_HEAD` that are not retained
+by a local branch or tag.
 Requiring an attached `refs/heads/*`
 branch keeps current HEAD rooted in a local ref while plain removal runs.
 The only destructive command is plain `git worktree remove -- <canonical-path>`; a

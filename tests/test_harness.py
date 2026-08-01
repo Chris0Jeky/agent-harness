@@ -7758,6 +7758,42 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertTrue(harness.apply_worktree_plan(plan))
         self.assertTrue(worktree.is_dir())
 
+    @unittest.skipUnless(os.name == "nt", "native Windows regression")
+    def test_executable_baseline_is_not_a_mode_change_on_native_windows(self) -> None:
+        script = self.repo / "tool.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.git("add", "tool.sh")
+        self.git("update-index", "--chmod=+x", "tool.sh")
+        self.git("commit", "-qm", "add executable script")
+        self.git("push", "-q")
+        worktree = self.add_worktree("executable-baseline")
+        self.git("config", "core.fileMode", "false", cwd=worktree)
+        causal_probe = self.git(
+            "-c",
+            "core.fileMode=true",
+            "diff-files",
+            "--summary",
+            "--",
+            "tool.sh",
+            cwd=worktree,
+        )
+        self.assertIn("mode change 100755 => 100644 tool.sh", causal_probe.stdout)
+        self.assertEqual(self.git("status", "--porcelain=v1", cwd=worktree).stdout, "")
+        staged_mode = self.add_worktree("staged-mode")
+        self.git("config", "core.fileMode", "false", cwd=staged_mode)
+        self.git("update-index", "--chmod=-x", "tool.sh", cwd=staged_mode)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["tracked_mode_changes"], [])
+        staged_candidate = self.candidate(plan, staged_mode)
+        self.assertEqual(staged_candidate["verdict"], "keep")
+        self.assertIn("tracked_or_untracked_changes", staged_candidate["reasons"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertFalse(worktree.exists())
+        self.assertTrue(staged_mode.is_dir())
+
     def test_recovery_reachability_uses_one_stdin_query(self) -> None:
         commits = [f"{value:040x}" for value in range(1, 260)]
         expected_unretained = [commits[0], commits[-1]]
@@ -8792,7 +8828,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
 
             return failing_runner, injected
 
-        cases = (
+        cases = [
             (
                 "head_probe_failed",
                 lambda command, cwd: command[1:3] == ["rev-parse", "HEAD"]
@@ -8806,12 +8842,6 @@ class WorktreeCloseoutTests(unittest.TestCase):
             (
                 "index_resolve_undo_probe_failed",
                 lambda command, cwd: command[1:3] == ["ls-files", "--resolve-undo"]
-                and harness.same_worktree_path(cwd, worktree),
-            ),
-            (
-                "tracked_mode_probe_failed",
-                lambda command, cwd: command[1:4]
-                == ["-c", "core.fileMode=true", "diff-files"]
                 and harness.same_worktree_path(cwd, worktree),
             ),
             (
@@ -8831,7 +8861,17 @@ class WorktreeCloseoutTests(unittest.TestCase):
                     part.startswith("--contains=") for part in command
                 ),
             ),
-        )
+        ]
+        if harness.worktree_mode_drift_is_observable():
+            cases.insert(
+                3,
+                (
+                    "tracked_mode_probe_failed",
+                    lambda command, cwd: command[1:4]
+                    == ["-c", "core.fileMode=true", "diff-files"]
+                    and harness.same_worktree_path(cwd, worktree),
+                ),
+            )
 
         for reason, predicate in cases:
             with self.subTest(reason=reason):

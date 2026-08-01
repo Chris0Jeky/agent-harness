@@ -571,6 +571,16 @@ def worktree_path_is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def worktree_mode_drift_is_observable() -> bool:
+    """Return whether the native runtime exposes Unix executable-bit drift."""
+
+    # Git for Windows cannot represent the working-tree executable bit. Forcing
+    # core.fileMode=true there turns every clean 100755 baseline into a synthetic
+    # 100755 -> 100644 difference. POSIX still needs the forced comparison because
+    # a user may set core.fileMode=false on a filesystem where chmod remains real.
+    return os.name != "nt"
+
+
 def parse_worktree_list(output: str) -> list[dict[str, Any]]:
     """Parse `git worktree list --porcelain -z` without path quoting."""
 
@@ -1664,7 +1674,7 @@ def inspect_worktree_candidate(
                 if candidate["index_resolve_undo"]:
                     keep("index_resolve_undo")
 
-    if top_matches:
+    if top_matches and worktree_mode_drift_is_observable():
         mode_result = worktree_git_result(
             command_runner,
             [
