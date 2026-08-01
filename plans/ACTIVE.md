@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-08-01. Published base: `93755c6532e2e32bb0c1c47364fba12440d1da8b`.
+Snapshot: 2026-08-01. Published implementation base: `e6d0558200d006de0b86630a1d31bb4ce8f06244`.
 No implementation workstream is active; both slots are free.
 
 ## No active implementation
@@ -9,8 +9,8 @@ No implementation workstream is active; both slots are free.
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
   PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
   passed all nine hosted checks; #202 also passed its required independent read-only review.
-- No live closeout apply, estate cleanup, branch deletion, floor deployment, trust mutation, or
-  consumer rollout occurred.
+- No live closeout apply, estate cleanup, branch deletion, floor deployment, trust mutation,
+  live canary, or consumer rollout occurred.
 - Select the next slice only after refreshing GitHub, worktrees, tier authority, and this map. Do
   not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
 
@@ -31,6 +31,12 @@ No implementation workstream is active; both slots are free.
 - PR #198 skipped only the synthetic native-Windows executable-mode comparison, retained every
   ordinary preservation probe, preserved the POSIX mode-only blocker, and closed #170. PR #199
   published its state closeout.
+- PR #204 closed #89 with static Windows Git command-fidelity diagnosis; exact head `2150b420`,
+  base `6b49a67`, and all nine jobs in run `30714604384` passed before merge `77a9759`. PR #206
+  closed #131 with the tailored new-repo documentation contract; exact head `47fd5c1` and run
+  `30717285862` passed before merge `ace7d77`. PR #205 closed #189 with diagnosis-only static
+  Claude-hook topology reporting; exact head `ebfb03b`, base `ace7d77`, run `30718502986`, and
+  zero unresolved threads passed before merge `e6d0558`.
 - PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
   review evidence remain preserved.
 
@@ -39,7 +45,11 @@ No implementation workstream is active; both slots are free.
 - #160 is reproduced and owner-blocked on disabled mixed-transport precedence. Recommended rule:
   effective disablement suppresses only cross-layer conflict; same-table conflict remains invalid.
 - #201 is the bounded AH-3 follow-up for Git numeric booleans in exact no-follow-tags narrowing; it
-  is not permission to reopen #193/#196 or broaden the parser.
-- #185/#186/#188–#192 are mapped follow-ups, not permission to broaden the active wave.
+  remains held while dispatcher/smoke ownership is occupied and is not permission to reopen
+  #193/#196 or broaden the parser.
+- #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not this runtime.
+  #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call
+  site. #185/#191/#192 remain mapped follow-ups. Replay slices remain held while the replay-tool
+  and replay-v0-freeze worktrees are occupied.
 - H-2 is the sole open human item and owner-parked. Do not run estate-wide canaries or disable the
   harness. AH-10 extraction and a public replay repository remain deferred.
