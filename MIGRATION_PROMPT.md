@@ -142,13 +142,16 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
 ### Any NEW repo
 - Run `py -3 <agent-harness-root>/harness.py seed <repo> --tier 1`; it writes the
   runtime-neutral tier declaration only. It does not create CLAUDE.md, AGENTS.md, settings, or
-  hook scaffolds. Add those only when the repo has a concrete need.
-- When a repo-specific doc is needed, keep the tailored contract in this order: **identity**
-  (what the repo is and its boundary), **run** (the measured commands), **prove** (the narrowest
-  check for each seam), **map** (only when the repo needs regions), **pitfalls** (observed local
-  traps), then **authority** (the declared tier and human-owned decisions). Keep policy in its
-  injected global home rather than copying it into the repo. Preserve the BLUEPRINT §1 caps:
-  T1 <=40 lines, T2 <=100, T3 <=150, and T4 <=150.
+  hook scaffolds. Every active Codex repo must still add exactly one reviewed root
+  `.codex/hooks.json` PreToolUse floor adapter per SPECS §5; lifecycle hooks and all other
+  scaffolds are need-based.
+- When a repo-specific doc is needed, keep the generated tier/authority header at the top of its
+  CLAUDE.md. Below that header, keep the tailored content in this order: **identity** (what the
+  repo is and its boundary), **run** (the measured commands), **prove** (the narrowest check for
+  each seam), **map** (only when the repo needs regions), **pitfalls** (observed local traps), then
+  **authority** (the declared facts and human-owned decisions). Keep policy in its injected global
+  home rather than copying it into the repo. Preserve the BLUEPRINT §1 CLAUDE.md caps: T1 <=40
+  lines, T2 <=100, and T3/T4 <=150. AGENTS.md has a separate <=80-line cap at every tier.
 - Before committing a documented command, run every cheap command named in the doc and record
   **NOT verified** for anything not run. Do a snappiness pass: shared MCP servers belong at user
   scope; add a project entry only for a distinct consumer-owned instance; check for duplicate
