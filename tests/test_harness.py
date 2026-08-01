@@ -177,12 +177,13 @@ class HarnessTests(unittest.TestCase):
         system_requirements: str | None = None,
         managed_config: str | None = None,
         offline: bool = False,
+        as_json: bool = False,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
         claude_home = root / "claude-home"
         skills_home = root / "skills-home"
-        (codex_home / "AGENTS.md").parent.mkdir()
+        (codex_home / "AGENTS.md").parent.mkdir(exist_ok=True)
         (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
         if user_config is not None:
             (codex_home / "config.toml").write_text(user_config, encoding="utf-8")
@@ -205,7 +206,7 @@ class HarnessTests(unittest.TestCase):
             target.write_bytes(
                 (harness_root / "templates" / "hooks" / filename).read_bytes()
             )
-        (skills_home / "sample").mkdir(parents=True)
+        (skills_home / "sample").mkdir(parents=True, exist_ok=True)
         (skills_home / "sample" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
         args = SimpleNamespace(
             codex_home=str(codex_home),
@@ -214,6 +215,8 @@ class HarnessTests(unittest.TestCase):
             repo=str(repo),
             offline=offline,
         )
+        if as_json:
+            args.json = True
         original_run = harness.run
 
         def fixture_run(
@@ -267,11 +270,436 @@ class HarnessTests(unittest.TestCase):
             ):
                 return self.run_doctor_with_fixture_globals(repo, **fixtures)
 
+    @staticmethod
+    def write_claude_settings(path: Path, hooks: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_claude_hook_topology_reports_taskdeck_overlap_and_bash_coverage(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        # `shell` describes the handler process, not the target tool selected
+        # by the matcher. The only coverage that can be reported is Bash.
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "shell": "PowerShell",
+                                "command": f'py -3 "{windows_dispatcher}" --token synthetic-secret',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 scripts/agent_hooks/pre_tool_use.py",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        inventory = [finding for finding in findings if finding["kind"] == "inventory"]
+        overlaps = [
+            finding for finding in findings if finding["kind"] == "likely_overlap"
+        ]
+        self.assertEqual(len(inventory), 2)
+        self.assertEqual(inventory[0]["target_tools"], ["Bash"])
+        self.assertEqual(inventory[0]["policy_source"], "shared-dispatcher")
+        self.assertEqual(len(overlaps), 1)
+        self.assertEqual(overlaps[0]["target_tools"], ["Bash"])
+        rendered = json.dumps(findings)
+        self.assertNotIn("synthetic-secret", rendered)
+        self.assertNotIn("--token", rendered)
+        self.assertNotIn("PowerShell", rendered)
+
+    def test_claude_hook_topology_normalizes_dispatcher_paths_as_exact_duplicate(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'py -3 "{windows_dispatcher}"',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [
+                            {"type": "command", "command": f'python3 "{dispatcher}"'}
+                        ],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        duplicates = [
+            finding for finding in findings if finding["kind"] == "exact_duplicate"
+        ]
+        self.assertEqual(len(duplicates), 1)
+        self.assertEqual(duplicates[0]["target_tools"], ["Bash"])
+
+    def test_claude_hook_topology_lifecycle_and_missing_project_are_not_overlap(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "python3 global.py"}],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "python3 pre_commit.py"}]}
+                ]
+            },
+        )
+        findings = harness.claude_hook_topology(claude_home, repo)
+        self.assertFalse(
+            any(
+                finding["kind"] in {"exact_duplicate", "likely_overlap"}
+                for finding in findings
+            )
+        )
+        project_settings = repo / ".claude" / "settings.json"
+        project_settings.unlink()
+        missing = harness.claude_hook_topology(claude_home, repo)
+        self.assertEqual(
+            [
+                finding["provenance"]
+                for finding in missing
+                if finding["kind"] == "inventory"
+            ],
+            ["user"],
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in missing
+            )
+        )
+
+    def test_claude_hook_topology_proves_universal_matchers_and_mcp_tool(self) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        for matcher in (None, "", "*"):
+            with self.subTest(matcher=matcher):
+                self.write_claude_settings(
+                    claude_home / "settings.json",
+                    {
+                        "PreToolUse": [
+                            {
+                                **({} if matcher is None else {"matcher": matcher}),
+                                "hooks": [
+                                    {"type": "command", "command": "python3 global.py"}
+                                ],
+                            }
+                        ]
+                    },
+                )
+                self.write_claude_settings(
+                    repo / ".claude" / "settings.json",
+                    {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 project.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+                findings = harness.claude_hook_topology(claude_home, repo)
+                overlap = [
+                    finding
+                    for finding in findings
+                    if finding["kind"] == "likely_overlap"
+                ]
+                self.assertEqual(
+                    [finding["target_tools"] for finding in overlap], [["Bash"]]
+                )
+        self.assertEqual(harness.claude_target_overlap(["*"], ["*"]), ["*"])
+        self.assertEqual(
+            harness.claude_supported_matcher("Write,Edit"),
+            ("Edit|Write", ("Edit", "Write")),
+        )
+        self.assertTrue(
+            harness.claude_handler_identity(
+                {"type": "mcp_tool", "server": "fixture", "tool": "scan"},
+                claude_home,
+            ).startswith("opaque-mcp_tool-sha256:")
+        )
+        self.assertIsNone(
+            harness.claude_handler_identity(
+                {"type": "mcp_tool", "server": "fixture"}, claude_home
+            )
+        )
+        self.assertIsNone(
+            harness.claude_handler_identity(
+                {"type": "mcp", "server": "fixture", "tool": "scan"},
+                claude_home,
+            )
+        )
+        for valid, malformed in (
+            ({"type": "http", "url": "https://fixture.invalid/hook"}, {"type": "http"}),
+            ({"type": "prompt", "prompt": "fixture"}, {"type": "prompt"}),
+            ({"type": "agent", "prompt": "fixture"}, {"type": "agent"}),
+        ):
+            with self.subTest(handler_type=valid["type"]):
+                self.assertIsNotNone(
+                    harness.claude_handler_identity(valid, claude_home)
+                )
+                self.assertIsNone(
+                    harness.claude_handler_identity(malformed, claude_home)
+                )
+
+    def test_claude_dispatcher_identity_keeps_posix_path_case_distinct(self) -> None:
+        claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        different_case = str(dispatcher).upper()
+        self.assertTrue(
+            harness.claude_command_points_to_dispatcher(
+                f'python3 "{different_case}"', dispatcher
+            )
+        )
+        with mock.patch.object(harness.os, "name", "posix"):
+            self.assertFalse(
+                harness.claude_command_points_to_dispatcher(
+                    f'python3 "{different_case}"', dispatcher
+                )
+            )
+
+    def test_claude_hook_topology_invalid_unreadable_unknown_and_linked_are_unproven(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        user_settings = claude_home / "settings.json"
+        user_settings.parent.mkdir(parents=True)
+        user_settings.write_text("{ invalid", encoding="utf-8")
+        project_settings = repo / ".claude" / "settings.json"
+        self.write_claude_settings(
+            project_settings,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": ".*",
+                        "hooks": [{"type": "command", "command": "python3 local.py"}],
+                    }
+                ]
+            },
+        )
+        invalid = harness.claude_hook_topology(claude_home, repo)
+        self.assertTrue(all(finding["status"] == "UNPROVEN" for finding in invalid))
+
+        original_read_text = Path.read_text
+
+        def refuse_project(path: Path, *args: object, **kwargs: object) -> str:
+            if path == project_settings:
+                raise PermissionError("fixture denied")
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(
+            Path, "read_text", autospec=True, side_effect=refuse_project
+        ):
+            unreadable = harness.claude_hook_topology(claude_home, repo)
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in unreadable
+            )
+        )
+        user_settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [
+                                    {"type": "command", "command": "python3 global.py"}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        unknown = harness.claude_hook_topology(
+            claude_home, repo, linked_worktree_source_ambiguous=True
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "matcher" and finding["status"] == "UNPROVEN"
+                for finding in unknown
+            )
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in unknown
+            )
+        )
+
+    def test_doctor_json_matches_human_check_order_and_hides_commands(self) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'python3 "{dispatcher}" --token synthetic-secret',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.local.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "python3 local.py"}],
+                    }
+                ]
+            },
+        )
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        subdir = repo / "nested"
+        subdir.mkdir()
+
+        human_code, human = self.run_doctor_with_fixture_globals(subdir, offline=True)
+        json_code, rendered_json = self.run_doctor_with_fixture_globals(
+            subdir, offline=True, as_json=True
+        )
+        payload = json.loads(rendered_json)
+        human_checks = [
+            line.partition("] ")[2].partition(": ")[0]
+            for line in human.splitlines()
+            if line.startswith(("[ok] ", "[FAIL] ", "[UNPROVEN] "))
+        ]
+        self.assertEqual(human_checks, [check["check"] for check in payload["checks"]])
+        self.assertEqual(human_code, 1)
+        self.assertEqual(json_code, 1)
+        self.assertEqual(
+            [
+                check["check"]
+                for check in payload["checks"]
+                if check["status"] == "FAIL"
+            ],
+            ["Claude hook topology"],
+        )
+        self.assertIn("[FAIL] Claude hook topology:", human)
+        self.assertIn("[likely_overlap] user", human)
+        self.assertIn("; local ", human)
+        self.assertIn(str(claude_home / "settings.json"), human)
+        self.assertIn(str(repo / ".claude" / "settings.local.json"), human)
+        self.assertNotIn(str(subdir / ".claude"), human)
+        self.assertEqual(
+            [
+                check["status"]
+                for check in payload["checks"]
+                if check["check"] == "Claude hook topology"
+            ],
+            ["FAIL"],
+        )
+        self.assertEqual(
+            len(
+                [
+                    finding
+                    for finding in payload["claude_hook_findings"]
+                    if finding["kind"] == "likely_overlap"
+                ]
+            ),
+            1,
+        )
+        self.assertNotIn("synthetic-secret", human + rendered_json)
+        self.assertNotIn("--token", human + rendered_json)
 
     def test_seed_creates_runtime_neutral_tier(self) -> None:
         repo = self.make_repo()
