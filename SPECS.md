@@ -352,6 +352,7 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   for a linked worktree whose primary checkout uses `--separate-git-dir`, and when the common Git
   directory has no checkout, such as a bare repository. Configure, review, and trust the
   root-checkout source with `/hooks`; never alter a trust hash manually or use a bypass flag.
+
 - Codex 0.144.1 does not support the Claude `ask` decision, so the dispatcher conservatively
   translates `ask` to `deny`. The historical Claude global adapter still omits `--runtime` and
   therefore selects the Claude default, retaining interactive `ask` behavior; it still passes
@@ -409,6 +410,59 @@ reviewing every handler, or pass `--dangerously-bypass-hook-trust`. These shortc
 review boundary rather than repairing it. This procedure was established on Codex CLI 0.145.0;
 if the normal TUI, `/hooks`, or `hooks/list` contract changes in a later version, record that
 version-specific difference and re-establish the supported path before relying on it.
+
+### Candidate validation from linked worktrees
+
+A linked-worktree dispatcher or adapter-marker change is a source candidate, not a live hook
+candidate. Its candidate-local `.codex/hooks.json` copy is inactive: Codex uses the matching
+adapter under the checkout that owns the common Git directory. The expected `doctor --repo`
+diagnostic therefore names the root-checkout source and rejects a worktree-only or differing local
+copy. Keep that fail-closed result as evidence of the topology; do not make it green by copying the
+candidate into the root checkout, hand-editing trust state or hashes, or passing a hook-trust bypass
+flag.
+
+Validate an unmerged candidate in separate evidence lanes:
+
+1. Record the candidate's full `git rev-parse HEAD` SHA, then run the source gates that read its
+   dispatcher and adapter seam in the candidate worktree:
+   `py -3 -m unittest discover -s tests -v` and
+   `py -3 templates\hooks\smoke_test.py`. These prove source behavior only.
+2. Make a standalone full clone at that exact SHA; do not make another linked worktree. For a local
+   source, `git clone --no-local <source-repository> <scratch>` forces an independent object copy.
+   Run `git -C <scratch> checkout --detach <candidate-sha>`, then prove that
+   `git -C <scratch> rev-parse HEAD` is that SHA, `git -C <scratch> status --porcelain` is empty,
+   `git -C <scratch> rev-parse --path-format=absolute --git-common-dir` is inside the scratch clone,
+   and `git -C <scratch> worktree list --porcelain` names only the scratch checkout. The selected
+   source must contain the exact committed candidate; an uncommitted working-tree copy is not a
+   substitute.
+3. From the scratch root run the named static audit,
+   `py -3 .\harness.py doctor --repo . --json`, and record `Codex project root markers`,
+   `Codex hook source`, `Codex adapter contract`, `Codex project hook activation`, and
+   `project Codex floor` separately. A detached or feature-branch candidate is not published
+   `main`, and its template can differ from the installed global copy, so the overall Doctor result
+   may also contain an expected `UNPROVEN` canonical-reference leg or a shared-floor mismatch.
+   Record every result; never recast one as green or bypass it. A successful named adapter check
+   proves only its stated static scope. It neither grants trust nor executes the dispatcher.
+4. Do not start a normal session in that pre-merge scratch clone as a shortcut to candidate runtime
+   evidence. The normal project adapter invokes the installed `~/.claude/hooks/dispatch.py` bytes,
+   so a canary there can execute the installed dispatcher rather than the candidate
+   `templates/hooks/dispatch.py`. Do not deploy dirty, in-review, or unmerged bytes globally to
+   change that fact.
+
+Only after the producer change is merged, review a clean-main `sync-global` dry run and separately
+authorize installation of the reviewed clean-main bytes. In a new normal TUI from the producer's
+exact CWD, use the [project-hook trust bootstrap](#codex-project-hook-trust-bootstrap) to review and
+re-trust the installed handler. Then, and only then, collect runtime evidence with both a harmless
+allow canary (`git status --short --branch`) and the inert local dry-run deny probe
+`git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`. The deny must occur
+before Git executes and show the intended floor banner/version; the local `.` destination and
+`--dry-run` leave no remote mutation. This exact-CWD step proves runtime attribution, not merely
+the static marker.
+
+The rollout order is fixed: **producer merge → reviewed clean-main install → producer exact-CWD
+re-trust and canaries → consumer marker refresh → each consumer's exact-CWD re-trust and canaries**.
+Consumer marker updates and their runtime validation are separate reviewed rollout work; neither a
+producer PR nor a standalone scratch audit performs them.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 
