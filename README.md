@@ -25,6 +25,7 @@ share one repository while keeping their contracts explicit.
 ```powershell
 # Inspect first; installation is never implicit.
 py -3 .\harness.py doctor
+py -3 .\harness.py doctor --json
 py -3 .\harness.py doctor --repo C:\path\to\repo
 py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data

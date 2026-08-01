@@ -83,6 +83,42 @@ CODEX_HOOK_EVENT_NAMES = (
     "SubagentStop",
     "Stop",
 )
+# This is the documented static vocabulary. Doctor inventories only the Claude
+# settings events whose on-disk shape it can name without consulting a running
+# Claude session; future events must be surfaced as UNPROVEN instead of being
+# silently treated as harmless configuration.
+CLAUDE_HOOK_EVENT_NAMES = (
+    "SessionStart",
+    "Setup",
+    "InstructionsLoaded",
+    "UserPromptSubmit",
+    "UserPromptExpansion",
+    "MessageDisplay",
+    "PreToolUse",
+    "PermissionRequest",
+    "PermissionDenied",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    "Notification",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskCreated",
+    "PreCompact",
+    "PostCompact",
+    "Stop",
+    "StopFailure",
+    "TeammateIdle",
+    "TaskCompleted",
+    "ConfigChange",
+    "CwdChanged",
+    "FileChanged",
+    "WorktreeCreate",
+    "WorktreeRemove",
+    "Elicitation",
+    "ElicitationResult",
+)
 I64_MAX = (1 << 63) - 1
 U64_MAX = (1 << 64) - 1
 USIZE_MAX = (sys.maxsize * 2) + 1
@@ -2407,6 +2443,371 @@ def read_optional_bytes(path: Path) -> bytes | None:
         return None
     except OSError as exc:
         raise HarnessError(f"cannot read {path}: {exc}") from exc
+
+
+def claude_supported_matcher(matcher: Any) -> tuple[str, tuple[str, ...]] | None:
+    """Normalize only the literal tool-matchers Doctor can prove.
+
+    Claude treats an exact-string subset as literal tool names and its other
+    matchers as regular expressions. Literal names and an anchored literal are
+    finite cases; wildcard and richer regex forms need Claude's runtime
+    matcher and therefore stay UNPROVEN here.
+    """
+    if matcher is None or (isinstance(matcher, str) and matcher in {"", "*"}):
+        return "*", ("*",)
+    if not isinstance(matcher, str):
+        return None
+    normalized = matcher
+    anchored = re.fullmatch(r"\^([A-Za-z0-9_ -]+)\$", matcher)
+    if anchored is not None:
+        normalized = anchored.group(1)
+    if not re.fullmatch(r"[A-Za-z0-9_ -]+(?:[|,][A-Za-z0-9_ -]+)*", normalized):
+        return None
+    tools = [tool.strip() for tool in re.split(r"[|,]", normalized)]
+    if not all(tools):
+        return None
+    coverage = tuple(sorted(set(tools)))
+    return "|".join(coverage), coverage
+
+
+def claude_target_overlap(left: list[str], right: list[str]) -> list[str]:
+    """Return only the tool coverage two static matchers provably share."""
+    left_universal = left == ["*"]
+    right_universal = right == ["*"]
+    if left_universal and right_universal:
+        return ["*"]
+    if left_universal:
+        return right
+    if right_universal:
+        return left
+    return sorted(set(left).intersection(right))
+
+
+def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
+    """Recognize the controlled dispatcher path without POSIX case folding."""
+    expected = str(dispatcher.resolve()).replace("\\", "/")
+    candidate = command.replace("\\", "/")
+    if os.name == "nt":
+        expected = expected.casefold()
+        candidate = candidate.casefold()
+    # This is intentionally a token check, not a shell parser: static Doctor
+    # can identify the exact controlled path but cannot prove what a shell will
+    # execute. The boundaries reject a path merely embedded in another token.
+    return bool(
+        re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate)
+    )
+
+
+def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
+    """Return an internal policy equality key; never render the raw command."""
+    dispatcher = claude_home / "hooks" / "dispatch.py"
+    if claude_command_points_to_dispatcher(command, dispatcher):
+        return ("shared-dispatcher", "")
+    return ("command", command)
+
+
+def claude_handler_identity(
+    handler: dict[str, Any], claude_home: Path
+) -> tuple[str, str] | None:
+    """Return an internal equality key for one statically valid handler."""
+    handler_type = handler.get("type")
+    if handler_type == "command":
+        command = handler.get("command")
+        return (
+            claude_policy_source_identity(command, claude_home)
+            if isinstance(command, str)
+            else None
+        )
+    required_fields = {
+        "http": ("url",),
+        "mcp_tool": ("server", "tool"),
+        "prompt": ("prompt",),
+        "agent": ("prompt",),
+    }
+    if handler_type not in required_fields or any(
+        not isinstance(handler.get(field), str) or not handler[field]
+        for field in required_fields[handler_type]
+    ):
+        return None
+    encoded = json.dumps(
+        handler, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return (handler_type, encoded)
+
+
+def claude_render_policy_sources(entries: list[dict[str, Any]]) -> None:
+    """Assign deterministic report-local labels without rendering identity bytes."""
+    labels: dict[tuple[str, str], str] = {}
+    counts: dict[str, int] = {}
+    for entry in entries:
+        identity = entry["_policy_identity"]
+        if identity not in labels:
+            handler_type, _ = identity
+            if handler_type == "shared-dispatcher":
+                labels[identity] = "shared-dispatcher"
+            else:
+                counts[handler_type] = counts.get(handler_type, 0) + 1
+                labels[identity] = f"opaque-{handler_type}-{counts[handler_type]}"
+        entry["policy_source"] = labels[identity]
+
+
+def claude_hook_topology(
+    claude_home: Path,
+    requested_repo: Path,
+    *,
+    linked_worktree_source_ambiguous: bool = False,
+) -> list[dict[str, Any]]:
+    """Inventory the two inspectable Claude hook layers without running them.
+
+    This is diagnostic evidence only.  It intentionally does not infer
+    Claude's effective managed, organization, session, plugin, or trust state,
+    and it does not turn a handler-process ``shell`` field into tool coverage.
+    """
+    findings: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
+    sources = (
+        ("user", claude_home / "settings.json"),
+        ("project", requested_repo / ".claude" / "settings.json"),
+        ("local", requested_repo / ".claude" / "settings.local.json"),
+    )
+    for provenance, source in sources:
+        if provenance != "user" and linked_worktree_source_ambiguous:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": (
+                        "linked-worktree project settings source is not statically "
+                        "proven; user-layer inventory remains available"
+                    ),
+                }
+            )
+            continue
+        try:
+            text = read_optional_text(source)
+        except HarnessError as exc:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": str(exc),
+                }
+            )
+            continue
+        if text is None:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": "settings file is absent; static registration is unproven",
+                }
+            )
+            continue
+        try:
+            document = json.loads(text)
+        except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as exc:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": f"settings.json is invalid: {exc}",
+                }
+            )
+            continue
+        if not isinstance(document, dict) or not isinstance(
+            document.get("hooks"), dict
+        ):
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": "settings.json has no inspectable hooks object",
+                }
+            )
+            continue
+        for event in sorted(document["hooks"]):
+            groups = document["hooks"][event]
+            if event not in CLAUDE_HOOK_EVENT_NAMES:
+                findings.append(
+                    {
+                        "status": REALITY_UNPROVEN,
+                        "kind": "event",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": "unsupported",
+                        "detail": "settings.json declares an unsupported hook event",
+                    }
+                )
+                continue
+            if not isinstance(groups, list):
+                findings.append(
+                    {
+                        "status": REALITY_UNPROVEN,
+                        "kind": "event",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": event,
+                        "detail": "supported hook event does not contain a group list",
+                    }
+                )
+                continue
+            for group_index, group in enumerate(groups):
+                if not isinstance(group, dict) or not isinstance(
+                    group.get("hooks"), list
+                ):
+                    findings.append(
+                        {
+                            "status": REALITY_UNPROVEN,
+                            "kind": "group",
+                            "provenance": provenance,
+                            "source": str(source),
+                            "event": event,
+                            "detail": "supported hook group is not statically inspectable",
+                        }
+                    )
+                    continue
+                normalized_matcher = "not-applicable"
+                targets: tuple[str, ...] = ()
+                if event == "PreToolUse":
+                    matcher = claude_supported_matcher(group.get("matcher"))
+                    if matcher is None:
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "matcher",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "normalized_matcher": "UNPROVEN",
+                                "detail": "PreToolUse matcher is missing or outside the supported literal subset",
+                            }
+                        )
+                        continue
+                    normalized_matcher, targets = matcher
+                for handler_index, handler in enumerate(group["hooks"]):
+                    if not isinstance(handler, dict):
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "handler",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "detail": "supported hook handler is not an object",
+                            }
+                        )
+                        continue
+                    policy_identity = claude_handler_identity(handler, claude_home)
+                    if policy_identity is None:
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "handler",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "detail": "handler type is unsupported or its command is missing",
+                            }
+                        )
+                        continue
+                    entry = {
+                        "status": "ok",
+                        "kind": "inventory",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": event,
+                        "normalized_matcher": normalized_matcher,
+                        "target_tools": list(targets),
+                        "_policy_identity": policy_identity,
+                        "group_index": group_index,
+                        "handler_index": handler_index,
+                    }
+                    entries.append(entry)
+                    findings.append(entry)
+
+    claude_render_policy_sources(entries)
+
+    user_pre = [
+        entry
+        for entry in entries
+        if entry["provenance"] == "user" and entry["event"] == "PreToolUse"
+    ]
+    non_user_pre = [
+        entry
+        for entry in entries
+        if entry["provenance"] != "user" and entry["event"] == "PreToolUse"
+    ]
+    for user_entry in user_pre:
+        for other_entry in non_user_pre:
+            overlap = claude_target_overlap(
+                user_entry["target_tools"], other_entry["target_tools"]
+            )
+            if not overlap:
+                continue
+            kind = (
+                "exact_duplicate"
+                if user_entry["_policy_identity"] == other_entry["_policy_identity"]
+                else "likely_overlap"
+            )
+            findings.append(
+                {
+                    "status": kind,
+                    "kind": kind,
+                    "event": "PreToolUse",
+                    "target_tools": overlap,
+                    "user_source": user_entry["source"],
+                    "other_provenance": other_entry["provenance"],
+                    "other_source": other_entry["source"],
+                    "user_matcher": user_entry["normalized_matcher"],
+                    "other_matcher": other_entry["normalized_matcher"],
+                    "user_policy_source": user_entry["policy_source"],
+                    "other_policy_source": other_entry["policy_source"],
+                    "detail": (
+                        "static registration only; it does not prove execution, trust, "
+                        "organization, managed, session, or plugin state"
+                    ),
+                }
+            )
+    for entry in entries:
+        del entry["_policy_identity"]
+    return findings
+
+
+def claude_topology_summary(findings: list[dict[str, Any]]) -> str:
+    """Render deterministic, redaction-safe actionable Claude evidence."""
+    rendered: list[str] = []
+    for finding in findings:
+        kind = finding["kind"]
+        if kind in {"exact_duplicate", "likely_overlap"}:
+            rendered.append(
+                f"[{kind}] user {finding['user_source']} "
+                f"PreToolUse({finding['user_matcher']}) policy="
+                f"{finding['user_policy_source']}; "
+                f"{finding['other_provenance']} {finding['other_source']} PreToolUse("
+                f"{finding['other_matcher']}) policy="
+                f"{finding['other_policy_source']}; coverage="
+                f"{'|'.join(finding['target_tools'])}"
+            )
+            continue
+        if finding["status"] != REALITY_UNPROVEN:
+            continue
+        location = " ".join(
+            str(finding[key])
+            for key in ("provenance", "source", "event", "normalized_matcher")
+            if key in finding
+        )
+        rendered.append(f"[UNPROVEN] {kind} {location}: {finding['detail']}")
+    return "; ".join(rendered)
 
 
 def toml_config(config_path: Path) -> dict[str, Any] | None:
@@ -7029,6 +7430,7 @@ def doctor(args: argparse.Namespace) -> int:
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
     harness_root = Path(__file__).resolve().parent
     checks = []
+    claude_findings: list[dict[str, Any]] = []
     codex_command = (
         ["powershell", "-NoProfile", "-Command", "codex --version"]
         if os.name == "nt"
@@ -7381,6 +7783,53 @@ def doctor(args: argparse.Namespace) -> int:
             )
         )
         try:
+            linked_worktree_source_ambiguous = (
+                requested_checkout != authoritative_checkout
+            )
+            claude_requested_repo = requested_checkout
+        except UnboundLocalError:
+            # The existing Codex root-resolution failure means we cannot prove
+            # which Claude project settings file the runtime would read either.
+            linked_worktree_source_ambiguous = True
+            claude_requested_repo = Path(args.repo)
+        claude_findings = claude_hook_topology(
+            claude_home,
+            claude_requested_repo,
+            linked_worktree_source_ambiguous=linked_worktree_source_ambiguous,
+        )
+        inventory_count = sum(
+            finding["kind"] == "inventory" for finding in claude_findings
+        )
+        exact_count = sum(
+            finding["kind"] == "exact_duplicate" for finding in claude_findings
+        )
+        overlap_count = sum(
+            finding["kind"] == "likely_overlap" for finding in claude_findings
+        )
+        claude_unproven = any(
+            finding["status"] == REALITY_UNPROVEN for finding in claude_findings
+        )
+        claude_overlap = exact_count + overlap_count > 0
+        claude_detail = (
+            f"{inventory_count} static handler registration(s); "
+            f"{exact_count} exact duplicate(s); {overlap_count} likely overlap(s); "
+            + claude_topology_summary(claude_findings)
+            + "; static registration does not prove execution, trust, organization, "
+            "managed, session, or plugin state; a handler shell does not establish "
+            "PowerShell target-tool coverage"
+        )
+        checks.append(
+            (
+                "Claude hook topology",
+                (
+                    False
+                    if claude_overlap
+                    else REALITY_UNPROVEN if claude_unproven else True
+                ),
+                claude_detail,
+            )
+        )
+        try:
             reality_repo = git_root(Path(args.repo))
             _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
@@ -7422,12 +7871,24 @@ def doctor(args: argparse.Namespace) -> int:
     # UNPROVEN, never as `[ok]`. It is not a failure either — an unprovable
     # canonical reference is a property of where the operator is standing, not
     # a defect in the floor being audited.
+    check_records: list[dict[str, str]] = []
     for label, ok, detail in checks:
         if ok == REALITY_UNPROVEN:
             state = REALITY_UNPROVEN
         else:
             state = "ok" if ok else "FAIL"
-        print(f"[{state}] {label}: {detail}")
+        check_records.append({"status": state, "check": label, "detail": detail})
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"checks": check_records, "claude_hook_findings": claude_findings},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        for check in check_records:
+            print(f"[{check['status']}] {check['check']}: {check['detail']}")
     return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
@@ -7526,6 +7987,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--codex-home")
     check.add_argument("--claude-home")
     check.add_argument("--skills-home")
+    check.add_argument("--json", action="store_true")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
     )
