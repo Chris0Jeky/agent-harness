@@ -343,6 +343,39 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   CLI/session/managed-cloud overrides.
   Review the adapter in the exact CWD and activate it with `/hooks` in a new Codex session, then
   run a live safe/deny canary.
+
+### Codex project-hook trust bootstrap
+
+`doctor` can diagnose only the static adapter and inspectable activation blockers. Its
+exact-CWD `/hooks` remediation message is deliberately not proof that Codex has accepted a
+project or handler for a particular session. Use this supported bootstrap procedure instead:
+
+1. Start the normal interactive Codex TUI from the exact project CWD that will run the hook. If
+   Codex asks for project trust, accept trust for that exact project; do not substitute a parent,
+   sibling, or worktree copy. For a linked worktree, review the authoritative root-checkout
+   adapter identified by `doctor`.
+2. In that same TUI and CWD, open `/hooks`. Before trusting anything, review the intended handler's
+   current source path, matcher, command (including `--event pre --runtime codex`), timeout,
+   current definition hash, and any `expected=<sha256>` audit marker. Trust only that reviewed
+   handler, not every listed handler.
+3. Confirm in the same exact-CWD `/hooks` view that the intended handler is enabled and trusted
+   with no relevant warning or error. The app-server `hooks/list` result may corroborate the
+   source, command, enabled state, hash, warnings, errors, and trust status, but is inspection
+   only. Noninteractive `codex exec` can exercise an already trusted handler; neither interface
+   grants project or per-hook trust.
+4. Immediately collect runtime evidence: run a declared harmless allow canary such as
+   `git status --short --branch`, then an inert deny canary that cannot perform a real mutation.
+   For example, the force-push-shaped probe
+   `git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary` must be denied
+   before Git executes; its dry run and local `.` destination leave no remote update if the hook
+   is unavailable. Record the exact CWD, reviewed definition/hash, and both results.
+
+Never hand-edit Codex trust state or definition hashes, use a blanket “trust all” action without
+reviewing every handler, or pass `--dangerously-bypass-hook-trust`. These shortcuts erase the
+review boundary rather than repairing it. This procedure was established on Codex CLI 0.145.0;
+if the normal TUI, `/hooks`, or `hooks/list` contract changes in a later version, record that
+version-specific difference and re-establish the supported path before relying on it.
+
 - In a linked Git worktree, Codex maps every active hook layer to the same relative `.codex`
   directory in the root checkout that owns Git's common directory. `doctor --repo` discovers that
   root from Git common-dir/worktree facts, reports every mapped source, and fails when a local
