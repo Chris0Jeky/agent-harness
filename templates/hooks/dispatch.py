@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.22 (2026-07-31)"
+FLOOR_VERSION = "1.6.23 (2026-08-01)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8560,12 +8560,14 @@ def git_globals_preserve_attribution(git_globals: list[str] | None) -> bool:
 
 def git_push_positional_operands(
     args: list[str],
-) -> tuple[list[str], str, bool] | None:
+) -> tuple[list[str], str, bool, bool] | None:
     """Positional operands of a git push, its --repo value, and selector facts.
 
-    Returns (positionals, option_remote, selector) where `selector` is True for
-    any multi-ref or deletion selector (--all/--branches/--tags/--mirror/
-    --delete/-d/--follow-tags). Returns None when an abbreviated value option
+    Returns (positionals, option_remote, selector, no_follow_tags) where
+    `selector` is True for any multi-ref or deletion selector
+    (--all/--branches/--tags/--mirror/--delete/-d/--follow-tags), and
+    `no_follow_tags` records an exact CLI negation in option position. Returns
+    None when an abbreviated value option
     makes the argv unattributable — the same shape push_remotes() answers with
     [].
 
@@ -8580,6 +8582,7 @@ def git_push_positional_operands(
     positionals: list[str] = []
     option_remote = ""
     selector = False
+    no_follow_tags = False
     value_options = (_GIT_PUSH_VALUE_LONG_OPTIONS - {"--repo"}) | {"-o"}
     i = 0
     while i < len(args):
@@ -8606,6 +8609,10 @@ def git_push_positional_operands(
         if arg in value_options:
             i += 2
             continue
+        if arg == "--no-follow-tags":
+            no_follow_tags = True
+            i += 1
+            continue
         if any(
             git_option_abbreviates(arg, selector_option, min_prefix=1)
             for selector_option in _GIT_PUSH_SELECTOR_LONG_OPTIONS
@@ -8623,7 +8630,7 @@ def git_push_positional_operands(
             i += 1
             continue
         i += 1
-    return positionals, option_remote, selector
+    return positionals, option_remote, selector, no_follow_tags
 
 
 def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
@@ -8700,7 +8707,7 @@ def sensitive_push_narrowing_status(
     parsed = git_push_positional_operands(args)
     if parsed is None:
         return False, "unattributable push argv"
-    positionals, option_remote, selector = parsed
+    positionals, option_remote, selector, no_follow_tags = parsed
     if selector:
         return False, "multi-ref or deletion selector"
     # Positional wins over --repo, mirroring push_remotes and git itself
@@ -8783,11 +8790,22 @@ def sensitive_push_narrowing_status(
         config_values.setdefault(key.lower(), []).append(value)
     # The all-config probe exits zero even when a specific key is absent, so a
     # resolver failure cannot collapse to the same answer as "not configured".
-    # Git accepts several false spellings; every other occurrence fails closed
-    # because it can make a branch-only push publish an annotated tag.
+    # Git treats an explicitly empty boolean value as false, but a VALUELESS
+    # key as true. The all-config format preserves that distinction: the empty
+    # value has the key/value newline parsed above, while a valueless entry has
+    # no separator and already failed closed as malformed. Unknown boolean
+    # text remains a deny even under --no-follow-tags; only a valid configured
+    # true is safely overridden by that exact CLI negation.
+    configured_follow_tags = [
+        value.strip().lower() for value in config_values.get("push.followtags", [])
+    ]
+    false_booleans = {"", "false", "no", "off", "0"}
+    true_booleans = {"true", "yes", "on", "1"}
     if any(
-        value.strip().lower() not in {"false", "no", "off", "0"}
-        for value in config_values.get("push.followtags", [])
+        value not in false_booleans | true_booleans for value in configured_follow_tags
+    ) or (
+        not no_follow_tags
+        and any(value in true_booleans for value in configured_follow_tags)
     ):
         return False, "configured push.followTags may publish annotated tags"
     # Independent of the destination check: `git push origin` names a remote and
@@ -8821,21 +8839,28 @@ def sensitive_push_narrowing_status(
             if configured_push_defaults
             else "simple"
         )
+        if push_default == "tracking":
+            # Git retains `tracking` as a deprecated synonym for `upstream`.
+            push_default = "upstream"
         if push_default == "upstream":
-            current_branch = command_output_before_deadline(
+            current_branch_ref = command_output_before_deadline(
                 command_runner,
                 [
                     "git",
                     *(git_globals or []),
                     "symbolic-ref",
                     "--quiet",
-                    "--short",
                     "HEAD",
                 ],
                 project_dir,
                 deadline,
                 diagnostics,
             ).strip()
+            current_branch = (
+                current_branch_ref.removeprefix("refs/heads/")
+                if current_branch_ref.startswith("refs/heads/")
+                else ""
+            )
             upstream_merge = (
                 command_output_before_deadline(
                     command_runner,
@@ -8881,6 +8906,19 @@ def sensitive_push_narrowing_status(
         return False, "the pushed repository does not declare sensitive_data"
     if pushed_flags.get("sensitive_data") is not False:
         return False, "the pushed repository itself declares sensitive_data"
+
+    def same_repository_path(left: str, right: str) -> bool:
+        """Compare live Git paths by identity, with a fail-closed fallback.
+
+        Hosted Windows can report an 8.3 alias while Python holds the long
+        spelling, and macOS can report /var for Python's /private/var. Both
+        paths exist at this point, so samefile proves identity across aliases.
+        """
+        try:
+            return os.path.samefile(left, right)
+        except OSError:
+            return False
+
     # A LINKED WORKTREE can live outside the repository it belongs to, so the
     # toplevel alone does not prove where the repository sits: the same repo was
     # denied from its primary checkout inside a sensitive root and exempted from
@@ -8889,7 +8927,13 @@ def sensitive_push_narrowing_status(
     containment_roots = [toplevel]
     common_dir = command_output_before_deadline(
         command_runner,
-        ["git", *(git_globals or []), "rev-parse", "--git-common-dir"],
+        [
+            "git",
+            *(git_globals or []),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
         project_dir,
         deadline,
         diagnostics,
@@ -8899,7 +8943,7 @@ def sensitive_push_narrowing_status(
             "unresolved repository common directory", diagnostics
         )
     if not os.path.isabs(common_dir):
-        common_dir = os.path.join(toplevel, common_dir)
+        return False, "repository common directory is not absolute"
     common_dir = os.path.abspath(common_dir)
     worktree_metadata = command_output_before_deadline(
         command_runner,
@@ -8922,13 +8966,115 @@ def sensitive_push_narrowing_status(
         )
     primary_checkout = os.path.abspath(primary_record[len("worktree ") :])
     common_parent = os.path.dirname(common_dir)
-    if os.path.normcase(primary_checkout) != os.path.normcase(common_parent):
-        # `git init --separate-git-dir` leaves no reliable primary-checkout
-        # pointer in the shared repository metadata: `worktree list` reports
-        # the detached Git storage itself as the primary. The real checkout may
-        # sit under a sensitive root, so this topology cannot earn exemption.
-        return False, "a separate Git directory hides the primary checkout"
-    containment_roots.append(primary_checkout)
+    if not same_repository_path(primary_checkout, common_parent):
+        # An ordinary submodule and `git init --separate-git-dir` both report
+        # the Git storage itself as the first worktree record. A submodule is
+        # distinguishable without trusting core.worktree alone: its active Git
+        # dir IS the common dir. A separate-Git-dir repository can place its
+        # common dir under a benign superproject and configure a linked
+        # worktree to look like the submodule, but that linked worktree's active
+        # Git dir remains below <common>/worktrees. It must not earn exemption.
+        active_git_dir = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not os.path.isabs(active_git_dir) or not same_repository_path(
+            active_git_dir, common_dir
+        ):
+            return False, "a separate Git directory hides the primary checkout"
+        core_worktrees = config_values.get("core.worktree", [])
+        submodule_primary = ""
+        superproject = ""
+        candidate_superproject = ""
+        if (
+            same_repository_path(primary_checkout, common_dir)
+            and len(core_worktrees) == 1
+            and core_worktrees[0].strip()
+        ):
+            configured_worktree = core_worktrees[0].strip()
+            if not os.path.isabs(configured_worktree):
+                configured_worktree = os.path.join(common_dir, configured_worktree)
+            configured_worktree = os.path.abspath(configured_worktree)
+            if same_repository_path(configured_worktree, toplevel):
+                candidate_superproject = command_output_before_deadline(
+                    command_runner,
+                    [
+                        "git",
+                        *(git_globals or []),
+                        "rev-parse",
+                        "--show-superproject-working-tree",
+                    ],
+                    project_dir,
+                    deadline,
+                    diagnostics,
+                ).strip()
+                if candidate_superproject and os.path.isabs(candidate_superproject):
+                    candidate_superproject = os.path.abspath(candidate_superproject)
+                    superproject_common_dir = command_output_before_deadline(
+                        command_runner,
+                        [
+                            "git",
+                            "-C",
+                            candidate_superproject,
+                            "rev-parse",
+                            "--path-format=absolute",
+                            "--git-common-dir",
+                        ],
+                        project_dir,
+                        deadline,
+                        diagnostics,
+                    ).strip()
+                    superproject_metadata = command_output_before_deadline(
+                        command_runner,
+                        [
+                            "git",
+                            "-C",
+                            candidate_superproject,
+                            "worktree",
+                            "list",
+                            "--porcelain",
+                            "-z",
+                        ],
+                        project_dir,
+                        deadline,
+                        diagnostics,
+                    )
+                    superproject_primary_record = superproject_metadata.split("\0", 1)[
+                        0
+                    ]
+                    if (
+                        os.path.isabs(superproject_common_dir)
+                        and superproject_primary_record.startswith("worktree ")
+                        and same_repository_path(
+                            superproject_primary_record[len("worktree ") :],
+                            candidate_superproject,
+                        )
+                        and same_repository_path(
+                            os.path.dirname(superproject_common_dir),
+                            candidate_superproject,
+                        )
+                    ):
+                        submodule_primary = configured_worktree
+                        superproject = candidate_superproject
+        if not submodule_primary or not superproject:
+            if candidate_superproject:
+                return False, "submodule superproject primary checkout is unresolved"
+            # `git init --separate-git-dir` has no reliable primary-checkout
+            # pointer in shared metadata. The real checkout may sit under a
+            # sensitive root, so this topology cannot earn exemption.
+            return False, "a separate Git directory hides the primary checkout"
+        containment_roots.extend((submodule_primary, superproject))
+    else:
+        containment_roots.append(primary_checkout)
     # Skip ONLY the toplevel, whose declaration condition 3 just validated.
     # Skipping the primary too — which an earlier revision did, by building the
     # skip set from BOTH roots — silences the primary's OWN declaration whenever
@@ -8938,10 +9084,9 @@ def sensitive_push_narrowing_status(
     # denied. The primary is a DIFFERENT working tree: its tier.json is a
     # different file from the worktree's checkout of it, so it must be read, not
     # assumed (PR #132 fix-diff verification).
-    toplevel_key = os.path.normcase(os.path.abspath(toplevel))
     for root in containment_roots:
         for declared in declared_project_dirs(root):
-            if os.path.normcase(os.path.abspath(declared)) == toplevel_key:
+            if same_repository_path(declared, toplevel):
                 continue
             try:
                 declared_tier = load_tier(declared)
