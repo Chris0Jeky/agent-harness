@@ -792,6 +792,75 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         allowed, detail = self.narrowing(["origin", "main"], submodule)
         self.assertTrue(allowed, detail)
 
+    def test_submodule_in_linked_superproject_cannot_hide_sensitive_primary(self):
+        source = os.path.join(self.root, "linked-submodule-source")
+        superproject = os.path.join(
+            self.sensitive_root, "linked-submodule-superproject"
+        )
+        outside = os.path.join(self.root, "linked-submodule-outside")
+        self._make_repo(source, {"tier": 2, "flags": {"sensitive_data": False}})
+        self._git(source, "add", "-f", ".agent-harness/tier.json")
+        self._git(source, "commit", "-m", "track linked submodule tier")
+        self._make_repo(superproject, {"tier": 2, "flags": {"sensitive_data": False}})
+        self._git(superproject, "add", "-f", ".agent-harness/tier.json")
+        self._git(
+            superproject,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source,
+            "module",
+        )
+        self._git(superproject, "commit", "-m", "track linked submodule")
+        self._git(superproject, "worktree", "add", "--detach", outside, "main")
+        self._git(outside, "switch", "-c", "linked-superproject")
+        self._git(
+            outside,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "module",
+        )
+        submodule = os.path.join(outside, "module")
+        self._git(
+            submodule,
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+
+        self.assertEqual(
+            os.path.normcase(
+                self._git(
+                    submodule,
+                    "rev-parse",
+                    "--show-superproject-working-tree",
+                )
+            ),
+            os.path.normcase(os.path.abspath(outside)),
+        )
+        superproject_metadata = self._git(
+            outside, "worktree", "list", "--porcelain"
+        ).splitlines()[0]
+        self.assertEqual(
+            os.path.normcase(
+                os.path.abspath(superproject_metadata.removeprefix("worktree "))
+            ),
+            os.path.normcase(os.path.abspath(superproject)),
+        )
+        self.assertNotEqual(
+            os.path.normcase(os.path.abspath(superproject)),
+            os.path.normcase(os.path.abspath(outside)),
+        )
+
+        allowed, detail = self.narrowing(["origin", "main"], submodule)
+        self.assertFalse(allowed, detail)
+        self.assertIn("superproject primary", detail)
+
     def test_a_worktree_cannot_declassify_its_own_sensitive_repository(self):
         """A repo that declares sensitive_data ITSELF stays denied from any of
         its worktrees, nested or outside.
