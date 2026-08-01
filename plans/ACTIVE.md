@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-08-01. Published implementation base: `e6d0558200d006de0b86630a1d31bb4ce8f06244`.
+Snapshot: 2026-08-02. Published implementation base: `e6d0558200d006de0b86630a1d31bb4ce8f06244`.
 No implementation workstream is active; both slots are free.
 
 ## No active implementation
@@ -37,6 +37,16 @@ No implementation workstream is active; both slots are free.
   `30717285862` passed before merge `ace7d77`. PR #205 closed #189 with diagnosis-only static
   Claude-hook topology reporting; exact head `ebfb03b`, base `ace7d77`, run `30718502986`, and
   zero unresolved threads passed before merge `e6d0558`.
+- #74 closed on current executable evidence: PR #71 commits `0b488e5`/`e688d1e` are ancestors of
+  main and the full hook smoke suite passed 2237/2237; the invalid-descriptor residual remains
+  non-blocking. #96 closed on its existing PR #100 policy evidence (commit `6bedff3`, merge
+  `62dfbb1`), the #75-to-#95 split, and focused cross-product proof 27/27.
+- Documentation-only PR #208 closed #85 (base `0b3317d`, head `02cd197`, merge `02e3ba6`): all
+  nine jobs in run `30722065509` passed with zero unresolved threads. It documents Codex project
+  hook trust bootstrap only; no trust mutation, canary, or deployment ran. Documentation-only PR
+  #209 closed #84 (base `02e3ba6`, head `0e5845e`, merge `aee3ea6`): all nine jobs in run
+  `30722999868` passed with zero unresolved threads. It documents linked-worktree candidate
+  validation only; no Doctor behavior, trust/canary/deployment, or consumer rollout changed.
 - PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
   review evidence remain preserved.
 
