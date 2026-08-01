@@ -132,6 +132,9 @@ Codex hooks. Each active repo must update its project `.codex/hooks.json` pin an
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
 for the exact-CWD TUI procedure and its runtime-evidence boundary.
+For a dispatcher or adapter-marker candidate made in a linked worktree, see
+[safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
+the candidate as installed or live.
 `doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
 system `hooks.json`, system `requirements.toml`, inline system/base and selectable profile-v2
 hooks, and the legacy managed config file. On Windows it resolves the system layer through the
