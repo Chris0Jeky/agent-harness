@@ -1,6 +1,6 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-01 at `main@93755c6532e2e32bb0c1c47364fba12440d1da8b`.
+Snapshot: 2026-08-01, implementation state through `main@e6d0558200d006de0b86630a1d31bb4ce8f06244`.
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 
@@ -11,15 +11,15 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 | AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #96, #119, #138, #185 |
 | AH-2 — internal Policy Lab | AH-1 truth and corpus provenance | **Implemented core; bounded follow-ups queued.** PR #140 merged deterministic replay evidence; PRs #159/#163 repaired report/manifest contracts; PRs #174/#176/#187 closed #152/#156/#177 with reproduction and schema/runtime proof. Replay remains internal and experimental. | #141, #142, #143, #145, #146, #147, #150, #157, #158 |
 | AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. #201 owns the remaining numeric-boolean edge. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #74, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201 |
-| AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165. #160 is reproduced and owner-blocked on precedence; #189 adds a bounded duplicate-Claude-floor seam. | #19, #85, #89, #98, #107, #160, #189 |
+| AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting. #160 is reproduced and owner-blocked on precedence. | #19, #85, #98, #107, #160 |
 | AH-5 — runtime/external adapters | AH-2 stable source and report contracts | **Partial.** Recorded and generic process sources exist; runtime surface parity remains bounded. | #86, #88 |
-| AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows mode deltas and closed #170. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #84, #91, #101, #122, #131, #139, #186, #188, #190, #191, #192 |
+| AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows mode deltas and closed #170; PR #206 published the tailored new-repo contract and closed #131. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #84, #91, #101, #122, #139, #186, #188, #190, #191, #192 |
 | AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Owner-parked.** Issue #39 is measured rollout evidence. H-2 remains the only open human item; do not restart estate-wide canaries. | #39 |
 | AH-8 — integrated measurement | evidence from all executable capabilities | **Historical measurements exist; integrated current baseline unverified.** Keep warning, approval, and denial metrics separate. | #21, #109, #110, #118, #120 |
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seams remain #98, #101, and #160. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 67 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
+All 64 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
@@ -28,16 +28,18 @@ All 67 issues open at this snapshot have one primary epic above. Cross-cutting o
   exception; #184 then closed with exact producer proof. PR #200 closed #196, PR #202 repaired its
   confirmed late fail-closed defect, and #201 owns the remaining bounded usability follow-up.
   #118/#120 are AH-8 friction evidence feeding AH-3.
-- #19/#85/#89/#98 are the Doctor/configuration-reality cluster; #19/#85 also inform AH-5.
+- #19/#85/#98 are the open Doctor/configuration-reality cluster; PR #204 closed #89. #19/#85 also
+  inform AH-5.
 - Closed #87 established the static MCP topology baseline through PR #161; #101/#139 remain
   estate-operations work, and #98/#101 retain AH-9 seams.
 - #160 remains the primary AH-4 follow-up from the #87 successor and retains AH-9 lineage; it is
   owner-blocked on disabled mixed-transport precedence. PRs #175/#178 closed #164/#165, while
-  #189 adds static duplicate-Claude-floor diagnosis without authorizing removal.
+  PR #205 closed #189 with static Claude-hook topology diagnosis without authorizing removal.
 - PR #180 closed bounded AH-6 reporting follow-up #168; PRs #183/#194/#197/#198 closed
-  #171/#167/#172/#170. #186/#188/#190/#191/#192 cover merge-gate completeness, retirement,
-  interpreter discovery, guarded creation, and proof-aware merged-branch teardown. None authorizes
-  live estate cleanup.
+  #171/#167/#172/#170, and PR #206 closed #131. #186 is owned by the canonical
+  `review-and-ship` skill in `claude-config`; #188 awaits an owner-reviewed consumer manifest;
+  #190 awaits a real generated launcher call site. #191/#192 remain mapped creation and
+  proof-aware teardown work. None authorizes live estate cleanup.
 - #142–#147 are primary AH-2 replay follow-ups and secondary AH-5 adapter-contract inputs.
 - #21 and its measured follow-ons support bounded Pattern Guard v2; they do not authorize a
   universal parser redesign.
@@ -45,7 +47,17 @@ All 67 issues open at this snapshot have one primary epic above. Cross-cutting o
 
 ## Open PR ownership
 
-No PR is open at this snapshot. PR #200 closed #196 and merged as
+No implementation PR is open at this snapshot. PR #204 closed #89 from exact head
+`2150b420f05d8244ec922643bc0ca33b64f66885` against base
+`6b49a67ef7642683341d8e894faafe47a5d19c58`; run `30714604384` passed before merge
+`77a9759c356f3a2add0ecada157cd95c4e14e6a5`. PR #206 closed #131 from exact head
+`47fd5c18590bb3f63be27c0f3e161adf29acbd0f`; run `30717285862` passed before merge
+`ace7d77474c0d35e487f3c8eba0897a4d2a7e457`. PR #205 closed #189 from exact head
+`ebfb03bdc74bca72f08ae3d7a75ac7a319ba5c92` against base
+`ace7d77474c0d35e487f3c8eba0897a4d2a7e457`; run `30718502986` and zero unresolved threads
+passed before merge `e6d0558200d006de0b86630a1d31bb4ce8f06244`.
+
+PR #200 closed #196 and merged as
 `59dd9644bf3660c45de4358ce99b0e2bd162cd27`; exact-head run `30708929446` passed all nine jobs.
 PR #202 then repaired a confirmed late P1 by withdrawing the unprovable ordinary-submodule
 allowance and merged as `93755c6532e2e32bb0c1c47364fba12440d1da8b`; exact-head run
@@ -54,7 +66,7 @@ thread is resolved. #201 remains the bounded non-blocking follow-up. PR #199 pub
 closeout. PRs #154/#155 remain closed unmerged with branches and historical threads preserved.
 PRs #181/#182/#183/#187/#194/#195/#197/#198/#199/#200/#202 merged continuity, CI-budget,
 reachability, replay-schema, suspend-aware closeout, workbench-state, direct-`ORIG_HEAD`,
-native-Windows mode-capability, state-closeout, and bounded floor slices through `main@93755c6`.
+native-Windows mode-capability, state-closeout, and bounded floor slices through `main@e6d0558`.
 Every base or head change re-proves affected evidence.
 
 ## Outcome ordering
