@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = ROOT / "templates" / "hooks" / "dispatch.py"
@@ -729,6 +730,16 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed, detail)
         self.assertIn("separate Git directory", detail)
 
+    def test_unresolvable_filesystem_identity_keeps_the_deny(self):
+        with mock.patch.object(
+            dispatch.os.path,
+            "samefile",
+            side_effect=OSError("filesystem identity unavailable"),
+        ):
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+        self.assertFalse(allowed, detail)
+        self.assertIn("separate Git directory", detail)
+
     def test_separate_git_dir_cannot_impersonate_an_ordinary_submodule(self):
         superproject = os.path.join(self.root, "spoofed-submodule-superproject")
         primary = os.path.join(self.sensitive_root, "spoofed-submodule-primary")
@@ -777,11 +788,11 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self._git(module, "switch", "-c", "impersonating-submodule")
         self._git(module, "config", "core.worktree", module)
 
-        self.assertEqual(
-            os.path.normcase(
-                self._git(module, "rev-parse", "--show-superproject-working-tree")
-            ),
-            os.path.normcase(os.path.abspath(superproject)),
+        self.assertTrue(
+            os.path.samefile(
+                self._git(module, "rev-parse", "--show-superproject-working-tree"),
+                superproject,
+            )
         )
         self.assertGreater(
             len(
@@ -802,10 +813,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         common_dir = self._git(
             module, "rev-parse", "--path-format=absolute", "--git-common-dir"
         )
-        self.assertNotEqual(
-            os.path.normcase(os.path.abspath(active_git_dir)),
-            os.path.normcase(os.path.abspath(common_dir)),
-        )
+        self.assertFalse(os.path.samefile(active_git_dir, common_dir))
 
         allowed, detail = self.narrowing(["origin", "impersonating-submodule"], module)
         self.assertFalse(allowed, detail)
@@ -848,16 +856,12 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         active_git_dir = self._git(
             submodule, "rev-parse", "--path-format=absolute", "--git-dir"
         )
-        self.assertEqual(
-            os.path.normcase(os.path.abspath(active_git_dir)),
-            os.path.normcase(os.path.abspath(common_dir)),
-        )
+        self.assertTrue(os.path.samefile(active_git_dir, common_dir))
         primary_record = self._git(
             submodule, "worktree", "list", "--porcelain"
         ).splitlines()[0]
-        self.assertEqual(
-            os.path.normcase(os.path.abspath(common_dir)),
-            os.path.normcase(os.path.abspath(primary_record.removeprefix("worktree "))),
+        self.assertTrue(
+            os.path.samefile(common_dir, primary_record.removeprefix("worktree "))
         )
         self.assertTrue(
             self._git(submodule, "config", "--get", "core.worktree"),
@@ -869,19 +873,16 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 self._git(submodule, "config", "--get", "core.worktree"),
             )
         )
-        self.assertEqual(
-            os.path.normcase(resolved_core_worktree),
-            os.path.normcase(os.path.abspath(submodule)),
-        )
-        self.assertEqual(
-            os.path.normcase(
+        self.assertTrue(os.path.samefile(resolved_core_worktree, submodule))
+        self.assertTrue(
+            os.path.samefile(
                 self._git(
                     submodule,
                     "rev-parse",
                     "--show-superproject-working-tree",
-                )
-            ),
-            os.path.normcase(os.path.abspath(superproject)),
+                ),
+                superproject,
+            )
         )
 
         allowed, detail = self.narrowing(["origin", "main"], submodule)
@@ -928,29 +929,25 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "https://github.com/example/thing.git",
         )
 
-        self.assertEqual(
-            os.path.normcase(
+        self.assertTrue(
+            os.path.samefile(
                 self._git(
                     submodule,
                     "rev-parse",
                     "--show-superproject-working-tree",
-                )
-            ),
-            os.path.normcase(os.path.abspath(outside)),
+                ),
+                outside,
+            )
         )
         superproject_metadata = self._git(
             outside, "worktree", "list", "--porcelain"
         ).splitlines()[0]
-        self.assertEqual(
-            os.path.normcase(
-                os.path.abspath(superproject_metadata.removeprefix("worktree "))
-            ),
-            os.path.normcase(os.path.abspath(superproject)),
+        self.assertTrue(
+            os.path.samefile(
+                superproject_metadata.removeprefix("worktree "), superproject
+            )
         )
-        self.assertNotEqual(
-            os.path.normcase(os.path.abspath(superproject)),
-            os.path.normcase(os.path.abspath(outside)),
-        )
+        self.assertFalse(os.path.samefile(superproject, outside))
 
         allowed, detail = self.narrowing(["origin", "main"], submodule)
         self.assertFalse(allowed, detail)

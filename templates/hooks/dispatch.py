@@ -8906,6 +8906,19 @@ def sensitive_push_narrowing_status(
         return False, "the pushed repository does not declare sensitive_data"
     if pushed_flags.get("sensitive_data") is not False:
         return False, "the pushed repository itself declares sensitive_data"
+
+    def same_repository_path(left: str, right: str) -> bool:
+        """Compare live Git paths by identity, with a fail-closed fallback.
+
+        Hosted Windows can report an 8.3 alias while Python holds the long
+        spelling, and macOS can report /var for Python's /private/var. Both
+        paths exist at this point, so samefile proves identity across aliases.
+        """
+        try:
+            return os.path.samefile(left, right)
+        except OSError:
+            return False
+
     # A LINKED WORKTREE can live outside the repository it belongs to, so the
     # toplevel alone does not prove where the repository sits: the same repo was
     # denied from its primary checkout inside a sensitive root and exempted from
@@ -8953,7 +8966,7 @@ def sensitive_push_narrowing_status(
         )
     primary_checkout = os.path.abspath(primary_record[len("worktree ") :])
     common_parent = os.path.dirname(common_dir)
-    if os.path.normcase(primary_checkout) != os.path.normcase(common_parent):
+    if not same_repository_path(primary_checkout, common_parent):
         # An ordinary submodule and `git init --separate-git-dir` both report
         # the Git storage itself as the first worktree record. A submodule is
         # distinguishable without trusting core.worktree alone: its active Git
@@ -8974,16 +8987,16 @@ def sensitive_push_narrowing_status(
             deadline,
             diagnostics,
         ).strip()
-        if not os.path.isabs(active_git_dir) or os.path.normcase(
-            os.path.abspath(active_git_dir)
-        ) != os.path.normcase(common_dir):
+        if not os.path.isabs(active_git_dir) or not same_repository_path(
+            active_git_dir, common_dir
+        ):
             return False, "a separate Git directory hides the primary checkout"
         core_worktrees = config_values.get("core.worktree", [])
         submodule_primary = ""
         superproject = ""
         candidate_superproject = ""
         if (
-            os.path.normcase(primary_checkout) == os.path.normcase(common_dir)
+            same_repository_path(primary_checkout, common_dir)
             and len(core_worktrees) == 1
             and core_worktrees[0].strip()
         ):
@@ -8991,9 +9004,7 @@ def sensitive_push_narrowing_status(
             if not os.path.isabs(configured_worktree):
                 configured_worktree = os.path.join(common_dir, configured_worktree)
             configured_worktree = os.path.abspath(configured_worktree)
-            if os.path.normcase(configured_worktree) == os.path.normcase(
-                os.path.abspath(toplevel)
-            ):
+            if same_repository_path(configured_worktree, toplevel):
                 candidate_superproject = command_output_before_deadline(
                     command_runner,
                     [
@@ -9043,16 +9054,14 @@ def sensitive_push_narrowing_status(
                     if (
                         os.path.isabs(superproject_common_dir)
                         and superproject_primary_record.startswith("worktree ")
-                        and os.path.normcase(
-                            os.path.abspath(
-                                superproject_primary_record[len("worktree ") :]
-                            )
+                        and same_repository_path(
+                            superproject_primary_record[len("worktree ") :],
+                            candidate_superproject,
                         )
-                        == os.path.normcase(candidate_superproject)
-                        and os.path.normcase(
-                            os.path.dirname(os.path.abspath(superproject_common_dir))
+                        and same_repository_path(
+                            os.path.dirname(superproject_common_dir),
+                            candidate_superproject,
                         )
-                        == os.path.normcase(candidate_superproject)
                     ):
                         submodule_primary = configured_worktree
                         superproject = candidate_superproject
@@ -9075,10 +9084,9 @@ def sensitive_push_narrowing_status(
     # denied. The primary is a DIFFERENT working tree: its tier.json is a
     # different file from the worktree's checkout of it, so it must be read, not
     # assumed (PR #132 fix-diff verification).
-    toplevel_key = os.path.normcase(os.path.abspath(toplevel))
     for root in containment_roots:
         for declared in declared_project_dirs(root):
-            if os.path.normcase(os.path.abspath(declared)) == toplevel_key:
+            if same_repository_path(declared, toplevel):
                 continue
             try:
                 declared_tier = load_tier(declared)
