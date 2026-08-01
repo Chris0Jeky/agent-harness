@@ -1,33 +1,17 @@
 # Active workstreams
 
-Snapshot: 2026-08-01. Published base: `744b2f21d36053a9c0152a617b8af02a4b72b4a8`.
-One workstream is active; the second slot is free.
+Snapshot: 2026-08-01. Published base: `c8a1d2649bd4b2eb7ba7dec18089d43caccd08d7`.
+No implementation workstream is active; both slots are free.
 
-## A — AH-6 native Windows executable-mode capability (#170)
+## No active implementation
 
-- **Observable outcome:** guarded closeout does not retain a clean native-Windows worktree merely
-  because Git's forced mode comparison synthesizes `100755` to `100644`, while a genuine POSIX
-  executable-mode-only change remains a preservation blocker even when `core.fileMode=false`.
-- **Evidence:** PR #169's bounded review reproduced the Windows false keep and opened #170. On the
-  current branch, a real Git-for-Windows fixture first reproduces the synthetic delta, and the
-  unchanged WSL2 fixture proves a real `chmod` delta is still detected on a mode-capable filesystem.
-- **In:** the closeout mode-comparison capability seam, causal Windows and POSIX fixtures, and the
-  README/SPECS contract qualification.
-- **Out:** temporary write probes, live closeout apply, force removal, branch deletion, estate
-  cleanup, mode emulation on unknown POSIX mounts, or any floor/runtime deployment.
-- **Architecture seam:** `harness.py` worktree candidate inspection before the existing forced
-  `core.fileMode=true` comparison.
-- **Tests/fixtures/corpus:** one native-Windows executable-baseline fixture plus the existing POSIX
-  mode-drift and probe-failure fixtures; no replay corpus change.
-- **Measurement:** correctness matrix only; do not infer filesystem prevalence or estate impact.
-- **Limitation:** native Windows cannot preserve a working-tree Unix executable bit. POSIX mounts
-  that also cannot expose it may still conservatively retain a candidate; that is a false keep,
-  never removal authority.
-- **Exact verification:** focused Windows/WSL controls; full closeout and unit suites; smoke;
-  audit/Doctor; Black, Ruff, compile, diff checks; hosted Windows/macOS/Linux CI; one independent
-  read-only review; aging and all-surface triage.
-- **Next executable handoff:** publish one PR closing only #170, with no live apply or consumer
-  rollout, then merge-commit only after exact-head evidence is green.
+- PR #198 merged the bounded AH-6 native-Windows mode-capability repair and closed #170. The exact
+  head/base gate, all nine hosted checks, two independent read-only reviews, and immediate
+  post-merge feedback refresh were clean.
+- No live closeout apply, estate cleanup, branch deletion, floor deployment, trust mutation, or
+  consumer rollout occurred.
+- Select the next slice only after refreshing GitHub, worktrees, tier authority, and this map. Do
+  not infer priority from issue number alone or reopen the completed #170/#198 pipeline.
 
 ## Completed in this wave
 
@@ -43,6 +27,8 @@ One workstream is active; the second slot is free.
 - PR #195 published the current workbench continuity homes. PR #197 preserved direct non-commit
   `ORIG_HEAD` identity and closed #172; its exact-head run passed all nine hosted jobs, and the
   post-merge review/comment/thread refresh found no late feedback.
+- PR #198 skipped only the synthetic native-Windows executable-mode comparison, retained every
+  ordinary preservation probe, preserved the POSIX mode-only blocker, and closed #170.
 - PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
   review evidence remain preserved.
 
