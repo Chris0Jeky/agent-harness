@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import io
 import json
 import os
@@ -486,11 +487,12 @@ class HarnessTests(unittest.TestCase):
             harness.claude_supported_matcher("Write,Edit"),
             ("Edit|Write", ("Edit", "Write")),
         )
-        self.assertTrue(
+        self.assertEqual(
             harness.claude_handler_identity(
                 {"type": "mcp_tool", "server": "fixture", "tool": "scan"},
                 claude_home,
-            ).startswith("opaque-mcp_tool-sha256:")
+            ),
+            ("mcp_tool", '{"server":"fixture","tool":"scan","type":"mcp_tool"}'),
         )
         self.assertIsNone(
             harness.claude_handler_identity(
@@ -515,6 +517,76 @@ class HarnessTests(unittest.TestCase):
                 self.assertIsNone(
                     harness.claude_handler_identity(malformed, claude_home)
                 )
+
+    def test_claude_hook_topology_uses_opaque_report_local_policy_labels(self) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        command = "python3 hook.py --token command-secret"
+        handler = {
+            "type": "mcp_tool",
+            "server": "mcp-secret-server",
+            "tool": "secret-tool",
+        }
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": command}, handler],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": command}, handler],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        repeated = harness.claude_hook_topology(claude_home, repo)
+        rendered = json.dumps(findings) + harness.claude_topology_summary(findings)
+        command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+        handler_digest = hashlib.sha256(
+            json.dumps(
+                handler, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        inventory = [finding for finding in findings if finding["kind"] == "inventory"]
+        duplicates = [
+            finding for finding in findings if finding["kind"] == "exact_duplicate"
+        ]
+
+        self.assertEqual(findings, repeated)
+        self.assertEqual(
+            [finding["policy_source"] for finding in inventory],
+            ["opaque-command-1", "opaque-mcp_tool-1"] * 2,
+        )
+        self.assertEqual(len(duplicates), 2)
+        self.assertTrue(
+            all(
+                finding["user_policy_source"] == finding["other_policy_source"]
+                for finding in duplicates
+            )
+        )
+        for secret in (
+            command,
+            "command-secret",
+            "mcp-secret-server",
+            "secret-tool",
+            command_digest,
+            handler_digest,
+            "sha256",
+            "_policy_identity",
+        ):
+            self.assertNotIn(secret, rendered)
 
     def test_claude_dispatcher_identity_keeps_posix_path_case_distinct(self) -> None:
         claude_home = (Path(self.temp.name) / "claude-home").resolve()

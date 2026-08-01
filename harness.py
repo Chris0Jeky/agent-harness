@@ -2498,22 +2498,18 @@ def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
     )
 
 
-def claude_policy_source_identity(command: str, claude_home: Path) -> str:
-    """Return a safe static policy identity without rendering command argv.
-
-    The one path Doctor controls is the shared dispatcher under the inspected
-    Claude home.  Every other handler is deliberately opaque: its digest can
-    establish exact static equality without exposing arguments or secrets.
-    """
+def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
+    """Return an internal policy equality key; never render the raw command."""
     dispatcher = claude_home / "hooks" / "dispatch.py"
     if claude_command_points_to_dispatcher(command, dispatcher):
-        return "shared-dispatcher"
-    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
-    return f"opaque-command-sha256:{digest}"
+        return ("shared-dispatcher", "")
+    return ("command", command)
 
 
-def claude_handler_identity(handler: dict[str, Any], claude_home: Path) -> str | None:
-    """Return a redaction-safe identity for one statically valid handler."""
+def claude_handler_identity(
+    handler: dict[str, Any], claude_home: Path
+) -> tuple[str, str] | None:
+    """Return an internal equality key for one statically valid handler."""
     handler_type = handler.get("type")
     if handler_type == "command":
         command = handler.get("command")
@@ -2536,8 +2532,23 @@ def claude_handler_identity(handler: dict[str, Any], claude_home: Path) -> str |
     encoded = json.dumps(
         handler, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     )
-    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
-    return f"opaque-{handler_type}-sha256:{digest}"
+    return (handler_type, encoded)
+
+
+def claude_render_policy_sources(entries: list[dict[str, Any]]) -> None:
+    """Assign deterministic report-local labels without rendering identity bytes."""
+    labels: dict[tuple[str, str], str] = {}
+    counts: dict[str, int] = {}
+    for entry in entries:
+        identity = entry["_policy_identity"]
+        if identity not in labels:
+            handler_type, _ = identity
+            if handler_type == "shared-dispatcher":
+                labels[identity] = "shared-dispatcher"
+            else:
+                counts[handler_type] = counts.get(handler_type, 0) + 1
+                labels[identity] = f"opaque-{handler_type}-{counts[handler_type]}"
+        entry["policy_source"] = labels[identity]
 
 
 def claude_hook_topology(
@@ -2696,8 +2707,8 @@ def claude_hook_topology(
                             }
                         )
                         continue
-                    policy_source = claude_handler_identity(handler, claude_home)
-                    if policy_source is None:
+                    policy_identity = claude_handler_identity(handler, claude_home)
+                    if policy_identity is None:
                         findings.append(
                             {
                                 "status": REALITY_UNPROVEN,
@@ -2717,12 +2728,14 @@ def claude_hook_topology(
                         "event": event,
                         "normalized_matcher": normalized_matcher,
                         "target_tools": list(targets),
-                        "policy_source": policy_source,
+                        "_policy_identity": policy_identity,
                         "group_index": group_index,
                         "handler_index": handler_index,
                     }
                     entries.append(entry)
                     findings.append(entry)
+
+    claude_render_policy_sources(entries)
 
     user_pre = [
         entry
@@ -2743,7 +2756,7 @@ def claude_hook_topology(
                 continue
             kind = (
                 "exact_duplicate"
-                if user_entry["policy_source"] == other_entry["policy_source"]
+                if user_entry["_policy_identity"] == other_entry["_policy_identity"]
                 else "likely_overlap"
             )
             findings.append(
@@ -2765,6 +2778,8 @@ def claude_hook_topology(
                     ),
                 }
             )
+    for entry in entries:
+        del entry["_policy_identity"]
     return findings
 
 
