@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.23 (2026-08-01)"
+FLOOR_VERSION = "1.6.24 (2026-08-01)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8967,114 +8967,13 @@ def sensitive_push_narrowing_status(
     primary_checkout = os.path.abspath(primary_record[len("worktree ") :])
     common_parent = os.path.dirname(common_dir)
     if not same_repository_path(primary_checkout, common_parent):
-        # An ordinary submodule and `git init --separate-git-dir` both report
-        # the Git storage itself as the first worktree record. A submodule is
-        # distinguishable without trusting core.worktree alone: its active Git
-        # dir IS the common dir. A separate-Git-dir repository can place its
-        # common dir under a benign superproject and configure a linked
-        # worktree to look like the submodule, but that linked worktree's active
-        # Git dir remains below <common>/worktrees. It must not earn exemption.
-        active_git_dir = command_output_before_deadline(
-            command_runner,
-            [
-                "git",
-                *(git_globals or []),
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-dir",
-            ],
-            project_dir,
-            deadline,
-            diagnostics,
-        ).strip()
-        if not os.path.isabs(active_git_dir) or not same_repository_path(
-            active_git_dir, common_dir
-        ):
-            return False, "a separate Git directory hides the primary checkout"
-        core_worktrees = config_values.get("core.worktree", [])
-        submodule_primary = ""
-        superproject = ""
-        candidate_superproject = ""
-        if (
-            same_repository_path(primary_checkout, common_dir)
-            and len(core_worktrees) == 1
-            and core_worktrees[0].strip()
-        ):
-            configured_worktree = core_worktrees[0].strip()
-            if not os.path.isabs(configured_worktree):
-                configured_worktree = os.path.join(common_dir, configured_worktree)
-            configured_worktree = os.path.abspath(configured_worktree)
-            if same_repository_path(configured_worktree, toplevel):
-                candidate_superproject = command_output_before_deadline(
-                    command_runner,
-                    [
-                        "git",
-                        *(git_globals or []),
-                        "rev-parse",
-                        "--show-superproject-working-tree",
-                    ],
-                    project_dir,
-                    deadline,
-                    diagnostics,
-                ).strip()
-                if candidate_superproject and os.path.isabs(candidate_superproject):
-                    candidate_superproject = os.path.abspath(candidate_superproject)
-                    superproject_common_dir = command_output_before_deadline(
-                        command_runner,
-                        [
-                            "git",
-                            "-C",
-                            candidate_superproject,
-                            "rev-parse",
-                            "--path-format=absolute",
-                            "--git-common-dir",
-                        ],
-                        project_dir,
-                        deadline,
-                        diagnostics,
-                    ).strip()
-                    superproject_metadata = command_output_before_deadline(
-                        command_runner,
-                        [
-                            "git",
-                            "-C",
-                            candidate_superproject,
-                            "worktree",
-                            "list",
-                            "--porcelain",
-                            "-z",
-                        ],
-                        project_dir,
-                        deadline,
-                        diagnostics,
-                    )
-                    superproject_primary_record = superproject_metadata.split("\0", 1)[
-                        0
-                    ]
-                    if (
-                        os.path.isabs(superproject_common_dir)
-                        and superproject_primary_record.startswith("worktree ")
-                        and same_repository_path(
-                            superproject_primary_record[len("worktree ") :],
-                            candidate_superproject,
-                        )
-                        and same_repository_path(
-                            os.path.dirname(superproject_common_dir),
-                            candidate_superproject,
-                        )
-                    ):
-                        submodule_primary = configured_worktree
-                        superproject = candidate_superproject
-        if not submodule_primary or not superproject:
-            if candidate_superproject:
-                return False, "submodule superproject primary checkout is unresolved"
-            # `git init --separate-git-dir` has no reliable primary-checkout
-            # pointer in shared metadata. The real checkout may sit under a
-            # sensitive root, so this topology cannot earn exemption.
-            return False, "a separate Git directory hides the primary checkout"
-        containment_roots.extend((submodule_primary, superproject))
-    else:
-        containment_roots.append(primary_checkout)
+        # Ordinary submodules and separate-Git-dir repositories can expose the
+        # same forward metadata while another checkout points at the same Git
+        # directory from an unenumerable sensitive location. No forward-only
+        # probe can prove that hidden reference absent, so neither topology can
+        # earn the public-push exemption (PR #200 late review).
+        return False, "a separate Git directory hides the primary checkout"
+    containment_roots.append(primary_checkout)
     # Skip ONLY the toplevel, whose declaration condition 3 just validated.
     # Skipping the primary too — which an earlier revision did, by building the
     # skip set from BOTH roots — silences the primary's OWN declaration whenever

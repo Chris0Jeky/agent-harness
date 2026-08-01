@@ -187,9 +187,10 @@ common Git directory has no checkout (for example, a bare repository). Configure
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Current state (2026-08-01): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.23 after the owner-authorized #184 security-preservation repair and #196's bounded
-six-case fail-closed usability correction; the deployed Claude hook remains measured at 1.6.21,
-and no install, consumer rollout, or trust change is implied.
+source is 1.6.24 after the owner-authorized #184 security-preservation repair and #196's bounded
+usability correction. A late #200 review proved that the ordinary-submodule case cannot exclude an
+unobservable separate checkout, so that one case remains fail-closed. The deployed Claude hook
+remains measured at 1.6.21, and no install, consumer rollout, or trust change is implied.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
