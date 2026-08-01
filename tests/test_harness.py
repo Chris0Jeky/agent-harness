@@ -285,8 +285,8 @@ class HarnessTests(unittest.TestCase):
         self,
     ) -> None:
         repo = self.make_repo()
-        claude_home = Path(self.temp.name) / "claude-home"
-        dispatcher = claude_home / "hooks" / "dispatch.py"
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
         windows_dispatcher = str(dispatcher).replace("/", "\\")
@@ -345,8 +345,8 @@ class HarnessTests(unittest.TestCase):
         self,
     ) -> None:
         repo = self.make_repo()
-        claude_home = Path(self.temp.name) / "claude-home"
-        dispatcher = claude_home / "hooks" / "dispatch.py"
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
         windows_dispatcher = str(dispatcher).replace("/", "\\")
@@ -517,16 +517,17 @@ class HarnessTests(unittest.TestCase):
                 )
 
     def test_claude_dispatcher_identity_keeps_posix_path_case_distinct(self) -> None:
-        claude_home = Path(self.temp.name) / "claude-home"
-        dispatcher = claude_home / "hooks" / "dispatch.py"
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
         different_case = str(dispatcher).upper()
-        self.assertTrue(
-            harness.claude_command_points_to_dispatcher(
-                f'python3 "{different_case}"', dispatcher
+        with mock.patch.object(harness.os, "name", "nt"):
+            self.assertTrue(
+                harness.claude_command_points_to_dispatcher(
+                    f'python3 "{different_case}"', dispatcher
+                )
             )
-        )
         with mock.patch.object(harness.os, "name", "posix"):
             self.assertFalse(
                 harness.claude_command_points_to_dispatcher(
@@ -612,9 +613,9 @@ class HarnessTests(unittest.TestCase):
         )
 
     def test_doctor_json_matches_human_check_order_and_hides_commands(self) -> None:
-        repo = self.make_repo()
-        claude_home = Path(self.temp.name) / "claude-home"
-        dispatcher = claude_home / "hooks" / "dispatch.py"
+        repo = self.make_repo().resolve()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
         self.write_claude_settings(
@@ -677,9 +678,9 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("[FAIL] Claude hook topology:", human)
         self.assertIn("[likely_overlap] user", human)
         self.assertIn("; local ", human)
-        self.assertIn(str(claude_home / "settings.json"), human)
-        self.assertIn(str(repo / ".claude" / "settings.local.json"), human)
-        self.assertNotIn(str(subdir / ".claude"), human)
+        self.assertIn(str((claude_home / "settings.json").resolve()), human)
+        self.assertIn(str((repo / ".claude" / "settings.local.json").resolve()), human)
+        self.assertNotIn(str((subdir / ".claude").resolve()), human)
         self.assertEqual(
             [
                 check["status"]
