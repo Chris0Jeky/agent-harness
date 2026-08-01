@@ -740,9 +740,9 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         self.assertFalse(allowed, detail)
         self.assertIn("separate Git directory", detail)
 
-    def test_separate_git_dir_cannot_impersonate_an_ordinary_submodule(self):
-        superproject = os.path.join(self.root, "spoofed-submodule-superproject")
-        primary = os.path.join(self.sensitive_root, "spoofed-submodule-primary")
+    def test_primary_separate_git_dir_cannot_qualify_as_a_submodule(self):
+        superproject = os.path.join(self.root, "primary-git-dir-superproject")
+        primary = os.path.join(self.sensitive_root, "primary-git-dir-checkout")
         module = os.path.join(superproject, "module")
         git_dir = os.path.join(superproject, ".git", "modules", "module")
         self._make_repo(superproject, {"tier": 2, "flags": {"sensitive_data": False}})
@@ -767,7 +767,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         ) as handle:
             json.dump({"tier": 2, "flags": {"sensitive_data": False}}, handle)
         self._git(primary, "add", "seed.txt", ".agent-harness/tier.json")
-        self._git(primary, "commit", "-m", "seed impersonating repository")
+        self._git(primary, "commit", "-m", "seed separate repository")
         self._git(
             primary,
             "remote",
@@ -783,10 +783,12 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "--cacheinfo",
             f"160000,{commit_id},module",
         )
-        self._git(superproject, "commit", "-m", "register impersonating gitlink")
-        self._git(primary, "worktree", "add", "--detach", module, "main")
-        self._git(module, "switch", "-c", "impersonating-submodule")
-        self._git(module, "config", "core.worktree", module)
+        self._git(superproject, "commit", "-m", "register gitlink")
+        os.makedirs(module)
+        with open(os.path.join(module, ".git"), "w", encoding="utf-8") as handle:
+            handle.write("gitdir: ../.git/modules/module\n")
+        self._git(primary, "config", "core.worktree", module)
+        self._git(module, "reset", "--hard", "HEAD")
 
         self.assertTrue(
             os.path.samefile(
@@ -794,7 +796,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 superproject,
             )
         )
-        self.assertGreater(
+        self.assertEqual(
             len(
                 [
                     line
@@ -805,7 +807,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 ]
             ),
             1,
-            "the impersonation depends on a second registered worktree",
+            "the primary shape reports no linked worktree",
         )
         active_git_dir = self._git(
             module, "rev-parse", "--path-format=absolute", "--git-dir"
@@ -813,19 +815,19 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         common_dir = self._git(
             module, "rev-parse", "--path-format=absolute", "--git-common-dir"
         )
-        self.assertFalse(os.path.samefile(active_git_dir, common_dir))
+        self.assertTrue(os.path.samefile(active_git_dir, common_dir))
 
-        allowed, detail = self.narrowing(["origin", "impersonating-submodule"], module)
+        allowed, detail = self.narrowing(["origin", "main"], module)
         self.assertFalse(allowed, detail)
         self.assertIn("separate Git directory", detail)
         decision, reason = checked(
-            f'git -C "{module}" push origin impersonating-submodule',
+            f'git -C "{module}" push origin main',
             self.sensitive_root,
             remote_resolver=_public_resolver,
         )
         self.assertEqual(decision, "deny", reason)
 
-    def test_ordinary_submodule_has_a_provable_primary_checkout(self):
+    def test_ordinary_submodule_cannot_prove_a_unique_primary_checkout(self):
         source = os.path.join(self.root, "submodule-source")
         superproject = os.path.join(self.root, "submodule-superproject")
         self._make_repo(source, {"tier": 2, "flags": {"sensitive_data": False}})
@@ -886,7 +888,8 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         )
 
         allowed, detail = self.narrowing(["origin", "main"], submodule)
-        self.assertTrue(allowed, detail)
+        self.assertFalse(allowed, detail)
+        self.assertIn("separate Git directory", detail)
 
     def test_submodule_in_linked_superproject_cannot_hide_sensitive_primary(self):
         source = os.path.join(self.root, "linked-submodule-source")
@@ -951,7 +954,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
 
         allowed, detail = self.narrowing(["origin", "main"], submodule)
         self.assertFalse(allowed, detail)
-        self.assertIn("superproject primary", detail)
+        self.assertIn("separate Git directory", detail)
 
     def test_a_worktree_cannot_declassify_its_own_sensitive_repository(self):
         """A repo that declares sensitive_data ITSELF stays denied from any of
