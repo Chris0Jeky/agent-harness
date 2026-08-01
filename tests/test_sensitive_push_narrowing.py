@@ -89,7 +89,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
 
     @classmethod
     def _git(cls, cwd, *argv):
-        subprocess.run(
+        completed = subprocess.run(
             [GIT, *argv],
             cwd=cwd,
             check=True,
@@ -105,6 +105,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 "GIT_COMMITTER_EMAIL": "floor@test",
             },
         )
+        return completed.stdout.strip()
 
     @classmethod
     def _make_repo(cls, path, tier):
@@ -219,6 +220,16 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             allowed, _detail = self.narrowing(args, self.nonsensitive)
             self.assertFalse(allowed, args)
 
+    def test_plain_force_options_stay_denied_before_the_narrowing(self):
+        for option in ("--force", "-f"):
+            decision, reason = checked(
+                f'git -C "{self.nonsensitive}" push {option} origin main',
+                self.sensitive_root,
+                remote_resolver=_public_resolver,
+            )
+            self.assertEqual(decision, "deny", option)
+            self.assertIn("force-push", reason.lower())
+
     def test_non_branch_sources_keep_the_deny(self):
         for source in (
             "0123456789abcdef0123456789abcdef01234567",
@@ -279,6 +290,20 @@ class SensitivePushNarrowingTests(unittest.TestCase):
                 ["origin", "main"], self.nonsensitive, ["-C", self.nonsensitive]
             )
         self.assertTrue(allowed, detail)
+
+    def test_repository_subdirectory_resolves_common_dir_from_git_cwd(self):
+        nested_cwd = os.path.join(self.nonsensitive, "nested", "command-cwd")
+        os.makedirs(nested_cwd, exist_ok=True)
+        for project_dir, git_globals in (
+            (nested_cwd, None),
+            (self.root, ["-C", nested_cwd]),
+        ):
+            with self.subTest(project_dir=project_dir, git_globals=git_globals):
+                with floor_environment.hermetic_environment(dispatch, None):
+                    allowed, detail = dispatch.sensitive_push_narrowing_status(
+                        ["origin", "main"], project_dir, git_globals
+                    )
+                self.assertTrue(allowed, detail)
 
     def test_tag_publishing_and_abbreviated_selectors_keep_the_deny(self):
         # git accepts unambiguous long-option prefixes, so `--al` IS `--all`.
@@ -346,8 +371,235 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
             self.assertFalse(allowed, detail)
             self.assertIn("followTags", detail)
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"], self.nonsensitive
+            )
+            self.assertFalse(allowed, detail)
+            self.assertIn("followTags", detail)
         finally:
             self._git(self.nonsensitive, "config", "--unset", "push.followTags")
+
+    def test_empty_follow_tags_uses_git_false_semantics(self):
+        self._git(self.nonsensitive, "config", "push.followTags", "")
+        try:
+            self.assertEqual(
+                self._git(
+                    self.nonsensitive,
+                    "config",
+                    "--bool",
+                    "--get",
+                    "push.followTags",
+                ),
+                "false",
+            )
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertTrue(allowed, detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+
+        # A key with no equals/value is different from an explicitly empty
+        # value: Git's boolean parser treats the valueless form as true.
+        with open(
+            os.path.join(self.nonsensitive, ".git", "config"),
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write("\n[push]\n\tfollowTags\n")
+        try:
+            self.assertEqual(
+                self._git(
+                    self.nonsensitive,
+                    "config",
+                    "--bool",
+                    "--get",
+                    "push.followTags",
+                ),
+                "true",
+            )
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("configuration", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+
+    def test_no_follow_tags_overrides_configured_true_only_in_option_position(self):
+        remote_name = "issue196-no-follow"
+        remote_path = os.path.join(self.root, remote_name + ".git")
+        self._git(self.root, "init", "--bare", remote_path)
+        self._git(self.nonsensitive, "remote", "add", remote_name, remote_path)
+        self._git(
+            self.nonsensitive,
+            "tag",
+            "-a",
+            "issue196-annotated",
+            "-m",
+            "annotated follow-tags control",
+        )
+        self._git(self.nonsensitive, "config", "push.followTags", "true")
+        self._git(
+            self.nonsensitive,
+            "update-ref",
+            "refs/heads/--no-follow-tags",
+            "HEAD",
+        )
+        try:
+            planned = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                "--no-follow-tags",
+                remote_name,
+                "main",
+            )
+            self.assertIn("refs/heads/main:refs/heads/main", planned)
+            self.assertNotIn("refs/tags/issue196-annotated", planned)
+            planned_with_later_selector = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                "--no-follow-tags",
+                "--follow-tags",
+                remote_name,
+                "main",
+            )
+            self.assertIn(
+                "refs/tags/issue196-annotated:refs/tags/issue196-annotated",
+                planned_with_later_selector,
+            )
+
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", remote_name, "main"], self.nonsensitive
+            )
+            self.assertTrue(allowed, detail)
+
+            for args in (
+                ["--no-follow-tags", "--follow-tags", "origin", "main"],
+                ["--no-follow-tags", "--tags", "origin"],
+                ["--no-follow-tags", "--delete", "origin", "main"],
+                ["--no-follow-tags", "origin", "+main:refs/heads/main"],
+                ["--no-follow-tags", "origin", "main:refs/tags/v1"],
+                ["--push-option", "--no-follow-tags", "origin", "main"],
+                ["origin", "--", "--no-follow-tags"],
+            ):
+                with self.subTest(args=args):
+                    allowed, _detail = self.narrowing(args, self.nonsensitive)
+                    self.assertFalse(allowed, args)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+            self._git(
+                self.nonsensitive,
+                "update-ref",
+                "-d",
+                "refs/heads/--no-follow-tags",
+            )
+            self._git(self.nonsensitive, "tag", "-d", "issue196-annotated")
+            self._git(self.nonsensitive, "remote", "remove", remote_name)
+
+    def test_ambiguous_short_branch_name_does_not_change_upstream_key(self):
+        self._git(self.nonsensitive, "tag", "-f", "main")
+        self._git(self.nonsensitive, "config", "push.default", "upstream")
+        self._git(self.nonsensitive, "config", "branch.main.remote", "origin")
+        self._git(
+            self.nonsensitive,
+            "config",
+            "branch.main.merge",
+            "refs/heads/main",
+        )
+        try:
+            self.assertEqual(
+                self._git(
+                    self.nonsensitive,
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "HEAD",
+                ),
+                "heads/main",
+            )
+            allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+            self.assertTrue(allowed, detail)
+
+            # HEAD can be a symbolic ref outside refs/heads. It must not borrow
+            # branch.main's safe-looking config just because the suffix matches.
+            self._git(
+                self.nonsensitive,
+                "symbolic-ref",
+                "HEAD",
+                "refs/tags/main",
+            )
+            allowed, detail = self.narrowing(["origin"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("upstream", detail)
+        finally:
+            self._git(
+                self.nonsensitive,
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            )
+            self._git(self.nonsensitive, "tag", "-d", "main")
+            self._git(self.nonsensitive, "config", "--unset", "push.default")
+            self._git(self.nonsensitive, "config", "--unset", "branch.main.remote")
+            self._git(
+                self.nonsensitive,
+                "config",
+                "--unset-all",
+                "branch.main.merge",
+            )
+
+    def test_tracking_push_default_uses_upstream_branch_validation(self):
+        remote_name = "issue196-tracking"
+        remote_path = os.path.join(self.root, remote_name + ".git")
+        self._git(self.root, "init", "--bare", remote_path)
+        self._git(self.nonsensitive, "remote", "add", remote_name, remote_path)
+        self._git(self.nonsensitive, "config", "push.default", "tracking")
+        self._git(self.nonsensitive, "config", "branch.main.remote", remote_name)
+        self._git(
+            self.nonsensitive,
+            "config",
+            "branch.main.merge",
+            "refs/heads/main",
+        )
+        try:
+            planned = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                remote_name,
+            )
+            self.assertIn("refs/heads/main:refs/heads/main", planned)
+            allowed, detail = self.narrowing([remote_name], self.nonsensitive)
+            self.assertTrue(allowed, detail)
+            self._git(
+                self.nonsensitive,
+                "config",
+                "branch.main.merge",
+                "refs/tags/public-release",
+            )
+            planned = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                remote_name,
+            )
+            self.assertIn("refs/heads/main:refs/tags/public-release", planned)
+            allowed, detail = self.narrowing([remote_name], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            self.assertIn("upstream", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset", "push.default")
+            self._git(self.nonsensitive, "config", "--unset", "branch.main.remote")
+            self._git(
+                self.nonsensitive,
+                "config",
+                "--unset-all",
+                "branch.main.merge",
+            )
+            self._git(self.nonsensitive, "remote", "remove", remote_name)
 
     def test_upstream_push_default_cannot_target_a_tag(self):
         self._git(self.nonsensitive, "config", "push.default", "upstream")
@@ -472,6 +724,73 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         allowed, detail = self.narrowing(["origin", "separate-wt"], outside)
         self.assertFalse(allowed, detail)
         self.assertIn("separate Git directory", detail)
+        self._git(outside, "config", "core.worktree", outside)
+        allowed, detail = self.narrowing(["origin", "separate-wt"], outside)
+        self.assertFalse(allowed, detail)
+        self.assertIn("separate Git directory", detail)
+
+    def test_ordinary_submodule_has_a_provable_primary_checkout(self):
+        source = os.path.join(self.root, "submodule-source")
+        superproject = os.path.join(self.root, "submodule-superproject")
+        self._make_repo(source, {"tier": 2, "flags": {"sensitive_data": False}})
+        self._git(source, "add", "-f", ".agent-harness/tier.json")
+        self._git(source, "commit", "-m", "track submodule tier")
+        self._make_repo(superproject, {"tier": 2, "flags": {"sensitive_data": False}})
+        self._git(
+            superproject,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source,
+            "module",
+        )
+        submodule = os.path.join(superproject, "module")
+        self._git(
+            submodule,
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+
+        common_dir = self._git(submodule, "rev-parse", "--git-common-dir")
+        if not os.path.isabs(common_dir):
+            common_dir = os.path.join(submodule, common_dir)
+        primary_record = self._git(
+            submodule, "worktree", "list", "--porcelain"
+        ).splitlines()[0]
+        self.assertEqual(
+            os.path.normcase(os.path.abspath(common_dir)),
+            os.path.normcase(os.path.abspath(primary_record.removeprefix("worktree "))),
+        )
+        self.assertTrue(
+            self._git(submodule, "config", "--get", "core.worktree"),
+            "ordinary submodule must expose its checkout through core.worktree",
+        )
+        resolved_core_worktree = os.path.abspath(
+            os.path.join(
+                common_dir,
+                self._git(submodule, "config", "--get", "core.worktree"),
+            )
+        )
+        self.assertEqual(
+            os.path.normcase(resolved_core_worktree),
+            os.path.normcase(os.path.abspath(submodule)),
+        )
+        self.assertEqual(
+            os.path.normcase(
+                self._git(
+                    submodule,
+                    "rev-parse",
+                    "--show-superproject-working-tree",
+                )
+            ),
+            os.path.normcase(os.path.abspath(superproject)),
+        )
+
+        allowed, detail = self.narrowing(["origin", "main"], submodule)
+        self.assertTrue(allowed, detail)
 
     def test_a_worktree_cannot_declassify_its_own_sensitive_repository(self):
         """A repo that declares sensitive_data ITSELF stays denied from any of
