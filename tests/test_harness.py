@@ -5423,6 +5423,58 @@ allow_local_binding = true
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)
 
+    def test_doctor_rejects_a_path_first_windows_git_command_shim(self) -> None:
+        shim_directory = str(Path(self.temp.name) / "shim")
+        native_directory = str(Path(self.temp.name) / "native")
+        shim = os.path.join(shim_directory, "git.cmd")
+        native = os.path.join(native_directory, "git.exe")
+        environment = {
+            "PATH": f"{shim_directory};{native_directory}",
+            "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        }
+
+        with mock.patch.object(harness.os, "name", "nt"):
+            with mock.patch.object(harness.os, "pathsep", ";"):
+                with mock.patch.object(
+                    harness.os.path,
+                    "isfile",
+                    side_effect=lambda path: path.lower()
+                    in {shim.lower(), native.lower()},
+                ):
+                    harness.reset_probe_binary_cache()
+                    self.assertEqual(
+                        harness.resolve_windows_command_binary(
+                            "git", environment
+                        ).lower(),
+                        shim.lower(),
+                    )
+                    self.assertEqual(
+                        harness.resolve_probe_binary("git", environment).lower(),
+                        native.lower(),
+                    )
+                    ok, detail = harness.git_command_fidelity_status(environment)
+
+        self.assertFalse(ok)
+        self.assertIn(shim.lower(), detail.lower())
+        self.assertIn(native.lower(), detail.lower())
+        self.assertIn("HEAD^{commit}", detail)
+        self.assertIn("Git for Windows directly", detail)
+
+    def test_doctor_accepts_an_effective_native_git_image(self) -> None:
+        image = r"C:\\fixture\\git.exe"
+        with mock.patch.object(harness.os, "name", "nt"):
+            with mock.patch.object(
+                harness, "resolve_windows_command_binary", return_value=image
+            ):
+                with mock.patch.object(
+                    harness, "resolve_probe_binary", return_value=image
+                ):
+                    ok, detail = harness.git_command_fidelity_status()
+
+        self.assertTrue(ok)
+        self.assertIn(image, detail)
+        self.assertIn("preserves argv", detail)
+
     def test_doctor_reports_floor_version_and_reference_integrity(self) -> None:
         repo = self.make_repo()
         self.write_hooks(
@@ -5436,6 +5488,7 @@ allow_local_binding = true
         ):
             result, output = self.run_doctor_with_fixture_globals(repo)
         self.assertIn("[ok] floor version: canonical template ", output)
+        self.assertIn("[ok] Git command fidelity:", output)
         self.assertIn("reference integrity: ", output)
         self.assertIn("declared vs real: ", output)
         self.assertEqual(result, 0, output)
