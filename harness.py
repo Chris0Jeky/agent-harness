@@ -142,6 +142,7 @@ class HarnessError(RuntimeError):
 #   4. An argv[0] that already carries a directory keeps its meaning verbatim;
 #      searching for it would change what the caller asked for.
 NON_REPARSING_PROBE_SUFFIXES = frozenset({".exe", ".com"})
+WINDOWS_COMMAND_SHIM_SUFFIXES = frozenset({".cmd", ".bat"})
 # Windows' own default, used when PATHEXT is absent or empty. Treating an empty
 # PATHEXT as "no suffixes" would leave every probe on that box unresolvable.
 DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD"
@@ -232,6 +233,26 @@ def probe_candidate_paths(
     return candidates
 
 
+def windows_command_candidate_paths(
+    name: str, directories: list[str], suffixes: list[str]
+) -> list[str]:
+    """Return the PATH/PATHEXT order a bare Windows command name sees.
+
+    This intentionally differs from ``probe_candidate_paths``: Windows walks
+    every PATHEXT suffix in one PATH directory before it moves to the next one.
+    It answers what a bare command would reach, while probes retain their
+    images-first resolver so they never have to launch that batch shim.
+    """
+    declared = os.path.splitext(name)[1]
+    if declared:
+        return [os.path.join(directory, name) for directory in directories]
+    return [
+        os.path.join(directory, name) + suffix
+        for directory in directories
+        for suffix in suffixes
+    ]
+
+
 def probe_candidate_is_runnable(path: str) -> bool:
     """Whether the operating system would actually execute this candidate."""
     if not os.path.isfile(path):
@@ -310,6 +331,29 @@ def resolve_probe_binary(name: str, env: Mapping[str, str] | None = None) -> str
     return resolved
 
 
+def resolve_windows_command_binary(
+    name: str, env: Mapping[str, str] | None = None
+) -> str | None:
+    """Resolve a bare command in Windows' PATH/PATHEXT order without spawning.
+
+    This is diagnostic-only. Production probes use ``resolve_probe_binary`` so
+    a later native image can safely outrank an earlier command shim.
+    """
+    if os.name != "nt":
+        return None
+    if os.path.dirname(name):
+        return name if probe_candidate_is_runnable(name) else None
+    environment = probe_environment(env)
+    for candidate in windows_command_candidate_paths(
+        name,
+        probe_search_directories(environment),
+        probe_search_suffixes(environment),
+    ):
+        if probe_candidate_is_runnable(candidate):
+            return candidate
+    return None
+
+
 def probe_spawn_argv(
     argv: list[str], env: Mapping[str, str] | None = None
 ) -> tuple[list[str], str]:
@@ -333,6 +377,36 @@ def probe_spawn_argv(
                 f"spawned safely because {hazard}"
             )
     return spawned, ""
+
+
+def git_command_fidelity_status(
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Report whether Doctor's resolved Git command preserves Windows argv.
+
+    A successful ``git --version`` does not prove that a Windows batch shim
+    preserves a revision expression: ``cmd.exe`` re-parses the complete command
+    line before the shim forwards it. This is deliberately static: Doctor names
+    a risky command boundary without sending a synthetic ref through a local shim.
+    """
+    safe_executable = resolve_probe_binary("git", env)
+    if safe_executable is None:
+        return False, "Git could not be resolved from absolute PATH entries"
+    effective_executable = resolve_windows_command_binary("git", env)
+    if effective_executable is None:
+        return True, f"safe Git target {safe_executable} preserves argv"
+    suffix = os.path.splitext(effective_executable)[1].lower()
+    if suffix in WINDOWS_COMMAND_SHIM_SUFFIXES:
+        return False, (
+            f"effective Git target {effective_executable} is a {suffix} shim; "
+            f"safe Git target is {safe_executable}. cmd.exe can "
+            "re-parse caret-bearing revision expressions such as HEAD^{commit}. "
+            "Invoke Git for Windows directly or remove/replace the shim"
+        )
+    return True, (
+        f"effective Git target {effective_executable}; safe Git target "
+        f"{safe_executable} preserves argv"
+    )
 
 
 def run(
@@ -6969,6 +7043,8 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (label, result.returncode == 0, (result.stdout or result.stderr).strip())
         )
+    git_fidelity_ok, git_fidelity_detail = git_command_fidelity_status()
+    checks.append(("Git command fidelity", git_fidelity_ok, git_fidelity_detail))
     try:
         global_floor_count, global_floor_detail = inspectable_global_codex_floor_status(
             codex_home

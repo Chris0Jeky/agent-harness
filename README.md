@@ -108,7 +108,10 @@ degrades to `UNPROVEN` and exits 0. A probe's binary is resolved against absolut
 entries only, never the current directory — Windows' `CreateProcess` searches the cwd first,
 and the cwd of an audit is a repository that could otherwise answer to the name `git`
 (issue #112). A `.EXE`/`.COM` anywhere on `PATH` outranks a `.CMD`/`.BAT` shim everywhere on
-it, and a shim is spawned only with arguments that survive `cmd.exe` re-parsing; a name that
+it, and a shim is spawned only with arguments that survive `cmd.exe` re-parsing. On Windows,
+Doctor also reports the PATH/PATHEXT-effective Git target separately from its safe native probe
+target, and rejects an effective Git `.CMD`/`.BAT` shim because it can corrupt caret-bearing
+revision expressions; invoke the reported native Git target directly or remove/replace the shim. A name that
 cannot be resolved is a named `UNPROVEN`, never a silent empty answer. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
 tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
 diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
