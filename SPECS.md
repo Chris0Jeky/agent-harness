@@ -545,9 +545,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   every registered linked worktree and only removes a candidate after an explicit complete branch
   namespace refresh for every remote, one canonical physical identity from discovery through the
   removal operand, exact containment under the primary checkout's `.worktrees/`, no configured
-  work-tree redirection, clean tracked/staged/untracked/ignored state, no executable-mode-only
-  difference, no assume-unchanged/skip-worktree index flags or resolve-undo recovery records, no
-  pending `COMMIT_EDITMSG` differing from the current commit message, no worktree-local refs,
+  work-tree redirection, clean tracked/staged/untracked/ignored state, no observable
+  executable-mode-only difference, no assume-unchanged/skip-worktree index flags or resolve-undo
+  recovery records, no pending `COMMIT_EDITMSG` differing from the current commit message, no
+  worktree-local refs,
   non-baseline administrative/operation state, or non-regular candidate HEAD reflog, no direct
   `ORIG_HEAD` target whose object type is not `commit`, no recovery commit held only by either
   object-ID side of a raw candidate HEAD reflog record or by `ORIG_HEAD`, an attached
@@ -571,6 +572,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   version 3 carries the mode, index-recovery, pending-message status, local-ref,
   administrative-state, direct-`ORIG_HEAD` object identity/type, and recovery-retention evidence
   without emitting commit-message content.
+  Native Windows skips only the forced executable-mode comparison because its working tree cannot
+  represent Git's Unix executable bit and otherwise synthesizes `100755` to `100644` differences
+  for clean files. POSIX forces that comparison even when repository `core.fileMode=false`,
+  preserving genuine mode-only drift; a POSIX filesystem that cannot expose the bit may still
+  conservatively retain a candidate.
 
 The owner lease is coordination, not authentication or an OS lock. It proves nothing about a
 process that does not follow the protocol. A non-cooperating process or watcher may still write

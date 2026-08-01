@@ -1,33 +1,33 @@
 # Active workstreams
 
-Snapshot: 2026-07-31. Published base: `b2c2fd40a1e3d99821983b6ad38a1fecd1d22809`.
+Snapshot: 2026-08-01. Published base: `744b2f21d36053a9c0152a617b8af02a4b72b4a8`.
 One workstream is active; the second slot is free.
 
-## A — AH-1 continuity publication (PR #195)
+## A — AH-6 native Windows executable-mode capability (#170)
 
-- **Observable outcome:** the five canonical continuity homes describe `main@b2c2fd4`, all 69 open
-  issues map exactly once, and the next session can resume without trusting historical root
-  `HANDOFF.md`.
-- **Evidence:** branch `docs/workbench-continuity-20260731` preserves its original continuity commit
-  while merging current `origin/main`; PR #193 merged as `b2c2fd4`, preserving head `8648e5c`; all
-  nine jobs in run `30666338126` passed; six connector threads were tracked in #196 and resolved.
-- **In:** `docs/SYSTEM_STATE.md`, `ROADMAP.md`, this file, `docs/BENCHMARKS.md`, and
-  `handoffs/2026-07-31-workbench-pivot.md`.
-- **Out:** runtime behavior beyond the merged base, root `HANDOFF.md`, `FLOOR_LIMITATIONS.md`, H-2
-  activity, live estate/config/Docker mutation, public replay, plugin extraction, or sibling edits.
-- **Architecture seam:** evidence/state ownership across AH-1 through AH-10, not enforcement.
-- **Tests/fixtures/corpus:** no fixture/corpus change; live issue-map, JSON, audit/Doctor,
-  Markdown/diff, fix-diff review, hosted CI, aging, and all-surface triage gates apply.
-- **Measurement:** only measured B-012 through B-014 evidence is added; no current estate baseline,
-  longitudinal Doctor series, or universal policy quality is claimed.
-- **Limitation:** deployed global floor remains 1.6.21 while canonical source is 1.6.22. Static
-  Doctor cannot prove fresh-session trust; GitHub state can change after this dated snapshot.
-- **Exact verification:** `py -3 -B harness.py audit . --offline`; `py -3 -B harness.py doctor
-  --repo . --offline` (expected exit 1 only for canonical 1.6.22 versus deployed 1.6.21 shared-floor
-  drift; any other failure blocks); prove 69/69 live issue mapping; parse tier JSON; `git diff
-  --check origin/main...HEAD`.
-- **Next executable handoff:** push the base-refresh fix, verify the exact head against `b2c2fd4`,
-  require all nine hosted jobs green, finish one fix-diff review, age/triage once, and merge-commit.
+- **Observable outcome:** guarded closeout does not retain a clean native-Windows worktree merely
+  because Git's forced mode comparison synthesizes `100755` to `100644`, while a genuine POSIX
+  executable-mode-only change remains a preservation blocker even when `core.fileMode=false`.
+- **Evidence:** PR #169's bounded review reproduced the Windows false keep and opened #170. On the
+  current branch, a real Git-for-Windows fixture first reproduces the synthetic delta, and the
+  unchanged WSL2 fixture proves a real `chmod` delta is still detected on a mode-capable filesystem.
+- **In:** the closeout mode-comparison capability seam, causal Windows and POSIX fixtures, and the
+  README/SPECS contract qualification.
+- **Out:** temporary write probes, live closeout apply, force removal, branch deletion, estate
+  cleanup, mode emulation on unknown POSIX mounts, or any floor/runtime deployment.
+- **Architecture seam:** `harness.py` worktree candidate inspection before the existing forced
+  `core.fileMode=true` comparison.
+- **Tests/fixtures/corpus:** one native-Windows executable-baseline fixture plus the existing POSIX
+  mode-drift and probe-failure fixtures; no replay corpus change.
+- **Measurement:** correctness matrix only; do not infer filesystem prevalence or estate impact.
+- **Limitation:** native Windows cannot preserve a working-tree Unix executable bit. POSIX mounts
+  that also cannot expose it may still conservatively retain a candidate; that is a false keep,
+  never removal authority.
+- **Exact verification:** focused Windows/WSL controls; full closeout and unit suites; smoke;
+  audit/Doctor; Black, Ruff, compile, diff checks; hosted Windows/macOS/Linux CI; one independent
+  read-only review; aging and all-surface triage.
+- **Next executable handoff:** publish one PR closing only #170, with no live apply or consumer
+  rollout, then merge-commit only after exact-head evidence is green.
 
 ## Completed in this wave
 
@@ -37,8 +37,12 @@ One workstream is active; the second slot is free.
 - PR #187 closed #177 with schema/runtime surrogate parity. PR #194 closed #167 with suspend-aware,
   rollback-detecting fingerprint expiry and global stop-on-invalidity. No live closeout apply ran.
 - PR #193 merged the four owner-authorized #184 public-push security repairs as `b2c2fd4`; #184 then
-  closed with exact producer proof, without authorizing live installation. Five pre-merge and one post-merge fail-closed usability
-  findings were classified once, recorded in #196, and resolved without another fix loop.
+  closed with exact producer proof, without authorizing live installation. Five pre-merge and one
+  post-merge fail-closed usability findings were classified once, recorded in #196, and resolved
+  without another fix loop.
+- PR #195 published the current workbench continuity homes. PR #197 preserved direct non-commit
+  `ORIG_HEAD` identity and closed #172; its exact-head run passed all nine hosted jobs, and the
+  post-merge review/comment/thread refresh found no late feedback.
 - PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
   review evidence remain preserved.
 
@@ -46,9 +50,6 @@ One workstream is active; the second slot is free.
 
 - #160 is reproduced and owner-blocked on disabled mixed-transport precedence. Recommended rule:
   effective disablement suppresses only cross-layer conflict; same-table conflict remains invalid.
-- #172 is the exact next independent safe slice after PR #195 settles: preserve direct non-commit
-  `ORIG_HEAD` identity with additive fingerprint evidence. #170 additionally needs a real
-  POSIX/mode-capable proving environment.
 - #196 is the bounded AH-3 follow-up for six fail-closed public-push usability edges; it is not
   permission to reopen #193 or broaden the parser.
 - #185/#186/#188–#192 are mapped follow-ups, not permission to broaden the active wave.
