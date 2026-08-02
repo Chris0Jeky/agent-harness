@@ -522,8 +522,8 @@ segment; NEVER match against `-m`/`--body` string arguments.
 ### §6.1 Cross-product gate — where the tripwire ends (issue #63)
 
 The matrix above tests each command in canonical form. `tests/test_prefix_wrapper_crossproduct.py`
-crosses it with the shapes real command lines carry — 27 prefix spellings (leading
-redirections, `--%`, `VAR=value`, combinations) and 74 wrapper spellings (launchers,
+crosses it with the shapes real command lines carry — 25 prefix spellings (leading
+redirections, `VAR=value`, separators, and combinations) and 74 wrapper spellings (launchers,
 container/remote exec, nested interpreters, scriptblock/evaluator forms) — and asserts BOTH
 directions: charter denies stay denied, curated benign commands stay allowed.
 
