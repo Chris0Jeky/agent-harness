@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-08-02. Published implementation base: `ac3266a8726c04a97fdc70d0c459fcfaf3b0ff85`.
+Snapshot: 2026-08-02. Published implementation base: `c81f8911a6c186dc98e22c62289a07fcc24166c7`.
 No implementation workstream is active; both slots are free.
 
 ## No active implementation
@@ -62,8 +62,9 @@ No implementation workstream is active; both slots are free.
 
 ## Parked or queued, not active
 
-- #160 is reproduced and owner-blocked on disabled mixed-transport precedence. Recommended rule:
-  effective disablement suppresses only cross-layer conflict; same-table conflict remains invalid.
+- #160 closed through PR #219: effective disablement suppresses only a cross-layer mixed-transport
+  conflict; same-table conflict remains invalid and a later re-enable fails closed. Doctor reports
+  static topology only, not complete Codex parser acceptance for inactive definitions.
 - #201 is the bounded AH-3 follow-up for Git numeric booleans in exact no-follow-tags narrowing; it
   remains held while dispatcher/smoke ownership is occupied and is not permission to reopen
   #193/#196 or broaden the parser.
