@@ -8,7 +8,7 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 
 | Epic | Dependency | Evidence and outcome state | Primary open issues |
 |---|---|---|---|
-| AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #138, #185, #215 |
+| AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #138, #185 |
 | AH-2 — internal Policy Lab | AH-1 truth and corpus provenance | **Implemented core; bounded follow-ups queued.** PR #140 merged deterministic replay evidence; PRs #159/#163 repaired report/manifest contracts; PRs #174/#176/#187 closed #152/#156/#177 with reproduction and schema/runtime proof. Replay remains internal and experimental. | #141, #142, #143, #145, #146, #147, #150, #157, #158 |
 | AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. #201 owns the remaining numeric-boolean edge. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201 |
 | AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting; PR #212 closed #98 with canonical guidance-source identity before byte comparison. PR #208 closed documentation-only trust-bootstrap issue #85 without a runtime claim. #160 is reproduced and owner-blocked on precedence. | #19, #107, #160 |
@@ -19,7 +19,7 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seams remain #101 and #160. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 58 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
+All 57 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
