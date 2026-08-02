@@ -196,7 +196,10 @@ declarations, calls the outcome UNPROVEN, and fails closed. Valid feature values
 inactive legacy profile map do not affect activation; malformed hook feature values still fail the
 typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
 runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,
-so a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory.
+so a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory whenever
+the PreTool floor is enabled. The owner paused that floor on 2026-08-02: do not perform that
+trust/canary sequence, re-enable the floor, or alter its runtime settings unless the owner
+explicitly directs it.
 
 For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
 in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped
@@ -221,9 +224,9 @@ roadmap work. Public replay or blueprint-plugin extraction is deferred under AH-
 
 The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
 Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
-boundaries stay in `docs/SYSTEM_STATE.md`. The only open human action is H-2's owner-parked,
-fresh-session Codex trust/canary evidence. Do not infer that static byte equality proves live
-runtime activation.
+boundaries stay in `docs/SYSTEM_STATE.md`. The only open human action is H-2's owner-paused,
+fresh-session Codex trust/canary evidence. It must not be performed while the owner's PreTool-floor
+pause is in force. Do not infer that static byte equality proves live runtime activation.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
