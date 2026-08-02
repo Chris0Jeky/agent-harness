@@ -14,12 +14,12 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 | AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting; PR #212 closed #98 with canonical guidance-source identity before byte comparison. PR #208 closed documentation-only trust-bootstrap issue #85 without a runtime claim. PR #219 closed #160 with the selected disabled mixed-transport topology precedence. | #19, #107 |
 | AH-5 — runtime/external adapters | AH-2 stable source and report contracts | **Partial.** Recorded and generic process sources exist; runtime surface parity remains bounded. | #86, #88 |
 | AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows mode deltas and closed #170; PR #206 published the tailored new-repo contract and closed #131. PR #209 closed linked-worktree validation documentation #84 without changing runtime behavior. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #91, #101, #122, #139, #186, #188, #190, #191, #192 |
-| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Owner-parked.** Issue #39 is measured rollout evidence. H-2 remains the only open human item; do not restart estate-wide canaries. | #39 |
+| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Owner-paused.** Issue #39 is measured rollout evidence. H-2 remains the only open human item; do not restart estate-wide canaries. #222 records the separately owner-gated canonical-guidance reconciliation. | #39, #222 |
 | AH-8 — integrated measurement | evidence from all executable capabilities | **Historical measurements exist; integrated current baseline unverified.** PR #211 made cross-product shapes executable and closed #109. Keep warning, approval, and denial metrics separate. | #21, #110, #118, #120 |
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seam #101 remains; #160 is closed and retains historical AH-9 lineage. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 56 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
+All 57 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
@@ -99,4 +99,5 @@ Every base or head change re-proves affected evidence.
 3. Use AH-8 evidence to choose bounded AH-3 families and measure them in shadow before enforcement.
 4. Advance AH-4/AH-6 only from reproduced configuration and estate failures; keep diagnosis and
    mutation separate.
-5. Leave AH-7 owner-parked and AH-10 deferred until their explicit evidence gates change.
+5. Leave AH-7 owner-paused until the owner explicitly re-enables the PreTool floor; leave AH-10
+   deferred until its explicit evidence gates change.
