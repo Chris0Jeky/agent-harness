@@ -128,7 +128,10 @@ that measured nothing cannot read as a clean one. `doctor` surfaces the same fin
 
 Supply `doctor --config-root C:\path\to\claude-config` to compare the source checkout's
 `CLAUDE.md` and `codex/AGENTS.md` bytes with their respective deployed global runtime files.
-An omitted, absent, or unreadable source is `UNPROVEN`; a readable byte mismatch fails.
+An `[ok]` source must be the checkout root of the harness origin's `claude-config` sibling,
+clean on `main`, level with its published `origin/main`, and free of hidden index flags on both
+guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
+byte mismatch or absent deployed target fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before

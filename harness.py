@@ -5115,14 +5115,62 @@ def describe_floor(label: str, digest: str, version: str) -> str:
     return f"{label} {version or '<no FLOOR_VERSION>'} sha {digest[:12]}"
 
 
-def harness_reference_status(
-    harness_root: Path, command_runner: Any, deadline: float | None
+def checkout_reference_status(
+    harness_root: Path,
+    command_runner: Any,
+    deadline: float | None,
+    *,
+    label: str = "harness checkout",
+    relevant_paths: tuple[str, ...] = ("templates/hooks",),
+    expected_origin_slug: str | None = None,
+    require_checkout_root: bool = False,
+    required_tracked_paths: tuple[str, ...] = (),
+    require_exact_divergence: bool = False,
 ) -> tuple[bool, str]:
-    """Whether this harness checkout may serve as the canonical byte reference.
-
-    The pin/compare primitives read the WORKING TREE, so a floor branch or a
-    dirty tree would make unmerged bytes the reference. Refuse, and say so.
-    """
+    """Whether a clean checkout may serve as a canonical byte reference."""
+    relevant_description = " and ".join(relevant_paths)
+    if require_checkout_root:
+        resolved, top_level = output_before_deadline(
+            command_runner,
+            ["git", "rev-parse", "--show-toplevel"],
+            harness_root,
+            deadline,
+        )
+        top_level_text = top_level.strip()
+        if not resolved or not top_level_text:
+            return (
+                False,
+                f"the Git root of {label} {harness_root} is unresolvable",
+            )
+        try:
+            top_level_path = Path(top_level_text).resolve()
+        except (OSError, RuntimeError):
+            return (
+                False,
+                f"the Git root of {label} {harness_root} is unresolvable",
+            )
+        if top_level_path != harness_root:
+            return (
+                False,
+                f"{label} {harness_root} is not the checkout root (Git reports "
+                f"{top_level_path}), so its working tree is not the canonical reference",
+            )
+    if expected_origin_slug is not None:
+        resolved, origin_url = output_before_deadline(
+            command_runner,
+            ["git", "remote", "get-url", "origin"],
+            harness_root,
+            deadline,
+        )
+        actual_origin_slug = github_repo_slug(origin_url).casefold() if resolved else ""
+        if actual_origin_slug != expected_origin_slug.casefold():
+            shown_origin = actual_origin_slug or "<non-GitHub or unreadable>"
+            return (
+                False,
+                f"{label} {harness_root} origin identifies {shown_origin!r}, not "
+                f"expected sibling {expected_origin_slug!r}, so its working tree is "
+                "not the canonical reference",
+            )
     resolved, branch = output_before_deadline(
         command_runner,
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -5130,29 +5178,28 @@ def harness_reference_status(
         deadline,
     )
     if not resolved:
-        return False, f"the branch of harness checkout {harness_root} is unresolvable"
+        return False, f"the branch of {label} {harness_root} is unresolvable"
     if branch.strip() != "main":
         return (
             False,
-            f"harness checkout {harness_root} is on {branch.strip() or '<unknown>'!r}, "
+            f"{label} {harness_root} is on {branch.strip() or '<unknown>'!r}, "
             "not main, so its working tree is not the canonical reference",
         )
     resolved, dirty = output_before_deadline(
         command_runner,
-        ["git", "status", "--porcelain", "--", "templates/hooks"],
+        ["git", "status", "--porcelain", "--", *relevant_paths],
         harness_root,
         deadline,
     )
     if not resolved:
         return (
             False,
-            f"the working-tree state of harness checkout {harness_root} is "
-            "unresolvable",
+            f"the working-tree state of {label} {harness_root} is " "unresolvable",
         )
     if dirty.strip():
         return (
             False,
-            f"harness checkout {harness_root} has uncommitted templates/hooks "
+            f"{label} {harness_root} has uncommitted {relevant_description} "
             "changes, so its working tree is not the canonical reference",
         )
     # "Clean" is only as trustworthy as the index. `skip-worktree` (S) and
@@ -5162,15 +5209,18 @@ def harness_reference_status(
     # read `ok` while published HEAD holds different canonical bytes.
     resolved, index_flags = output_before_deadline(
         command_runner,
-        ["git", "ls-files", "-v", "--", "templates/hooks"],
+        ["git", "ls-files", "-v", "--", *relevant_paths],
         harness_root,
         deadline,
     )
     if not resolved:
         return (
             False,
-            f"the index flags of harness checkout {harness_root} are unresolvable",
+            f"the index flags of {label} {harness_root} are unresolvable",
         )
+    indexed_paths = {
+        line.split(" ", 1)[1] for line in index_flags.splitlines() if " " in line
+    }
     hidden = sorted(
         line.split(" ", 1)[1]
         for line in index_flags.splitlines()
@@ -5179,9 +5229,16 @@ def harness_reference_status(
     if hidden:
         return (
             False,
-            f"harness checkout {harness_root} marks {', '.join(hidden)} "
+            f"{label} {harness_root} marks {', '.join(hidden)} "
             "skip-worktree/assume-unchanged, so `git status` cannot see local "
             "edits there and this working tree is not the canonical reference",
+        )
+    missing_tracked = sorted(set(required_tracked_paths) - indexed_paths)
+    if missing_tracked:
+        return (
+            False,
+            f"{label} {harness_root} does not track {', '.join(missing_tracked)}, "
+            "so its working tree is not the canonical reference",
         )
     # Clean on a local `main` is not the same as agreeing with the published
     # one: unpushed commits to templates/hooks, or a main that is behind, would
@@ -5199,10 +5256,16 @@ def harness_reference_status(
         if behind != "0" or ahead != "0":
             return (
                 False,
-                f"harness checkout {harness_root} is {ahead} ahead of and "
+                f"{label} {harness_root} is {ahead} ahead of and "
                 f"{behind} behind origin/main, so its working tree is not the "
                 "canonical reference",
             )
+    elif require_exact_divergence:
+        return (
+            False,
+            f"the origin/main divergence of {label} {harness_root} is "
+            "unresolvable, so its working tree is not the canonical reference",
+        )
     # `origin/main` is a LOCAL tracking ref. Unfetched, it can be arbitrarily
     # far behind the published branch, and `rev-list` then reports `0 0` for a
     # working tree that is stale — a vendored copy matching that obsolete
@@ -5224,23 +5287,30 @@ def harness_reference_status(
     if not resolved_head or not published_tip:
         return (
             False,
-            f"harness checkout {harness_root} is clean on main, but the published "
+            f"{label} {harness_root} is clean on main, but the published "
             "main tip could not be read (offline, or origin is unreachable), so "
             "this working tree cannot be proven current",
         )
     if head.strip() != published_tip:
         return (
             False,
-            f"harness checkout {harness_root} is clean on main at "
+            f"{label} {harness_root} is clean on main at "
             f"{head.strip()[:12]}, but published main is at {published_tip[:12]} — "
             "the local origin/main is stale, so this working tree is not the "
             "canonical reference",
         )
     return (
         True,
-        f"harness checkout {harness_root} is clean on main and level with "
+        f"{label} {harness_root} is clean on main and level with "
         f"origin/main at the published tip {published_tip[:12]}",
     )
+
+
+def harness_reference_status(
+    harness_root: Path, command_runner: Any, deadline: float | None
+) -> tuple[bool, str]:
+    """Whether this harness checkout may serve as the canonical byte reference."""
+    return checkout_reference_status(harness_root, command_runner, deadline)
 
 
 def vendored_floor_findings(
@@ -5496,20 +5566,75 @@ def same_file(left: Path, right: Path) -> bool:
     )
 
 
-def guidance_identity_status(source: Path, deployed: Path) -> tuple[bool | str, str]:
-    """Compare explicitly supplied guidance source bytes with one live target."""
-    try:
-        source_bytes = source.read_bytes()
-    except FileNotFoundError:
-        return REALITY_UNPROVEN, f"source guidance is absent: {source}"
-    except (OSError, UnicodeError) as exc:
-        return REALITY_UNPROVEN, f"cannot read source guidance {source}: {exc}"
+GUIDANCE_SOURCE_PATHS = ("CLAUDE.md", "codex/AGENTS.md")
+
+
+def guidance_reference_status(
+    source_root: Path,
+    harness_root: Path,
+    command_runner: Any,
+    deadline: float | None,
+) -> tuple[bool, str]:
+    """Prove a supplied claude-config checkout is the canonical guidance source."""
+    resolved, harness_origin = output_before_deadline(
+        command_runner,
+        ["git", "remote", "get-url", "origin"],
+        harness_root,
+        deadline,
+    )
+    harness_slug = github_repo_slug(harness_origin).casefold() if resolved else ""
+    owner, separator, _repository = harness_slug.partition("/")
+    if not separator or not owner:
+        return (
+            False,
+            f"the origin of harness checkout {harness_root} cannot identify the "
+            "GitHub sibling that owns canonical guidance",
+        )
+    return checkout_reference_status(
+        source_root,
+        command_runner,
+        deadline,
+        label="guidance source checkout",
+        relevant_paths=GUIDANCE_SOURCE_PATHS,
+        expected_origin_slug=f"{owner}/claude-config",
+        require_checkout_root=True,
+        required_tracked_paths=GUIDANCE_SOURCE_PATHS,
+        require_exact_divergence=True,
+    )
+
+
+def guidance_identity_status(
+    source: Path,
+    deployed: Path,
+    source_reference_ok: bool = True,
+    source_reference_detail: str = "",
+) -> tuple[bool | str, str]:
+    """Compare proven source guidance bytes with one deployed runtime target."""
     try:
         deployed_bytes = deployed.read_bytes()
     except FileNotFoundError:
         return False, f"deployed guidance is absent: {deployed}; source: {source}"
     except (OSError, UnicodeError) as exc:
         return REALITY_UNPROVEN, f"cannot read deployed guidance {deployed}: {exc}"
+    try:
+        source.stat()
+    except FileNotFoundError:
+        return REALITY_UNPROVEN, f"source guidance is absent: {source}"
+    except (OSError, UnicodeError) as exc:
+        return REALITY_UNPROVEN, f"cannot read source guidance {source}: {exc}"
+    if not source_reference_ok:
+        return (
+            REALITY_UNPROVEN,
+            "source guidance reference is not canonical: "
+            f"{source_reference_detail or 'reference proof did not pass'}; "
+            f"source: {source}; deployed: {deployed}; source bytes were not compared",
+        )
+    try:
+        source_bytes = source.read_bytes()
+    except FileNotFoundError:
+        return REALITY_UNPROVEN, f"source guidance is absent: {source}"
+    except (OSError, UnicodeError) as exc:
+        return REALITY_UNPROVEN, f"cannot read source guidance {source}: {exc}"
     return source_bytes == deployed_bytes, f"source: {source}; deployed: {deployed}"
 
 
@@ -7473,17 +7598,31 @@ def doctor(args: argparse.Namespace) -> int:
     except (HarnessError, OSError, UnicodeError) as exc:
         global_floor_count = -1
         global_floor_detail = str(exc)
+    # One bounded runner and deadline cover every canonical-source probe this
+    # command makes. A source that cannot prove identity or currency is
+    # UNPROVEN, never a substitute for live deployed bytes.
+    probe_deadline = monotonic() + REALITY_BUDGET_SECONDS
+    probe_runner = offline_aware_command_runner(args)
     if config_root is None:
         claude_guidance_ok: bool | str = REALITY_UNPROVEN
         codex_guidance_ok: bool | str = REALITY_UNPROVEN
         claude_guidance_detail = "no --config-root supplied"
         codex_guidance_detail = "no --config-root supplied"
     else:
+        guidance_reference_ok, guidance_reference_detail = guidance_reference_status(
+            config_root, harness_root, probe_runner, probe_deadline
+        )
         claude_guidance_ok, claude_guidance_detail = guidance_identity_status(
-            config_root / "CLAUDE.md", claude_home / "CLAUDE.md"
+            config_root / "CLAUDE.md",
+            claude_home / "CLAUDE.md",
+            guidance_reference_ok,
+            guidance_reference_detail,
         )
         codex_guidance_ok, codex_guidance_detail = guidance_identity_status(
-            config_root / "codex" / "AGENTS.md", codex_home / "AGENTS.md"
+            config_root / "codex" / "AGENTS.md",
+            codex_home / "AGENTS.md",
+            guidance_reference_ok,
+            guidance_reference_detail,
         )
     checks.extend(
         [
@@ -7531,16 +7670,8 @@ def doctor(args: argparse.Namespace) -> int:
             ),
         ]
     )
-    # `harness_reference_status` reaches the remote for the published main tip,
-    # so this probe answers to `--offline` exactly like the repo reality checks
-    # below; otherwise a supposedly offline run still waits out `git ls-remote`.
-    # ONE budget for every probe this command makes. The floor-version check
-    # and the `--repo` reality checks both call `harness_reference_status`, so
-    # a separate deadline each let an unreachable harness origin be waited out
-    # twice — and let the two legs report different reference states.
-    probe_deadline = monotonic() + REALITY_BUDGET_SECONDS
     reference_ok, reference_detail = harness_reference_status(
-        harness_root, offline_aware_command_runner(args), probe_deadline
+        harness_root, probe_runner, probe_deadline
     )
     template_version = floor_version(
         harness_root / "templates" / "hooks" / "dispatch.py"
