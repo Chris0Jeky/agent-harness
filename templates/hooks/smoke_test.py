@@ -124,6 +124,18 @@ def dispatch_argv(runtime: str | None = None):
     return argv
 
 
+def emit(*values: object) -> None:
+    """Write one promptly visible smoke line, including through a captured pipe."""
+    print(*values, flush=True)
+
+
+def report_progress(event: str, **fields: object) -> None:
+    """Emit a deterministic machine-readable boundary without changing verdicts."""
+    parts = ["smoke-progress", f"event={event}"]
+    parts.extend(f"{name}={fields[name]}" for name in sorted(fields))
+    emit(" ".join(parts))
+
+
 def run_case(
     command: str,
     tier: int = 1,
@@ -4601,14 +4613,17 @@ CASES = [
 
 def run_smoke():
     failures = []
+    report_progress("start", mode="producer-exhaustive")
+    report_progress("section", name="static-command-matrix")
     for command, tier, flags, expected in CASES:
         got = run_case(command, tier, flags)
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((command, tier, flags, expected, got))
-        print(
+        emit(
             f"  [{status}] tier={tier} flags={flags or '{}'} expected={expected:5s} got={got:5s}  {command}"
         )
+    report_progress("section", name="filesystem-containment")
     # project-internal absolute rm -rf must be allowed
     with tempfile.TemporaryDirectory() as proj:
         target = os.path.join(proj, "build").replace("\\", "/")
@@ -4616,7 +4631,7 @@ def run_smoke():
         status = "ok" if got == "allow" else "FAIL"
         if got != "allow":
             failures.append(("rm -rf <inside-project-abs>", 1, {}, "allow", got))
-        print(
+        emit(
             f"  [{status}] tier=1 expected=allow got={got}  rm -rf <inside-project-absolute>"
         )
 
@@ -4647,7 +4662,7 @@ def run_smoke():
         status = "ok" if got == "deny" else "FAIL"
         if got != "deny":
             failures.append((label, 1, {}, "deny", got))
-        print(f"  [{status}] tier=1 expected=deny got={got}  {label}")
+        emit(f"  [{status}] tier=1 expected=deny got={got}  {label}")
 
     escape_root = "C:/srv/outside" if os.name == "nt" else "/srv/outside"
     resolution_cases = [
@@ -4749,7 +4764,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 1, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     nested_cases = [
         ("git reset --hard HEAD~1", 4, {}, "deny", "nested cwd inherits T4"),
@@ -4773,7 +4788,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, tier, flags, expected, got))
-        print(f"  [{status}] tier={tier} expected={expected} got={got}  {label}")
+        emit(f"  [{status}] tier={tier} expected={expected} got={got}  {label}")
 
     temp_target = os.path.join(tempfile.gettempdir(), "deny-floor-scratch").replace(
         "\\", "/"
@@ -4783,7 +4798,7 @@ def run_smoke():
     status = "ok" if got == "allow" else "FAIL"
     if got != "allow":
         failures.append(("actual OS temp child", 1, {}, "allow", got))
-    print(f"  [{status}] expected=allow got={got}  actual OS temp child")
+    emit(f"  [{status}] expected=allow got={got}  actual OS temp child")
     temp_root = tempfile.gettempdir().replace("\\", "/")
     temp_root_cases = [
         (f"rm -rf {temp_root}", "rm refuses shared OS temp root"),
@@ -4797,7 +4812,7 @@ def run_smoke():
         status = "ok" if got == "deny" else "FAIL"
         if got != "deny":
             failures.append((label, 1, {}, "deny", got))
-        print(f"  [{status}] expected=deny got={got}  {label}")
+        emit(f"  [{status}] expected=deny got={got}  {label}")
     temp_case_count += len(temp_root_cases)
 
     dispatch_module = load_dispatch_module()
@@ -4814,7 +4829,7 @@ def run_smoke():
             status = "ok" if not got else "FAIL"
             if got:
                 failures.append((label, 1, {}, False, got))
-            print(f"  [{status}] expected=False got={got}  {label}")
+            emit(f"  [{status}] expected=False got={got}  {label}")
     finally:
         dispatch_module.tempfile.tempdir = original_tempdir
     temp_case_count += len(dangerous_temp_cases)
@@ -4826,7 +4841,7 @@ def run_smoke():
         status = "ok" if got == "deny" else "FAIL"
         if got != "deny":
             failures.append(("junction escape", 1, {}, "deny", got))
-        print(f"  [{status}] expected=deny got={got}  junction escape")
+        emit(f"  [{status}] expected=deny got={got}  junction escape")
     else:
         with tempfile.TemporaryDirectory(dir=fixture_root()) as link_fixture:
             temp_env = isolated_dispatch_temp(link_fixture)
@@ -4841,15 +4856,16 @@ def run_smoke():
             except OSError as exc:
                 got = f"fixture-error:{exc.__class__.__name__}"
                 failures.append(("symlink escape", 1, {}, "deny", got))
-                print(f"  [FAIL] symlink fixture unavailable: {exc.__class__.__name__}")
+                emit(f"  [FAIL] symlink fixture unavailable: {exc.__class__.__name__}")
             else:
                 link_target = link.replace("\\", "/")
                 got = invoke_case(f"rm -rf {link_target}", project, env_extra=temp_env)
                 status = "ok" if got == "deny" else "FAIL"
                 if got != "deny":
                     failures.append(("symlink escape", 1, {}, "deny", got))
-                print(f"  [{status}] expected=deny got={got}  symlink escape")
+                emit(f"  [{status}] expected=deny got={got}  symlink escape")
 
+    report_progress("section", name="payload-authority-and-runtime")
     schema_cases = [
         (
             "parsed non-object hook payload",
@@ -4955,7 +4971,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 1, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     authority_cases = []
     with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
@@ -4983,7 +4999,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 1, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     runtime_cases = [
         (
@@ -5394,8 +5410,9 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 3, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
+    report_progress("section", name="merged-authority-context")
     context_cases = []
     with tempfile.TemporaryDirectory() as outer, tempfile.TemporaryDirectory() as stale:
         with tempfile.TemporaryDirectory() as unrelated:
@@ -5443,7 +5460,7 @@ def run_smoke():
                 status = "ok" if got == expected else "FAIL"
                 if got != expected:
                     failures.append((label, 4, {}, expected, got))
-                print(f"  [{status}] expected={expected} got={got}  {label}")
+                emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     merge_policy_cases = []
     with tempfile.TemporaryDirectory() as payload_project, tempfile.TemporaryDirectory() as env_project:
@@ -5468,7 +5485,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 3, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     stale_boundary_cases = []
     # Keep this fixture outside both the repository authority and the OS temp
@@ -5493,7 +5510,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 1, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     filesystem_root = os.path.abspath(os.sep)
     root_target = os.path.join(filesystem_root, "critical", "outside").replace(
@@ -5541,7 +5558,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 1, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     symlink_authority_count = 1
     with tempfile.TemporaryDirectory(dir=fixture_root()) as authority_fixture:
@@ -5575,7 +5592,7 @@ def run_smoke():
             failures.append(
                 ("symlinked cwd preserves repo boundary", 1, {}, "deny", got)
             )
-        print(
+        emit(
             f"  [{status}] expected=deny got={got}  symlinked cwd preserves repo boundary"
         )
         if os.path.lexists(link):
@@ -5584,6 +5601,7 @@ def run_smoke():
             else:
                 os.rmdir(link)
 
+    report_progress("section", name="sensitive-remote-resolution")
     sensitive_remote_cases = []
     sensitive_cfg = {"tier": 2, "flags": {"sensitive_data": True}}
     for expected, resolver, label in (
@@ -6280,7 +6298,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 2, sensitive_cfg["flags"], expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
     asserted_sensitive_case_count = len(sensitive_remote_cases)
 
     remote_resolution_cases = [
@@ -6632,7 +6650,7 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 2, sensitive_cfg["flags"], expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
     asserted_sensitive_case_count += len(late_sensitive_cases)
     if asserted_sensitive_case_count != len(sensitive_remote_cases):
         failures.append(
@@ -6649,8 +6667,9 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 2, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
+    report_progress("section", name="runtime-neutral-authority")
     runtime_neutral_cases = []
     with tempfile.TemporaryDirectory(dir=fixture_root()) as project:
         write_tier(project, 1, {})
@@ -6700,19 +6719,20 @@ def run_smoke():
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 4, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     # The allow on plain `git worktree remove` below T4/wave rests on a claim
     # about GIT, not about the floor, and the first draft of issue #41 got that
     # claim backwards ("git refuses a dirty tree, so plain removal destroys
     # nothing"). Pin the real behaviour with real git so nobody has to take it
     # on faith again.
+    report_progress("section", name="worktree-removal-reality")
     worktree_reality_cases = ignored_worktree_removal_is_destructive()
     for label, got, expected in worktree_reality_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
             failures.append((label, 0, {}, expected, got))
-        print(f"  [{status}] expected={expected} got={got}  {label}")
+        emit(f"  [{status}] expected={expected} got={got}  {label}")
 
     total = (
         len(CASES)
@@ -6735,12 +6755,15 @@ def run_smoke():
         + len(runtime_neutral_cases)
         + len(worktree_reality_cases)
     )
-    print(f"\n{total - len(failures)}/{total} passed")
+    passed = total - len(failures)
+    emit(f"\n{passed}/{total} passed")
     if failures:
-        print("FAILURES:")
+        emit("FAILURES:")
         for f in failures:
-            print("  ", f)
+            emit("  ", f)
+        report_progress("complete", passed=passed, status="fail", total=total)
         sys.exit(1)
+    report_progress("complete", passed=passed, status="pass", total=total)
     sys.exit(0)
 
 
