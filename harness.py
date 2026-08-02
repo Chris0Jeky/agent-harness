@@ -5576,6 +5576,10 @@ def guidance_reference_status(
     deadline: float | None,
 ) -> tuple[bool, str]:
     """Prove a supplied claude-config checkout is the canonical guidance source."""
+    try:
+        source_root = source_root.resolve()
+    except (OSError, RuntimeError):
+        return False, f"the supplied guidance source path {source_root} is unresolvable"
     resolved, harness_origin = output_before_deadline(
         command_runner,
         ["git", "remote", "get-url", "origin"],

@@ -806,13 +806,13 @@ class HarnessTests(unittest.TestCase):
         source_codex = config_root / "codex" / "AGENTS.md"
         source_codex.parent.mkdir(parents=True)
         source_claude.write_bytes(b"claude source\r\n")
-        source_codex.write_bytes(b"# Codex\r\n")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
         deployed_claude = root / "claude-home" / "CLAUDE.md"
         deployed_codex = root / "codex-home" / "AGENTS.md"
         deployed_claude.parent.mkdir(parents=True)
         deployed_codex.parent.mkdir(parents=True)
         deployed_claude.write_bytes(b"claude source\r\n")
-        deployed_codex.write_bytes(b"# Codex\r\n")
+        deployed_codex.write_text("# Codex\n", encoding="utf-8")
 
         result, output = self.run_doctor_with_fixture_globals(
             repo, config_root=config_root
@@ -7802,6 +7802,13 @@ class RealityCheckTests(unittest.TestCase):
         )
         self.assertTrue(ok, detail)
         self.assertIn("level with origin/main", detail)
+
+        aliased_source_root = self.root / "alias" / ".." / "claude-config"
+        runner = self.canonical_guidance_reference_runner(aliased_source_root)
+        ok, detail = harness.guidance_reference_status(
+            aliased_source_root, self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok, detail)
 
         cases = (
             (
