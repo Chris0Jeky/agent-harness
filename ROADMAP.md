@@ -99,4 +99,5 @@ Every base or head change re-proves affected evidence.
 3. Use AH-8 evidence to choose bounded AH-3 families and measure them in shadow before enforcement.
 4. Advance AH-4/AH-6 only from reproduced configuration and estate failures; keep diagnosis and
    mutation separate.
-5. Leave AH-7 owner-parked and AH-10 deferred until their explicit evidence gates change.
+5. Leave AH-7 owner-paused until the owner explicitly re-enables the PreTool floor; leave AH-10
+   deferred until its explicit evidence gates change.
