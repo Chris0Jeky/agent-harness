@@ -17,7 +17,7 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +42,9 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
+      - name: Run replay tests on the supported host
+        run: python -m unittest discover -s replay_v0/tests -v
+
       - name: Run deny-floor smoke matrix
         run: python templates/hooks/smoke_test.py
 
@@ -49,11 +52,13 @@ jobs:
         run: >-
           python -m ruff check
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
+          tests/test_dispatch_as_hook.py
           tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
-          tests/test_powershell_block_scan.py
+          tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
@@ -64,11 +69,13 @@ jobs:
         run: >-
           python -m black --check
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
+          tests/test_dispatch_as_hook.py
           tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
-          tests/test_powershell_block_scan.py
+          tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
@@ -79,13 +86,124 @@ jobs:
         run: >-
           python -m py_compile
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
+          tests/test_dispatch_as_hook.py
           tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
           tests/test_git_option_arity.py tests/test_git_readonly_plumbing.py
-          tests/test_powershell_block_scan.py
+          tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
-          tests/test_push_guard_review_gaps.py tests/floor_environment.py
+          tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/floor_environment.py
           tests/test_floor_environment.py tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
+
+  replay-fast:
+    name: replay-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Run the dependency-free fast lane
+        run: |
+          python -m unittest discover -s replay_v0/tests/unit -v
+          python -m unittest discover -s replay_v0/tests/contract -v
+
+  replay-lint:
+    name: replay-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install approved development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Run replay lint and formatting checks
+        run: |
+          python -m ruff check replay_v0
+          python -m black --check replay_v0
+
+  replay-tests:
+    name: replay-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Run all replay tests
+        run: python -m unittest discover -s replay_v0/tests -v
+
+  charter-digests:
+    name: charter-digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Validate charter bytes and records
+        run: |
+          python -m replay_v0.cli validate --corpus replay_v0/corpora/charter
+          python -m unittest discover -s replay_v0/tests/charter -v
+
+  recorded-baseline:
+    name: recorded-baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Validate the synthetic recorded baseline
+        run: >-
+          python -m unittest
+          replay_v0.tests.charter.test_charter.CharterCorpusTests.test_synthetic_recording_matches_class_contract
+          -v
+
+  operations-contract:
+    name: operations-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install approved development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Prove the approved Pytest compatibility contract
+        run: |
+          python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
+          python -m pytest -q replay_v0/tests
+      - name: Prove determinism and extraction scope
+        run: python -m unittest replay_v0.tests.test_determinism -v
+      - name: Require the governing operations record
+        run: >-
+          python -c "from pathlib import Path;
+          assert Path('AGENT_HARNESS_OPERATIONS.md').is_file()"

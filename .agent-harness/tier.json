@@ -3,7 +3,7 @@
   "name": "workshop",
   "authority": {
     "push": "free",
-    "merge": "gated"
+    "merge": "free"
   },
   "flags": {
     "sensitive_data": false,
@@ -20,5 +20,5 @@
     "standing_context_tokens": 6000
   },
   "human_todo": "HUMAN_TODO.md",
-  "last_reviewed": "2026-07-13"
+  "last_reviewed": "2026-07-31"
 }

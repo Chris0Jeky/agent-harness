@@ -1,0 +1,184 @@
+{
+  "schema_version": "public-v0-extraction-manifest.v1",
+  "status": "owner-approved",
+  "approved_by": "Cristian Tcaci",
+  "approved_at": "2026-07-30",
+  "file_count": 35,
+  "files": [
+    {
+      "path": "replay_v0/.gitattributes",
+      "kind": "source",
+      "sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"
+    },
+    {
+      "path": "replay_v0/__init__.py",
+      "kind": "source",
+      "sha256": "6cc6b09a60da311c825a02bc728f052370c41f7c39d8def1ec0be6cde4429cd7"
+    },
+    {
+      "path": "replay_v0/cli.py",
+      "kind": "source",
+      "sha256": "4b152c94723e3a9041a1f865d02953a06e290cdae79e545e01fed9bd63f21d7a"
+    },
+    {
+      "path": "replay_v0/compare.py",
+      "kind": "source",
+      "sha256": "de3878156c3252921ecc7030dc070accf9d7514b8ed8a9eb3811f8f0b3ce3cd2"
+    },
+    {
+      "path": "replay_v0/corpora/charter/cases.jsonl",
+      "kind": "corpus",
+      "sha256": "439eb92a7ecb7f25d0935cd260b64b123dba5a348cbe432762ca46c8968d92d2"
+    },
+    {
+      "path": "replay_v0/corpora/charter/corpus-manifest.json",
+      "kind": "corpus",
+      "sha256": "ce500fe221ba4d49b107ad83895c97fadebf19a6998916b75ff02bf9a49ef9e2"
+    },
+    {
+      "path": "replay_v0/corpora/charter/events.jsonl",
+      "kind": "corpus",
+      "sha256": "2a5bed44eec4ba407c06be0ef77ae07c4d676618f003c1a29f5f712bacf687c2"
+    },
+    {
+      "path": "replay_v0/corpus.py",
+      "kind": "source",
+      "sha256": "822c242ba82c2826cdee5eb15ca5fc67566a98038aab96a29083dba167909a09"
+    },
+    {
+      "path": "replay_v0/digests.py",
+      "kind": "source",
+      "sha256": "5b995fad13e11753ec926c175e016b77d61dc835f5e3048b19a9f766b154737b"
+    },
+    {
+      "path": "replay_v0/fixtures/legacy-decisions.jsonl",
+      "kind": "fixture",
+      "sha256": "601faec1acc1e765fbee09c5313b2e6dc123d5f57cbf764984b77a367af37be6"
+    },
+    {
+      "path": "replay_v0/fixtures/legacy-decisions.jsonl.manifest.json",
+      "kind": "fixture",
+      "sha256": "bbaacb4835c2dc610e795e3903aad7a9b8e6dd1b995cb98f448ecb4df6125716"
+    },
+    {
+      "path": "replay_v0/fixtures/recorded/complete.jsonl",
+      "kind": "fixture",
+      "sha256": "85c298d710f7a8c91957a7b9c0b8ee96d08a37c8f15becc6fd9bc38b3dfce28b"
+    },
+    {
+      "path": "replay_v0/fixtures/recorded/complete.jsonl.manifest.json",
+      "kind": "fixture",
+      "sha256": "1681513e791bafbd9e0349449bb873baccf98366d8b2f81117c36b654a3f6d96"
+    },
+    {
+      "path": "replay_v0/manifests.py",
+      "kind": "source",
+      "sha256": "21b01edf9bac6879213bac72b2ea85c8cf7bc2b8b56165f220870c862f0c6957"
+    },
+    {
+      "path": "replay_v0/policy_sources.py",
+      "kind": "source",
+      "sha256": "778d624fa237dd10f26c7e0c6c882c4c76401fa9126d6fb269989ecd58f849f0"
+    },
+    {
+      "path": "replay_v0/README.md",
+      "kind": "documentation",
+      "sha256": "d02afd659f429b57d9a8eb5395ea90b3f40c34fa96541b821b55f568c7099ae5"
+    },
+    {
+      "path": "replay_v0/reports.py",
+      "kind": "source",
+      "sha256": "5dba444555118910b775ca728eac3022a56a4a631672754aaa79a7b1a75e4b59"
+    },
+    {
+      "path": "replay_v0/schemas/charter-case.v1.schema.json",
+      "kind": "schema",
+      "sha256": "270c8c882ddf5420d4bcdc88c4acd6d5958e2e109f1bcd473618f39cdce50d32"
+    },
+    {
+      "path": "replay_v0/schemas/command-event.v1.schema.json",
+      "kind": "schema",
+      "sha256": "099efc458d241a61e733dc425f6c235effa9df459eab7c26e647c22b3fa9a781"
+    },
+    {
+      "path": "replay_v0/schemas/policy-decision.v1.schema.json",
+      "kind": "schema",
+      "sha256": "0d125ead92578ee7d9846d641e17e8e7c631058a597de8e531a0b20d6262eaf6"
+    },
+    {
+      "path": "replay_v0/tests/__init__.py",
+      "kind": "test",
+      "sha256": "a2d2ea0a14a8288e19504c46e995418c959fd92e1e83f3213dc62201b111ff43"
+    },
+    {
+      "path": "replay_v0/tests/charter/__init__.py",
+      "kind": "test",
+      "sha256": "1243269244fb1ebb9a22a8fcaf181d9a933bee4033e53ac3e50ba9df268831a8"
+    },
+    {
+      "path": "replay_v0/tests/charter/test_charter.py",
+      "kind": "test",
+      "sha256": "3917ba2e86e5249607240ff33a31035a40fa8f4f42478054b192e889774fdb2f"
+    },
+    {
+      "path": "replay_v0/tests/contract/__init__.py",
+      "kind": "test",
+      "sha256": "794fa0003e7e85e6fb2465d9e4362f22f668ba0dad3451ef1c80ef848c56834b"
+    },
+    {
+      "path": "replay_v0/tests/contract/test_cli.py",
+      "kind": "test",
+      "sha256": "9c1042bd86e9af328ed56415e5c4e969e6b616b9c9c9b15aea97c2a05ac279aa"
+    },
+    {
+      "path": "replay_v0/tests/contract/test_process_source.py",
+      "kind": "test",
+      "sha256": "33de2eb3ccee6f1926a644e124f92623ae5b3d17b9ccf70e8b4b364ba97760d5"
+    },
+    {
+      "path": "replay_v0/tests/contract/test_schemas.py",
+      "kind": "test",
+      "sha256": "e004c1140d73d6aeedf8a5d2f95d9386d0e45c1245d0fe1f364219df13ddd27d"
+    },
+    {
+      "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
+      "kind": "fixture",
+      "sha256": "bd0fdc10831d33550b1961666591d27c542552c94122cbda5992056fa45e8189"
+    },
+    {
+      "path": "replay_v0/tests/fixtures/process_policies/reference_candidate.py",
+      "kind": "fixture",
+      "sha256": "2daefadf2a05d13cf008d43dd0980d6dbfb78baf3615b1a1ce79eaab58081f2a"
+    },
+    {
+      "path": "replay_v0/tests/test_determinism.py",
+      "kind": "test",
+      "sha256": "c91d9233b6234ee6a15ff3a87217dcc2e96002b3399323555e29412652f1422c"
+    },
+    {
+      "path": "replay_v0/tests/unit/__init__.py",
+      "kind": "test",
+      "sha256": "49dd040cd7ee8ea41a1c76c66d5ca37e973043f05985afff46b87cfa023d3f18"
+    },
+    {
+      "path": "replay_v0/tests/unit/test_compare.py",
+      "kind": "test",
+      "sha256": "525cf33773a36984e914be3d85b4d81092b5d5c6ac5669571498f55d920236fb"
+    },
+    {
+      "path": "replay_v0/tests/unit/test_digests.py",
+      "kind": "test",
+      "sha256": "97afdf7b6775db55bcd5fb124aa38c7a1d38fcd2df01c6866cef0b31c14745ce"
+    },
+    {
+      "path": "replay_v0/tests/unit/test_manifests.py",
+      "kind": "test",
+      "sha256": "6f2ded5b806f06e964664956614d2bde2819af95dc1ccb78fe0e34b648443c7a"
+    },
+    {
+      "path": "replay_v0/tests/unit/test_recorded_source.py",
+      "kind": "test",
+      "sha256": "d0b1a99d1236a8c7fd0596a9222cbdc8d70d5f8bc03827ff787a53bed64f858c"
+    }
+  ]
+}

@@ -250,6 +250,26 @@ class AmbientReadInventoryTests(unittest.TestCase):
         "has_git_config_environment": "covered: GIT_CONFIG* prefix",
         "has_git_process_environment": "covered: _GIT_PROCESS_COMMAND_ENVIRONMENT",
         "check": "covered: _GIT_REPOSITORY_ENVIRONMENT (bare-push overrides)",
+        "probe_path_directories": (
+            "NOT covered: reads PATH to resolve `git` and `gh` for the "
+            "remote-privacy probes. Clearing PATH would leave the probes unable "
+            "to run at all, which is the failure this resolution exists to name; "
+            "a test that cares pins its own PATH (tests/test_dispatch_as_hook.py "
+            "is the worked example)"
+        ),
+        "probe_path_extensions": (
+            "NOT covered: reads PATHEXT, alongside probe_path_directories above. "
+            "It decides which candidate names a bare `gh` may acquire on "
+            "Windows; the resolver then prefers a real image over a script shim "
+            "regardless of the order PATHEXT declares"
+        ),
+        "command_output": (
+            "NOT covered: passes the host environment through to a read-only "
+            "probe subprocess, with the non-interactive overrides in "
+            "_PROBE_ENVIRONMENT layered on top. The Git launch variables the "
+            "helper clears are cleared in the parent, so the child inherits the "
+            "cleared set; `neutral_git_command_runner` covers the config sources"
+        ),
         "environment_value": (
             "NOT covered: expands whatever $VAR / %VAR% the command text names, "
             "so the set is chosen by the command under test, not by the host"

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -175,12 +178,13 @@ class HarnessTests(unittest.TestCase):
         system_requirements: str | None = None,
         managed_config: str | None = None,
         offline: bool = False,
+        as_json: bool = False,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
         claude_home = root / "claude-home"
         skills_home = root / "skills-home"
-        (codex_home / "AGENTS.md").parent.mkdir()
+        (codex_home / "AGENTS.md").parent.mkdir(exist_ok=True)
         (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
         if user_config is not None:
             (codex_home / "config.toml").write_text(user_config, encoding="utf-8")
@@ -203,7 +207,7 @@ class HarnessTests(unittest.TestCase):
             target.write_bytes(
                 (harness_root / "templates" / "hooks" / filename).read_bytes()
             )
-        (skills_home / "sample").mkdir(parents=True)
+        (skills_home / "sample").mkdir(parents=True, exist_ok=True)
         (skills_home / "sample" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
         args = SimpleNamespace(
             codex_home=str(codex_home),
@@ -212,6 +216,8 @@ class HarnessTests(unittest.TestCase):
             repo=str(repo),
             offline=offline,
         )
+        if as_json:
+            args.json = True
         original_run = harness.run
 
         def fixture_run(
@@ -265,11 +271,508 @@ class HarnessTests(unittest.TestCase):
             ):
                 return self.run_doctor_with_fixture_globals(repo, **fixtures)
 
+    @staticmethod
+    def write_claude_settings(path: Path, hooks: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_claude_hook_topology_reports_taskdeck_overlap_and_bash_coverage(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        # `shell` describes the handler process, not the target tool selected
+        # by the matcher. The only coverage that can be reported is Bash.
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "shell": "PowerShell",
+                                "command": f'py -3 "{windows_dispatcher}" --token synthetic-secret',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 scripts/agent_hooks/pre_tool_use.py",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        inventory = [finding for finding in findings if finding["kind"] == "inventory"]
+        overlaps = [
+            finding for finding in findings if finding["kind"] == "likely_overlap"
+        ]
+        self.assertEqual(len(inventory), 2)
+        self.assertEqual(inventory[0]["target_tools"], ["Bash"])
+        self.assertEqual(inventory[0]["policy_source"], "shared-dispatcher")
+        self.assertEqual(len(overlaps), 1)
+        self.assertEqual(overlaps[0]["target_tools"], ["Bash"])
+        rendered = json.dumps(findings)
+        self.assertNotIn("synthetic-secret", rendered)
+        self.assertNotIn("--token", rendered)
+        self.assertNotIn("PowerShell", rendered)
+
+    def test_claude_hook_topology_normalizes_dispatcher_paths_as_exact_duplicate(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'py -3 "{windows_dispatcher}"',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [
+                            {"type": "command", "command": f'python3 "{dispatcher}"'}
+                        ],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        duplicates = [
+            finding for finding in findings if finding["kind"] == "exact_duplicate"
+        ]
+        self.assertEqual(len(duplicates), 1)
+        self.assertEqual(duplicates[0]["target_tools"], ["Bash"])
+
+    def test_claude_hook_topology_lifecycle_and_missing_project_are_not_overlap(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "python3 global.py"}],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "python3 pre_commit.py"}]}
+                ]
+            },
+        )
+        findings = harness.claude_hook_topology(claude_home, repo)
+        self.assertFalse(
+            any(
+                finding["kind"] in {"exact_duplicate", "likely_overlap"}
+                for finding in findings
+            )
+        )
+        project_settings = repo / ".claude" / "settings.json"
+        project_settings.unlink()
+        missing = harness.claude_hook_topology(claude_home, repo)
+        self.assertEqual(
+            [
+                finding["provenance"]
+                for finding in missing
+                if finding["kind"] == "inventory"
+            ],
+            ["user"],
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in missing
+            )
+        )
+
+    def test_claude_hook_topology_proves_universal_matchers_and_mcp_tool(self) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        for matcher in (None, "", "*"):
+            with self.subTest(matcher=matcher):
+                self.write_claude_settings(
+                    claude_home / "settings.json",
+                    {
+                        "PreToolUse": [
+                            {
+                                **({} if matcher is None else {"matcher": matcher}),
+                                "hooks": [
+                                    {"type": "command", "command": "python3 global.py"}
+                                ],
+                            }
+                        ]
+                    },
+                )
+                self.write_claude_settings(
+                    repo / ".claude" / "settings.json",
+                    {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 project.py",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+                findings = harness.claude_hook_topology(claude_home, repo)
+                overlap = [
+                    finding
+                    for finding in findings
+                    if finding["kind"] == "likely_overlap"
+                ]
+                self.assertEqual(
+                    [finding["target_tools"] for finding in overlap], [["Bash"]]
+                )
+        self.assertEqual(harness.claude_target_overlap(["*"], ["*"]), ["*"])
+        self.assertEqual(
+            harness.claude_supported_matcher("Write,Edit"),
+            ("Edit|Write", ("Edit", "Write")),
+        )
+        self.assertEqual(
+            harness.claude_handler_identity(
+                {"type": "mcp_tool", "server": "fixture", "tool": "scan"},
+                claude_home,
+            ),
+            ("mcp_tool", '{"server":"fixture","tool":"scan","type":"mcp_tool"}'),
+        )
+        self.assertIsNone(
+            harness.claude_handler_identity(
+                {"type": "mcp_tool", "server": "fixture"}, claude_home
+            )
+        )
+        self.assertIsNone(
+            harness.claude_handler_identity(
+                {"type": "mcp", "server": "fixture", "tool": "scan"},
+                claude_home,
+            )
+        )
+        for valid, malformed in (
+            ({"type": "http", "url": "https://fixture.invalid/hook"}, {"type": "http"}),
+            ({"type": "prompt", "prompt": "fixture"}, {"type": "prompt"}),
+            ({"type": "agent", "prompt": "fixture"}, {"type": "agent"}),
+        ):
+            with self.subTest(handler_type=valid["type"]):
+                self.assertIsNotNone(
+                    harness.claude_handler_identity(valid, claude_home)
+                )
+                self.assertIsNone(
+                    harness.claude_handler_identity(malformed, claude_home)
+                )
+
+    def test_claude_hook_topology_uses_opaque_report_local_policy_labels(self) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        command = "python3 hook.py --token command-secret"
+        handler = {
+            "type": "mcp_tool",
+            "server": "mcp-secret-server",
+            "tool": "secret-tool",
+        }
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": command}, handler],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": command}, handler],
+                    }
+                ]
+            },
+        )
+
+        findings = harness.claude_hook_topology(claude_home, repo)
+        repeated = harness.claude_hook_topology(claude_home, repo)
+        rendered = json.dumps(findings) + harness.claude_topology_summary(findings)
+        command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+        handler_digest = hashlib.sha256(
+            json.dumps(
+                handler, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        inventory = [finding for finding in findings if finding["kind"] == "inventory"]
+        duplicates = [
+            finding for finding in findings if finding["kind"] == "exact_duplicate"
+        ]
+
+        self.assertEqual(findings, repeated)
+        self.assertEqual(
+            [finding["policy_source"] for finding in inventory],
+            ["opaque-command-1", "opaque-mcp_tool-1"] * 2,
+        )
+        self.assertEqual(len(duplicates), 2)
+        self.assertTrue(
+            all(
+                finding["user_policy_source"] == finding["other_policy_source"]
+                for finding in duplicates
+            )
+        )
+        for secret in (
+            command,
+            "command-secret",
+            "mcp-secret-server",
+            "secret-tool",
+            command_digest,
+            handler_digest,
+            "sha256",
+            "_policy_identity",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_claude_dispatcher_identity_keeps_posix_path_case_distinct(self) -> None:
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        different_case = str(dispatcher).upper()
+        with mock.patch.object(harness.os, "name", "nt"):
+            self.assertTrue(
+                harness.claude_command_points_to_dispatcher(
+                    f'python3 "{different_case}"', dispatcher
+                )
+            )
+        with mock.patch.object(harness.os, "name", "posix"):
+            self.assertFalse(
+                harness.claude_command_points_to_dispatcher(
+                    f'python3 "{different_case}"', dispatcher
+                )
+            )
+
+    def test_claude_hook_topology_invalid_unreadable_unknown_and_linked_are_unproven(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = Path(self.temp.name) / "claude-home"
+        user_settings = claude_home / "settings.json"
+        user_settings.parent.mkdir(parents=True)
+        user_settings.write_text("{ invalid", encoding="utf-8")
+        project_settings = repo / ".claude" / "settings.json"
+        self.write_claude_settings(
+            project_settings,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": ".*",
+                        "hooks": [{"type": "command", "command": "python3 local.py"}],
+                    }
+                ]
+            },
+        )
+        invalid = harness.claude_hook_topology(claude_home, repo)
+        self.assertTrue(all(finding["status"] == "UNPROVEN" for finding in invalid))
+
+        original_read_text = Path.read_text
+
+        def refuse_project(path: Path, *args: object, **kwargs: object) -> str:
+            if path == project_settings:
+                raise PermissionError("fixture denied")
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(
+            Path, "read_text", autospec=True, side_effect=refuse_project
+        ):
+            unreadable = harness.claude_hook_topology(claude_home, repo)
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in unreadable
+            )
+        )
+        user_settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [
+                                    {"type": "command", "command": "python3 global.py"}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        unknown = harness.claude_hook_topology(
+            claude_home, repo, linked_worktree_source_ambiguous=True
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "matcher" and finding["status"] == "UNPROVEN"
+                for finding in unknown
+            )
+        )
+        self.assertTrue(
+            any(
+                finding["kind"] == "source"
+                and finding["provenance"] == "project"
+                and finding["status"] == "UNPROVEN"
+                for finding in unknown
+            )
+        )
+
+    def test_doctor_json_matches_human_check_order_and_hides_commands(self) -> None:
+        repo = self.make_repo().resolve()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'python3 "{dispatcher}" --token synthetic-secret',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.write_claude_settings(
+            repo / ".claude" / "settings.local.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "python3 local.py"}],
+                    }
+                ]
+            },
+        )
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        subdir = repo / "nested"
+        subdir.mkdir()
+
+        human_code, human = self.run_doctor_with_fixture_globals(subdir, offline=True)
+        json_code, rendered_json = self.run_doctor_with_fixture_globals(
+            subdir, offline=True, as_json=True
+        )
+        payload = json.loads(rendered_json)
+        human_checks = [
+            line.partition("] ")[2].partition(": ")[0]
+            for line in human.splitlines()
+            if line.startswith(("[ok] ", "[FAIL] ", "[UNPROVEN] "))
+        ]
+        self.assertEqual(human_checks, [check["check"] for check in payload["checks"]])
+        self.assertEqual(human_code, 1)
+        self.assertEqual(json_code, 1)
+        self.assertEqual(
+            [
+                check["check"]
+                for check in payload["checks"]
+                if check["status"] == "FAIL"
+            ],
+            ["Claude hook topology"],
+        )
+        self.assertIn("[FAIL] Claude hook topology:", human)
+        self.assertIn("[likely_overlap] user", human)
+        self.assertIn("; local ", human)
+        self.assertIn(str((claude_home / "settings.json").resolve()), human)
+        self.assertIn(str((repo / ".claude" / "settings.local.json").resolve()), human)
+        self.assertNotIn(str((subdir / ".claude").resolve()), human)
+        self.assertEqual(
+            [
+                check["status"]
+                for check in payload["checks"]
+                if check["check"] == "Claude hook topology"
+            ],
+            ["FAIL"],
+        )
+        self.assertEqual(
+            len(
+                [
+                    finding
+                    for finding in payload["claude_hook_findings"]
+                    if finding["kind"] == "likely_overlap"
+                ]
+            ),
+            1,
+        )
+        self.assertNotIn("synthetic-secret", human + rendered_json)
+        self.assertNotIn("--token", human + rendered_json)
 
     def test_seed_creates_runtime_neutral_tier(self) -> None:
         repo = self.make_repo()
@@ -378,6 +881,25 @@ class HarnessTests(unittest.TestCase):
         target.write_text(json.dumps(tier), encoding="utf-8")
         result = harness.audit_repo(repo)
         self.assertTrue(result["ok"], result["issues"])
+
+    def test_budgets_register_the_deny_floor_limitations_ledger(self) -> None:
+        # FLOOR_LIMITATIONS.md declares a 120-line cap and a rotation target in
+        # its own header, but budget_issues registered only CLAUDE.md /
+        # AGENTS.md / AGENT_MAP.md / skills, so an overflowing ledger was
+        # reported by nothing at all (issue #102).
+        repo = Path(self.temp.name) / "budgets"
+        repo.mkdir()
+        ledger = repo / "FLOOR_LIMITATIONS.md"
+        ledger.write_text("bypass family\n" * 120, encoding="utf-8")
+        self.assertEqual(harness.budget_issues(repo, 3), [])
+        ledger.write_text("bypass family\n" * 121, encoding="utf-8")
+        self.assertEqual(
+            harness.budget_issues(repo, 3),
+            [
+                "FLOOR_LIMITATIONS.md: 121>120 lines; "
+                "ROTATE: rotate to archive/floor-limitations-<year>.md"
+            ],
+        )
 
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
@@ -4439,6 +4961,300 @@ allow_local_binding = true
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
 
+    def test_doctor_rejects_user_project_command_mcp_duplicate(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        nested = repo / "nested"
+        config = nested / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[mcp_servers.docker]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run", "--servers", "github"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            nested,
+            user_config=(
+                "[mcp_servers.docker]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--profile", "safe"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex MCP topology", output)
+        self.assertIn('active command-backed MCP server "docker" is duplicated', output)
+        self.assertIn(str(config.resolve()), output)
+
+    def test_mcp_shared_user_project_source_is_not_duplicate(self) -> None:
+        codex_home = Path(self.temp.name) / "codex-home"
+        codex_home.mkdir()
+        shared_config = codex_home / "config.toml"
+        shared_config.write_text(
+            "[mcp_servers.shared]\n"
+            'command = "secret-command"\n'
+            'args = ["private-token"]\n',
+            encoding="utf-8",
+        )
+
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [shared_config])
+
+        self.assertTrue(ok, detail)
+        self.assertIn("1 active user and 0 active project command-backed", detail)
+        self.assertIn("0 active project config path(s)", detail)
+        self.assertNotIn("duplicated", detail)
+        self.assertNotIn("secret-command", detail)
+        self.assertNotIn("private-token", detail)
+
+    def test_doctor_models_layered_mcp_enablement_and_argument_source(self) -> None:
+        repo = self.make_repo()
+        valid_adapter = (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+        self.write_hooks(repo, valid_adapter)
+        project_config = repo / ".codex" / "config.toml"
+        project_config.write_text(
+            "[mcp_servers.MCP_DOCKER]\n" 'args = ["mcp", "gateway", "run"]\n',
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            user_config=(
+                "[mcp_servers.MCP_DOCKER]\n"
+                'command = "docker"\n'
+                'args = ["mcp", "gateway", "run", "--profile", "safe"]\n'
+            ),
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn("arguments in " + str(project_config.resolve()), output)
+        self.assertNotIn("args = [", output)
+
+        project_config.write_text(
+            "[mcp_servers.MCP_DOCKER]\n" "enabled = false\n",
+            encoding="utf-8",
+        )
+        codex_home = Path(self.temp.name) / "second-codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            "[mcp_servers.MCP_DOCKER]\n"
+            'command = "docker"\n'
+            'args = ["mcp", "gateway", "run"]\n',
+            encoding="utf-8",
+        )
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [project_config])
+        self.assertTrue(ok, detail)
+        self.assertNotIn("active Docker MCP gateway", detail)
+
+    def test_mcp_docker_gateway_recognizes_windows_pathext_shims(self) -> None:
+        args = ("mcp", "gateway", "run")
+        for executable in ("docker.cmd", "DOCKER.CMD", "docker.bat", "Docker.BAT"):
+            with self.subTest(executable=executable):
+                self.assertTrue(harness.unbounded_docker_mcp_gateway(executable, args))
+        self.assertFalse(
+            harness.unbounded_docker_mcp_gateway(
+                "docker.cmd", args + ("--servers=github",)
+            )
+        )
+        self.assertFalse(harness.unbounded_docker_mcp_gateway("podman.cmd", args))
+
+    def test_mcp_docker_gateway_matches_only_docker_subcommand(self) -> None:
+        for label, args, expected in (
+            ("direct", ("mcp", "gateway", "run"), True),
+            ("boolean global", ("--debug", "mcp", "gateway", "run"), True),
+            (
+                "short boolean assignment",
+                ("-D=false", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "combined short options",
+                ("-Dldebug", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "combined short terminal false assignment",
+                ("-Dv=0", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "numeric boolean assignment",
+                ("--debug=1", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "abbreviated boolean assignment",
+                ("--tls=t", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "value global",
+                ("--context", "safe", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "attached long value",
+                ("--config=private-config", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "empty attached context",
+                ("--context=", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "empty attached config",
+                ("--config=", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "attached short value",
+                ("-ldebug", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "ordinary container",
+                ("run", "--rm", "private-image", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "different subcommand",
+                ("compose", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "missing global value",
+                ("--context", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "missing clustered value",
+                ("-Dl", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "malformed boolean assignment",
+                ("--debug=yes", "mcp", "gateway", "run"),
+                False,
+            ),
+            (
+                "unknown shorthand",
+                ("-Dq", "mcp", "gateway", "run"),
+                False,
+            ),
+            ("terminal global", ("--version", "mcp", "gateway", "run"), False),
+            (
+                "false terminal assignment",
+                ("-v=false", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "numeric false terminal assignment",
+                ("--version=0", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "abbreviated false help assignment",
+                ("--help=f", "mcp", "gateway", "run"),
+                True,
+            ),
+            (
+                "true terminal assignment",
+                ("--version=true", "mcp", "gateway", "run"),
+                False,
+            ),
+            ("option terminator", ("--", "mcp", "gateway", "run"), True),
+            (
+                "bounded gateway",
+                (
+                    "--context",
+                    "safe",
+                    "mcp",
+                    "gateway",
+                    "run",
+                    "--servers=github",
+                ),
+                False,
+            ),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    expected,
+                    harness.unbounded_docker_mcp_gateway("docker", args),
+                )
+
+        codex_home = Path(self.temp.name) / "docker-container-codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            "[mcp_servers.container]\n"
+            'command = "docker"\n'
+            'args = ["run", "--rm", "private-image", "mcp", "gateway", '
+            '"run", "private-argument"]\n',
+            encoding="utf-8",
+        )
+
+        ok, detail = harness.codex_mcp_topology_status(codex_home, [])
+
+        self.assertTrue(ok, detail)
+        self.assertNotIn("private-image", detail)
+        self.assertNotIn("private-argument", detail)
+
+    def test_mcp_rejects_layered_mixed_transports_without_rendering_values(
+        self,
+    ) -> None:
+        root = Path(self.temp.name)
+        user = root / "user.toml"
+        project = root / "project.toml"
+        user.write_text(
+            '[mcp_servers.one]\ncommand = "secret-command"\n', encoding="utf-8"
+        )
+        project.write_text(
+            '[mcp_servers.one]\nurl = "https://private.invalid/token"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(harness.HarnessError, "mixes command") as caught:
+            harness.layered_mcp_server_states([user, project])
+        self.assertNotIn("secret-command", str(caught.exception))
+        self.assertNotIn("private.invalid", str(caught.exception))
+
+    def test_mcp_malformed_name_is_escaped_in_diagnostics(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            '[mcp_servers."evil\\n[ok] forged"]\nenabled = "yes"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(harness.HarnessError) as caught:
+            harness.mcp_server_patches(config)
+        detail = str(caught.exception)
+        self.assertNotIn("\n[ok] forged", detail)
+        self.assertIn(r"\n[ok] forged", detail)
+
+    @unittest.skipUnless(os.name == "nt", "Windows short paths are platform-specific")
+    def test_mcp_source_paths_use_one_windows_filesystem_identity(self) -> None:
+        config = Path(self.temp.name) / "long-name-config.toml"
+        config.write_text("[mcp_servers.one]\n", encoding="utf-8")
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            str(config), buffer, len(buffer)
+        )
+        if not length or Path(buffer.value) == config:
+            self.skipTest("8.3 short-path spelling is unavailable on this volume")
+        short = Path(buffer.value)
+        paths = harness.distinct_mcp_config_paths([config, short])
+        self.assertEqual(paths, [config.resolve()])
+        self.assertEqual(
+            harness.mcp_server_patches(short)[0][1],
+            config.resolve(),
+        )
+
     def test_doctor_requires_canonical_root_hooks_json_adapter(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
@@ -5108,6 +5924,58 @@ allow_local_binding = true
         result = harness.run(["definitely-not-a-real-harness-command"])
         self.assertEqual(result.returncode, 127)
 
+    def test_doctor_rejects_a_path_first_windows_git_command_shim(self) -> None:
+        shim_directory = str(Path(self.temp.name) / "shim")
+        native_directory = str(Path(self.temp.name) / "native")
+        shim = os.path.join(shim_directory, "git.cmd")
+        native = os.path.join(native_directory, "git.exe")
+        environment = {
+            "PATH": f"{shim_directory};{native_directory}",
+            "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        }
+
+        with mock.patch.object(harness.os, "name", "nt"):
+            with mock.patch.object(harness.os, "pathsep", ";"):
+                with mock.patch.object(
+                    harness.os.path,
+                    "isfile",
+                    side_effect=lambda path: path.lower()
+                    in {shim.lower(), native.lower()},
+                ):
+                    harness.reset_probe_binary_cache()
+                    self.assertEqual(
+                        harness.resolve_windows_command_binary(
+                            "git", environment
+                        ).lower(),
+                        shim.lower(),
+                    )
+                    self.assertEqual(
+                        harness.resolve_probe_binary("git", environment).lower(),
+                        native.lower(),
+                    )
+                    ok, detail = harness.git_command_fidelity_status(environment)
+
+        self.assertFalse(ok)
+        self.assertIn(shim.lower(), detail.lower())
+        self.assertIn(native.lower(), detail.lower())
+        self.assertIn("HEAD^{commit}", detail)
+        self.assertIn("Git for Windows directly", detail)
+
+    def test_doctor_accepts_an_effective_native_git_image(self) -> None:
+        image = r"C:\\fixture\\git.exe"
+        with mock.patch.object(harness.os, "name", "nt"):
+            with mock.patch.object(
+                harness, "resolve_windows_command_binary", return_value=image
+            ):
+                with mock.patch.object(
+                    harness, "resolve_probe_binary", return_value=image
+                ):
+                    ok, detail = harness.git_command_fidelity_status()
+
+        self.assertTrue(ok)
+        self.assertIn(image, detail)
+        self.assertIn("preserves argv", detail)
+
     def test_doctor_reports_floor_version_and_reference_integrity(self) -> None:
         repo = self.make_repo()
         self.write_hooks(
@@ -5121,6 +5989,7 @@ allow_local_binding = true
         ):
             result, output = self.run_doctor_with_fixture_globals(repo)
         self.assertIn("[ok] floor version: canonical template ", output)
+        self.assertIn("[ok] Git command fidelity:", output)
         self.assertIn("reference integrity: ", output)
         self.assertIn("declared vs real: ", output)
         self.assertEqual(result, 0, output)
@@ -5238,6 +6107,179 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("[FAIL] declared vs real", output)
         self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
+
+    def test_doctor_resolves_the_strictest_of_two_tier_declarations(self) -> None:
+        # `doctor --repo` shares audit's resolution path, so it inherited the
+        # same first-found-wins bug (issue #99): the legacy declaration below
+        # is the only one that names a human-action file, and reading just
+        # `.agent-harness/tier.json` reported nothing to check.
+        repo = self.make_repo()
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+        for directory, declaration in (
+            (
+                ".agent-harness",
+                {
+                    "tier": 1,
+                    "name": harness.TIER_NAMES[1],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": False},
+                },
+            ),
+            (
+                ".claude",
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "human-only"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": "HUMAN_TODO.md",
+                },
+            ),
+        ):
+            (repo / directory).mkdir()
+            (repo / directory / "tier.json").write_text(
+                json.dumps(declaration), encoding="utf-8"
+            )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[MISMATCH] human_todo vs the file on disk", output)
+
+
+class TierResolutionTests(unittest.TestCase):
+    """Co-located declarations bind to the STRICTEST union, not the first found.
+
+    Law 9 and `dispatch.load_tier` (SPECS §5) specify one resolution; audit read
+    `.agent-harness/tier.json` with FALLBACK to the legacy file, so a repo
+    declaring T1 beside a surviving T4 + sensitive_data legacy file audited at a
+    posture the dispatcher would never grant it (issue #99).
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def declare(
+        self, directory: str, repo: Path | None = None, **fields: object
+    ) -> Path:
+        declaration: dict[str, object] = {
+            "tier": 1,
+            "name": harness.TIER_NAMES[1],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        declaration.update(fields)
+        if "tier" in fields and "name" not in fields:
+            declaration["name"] = harness.TIER_NAMES[declaration["tier"]]
+        path = (repo or self.repo) / directory / "tier.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(declaration), encoding="utf-8")
+        return path
+
+    def posture(self) -> dict[str, object]:
+        return harness.load_tier(self.repo)[1]
+
+    def test_agreeing_declarations_bind_what_they_both_say(self) -> None:
+        for directory in (".agent-harness", ".claude"):
+            self.declare(directory, tier=3, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 3)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+        self.assertEqual(len(harness.load_tier(self.repo)[0]), 2)
+
+    def test_the_new_file_binds_when_it_is_the_stricter_one(self) -> None:
+        self.declare(".agent-harness", tier=4, flags={"wave_mode": True})
+        self.declare(".claude", tier=1, flags={"wave_mode": False})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["wave_mode"])
+
+    def test_a_stale_legacy_declaration_cannot_be_masked(self) -> None:
+        # The reported shape: T1 in the new file, T4 + sensitive_data in a
+        # legacy file nobody deleted. First-found-wins audited it as T1.
+        self.declare(".agent-harness", tier=1, flags={"sensitive_data": False})
+        self.declare(".claude", tier=4, flags={"sensitive_data": True})
+        posture = self.posture()
+        self.assertEqual(posture["tier"], 4)
+        self.assertTrue(posture["flags"]["sensitive_data"])
+
+    def test_every_tightening_flag_is_unioned(self) -> None:
+        self.declare(".agent-harness", flags={"sensitive_data": True})
+        self.declare(".claude", flags={"wave_mode": True, "dormant_production": True})
+        self.assertEqual(
+            self.posture()["flags"],
+            {
+                "sensitive_data": True,
+                "wave_mode": True,
+                "dormant_production": True,
+                "relaxed_work_loss_guards": False,
+            },
+        )
+
+    def test_the_work_loss_relaxation_needs_every_declaration_to_agree(self) -> None:
+        self.declare(".agent-harness", flags={"relaxed_work_loss_guards": True})
+        self.declare(".claude", flags={"relaxed_work_loss_guards": False})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Silence is not agreement either: the guard stays on.
+        self.declare(".claude", flags={})
+        self.assertFalse(self.posture()["flags"]["relaxed_work_loss_guards"])
+        # Unanimous, and only then, the declared relaxation applies.
+        self.declare(".claude", flags={"relaxed_work_loss_guards": True})
+        self.assertTrue(self.posture()["flags"]["relaxed_work_loss_guards"])
+
+    def test_a_lone_declaration_binds_on_its_own_from_either_home(self) -> None:
+        for index, directory in enumerate((".agent-harness", ".claude")):
+            with self.subTest(directory=directory):
+                repo = self.repo / f"lone-{index}"
+                declared = self.declare(
+                    directory,
+                    repo=repo,
+                    tier=3,
+                    flags={"relaxed_work_loss_guards": True},
+                )
+                paths, posture = harness.load_tier(repo)
+                self.assertEqual(posture["tier"], 3)
+                self.assertTrue(posture["flags"]["relaxed_work_loss_guards"])
+                self.assertEqual(paths, [declared])
+
+    def test_no_declaration_binds_nothing(self) -> None:
+        self.assertEqual(harness.load_tier(self.repo), ([], {}))
+        self.assertIsNone(harness.tier_path(self.repo))
+
+    def test_the_strictest_authority_dial_binds(self) -> None:
+        self.declare(".agent-harness", authority={"push": "free", "merge": "free"})
+        self.declare(".claude", authority={"push": "gated", "merge": "human-only"})
+        self.assertEqual(
+            self.posture()["authority"], {"push": "gated", "merge": "human-only"}
+        )
+
+    def test_non_posture_fields_come_from_the_runtime_neutral_file(self) -> None:
+        # `human_todo` is not comparable, so precedence decides it — and an
+        # explicit null is a declaration, not an omission.
+        self.declare(".agent-harness", human_todo="HUMAN_TODO.md")
+        self.declare(".claude", human_todo="TODO-human.md")
+        self.assertEqual(self.posture()["human_todo"], "HUMAN_TODO.md")
+        self.declare(".agent-harness", human_todo=None)
+        self.assertIsNone(self.posture()["human_todo"])
+        # An absent key falls through to the file that does declare one.
+        self.declare(".agent-harness")
+        self.assertEqual(self.posture()["human_todo"], "TODO-human.md")
+
+    def test_a_malformed_declaration_still_raises_with_its_path(self) -> None:
+        path = self.declare(".claude")
+        path.write_text("[]", encoding="utf-8")
+        with self.assertRaises(harness.HarnessError) as caught:
+            harness.load_tier(self.repo)
+        self.assertIn(str(path), str(caught.exception))
 
 
 class FakeCommandRunner:
@@ -5376,6 +6418,57 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("https://github.com/acme/widgets.git", detail)
         self.assertIn("PUBLIC", detail)
 
+    def test_a_stale_legacy_declaration_still_binds_the_audit(self) -> None:
+        # End-to-end shape of issue #99: the repo declares T1 without the
+        # overlay, a legacy file nobody deleted declares T4 + sensitive_data,
+        # and first-found-wins never even probed the remote.
+        repo = self.make_repo(tier=1, sensitive_data=False)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps(
+                {
+                    "tier": 4,
+                    "name": harness.TIER_NAMES[4],
+                    "authority": {"push": "free", "merge": "gated"},
+                    "flags": {"sensitive_data": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(result["tier"], 4)
+        self.assertEqual(len(result["tier_files"]), 2)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        self.assertFalse(result["ok"])
+
+    def test_two_declarations_name_the_file_each_issue_came_from(self) -> None:
+        repo = self.make_repo()
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "tier.json").write_text(
+            json.dumps({"tier": 9, "authority": {}, "flags": {}}), encoding="utf-8"
+        )
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertTrue(
+            all(
+                issue.startswith(".claude/tier.json: ")
+                for issue in result["issues"]
+                if "tier must be" in issue or "authority." in issue
+            ),
+            result["issues"],
+        )
+        self.assertIn(
+            ".claude/tier.json: tier must be an integer from 0 through 4",
+            result["issues"],
+        )
+        # The valid declaration still binds the tier the invalid one cannot.
+        self.assertEqual(result["tier"], 2)
+
     def test_public_non_origin_remote_is_advisory_not_a_failure(self) -> None:
         # A private fork of a public project: origin private, upstream public.
         # The exposure check must still say it loudly without failing a repo
@@ -5400,6 +6493,188 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("PUBLIC repository upstream/widgets", detail)
         self.assertIn("is not the publishing remote", detail)
         self.assertTrue(result["ok"], result["issues"])
+
+    # --- the visibility probe's transports (issue #106) ------------------------
+
+    def test_the_visibility_probe_asks_rest_before_graphql(self) -> None:
+        # `gh repo view` is the GraphQL lane, whose hourly quota an agent fleet
+        # exhausts while REST core is barely touched. REST answers first, and
+        # a REST verdict spends no GraphQL call at all.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api --hostname github.com repos/acme/widgets": (True, "private"),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(
+            probes,
+            [
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "repos/acme/widgets",
+                    "--jq",
+                    ".visibility",
+                ]
+            ],
+        )
+
+    def test_a_refused_rest_probe_falls_back_to_graphql(self) -> None:
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
+        lanes = [argv[1] for argv in runner.calls if argv[:1] == ["gh"]]
+        self.assertEqual(lanes, ["api", "repo"])
+        # The evidence names the transport that actually answered.
+        self.assertIn("`gh repo view github.com/acme/widgets", self.details(result))
+
+    def test_a_rest_answer_that_is_not_a_verdict_falls_back_too(self) -> None:
+        # `gh api --jq .visibility` prints a literal `null` at exit 0 when the
+        # field is absent, and "NULL" is truthy: gating the fallback on
+        # emptiness would rebuild the mute wall on the new lane.
+        repo = self.make_repo(sensitive_data=True)
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh api": (True, "null"),
+                "gh repo view": (True, "PRIVATE"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertEqual(
+            [argv[1] for argv in runner.calls if argv[:1] == ["gh"]], ["api", "repo"]
+        )
+
+    def test_an_exhausted_quota_is_named_in_the_unproven_line(self) -> None:
+        # Both lanes refusing used to print the same sentence as an absent
+        # binary: "returned <no output>". The probe's own words name the cause.
+        repo = self.make_repo(sensitive_data=True)
+
+        class RefusingRunner(FakeCommandRunner):
+            """A resolver that reports WHY it failed, as production does."""
+
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "gh: API rate limit exceeded for user ID 4210. (HTTP 403)",
+                    )
+                return resolved, output
+
+        runner = RefusingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        detail = self.details(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertIn("unmeasured", detail)
+        self.assertIn("(quota exhausted)", detail)
+        self.assertIn("API rate limit exceeded", detail)
+        # Both transports are named, so the reader knows neither answered.
+        self.assertIn("gh api --hostname github.com repos/acme/widgets", detail)
+        self.assertIn("gh repo view github.com/acme/widgets", detail)
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_a_credential_in_probe_stderr_never_reaches_a_finding(self) -> None:
+        # `gh` echoes tokens from a misconfigured credential helper and `git`
+        # echoes whole remote URLs, and this text is now quoted into findings
+        # that reach stdout, --json and the doctor detail.
+        repo = self.make_repo(sensitive_data=True)
+
+        class LeakingRunner(FakeCommandRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                resolved, output = super().__call__(argv, cwd, **kwargs)
+                if argv[:1] == ["gh"]:
+                    return (
+                        False,
+                        "",
+                        "error: ghp_0123456789abcdefghijABCDEF authenticating to "
+                        "https://ci-user:s3cr3t-pat@github.com/acme/widgets.git",
+                    )
+                return resolved, output
+
+        runner = LeakingRunner({"remote --verbose": (True, GITHUB_REMOTE_OUTPUT)})
+        result = self.audit(repo, runner)
+        rendered = self.details(result) + json.dumps(result)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["UNPROVEN"])
+        self.assertNotIn("ghp_0123456789abcdefghijABCDEF", rendered)
+        self.assertNotIn("s3cr3t-pat", rendered)
+        self.assertNotIn("ci-user", rendered)
+        self.assertIn("***", rendered)
+
+    def test_the_rest_route_accepts_only_an_owner_repo_pair(self) -> None:
+        # The path is interpolated into argv, so it is an allowlist and every
+        # rejection skips the REST lane rather than composing a command line.
+        for slug, path in (
+            ("acme/widgets", "acme/widgets"),
+            ("github.com/acme/widgets", "acme/widgets"),
+            ("https://github.com/acme/widgets", "acme/widgets"),
+            ("acme/widgets.js", "acme/widgets.js"),
+            ("_acme-2/-widgets_", "_acme-2/-widgets_"),
+            ("../acme/widgets", ""),
+            ("acme/../widgets", ""),
+            ("acme/widgets/extra", ""),
+            ("acme", ""),
+            ("acme/wid gets", ""),
+            ("acme/wid&gets", ""),
+            ("acme/..", ""),
+            ("acme/$(id)", ""),
+        ):
+            with self.subTest(slug=slug):
+                self.assertEqual(harness.github_rest_repo_path(slug), path)
+
+    def test_a_slug_the_rest_route_rejects_still_reaches_graphql(self) -> None:
+        runner = FakeCommandRunner({"gh repo view": (True, "PRIVATE")})
+        visibility, evidence = harness.github_visibility(
+            "acme/wid gets", Path("."), runner, None
+        )
+        self.assertEqual(visibility, "PRIVATE")
+        self.assertEqual([argv[1] for argv in runner.calls], ["repo"])
+        self.assertIn("gh repo view", evidence)
+
+    def test_a_failed_resolver_keeps_what_it_said(self) -> None:
+        script = "import sys; sys.stderr.write('boom: denied\\n'); sys.exit(1)"
+        resolved, output, failure = harness.bounded_command_result(
+            [sys.executable, "-c", script]
+        )
+        self.assertFalse(resolved)
+        self.assertEqual(output, "")
+        self.assertIn("boom: denied", failure)
+        # The two-element contract every other caller uses is unchanged.
+        self.assertEqual(
+            harness.bounded_command_output([sys.executable, "-c", script]), (False, "")
+        )
+
+    def test_an_absent_probe_binary_is_named_not_silent(self) -> None:
+        # Since issue #112 an absent probe is diagnosed by the PATH resolver
+        # rather than by the failed spawn, so the wording is the resolver's.
+        # The contract this test guards is unchanged: never a silent empty
+        # probe, and the name the caller asked for appears in the diagnosis.
+        resolved, _output, failure = harness.bounded_command_result(
+            ["definitely-not-a-real-binary-agent-harness"]
+        )
+        self.assertFalse(resolved)
+        self.assertIn("definitely-not-a-real-binary-agent-harness", failure)
+        self.assertIn(
+            "no executable of that name on PATH",
+            harness.probe_failure_note(
+                ["definitely-not-a-real-binary-agent-harness"], failure
+            ),
+        )
 
     def test_a_public_origin_still_fails_the_audit(self) -> None:
         repo = self.make_repo(sensitive_data=True)
@@ -5914,8 +7189,13 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "remote visibility"), ["MISMATCH"])
         probes = [argv for argv in runner.calls if argv[:1] == ["gh"]]
         self.assertTrue(probes)
+        # Both transports pin the host, each in its own spelling.
         for argv in probes:
-            self.assertTrue(argv[3].startswith("github.com/"), argv)
+            with self.subTest(argv=argv):
+                if argv[1] == "api":
+                    self.assertEqual(argv[2:4], ["--hostname", "github.com"])
+                else:
+                    self.assertTrue(argv[3].startswith("github.com/"), argv)
 
     def test_redaction_keeps_scp_syntax_actionable(self) -> None:
         # `git@github.com:owner/repo` carries a fixed account name, not a
@@ -5973,11 +7253,17 @@ class RealityCheckTests(unittest.TestCase):
         clock = {"now": 0.0}
 
         class OverrunningRunner(FakeCommandRunner):
-            """The visibility probe itself consumes the rest of the budget."""
+            """The visibility probe itself consumes the rest of the budget.
+
+            The burn is charged to the GraphQL lane because that is the one
+            that ANSWERS here: REST is probed first and this fixture has no
+            reply for it, so charging every `gh` call would exhaust the budget
+            before the measurement under test ever ran.
+            """
 
             def __call__(self, argv, cwd=None, **kwargs):
                 answer = super().__call__(argv, cwd, **kwargs)
-                if argv[:1] == ["gh"]:
+                if argv[:2] == ["gh", "repo"]:
                     clock["now"] += 10.0
                 return answer
 
@@ -6589,6 +7875,1681 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(
             [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
         )
+
+
+class WorktreeCloseoutTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = harness.canonical_worktree_path(Path(self.temp.name), strict=True)
+        self.remote = self.base / "remote.git"
+        self.repo = self.base / "repo"
+        self.claimant = "test-session"
+        subprocess.run(["git", "init", "--bare", "-q", str(self.remote)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "Harness Test")
+        (self.repo / "README.md").write_text("fixture\n", encoding="utf-8")
+        (self.repo / ".gitignore").write_text("private-report.md\n", encoding="utf-8")
+        self.git("add", "README.md", ".gitignore")
+        self.git("commit", "-qm", "create fixture")
+        self.git("branch", "-M", "main")
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("push", "-qu", "origin", "main")
+        (self.repo / ".worktrees").mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def git(
+        self, *args: str, cwd: Path | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd or self.repo,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def hash_blob(self, contents: str, *, cwd: Path | None = None) -> str:
+        return subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=cwd or self.repo,
+            input=contents,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def add_worktree(
+        self,
+        name: str,
+        *,
+        branch: str | None = None,
+        detached: bool = False,
+        lease: bool = True,
+    ) -> Path:
+        worktree = self.repo / ".worktrees" / name
+        args = ["worktree", "add"]
+        if detached:
+            args.append("--detach")
+        else:
+            args.extend(["-b", branch or f"test/{name}"])
+        args.extend([str(worktree), "origin/main"])
+        self.git(*args)
+        if lease:
+            self.acquire_lease(worktree)
+        return worktree
+
+    def acquire_lease(
+        self,
+        worktree: Path,
+        *,
+        claimant: str | None = None,
+        ttl_seconds: float = harness.WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+        replace_stale: bool = False,
+        now=None,
+    ) -> dict[str, object]:
+        kwargs = {}
+        if now is not None:
+            kwargs["now"] = now
+        return harness.mutate_worktree_lease(
+            worktree,
+            action="acquire",
+            claimant=claimant or self.claimant,
+            ttl_seconds=ttl_seconds,
+            replace_stale=replace_stale,
+            **kwargs,
+        )
+
+    def plan(
+        self, *, refresh: bool = True, claimant: str | None = None, **kwargs
+    ) -> dict[str, object]:
+        kwargs.setdefault("process_cwd", self.repo)
+        return harness.worktree_plan(
+            self.repo,
+            refresh=refresh,
+            claimant=claimant or self.claimant,
+            **kwargs,
+        )
+
+    @staticmethod
+    def candidate(plan: dict[str, object], path: Path) -> dict[str, object]:
+        expected_path = harness.canonical_worktree_path(path, strict=path.exists())
+        expected = harness.worktree_path_key(expected_path)
+        for candidate in plan["worktrees"]:
+            if candidate["path_key"] == expected or (
+                candidate["path_key"] is None
+                and harness.worktree_path_key(Path(candidate["path"])) == expected
+            ):
+                return candidate
+        raise AssertionError(f"missing worktree candidate: {path}")
+
+    @staticmethod
+    def fail_list_after_first_remove_runner():
+        calls: list[list[str]] = []
+        state = {"removals": 0, "failed_lists": 0}
+
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "list"] and state["removals"]:
+                state["failed_lists"] += 1
+                return subprocess.CompletedProcess(
+                    command, 6, "misleading", "controlled list failure"
+                )
+            result = harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+            if command[1:3] == ["worktree", "remove"] and not result.returncode:
+                state["removals"] += 1
+            return result
+
+        return runner, calls, state
+
+    def test_cooperative_lease_lifecycle_is_exclusive_explicit_and_expiring(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("lease-lifecycle", lease=False)
+        start = datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)
+        missing = self.candidate(self.plan(now=lambda: start), worktree)
+        self.assertIn("cooperative_lease_missing", missing["reasons"])
+
+        acquired = self.acquire_lease(worktree, ttl_seconds=30, now=lambda: start)
+        lease_id = acquired["lease"]["lease_id"]
+        owned = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=5)), worktree
+        )
+        self.assertEqual(owned["verdict"], "remove")
+
+        with self.assertRaisesRegex(harness.HarnessError, "renewal refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="renew",
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=10),
+            )
+        renewed = harness.mutate_worktree_lease(
+            worktree,
+            action="renew",
+            claimant=self.claimant,
+            ttl_seconds=50,
+            now=lambda: start + timedelta(seconds=10),
+        )
+        self.assertEqual(renewed["lease"]["lease_id"], lease_id)
+
+        occupied = self.candidate(
+            self.plan(
+                claimant="other-session",
+                now=lambda: start + timedelta(seconds=11),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_owned_by_other", occupied["reasons"])
+
+        expired = self.candidate(
+            self.plan(now=lambda: start + timedelta(seconds=61)), worktree
+        )
+        self.assertIn("cooperative_lease_expired", expired["reasons"])
+        with self.assertRaisesRegex(harness.HarnessError, "replace-stale"):
+            self.acquire_lease(
+                worktree,
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=61),
+            )
+        replaced = self.acquire_lease(
+            worktree,
+            claimant="successor",
+            replace_stale=True,
+            now=lambda: start + timedelta(seconds=61),
+        )
+        self.assertNotEqual(replaced["lease"]["lease_id"], lease_id)
+        with self.assertRaisesRegex(harness.HarnessError, "release refused"):
+            harness.mutate_worktree_lease(
+                worktree,
+                action="release",
+                claimant=self.claimant,
+                now=lambda: start + timedelta(seconds=62),
+            )
+        released = harness.mutate_worktree_lease(
+            worktree,
+            action="release",
+            claimant="successor",
+            now=lambda: start + timedelta(seconds=62),
+        )
+        self.assertTrue(released["ok"])
+        after_release = self.candidate(
+            self.plan(
+                claimant="successor",
+                now=lambda: start + timedelta(seconds=62),
+            ),
+            worktree,
+        )
+        self.assertIn("cooperative_lease_missing", after_release["reasons"])
+
+    def test_malformed_and_mismatched_leases_fail_closed(self) -> None:
+        worktree = self.add_worktree("bad-lease")
+        plan = self.plan()
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+
+        lease_path.write_text("{not json", encoding="utf-8")
+        malformed = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_malformed", malformed["reasons"])
+
+        lease_path.unlink()
+        acquired = self.acquire_lease(worktree)
+        record = acquired["lease"]["record"].copy()
+        record["worktree"] = str(self.repo)
+        harness.write_worktree_lease(lease_path, record)
+        mismatched = self.candidate(self.plan(), worktree)
+        self.assertIn("cooperative_lease_identity_mismatch", mismatched["reasons"])
+
+    def test_canonical_identity_collapses_aliases_and_drives_reported_path(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("canonical")
+        candidate = self.candidate(self.plan(), worktree)
+        canonical = harness.canonical_worktree_path(worktree)
+        self.assertEqual(candidate["path"], str(canonical))
+        self.assertEqual(candidate["path_key"], harness.worktree_path_key(canonical))
+
+        alias = self.base / "canonical-alias"
+        try:
+            alias.symlink_to(worktree, target_is_directory=True)
+        except OSError:
+            return
+        self.assertTrue(
+            harness.same_worktree_path(
+                harness.canonical_worktree_path(alias), canonical
+            )
+        )
+
+    def test_current_and_other_claimant_occupied_worktrees_are_retained(self) -> None:
+        current = self.add_worktree("current")
+        occupied = self.add_worktree("occupied", lease=False)
+        self.acquire_lease(occupied, claimant="another-agent")
+        plan = self.plan(process_cwd=current)
+        self.assertIn("process_cwd_occupied", self.candidate(plan, current)["reasons"])
+        self.assertIn(
+            "cooperative_lease_owned_by_other",
+            self.candidate(plan, occupied)["reasons"],
+        )
+
+    def test_default_is_read_only_and_does_not_trust_stale_remote_refs(self) -> None:
+        worktree = self.add_worktree("read-only")
+        plan = self.plan(refresh=False)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("remote_evidence_not_refreshed", candidate["reasons"])
+        self.assertTrue(worktree.is_dir())
+
+        with self.assertRaisesRegex(harness.HarnessError, "requires --refresh"):
+            harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo), refresh=False, apply=True, json=True
+                )
+            )
+        with self.assertRaisesRegex(harness.HarnessError, "requires --claimant"):
+            harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=None,
+                    json=True,
+                )
+            )
+
+    def test_refreshed_remote_containment_makes_a_clean_candidate_removable(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("contained")
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/main"],
+        )
+
+    def test_detached_candidate_is_retained_despite_remote_containment(self) -> None:
+        worktree = self.add_worktree("detached-contained", detached=True)
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("detached_head", candidate["reasons"])
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/main"],
+        )
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_remote_tracking_symbolic_head_is_not_a_local_branch(self) -> None:
+        worktree = self.add_worktree("remote-symbolic", detached=True)
+        self.git("symbolic-ref", "HEAD", "refs/remotes/origin/main", cwd=worktree)
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertFalse(candidate["detached"])
+        self.assertEqual(candidate["branch"], "refs/remotes/origin/main")
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_local_branch", candidate["reasons"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_tracked_untracked_and_ignored_content_are_preservation_blockers(
+        self,
+    ) -> None:
+        tracked = self.add_worktree("tracked")
+        untracked = self.add_worktree("untracked")
+        ignored = self.add_worktree("ignored")
+        (tracked / "README.md").write_text("changed\n", encoding="utf-8")
+        (untracked / "scratch.txt").write_text("keep\n", encoding="utf-8")
+        (ignored / "private-report.md").write_text("private\n", encoding="utf-8")
+
+        plan = self.plan()
+        for path, reason in (
+            (tracked, "tracked_or_untracked_changes"),
+            (untracked, "tracked_or_untracked_changes"),
+            (ignored, "ignored_files"),
+        ):
+            with self.subTest(path=path.name):
+                candidate = self.candidate(plan, path)
+                self.assertEqual(candidate["verdict"], "keep")
+                self.assertIn(reason, candidate["reasons"])
+
+    def test_staged_content_is_a_preservation_blocker(self) -> None:
+        staged = self.add_worktree("staged")
+        (staged / "staged.txt").write_text("keep\n", encoding="utf-8")
+        self.git("add", "staged.txt", cwd=staged)
+
+        candidate = self.candidate(self.plan(), staged)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("tracked_or_untracked_changes", candidate["reasons"])
+        self.assertTrue(any(entry.startswith("A ") for entry in candidate["changes"]))
+
+    def test_clean_detached_commit_must_reach_a_remote_tracking_ref(self) -> None:
+        worktree = self.add_worktree("unreachable", detached=True)
+        (worktree / "only-here.txt").write_text("local\n", encoding="utf-8")
+        self.git("add", "only-here.txt", cwd=worktree)
+        self.git("commit", "-qm", "local detached commit", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", candidate["reasons"])
+
+    def test_index_flags_cannot_hide_work_that_removal_would_destroy(self) -> None:
+        worktree = self.add_worktree("assume-unchanged")
+        self.git("update-index", "--assume-unchanged", "README.md", cwd=worktree)
+        (worktree / "README.md").write_text("hidden change\n", encoding="utf-8")
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("index_preservation_flags", candidate["reasons"])
+        self.assertTrue(candidate["index_preservation_flags"])
+
+    def test_clean_index_resolve_undo_state_is_a_preservation_blocker(self) -> None:
+        conflict = self.repo / "conflict.txt"
+        conflict.write_text("base\n", encoding="utf-8")
+        self.git("add", "conflict.txt")
+        self.git("commit", "-qm", "add conflict fixture")
+        self.git("push", "-q")
+        worktree = self.add_worktree("resolve-undo")
+
+        conflict.write_text("main\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on main")
+        self.git("push", "-q")
+        worktree_conflict = worktree / "conflict.txt"
+        worktree_conflict.write_text("branch\n", encoding="utf-8")
+        self.git("commit", "-qam", "change on branch", cwd=worktree)
+        merge = self.git("merge", "origin/main", cwd=worktree, check=False)
+        self.assertNotEqual(merge.returncode, 0)
+        worktree_conflict.write_text("resolved\n", encoding="utf-8")
+        self.git("add", "conflict.txt", cwd=worktree)
+        self.git("commit", "-qm", "resolve merge", cwd=worktree)
+        self.git("push", "-q", "origin", "test/resolve-undo")
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        causal_probe = self.git("ls-files", "--resolve-undo", "-z", cwd=worktree).stdout
+        self.assertTrue(causal_probe)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("index_resolve_undo", candidate["reasons"])
+        self.assertEqual(
+            candidate["index_resolve_undo"],
+            [entry for entry in causal_probe.split("\0") if entry],
+        )
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_mode_only_change_is_a_blocker_when_core_filemode_is_false(self) -> None:
+        script = self.repo / "tool.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.git("add", "tool.sh")
+        self.git("commit", "-qm", "add script")
+        self.git("push", "-q")
+        worktree = self.add_worktree("mode-only")
+        self.git("config", "core.fileMode", "false", cwd=worktree)
+        worktree_script = worktree / "tool.sh"
+        os.chmod(worktree_script, worktree_script.stat().st_mode | 0o111)
+        causal_probe = self.git(
+            "-c",
+            "core.fileMode=true",
+            "diff-files",
+            "--summary",
+            "--",
+            "tool.sh",
+            cwd=worktree,
+        )
+        if not causal_probe.stdout:
+            self.skipTest("filesystem does not expose executable mode changes")
+        self.assertEqual(self.git("status", "--porcelain=v1", cwd=worktree).stdout, "")
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("tracked_mode_changes", candidate["reasons"])
+        self.assertTrue(candidate["tracked_mode_changes"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows regression")
+    def test_executable_baseline_is_not_a_mode_change_on_native_windows(self) -> None:
+        script = self.repo / "tool.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.git("add", "tool.sh")
+        self.git("update-index", "--chmod=+x", "tool.sh")
+        self.git("commit", "-qm", "add executable script")
+        self.git("push", "-q")
+        worktree = self.add_worktree("executable-baseline")
+        self.git("config", "core.fileMode", "false", cwd=worktree)
+        causal_probe = self.git(
+            "-c",
+            "core.fileMode=true",
+            "diff-files",
+            "--summary",
+            "--",
+            "tool.sh",
+            cwd=worktree,
+        )
+        self.assertIn("mode change 100755 => 100644 tool.sh", causal_probe.stdout)
+        self.assertEqual(self.git("status", "--porcelain=v1", cwd=worktree).stdout, "")
+        staged_mode = self.add_worktree("staged-mode")
+        self.git("config", "core.fileMode", "false", cwd=staged_mode)
+        self.git("update-index", "--chmod=-x", "tool.sh", cwd=staged_mode)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["tracked_mode_changes"], [])
+        staged_candidate = self.candidate(plan, staged_mode)
+        self.assertEqual(staged_candidate["verdict"], "keep")
+        self.assertIn("tracked_or_untracked_changes", staged_candidate["reasons"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertFalse(worktree.exists())
+        self.assertTrue(staged_mode.is_dir())
+
+    def test_recovery_reachability_uses_one_stdin_query(self) -> None:
+        commits = [f"{value:040x}" for value in range(1, 260)]
+        expected_unretained = [commits[0], commits[-1]]
+        calls: list[tuple[list[str], Path, str | None]] = []
+
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command.copy(), cwd, stdin_text))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"{expected_unretained[-1].upper()}\n{expected_unretained[0]}\n"
+                f"{expected_unretained[-1]}\n",
+                "",
+            )
+
+        unretained, error = harness.commits_without_local_retention(
+            self.repo, commits, runner
+        )
+
+        self.assertEqual(error, "")
+        self.assertEqual(unretained, expected_unretained)
+        self.assertEqual(len(calls), 1)
+        command, cwd, stdin_text = calls[0]
+        self.assertEqual(
+            command,
+            [
+                "git",
+                "rev-list",
+                "--no-walk",
+                "--stdin",
+                "--not",
+                "--branches",
+                "--tags",
+            ],
+        )
+        self.assertTrue(harness.same_worktree_path(cwd, self.repo))
+        self.assertEqual(stdin_text, "".join(f"{object_id}\n" for object_id in commits))
+
+    def test_empty_recovery_set_launches_no_reachability_query(self) -> None:
+        calls = 0
+
+        def runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        unretained, error = harness.commits_without_local_retention(
+            self.repo, [], runner
+        )
+
+        self.assertEqual((unretained, error), ([], ""))
+        self.assertEqual(calls, 0)
+
+    def test_recovery_reachability_query_fails_closed(self) -> None:
+        commit = "a" * 40
+        cases = (
+            (7, "", "recovery reachability probe failed with exit 7"),
+            (0, "not-an-object-id\n", "invalid object id"),
+        )
+        for returncode, stdout, expected_error in cases:
+            with self.subTest(returncode=returncode, stdout=stdout):
+
+                def runner(
+                    command: list[str],
+                    cwd: Path,
+                    *,
+                    stdin_text: str | None = None,
+                ) -> subprocess.CompletedProcess[str]:
+                    self.assertEqual(stdin_text, f"{commit}\n")
+                    return subprocess.CompletedProcess(
+                        command, returncode, stdout, "controlled failure"
+                    )
+
+                unretained, error = harness.commits_without_local_retention(
+                    self.repo, [commit], runner
+                )
+                self.assertEqual(unretained, [])
+                self.assertIn(expected_error, error)
+
+    def test_non_commit_orig_head_identity_is_reported_and_retained(self) -> None:
+        tagged = self.add_worktree("orig-head-tag")
+        self.git(
+            "tag",
+            "-a",
+            "test/orig-head-object",
+            "-m",
+            "direct ORIG_HEAD tag",
+            cwd=tagged,
+        )
+        tag_oid = self.git(
+            "rev-parse", "refs/tags/test/orig-head-object", cwd=tagged
+        ).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", tag_oid, cwd=tagged)
+        self.git("update-ref", "-d", "refs/tags/test/orig-head-object", cwd=tagged)
+
+        blobbed = self.add_worktree("orig-head-blob")
+        blob_oid = self.hash_blob("direct ORIG_HEAD blob\n", cwd=blobbed)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=blobbed)
+
+        plan = self.plan()
+        for worktree, object_id, object_type in (
+            (tagged, tag_oid, "tag"),
+            (blobbed, blob_oid, "blob"),
+        ):
+            with self.subTest(object_type=object_type):
+                candidate = self.candidate(plan, worktree)
+                self.assertEqual(
+                    candidate["orig_head_object"],
+                    {"oid": object_id, "type": object_type},
+                )
+                self.assertEqual(candidate["verdict"], "keep")
+                self.assertIn("non_commit_orig_head", candidate["reasons"])
+
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        for worktree, object_id in ((tagged, tag_oid), (blobbed, blob_oid)):
+            candidate = self.candidate(plan, worktree)
+            self.assertEqual(candidate["apply"], "kept")
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual(
+                self.git("rev-parse", "ORIG_HEAD", cwd=worktree).stdout.strip(),
+                object_id,
+            )
+
+    def test_commit_orig_head_keeps_existing_recovery_behavior(self) -> None:
+        worktree = self.add_worktree("orig-head-commit")
+        commit = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", commit, cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(
+            candidate["orig_head_object"], {"oid": commit, "type": "commit"}
+        )
+        self.assertIn(commit, candidate["recovery_commits"])
+        self.assertNotIn("non_commit_orig_head", candidate["reasons"])
+        self.assertEqual(candidate["verdict"], "remove")
+
+    def test_absent_orig_head_does_not_resolve_a_same_named_branch(self) -> None:
+        worktree = self.add_worktree("orig-head-absent")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        (git_dir / "ORIG_HEAD").unlink(missing_ok=True)
+        self.git("branch", "ORIG_HEAD", "HEAD", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertIsNone(candidate["orig_head_object"])
+        self.assertNotIn("non_commit_orig_head", candidate["reasons"])
+        self.assertEqual(candidate["verdict"], "remove")
+
+    def test_orig_head_type_probe_runs_only_for_a_present_object(self) -> None:
+        worktree = self.add_worktree("orig-head-probe-budget")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        calls: list[list[str]] = []
+
+        def recording_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        (git_dir / "ORIG_HEAD").unlink(missing_ok=True)
+        self.assertEqual(
+            harness.worktree_orig_head_object(worktree, git_dir, recording_runner),
+            (None, ""),
+        )
+        self.assertEqual(calls, [])
+
+        blob_oid = self.hash_blob("one bounded type probe\n", cwd=worktree)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
+        self.assertEqual(
+            harness.worktree_orig_head_object(worktree, git_dir, recording_runner),
+            ({"oid": blob_oid, "type": "blob"}, ""),
+        )
+        self.assertEqual(calls, [["git", "cat-file", "-t", blob_oid]])
+
+    def test_orig_head_identity_change_is_caught_during_revalidation(self) -> None:
+        worktree = self.add_worktree("orig-head-revalidation")
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["orig_head_object"]["type"], "commit")
+
+        blob_oid = self.hash_blob("late direct ORIG_HEAD blob\n", cwd=worktree)
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
+
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(candidate["apply"], "kept")
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertEqual(candidate["revalidation"], "changed")
+        self.assertNotEqual(
+            candidate["fingerprint"], candidate["revalidated_fingerprint"]
+        )
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(
+            self.git("rev-parse", "ORIG_HEAD", cwd=worktree).stdout.strip(),
+            blob_oid,
+        )
+
+    def test_orig_head_type_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("orig-head-type-failure")
+        commit = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("update-ref", "ORIG_HEAD", commit, cwd=worktree)
+
+        def failing_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1:3] == ["cat-file", "-t"] and harness.same_worktree_path(
+                cwd, worktree
+            ):
+                return subprocess.CompletedProcess(
+                    command, 7, "misleading", "controlled failure"
+                )
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        plan = self.plan(command_runner=failing_runner)
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("worktree_recovery_probe_failed", candidate["reasons"])
+        self.assertIn("object-type probe failed", candidate["worktree_recovery_error"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_non_regular_orig_head_is_incomplete(self) -> None:
+        worktree = self.add_worktree("orig-head-directory")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        orig_head = git_dir / "ORIG_HEAD"
+        orig_head.unlink(missing_ok=True)
+        orig_head.mkdir()
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("worktree_recovery_probe_failed", candidate["reasons"])
+        self.assertIn("not a regular file", candidate["worktree_recovery_error"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(orig_head.is_dir())
+
+    def test_worktree_local_state_and_unique_reflog_are_preserved(self) -> None:
+        worktree = self.add_worktree("local-state")
+        (worktree / "unique.txt").write_text("only here\n", encoding="utf-8")
+        self.git("add", "unique.txt", cwd=worktree)
+        self.git("commit", "-qm", "unique local commit", cwd=worktree)
+        unique = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("reset", "--hard", "origin/main", cwd=worktree)
+        self.git("update-ref", "refs/bisect/bad", unique, cwd=worktree)
+
+        local_ref_plan = self.plan()
+        with_local_ref = self.candidate(local_ref_plan, worktree)
+        self.assertEqual(with_local_ref["verdict"], "keep")
+        self.assertIn("worktree_local_refs", with_local_ref["reasons"])
+        self.assertIn("worktree_administrative_state", with_local_ref["reasons"])
+        self.assertEqual(
+            [item["ref"] for item in with_local_ref["worktree_local_refs"]],
+            ["refs/bisect/bad"],
+        )
+        self.assertIn(unique, with_local_ref["unretained_recovery_commits"])
+        self.assertTrue(harness.apply_worktree_plan(local_ref_plan))
+        self.assertTrue(worktree.is_dir())
+
+        self.git("update-ref", "-d", "refs/bisect/bad", cwd=worktree)
+        reflog_only = self.candidate(self.plan(), worktree)
+        self.assertEqual(reflog_only["verdict"], "keep")
+        self.assertNotIn("worktree_local_refs", reflog_only["reasons"])
+        self.assertIn("unretained_recovery_commits", reflog_only["reasons"])
+        self.assertIn(unique, reflog_only["unretained_recovery_commits"])
+
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        (git_dir / "sequencer").mkdir()
+        operation = self.candidate(self.plan(), worktree)
+        self.assertIn("worktree_administrative_state", operation["reasons"])
+        self.assertIn("sequencer", operation["worktree_administrative_state"])
+
+    def test_old_side_of_head_reflog_preserves_unique_commit(self) -> None:
+        worktree = self.add_worktree("old-reflog-side")
+        self.git("switch", "--detach", cwd=worktree)
+        (worktree / "unique.txt").write_text("only in reflog\n", encoding="utf-8")
+        self.git("add", "unique.txt", cwd=worktree)
+        self.git("commit", "-qm", "unique detached commit", cwd=worktree)
+        unique = self.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        self.git("switch", "test/old-reflog-side", cwd=worktree)
+
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        reflog_path = git_dir / "logs" / "HEAD"
+        records = reflog_path.read_bytes().splitlines(keepends=True)
+        retained_records = [
+            record for record in records if record.split(b" ", 2)[1].decode() != unique
+        ]
+        self.assertLess(len(retained_records), len(records))
+        self.assertTrue(
+            any(
+                record.split(b" ", 2)[0].decode() == unique
+                for record in retained_records
+            )
+        )
+        reflog_path.write_bytes(b"".join(retained_records))
+        (git_dir / "COMMIT_EDITMSG").unlink(missing_ok=True)
+
+        new_sides = self.git(
+            "reflog", "show", "--format=%H", "--no-abbrev", "HEAD", cwd=worktree
+        ).stdout.splitlines()
+        self.assertNotIn(unique, new_sides)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("unretained_recovery_commits", candidate["reasons"])
+        self.assertIn(unique, candidate["recovery_commits"])
+        self.assertIn(unique, candidate["unretained_recovery_commits"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_non_regular_head_reflog_is_administrative_state(self) -> None:
+        worktree = self.add_worktree("head-reflog-directory")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        blob_oid = self.hash_blob("direct evidence beside a non-regular reflog\n")
+        self.git("update-ref", "ORIG_HEAD", blob_oid, cwd=worktree)
+        reflog_path = git_dir / "logs" / "HEAD"
+        reflog_path.unlink()
+        reflog_path.mkdir()
+        evidence = reflog_path / "unique-recovery.txt"
+        evidence.write_text("preserve me\n", encoding="utf-8")
+        self.assertEqual(self.git("reflog", "show", "HEAD", cwd=worktree).returncode, 0)
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_administrative_state", candidate["reasons"])
+        self.assertIn("logs/HEAD", candidate["worktree_administrative_state"])
+        self.assertEqual(
+            candidate["orig_head_object"], {"oid": blob_oid, "type": "blob"}
+        )
+        self.assertIn("non_commit_orig_head", candidate["reasons"])
+        self.assertTrue(plan["complete"])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(evidence.is_file())
+
+    def test_any_fetched_remote_tracking_ref_can_preserve_the_head(self) -> None:
+        worktree = self.add_worktree("archive")
+        (worktree / "archive.txt").write_text("published\n", encoding="utf-8")
+        self.git("add", "archive.txt", cwd=worktree)
+        self.git("commit", "-qm", "publish archive", cwd=worktree)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/archive", cwd=worktree)
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "remove")
+        self.assertEqual(candidate["commit_editmsg_status"], "matches_head")
+        self.assertEqual(
+            [item["ref"] for item in candidate["containing_remote_refs"]],
+            ["refs/remotes/origin/archive"],
+        )
+
+    def test_failed_commit_message_is_a_preservation_blocker(self) -> None:
+        worktree = self.add_worktree("failed-commit-message")
+        hook = self.repo / ".git" / "hooks" / "commit-msg"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        os.chmod(hook, 0o755)
+        failed = self.git(
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unique uncommitted rationale",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.git("status", "--porcelain", cwd=worktree).stdout, "")
+        git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+        )
+        self.assertIn(
+            "unique uncommitted rationale",
+            (git_dir / "COMMIT_EDITMSG").read_text(encoding="utf-8"),
+        )
+
+        plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertEqual(candidate["commit_editmsg_status"], "differs_from_head")
+        self.assertIn("commit_editmsg_uncommitted", candidate["reasons"])
+        self.assertNotIn("unique uncommitted rationale", json.dumps(candidate))
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_narrow_fetch_refspec_cannot_leave_a_deleted_branch_looking_fresh(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("deleted-archive")
+        (worktree / "archive.txt").write_text("once published\n", encoding="utf-8")
+        self.git("add", "archive.txt", cwd=worktree)
+        self.git("commit", "-qm", "publish then delete archive", cwd=worktree)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/archive", cwd=worktree)
+        first = self.candidate(self.plan(), worktree)
+        self.assertEqual(first["verdict"], "remove")
+
+        self.git("push", "-q", "origin", ":refs/heads/archive")
+        self.git("config", "--unset-all", "remote.origin.fetch")
+        self.git(
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        second = self.candidate(self.plan(), worktree)
+        self.assertEqual(second["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", second["reasons"])
+        self.assertEqual(
+            self.git(
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes/origin/archive",
+            ).stdout.strip(),
+            "",
+        )
+
+    def test_core_worktree_redirection_refuses_the_registered_path(self) -> None:
+        worktree = self.add_worktree("redirected")
+        alternate = self.base / "alternate-worktree"
+        shutil.copytree(worktree, alternate, ignore=shutil.ignore_patterns(".git"))
+        self.git("config", "extensions.worktreeConfig", "true")
+        self.git(
+            "config",
+            "--worktree",
+            "core.worktree",
+            str(alternate),
+            cwd=worktree,
+        )
+
+        candidate = self.candidate(self.plan(), worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("worktree_path_redirected", candidate["reasons"])
+        self.assertEqual(
+            harness.canonical_worktree_path(Path(candidate["measured_toplevel"])),
+            harness.canonical_worktree_path(alternate),
+        )
+
+    def test_grafts_and_replace_refs_cannot_supply_reachability(self) -> None:
+        worktree = self.add_worktree("rewritten-history")
+        grafts = self.repo / ".git" / "info" / "grafts"
+        grafts.write_text("# even presence is refused\n", encoding="utf-8")
+        grafted = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", grafted["reasons"])
+        self.assertTrue(grafted["history_rewrite"]["grafts_present"])
+
+        grafts.unlink()
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", f"refs/replace/{head}", head)
+        replaced = self.candidate(self.plan(), worktree)
+        self.assertIn("history_rewrite_metadata_present", replaced["reasons"])
+        self.assertEqual(
+            replaced["history_rewrite"]["replace_refs"],
+            [f"refs/replace/{head}"],
+        )
+
+    def test_inherited_external_graft_cannot_supply_reachability(self) -> None:
+        worktree = self.add_worktree("external-graft")
+        published = self.git("rev-parse", "origin/main").stdout.strip()
+        tree = self.git("rev-parse", "HEAD^{tree}", cwd=worktree).stdout.strip()
+        orphan = subprocess.run(
+            ["git", "commit-tree", tree, "-m", "unpublished orphan"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.git("reset", "--hard", orphan, cwd=worktree)
+        graft = self.base / "external-grafts"
+        graft.write_text(f"{published} {orphan}\n", encoding="utf-8")
+        poisoned = os.environ.copy()
+        poisoned["GIT_GRAFT_FILE"] = str(graft)
+        causal_probe = subprocess.run(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname)",
+                f"--contains={orphan}",
+                "refs/remotes/",
+            ],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=poisoned,
+        )
+        self.assertIn("refs/remotes/origin/main", causal_probe.stdout)
+
+        with mock.patch.dict(os.environ, {"GIT_GRAFT_FILE": str(graft)}):
+            plan = self.plan()
+            candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["verdict"], "keep")
+        self.assertIn("head_not_on_fetched_remote_ref", candidate["reasons"])
+        self.assertEqual(candidate["containing_remote_refs"], [])
+        self.assertTrue(harness.apply_worktree_plan(plan))
+        self.assertTrue(worktree.is_dir())
+
+    def test_primary_locked_and_outside_worktrees_are_never_candidates(self) -> None:
+        locked = self.add_worktree("locked")
+        outside = self.base / "outside"
+        self.git("worktree", "add", "--detach", str(outside), "origin/main")
+        self.git("worktree", "lock", "--reason", "fixture", str(locked))
+
+        plan = self.plan()
+        primary = self.candidate(plan, self.repo)
+        self.assertIn("primary_checkout", primary["reasons"])
+        self.assertIn("requested_checkout", primary["reasons"])
+        self.assertIn("git_locked", self.candidate(plan, locked)["reasons"])
+        self.assertIn(
+            "outside_worktree_directory", self.candidate(plan, outside)["reasons"]
+        )
+
+    def test_apply_uses_plain_remove_never_prunes_and_keeps_branch(
+        self,
+    ) -> None:
+        worktree = self.add_worktree(
+            "remove-me", branch="test/worktree-closeout-retained"
+        )
+        plan = self.plan()
+        calls: list[list[str]] = []
+        lease_path = Path(self.candidate(plan, worktree)["lease"]["path"])
+        mutation_lock = lease_path.parent / harness.WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        reclaim_was_refused = False
+
+        def recording_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal reclaim_was_refused
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "remove"]:
+                self.assertTrue(mutation_lock.is_dir())
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "mutation lock already exists"
+                ):
+                    harness.mutate_worktree_lease(
+                        worktree,
+                        action="acquire",
+                        claimant="cooperating-successor",
+                        replace_stale=True,
+                        now=lambda: harness.worktree_utc_now() + timedelta(hours=2),
+                    )
+                reclaim_was_refused = True
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        self.assertTrue(
+            harness.apply_worktree_plan(plan, command_runner=recording_runner)
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply"], "removed")
+        self.assertEqual(candidate["revalidation"], "matched")
+        self.assertEqual(candidate["fingerprint"], candidate["revalidated_fingerprint"])
+        self.assertTrue(reclaim_was_refused)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(
+            self.git(
+                "show-ref",
+                "--verify",
+                "refs/heads/test/worktree-closeout-retained",
+                check=False,
+            ).returncode,
+            0,
+        )
+        remove_calls = [call for call in calls if call[1:3] == ["worktree", "remove"]]
+        self.assertEqual(len(remove_calls), 1)
+        self.assertNotIn("--force", remove_calls[0])
+        self.assertNotIn("-f", remove_calls[0])
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+        self.assertEqual(
+            plan["administrative_cleanup"], "plain_remove_only_no_global_prune"
+        )
+
+    def test_expired_fingerprint_lease_refuses_removal(self) -> None:
+        worktree = self.add_worktree("expired")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1.0,
+                now=lambda: origin + timedelta(seconds=1),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertTrue(worktree.is_dir())
+
+    def test_suspend_inclusive_fingerprint_age_refuses_removal(self) -> None:
+        worktree = self.add_worktree("suspend-expired")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: origin
+                + timedelta(seconds=harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertEqual(candidate["revalidation"], "expired")
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_utc_clock_rollback_refuses_removal(self) -> None:
+        worktree = self.add_worktree("clock-rollback")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: origin - timedelta(seconds=1),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_utc_clock_rollback")
+        self.assertEqual(candidate["revalidation"], "invalid")
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_utc_rollback_between_samples_refuses_removal(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("interstage-clock-rollback")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [
+            origin + timedelta(seconds=30),
+            origin + timedelta(seconds=20),
+        ]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_utc_clock_rollback")
+        self.assertEqual(candidate["revalidation"], "invalid")
+        self.assertEqual(current_times, [])
+        self.assertTrue(worktree.is_dir())
+
+    def test_fingerprint_failure_stops_all_remaining_removals(self) -> None:
+        first = self.add_worktree("clock-failure-first")
+        second = self.add_worktree("clock-failure-second")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [origin - timedelta(seconds=1)]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        first_candidate = self.candidate(plan, first)
+        second_candidate = self.candidate(plan, second)
+        self.assertEqual(
+            first_candidate["apply_reason"], "fingerprint_utc_clock_rollback"
+        )
+        self.assertEqual(
+            second_candidate["apply_reason"],
+            "not_attempted_after_fingerprint_failure",
+        )
+        self.assertEqual(second_candidate["revalidation"], "not_attempted")
+        self.assertEqual(current_times, [])
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
+    def test_fingerprint_utc_expiry_during_revalidation_refuses_removal(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("revalidation-expired")
+        origin = harness.worktree_utc_now()
+        plan = self.plan(clock=lambda: 0.0, now=lambda: origin)
+        current_times = [
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=1),
+            origin + timedelta(seconds=harness.WORKTREE_FINGERPRINT_LEASE_SECONDS + 1),
+        ]
+
+        self.assertFalse(
+            harness.apply_worktree_plan(
+                plan,
+                clock=lambda: 1.0,
+                now=lambda: current_times.pop(0),
+            )
+        )
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "fingerprint_lease_expired")
+        self.assertEqual(candidate["revalidation"], "expired")
+        self.assertEqual(current_times, [])
+        self.assertTrue(worktree.is_dir())
+
+    def test_missing_or_malformed_fingerprint_utc_origin_refuses_apply(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("missing-utc-origin")
+        for label, generated_at in (("missing", None), ("malformed", "not-a-time")):
+            with self.subTest(label=label):
+                plan = self.plan()
+                if generated_at is None:
+                    plan.pop("generated_at")
+                else:
+                    plan["generated_at"] = generated_at
+                self.assertFalse(harness.apply_worktree_plan(plan))
+                self.assertEqual(plan["apply_error"], "fingerprint_origin_missing")
+                self.assertTrue(worktree.is_dir())
+
+    def test_ignored_file_change_between_plan_and_remove_is_revalidated(self) -> None:
+        worktree = self.add_worktree("race")
+        plan = self.plan()
+        changed = False
+
+        def racing_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal changed
+            if (
+                not changed
+                and command[1:4] == ["status", "--porcelain=v1", "-z"]
+                and harness.same_worktree_path(cwd, worktree)
+            ):
+                (worktree / "private-report.md").write_text(
+                    "arrived late\n", encoding="utf-8"
+                )
+                changed = True
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(plan, command_runner=racing_runner)
+        )
+        self.assertTrue(changed)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertTrue(worktree.is_dir())
+        self.assertTrue((worktree / "private-report.md").is_file())
+
+    def test_administrative_state_change_before_remove_is_revalidated(self) -> None:
+        worktree = self.add_worktree("admin-race")
+        plan = self.plan()
+        changed = False
+
+        def racing_runner(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal changed
+            if (
+                not changed
+                and command[1:3] == ["rev-parse", "--absolute-git-dir"]
+                and harness.same_worktree_path(cwd, worktree)
+            ):
+                git_dir = Path(
+                    self.git(
+                        "rev-parse", "--absolute-git-dir", cwd=worktree
+                    ).stdout.strip()
+                )
+                (git_dir / "sequencer").mkdir()
+                changed = True
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(plan, command_runner=racing_runner)
+        )
+        self.assertTrue(changed)
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(candidate["apply_reason"], "state_changed_since_audit")
+        self.assertTrue(worktree.is_dir())
+
+    def test_administrative_state_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("admin-probe-failure")
+        with mock.patch.object(
+            harness,
+            "worktree_administrative_state",
+            return_value=([], "permission denied"),
+        ):
+            plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn(
+            "worktree_administrative_state_probe_failed", candidate["reasons"]
+        )
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_commit_editmsg_probe_failure_is_incomplete(self) -> None:
+        worktree = self.add_worktree("commit-message-probe-failure")
+        with mock.patch.object(
+            harness,
+            "worktree_commit_editmsg_status",
+            return_value=("unknown", "permission denied"),
+        ):
+            plan = self.plan()
+        candidate = self.candidate(plan, worktree)
+        self.assertIn("commit_editmsg_probe_failed", candidate["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(worktree.is_dir())
+
+    def test_lease_change_during_revalidation_refuses_plain_removal(self) -> None:
+        worktree = self.add_worktree("lease-race")
+        plan = self.plan()
+        original_inspector = harness.inspect_worktree_lease
+        calls = 0
+
+        def changing_inspector(*args, **kwargs):
+            nonlocal calls
+            result = original_inspector(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                lease_path = Path(result[0]["path"])
+                record = result[0]["record"].copy()
+                record["lease_id"] = str(harness.uuid.uuid4())
+                harness.write_worktree_lease(lease_path, record)
+            return result
+
+        with mock.patch.object(
+            harness, "inspect_worktree_lease", side_effect=changing_inspector
+        ):
+            self.assertFalse(harness.apply_worktree_plan(plan))
+        candidate = self.candidate(plan, worktree)
+        self.assertEqual(
+            candidate["apply_reason"], "cooperative_lease_revalidation_failed"
+        )
+        self.assertTrue(worktree.is_dir())
+
+    def test_fetch_status_remove_and_prune_failures_are_not_parsed_as_success(
+        self,
+    ) -> None:
+        worktree = self.add_worktree("failures")
+
+        def fetch_failure(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1:2] == ["fetch"]:
+                return subprocess.CompletedProcess(command, 9, "stale output", "failed")
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        fetch_plan = harness.worktree_plan(
+            self.repo,
+            refresh=True,
+            command_runner=fetch_failure,
+            process_cwd=self.repo,
+        )
+        self.assertFalse(fetch_plan["complete"])
+        self.assertFalse(fetch_plan["refresh"]["ok"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=True,
+                ),
+                command_runner=fetch_failure,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(output.getvalue())["apply_error"], "remote_refresh_failed"
+        )
+
+        status_injected = False
+
+        def status_failure(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal status_injected
+            if command[1:2] == ["status"] and harness.same_worktree_path(cwd, worktree):
+                status_injected = True
+                return subprocess.CompletedProcess(
+                    command, 8, "?? misleading", "failed"
+                )
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        status_plan = harness.worktree_plan(
+            self.repo,
+            refresh=True,
+            command_runner=status_failure,
+            process_cwd=self.repo,
+        )
+        status_candidate = self.candidate(status_plan, worktree)
+        self.assertTrue(status_injected)
+        self.assertIn("status_probe_failed", status_candidate["reasons"])
+        self.assertFalse(status_plan["complete"])
+
+        good_plan = self.plan()
+        calls: list[list[str]] = []
+
+        def remove_failure(
+            command: list[str], cwd: Path, *, stdin_text: str | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command.copy())
+            if command[1:3] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(command, 7, "", "refused")
+            return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+        self.assertFalse(
+            harness.apply_worktree_plan(good_plan, command_runner=remove_failure)
+        )
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(
+            self.candidate(good_plan, worktree)["apply_reason"],
+            "plain_remove_refused",
+        )
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+
+    def test_partial_apply_list_failure_is_reported_in_json(self) -> None:
+        first = self.add_worktree("partial-json-01-removed")
+        current = self.add_worktree("partial-json-02-failing")
+        remaining = self.add_worktree("partial-json-03-remaining")
+        runner, calls, state = self.fail_list_after_first_remove_runner()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=True,
+                ),
+                command_runner=runner,
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["apply_error"], "partial_apply_revalidation_failed")
+        self.assertEqual(payload["summary"]["would_remove"], 3)
+        self.assertEqual(payload["summary"]["removed"], 1)
+        self.assertEqual(payload["summary"]["apply_refusals"], 2)
+        first_result = self.candidate(payload, first)
+        self.assertEqual(first_result["apply"], "removed")
+        self.assertEqual(first_result["revalidation"], "matched")
+        current_result = self.candidate(payload, current)
+        self.assertEqual(current_result["apply"], "kept")
+        self.assertEqual(current_result["revalidation"], "unavailable")
+        self.assertEqual(current_result["apply_reason"], "revalidation_probe_failed")
+        remaining_result = self.candidate(payload, remaining)
+        self.assertEqual(remaining_result["apply"], "kept")
+        self.assertEqual(remaining_result["revalidation"], "not_requested")
+        self.assertEqual(
+            remaining_result["apply_reason"],
+            "not_attempted_after_revalidation_failure",
+        )
+        self.assertEqual(state, {"removals": 1, "failed_lists": 1})
+        self.assertFalse(first.exists())
+        self.assertTrue(current.is_dir())
+        self.assertTrue(remaining.is_dir())
+        remove_calls = [call for call in calls if call[1:3] == ["worktree", "remove"]]
+        self.assertEqual(len(remove_calls), 1)
+        self.assertNotIn("--force", remove_calls[0])
+        self.assertNotIn("-f", remove_calls[0])
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+
+    def test_partial_apply_list_failure_is_reported_in_text(self) -> None:
+        first = self.add_worktree("partial-text-01-removed")
+        current = self.add_worktree("partial-text-02-failing")
+        remaining = self.add_worktree("partial-text-03-remaining")
+        runner, calls, state = self.fail_list_after_first_remove_runner()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo),
+                    refresh=True,
+                    apply=True,
+                    claimant=self.claimant,
+                    json=False,
+                ),
+                command_runner=runner,
+            )
+
+        text = output.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] apply: partial_apply_revalidation_failed", text)
+        self.assertIn("applied: removed with plain git worktree remove", text)
+        self.assertIn("applied: kept (revalidation_probe_failed)", text)
+        self.assertIn("applied: kept (not_attempted_after_revalidation_failure)", text)
+        self.assertIn("summary: 3 removable, 1 kept, 1 removed, 2 apply refusals", text)
+        self.assertEqual(state, {"removals": 1, "failed_lists": 1})
+        self.assertFalse(first.exists())
+        self.assertTrue(current.is_dir())
+        self.assertTrue(remaining.is_dir())
+        self.assertEqual(
+            len([call for call in calls if call[1:3] == ["worktree", "remove"]]),
+            1,
+        )
+        self.assertFalse(any(call[1:3] == ["worktree", "prune"] for call in calls))
+        self.assertFalse(any(call[1:2] == ["branch"] for call in calls))
+
+    def test_head_index_reachability_and_list_failures_block(self) -> None:
+        worktree = self.add_worktree("probe-failures")
+
+        def runner_failing(predicate):
+            injected: list[list[str]] = []
+
+            def failing_runner(
+                command: list[str], cwd: Path, *, stdin_text: str | None = None
+            ) -> subprocess.CompletedProcess[str]:
+                if predicate(command, cwd):
+                    injected.append(command.copy())
+                    return subprocess.CompletedProcess(
+                        command, 6, "misleading", "failed"
+                    )
+                return harness.worktree_git_runner(command, cwd, stdin_text=stdin_text)
+
+            return failing_runner, injected
+
+        cases = [
+            (
+                "head_probe_failed",
+                lambda command, cwd: command[1:3] == ["rev-parse", "HEAD"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "index_probe_failed",
+                lambda command, cwd: command[1:3] == ["ls-files", "-v"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "index_resolve_undo_probe_failed",
+                lambda command, cwd: command[1:3] == ["ls-files", "--resolve-undo"]
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "worktree_local_ref_probe_failed",
+                lambda command, cwd: command[1:2] == ["for-each-ref"]
+                and "refs/bisect/" in command
+                and harness.same_worktree_path(cwd, worktree),
+            ),
+            (
+                "worktree_recovery_reachability_probe_failed",
+                lambda command, cwd: command[1:3] == ["rev-list", "--no-walk"]
+                and harness.same_worktree_path(cwd, self.repo),
+            ),
+            (
+                "reachability_probe_failed",
+                lambda command, _cwd: any(
+                    part.startswith("--contains=") for part in command
+                ),
+            ),
+        ]
+        if harness.worktree_mode_drift_is_observable():
+            cases.insert(
+                3,
+                (
+                    "tracked_mode_probe_failed",
+                    lambda command, cwd: command[1:4]
+                    == ["-c", "core.fileMode=true", "diff-files"]
+                    and harness.same_worktree_path(cwd, worktree),
+                ),
+            )
+
+        for reason, predicate in cases:
+            with self.subTest(reason=reason):
+                failing_runner, injected = runner_failing(predicate)
+                plan = harness.worktree_plan(
+                    self.repo,
+                    refresh=True,
+                    command_runner=failing_runner,
+                    process_cwd=self.repo,
+                )
+                self.assertTrue(injected)
+                self.assertIn(reason, self.candidate(plan, worktree)["reasons"])
+                self.assertFalse(plan["complete"])
+
+        with mock.patch.object(
+            harness,
+            "worktree_head_reflog_commits",
+            return_value=([], "permission denied"),
+        ):
+            recovery_plan = self.plan()
+        self.assertIn(
+            "worktree_recovery_probe_failed",
+            self.candidate(recovery_plan, worktree)["reasons"],
+        )
+        self.assertFalse(recovery_plan["complete"])
+
+        list_failure, list_injected = runner_failing(
+            lambda command, _cwd: command[1:3] == ["worktree", "list"]
+        )
+        with self.assertRaisesRegex(harness.HarnessError, "worktree list failed"):
+            harness.worktree_plan(
+                self.repo,
+                refresh=False,
+                command_runner=list_failure,
+                process_cwd=self.repo,
+            )
+        self.assertTrue(list_injected)
+
+    def test_removing_one_candidate_preserves_unavailable_worktree_metadata(
+        self,
+    ) -> None:
+        removable = self.add_worktree("remove-one")
+        unavailable = self.add_worktree("temporarily-unavailable")
+        unavailable_git_dir = Path(
+            self.git("rev-parse", "--absolute-git-dir", cwd=unavailable).stdout.strip()
+        )
+        shutil.rmtree(unavailable)
+
+        plan = self.plan()
+        self.assertIn("path_unavailable", self.candidate(plan, unavailable)["reasons"])
+        self.assertFalse(plan["complete"])
+        self.assertFalse(harness.apply_worktree_plan(plan))
+        self.assertEqual(plan["apply_error"], "audit_incomplete")
+        self.assertTrue(removable.exists())
+        self.assertTrue(unavailable_git_dir.is_dir())
+
+    def test_json_summary_is_machine_readable(self) -> None:
+        self.add_worktree("json")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = harness.worktrees_command(
+                SimpleNamespace(
+                    repo=str(self.repo), refresh=False, apply=False, json=True
+                )
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(
+            payload["fingerprint_lease_seconds"],
+            harness.WORKTREE_FINGERPRINT_LEASE_SECONDS,
+        )
+        self.assertIn("worktrees", payload)
+        candidate = self.candidate(payload, self.repo / ".worktrees" / "json")
+        for field in (
+            "tracked_mode_changes",
+            "index_resolve_undo",
+            "commit_editmsg_status",
+            "worktree_local_refs",
+            "worktree_administrative_state",
+            "orig_head_object",
+            "recovery_commits",
+            "unretained_recovery_commits",
+        ):
+            self.assertIn(field, candidate)
+        self.assertEqual(payload["summary"]["removed"], 0)
+        self.assertEqual(payload["branch_deletion"], "not_performed")
+        self.assertFalse(
+            payload["cooperative_lease"]["noncooperating_processes_detected"]
+        )
+        self.assertNotIn("_fingerprint_created_monotonic", payload)
+
+    def test_git_runner_clears_repository_redirecting_environment(self) -> None:
+        completed = subprocess.CompletedProcess(["git", "status"], 0, "", "")
+        poisoned = {name: "poison" for name in harness.WORKTREE_GIT_CONTEXT_ENV}
+        poisoned.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "remote.origin.url",
+                "GIT_CONFIG_VALUE_0": "poison",
+                "GIT_CONFIG_PARAMETERS": "'remote.poison.url=https://example.invalid'",
+            }
+        )
+        with mock.patch.dict(os.environ, poisoned, clear=False):
+            with mock.patch.object(
+                harness, "probe_spawn_argv", return_value=(["git", "status"], "")
+            ):
+                with mock.patch.object(
+                    harness.subprocess, "run", return_value=completed
+                ) as spawn:
+                    result = harness.worktree_git_runner(
+                        ["git", "status"], self.repo, stdin_text="object-id\n"
+                    )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(spawn.call_args.kwargs["input"], "object-id\n")
+        environment = spawn.call_args.kwargs["env"]
+        for name in harness.WORKTREE_GIT_CONTEXT_ENV:
+            self.assertNotIn(name, environment)
+        self.assertNotIn("GIT_CONFIG_COUNT", environment)
+        self.assertNotIn("GIT_CONFIG_KEY_0", environment)
+        self.assertNotIn("GIT_CONFIG_VALUE_0", environment)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
 
 
 if __name__ == "__main__":

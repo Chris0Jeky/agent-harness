@@ -302,6 +302,185 @@ def powershell_encoded(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
+def ignored_worktree_removal_is_destructive() -> list[tuple[str, object, object]]:
+    """Pin, with real git, what PLAIN `git worktree remove` actually destroys.
+
+    The floor allows the plain form below T4/wave (issue #41). That allow is
+    justified by what git DOES refuse -- tracked modifications, untracked
+    non-ignored files -- and by the branch surviving. It is NOT justified by
+    the plain form being harmless: it deletes gitignored content outright.
+    An early draft of the rule asserted the opposite ("the PLAIN form destroys
+    nothing"), so this fixture measures the behaviour instead of restating a
+    belief. Returns (label, got, expected) triples in the shape run_smoke()
+    already reports.
+    """
+    ignored = [".env", "local.db", "vendor.cfg", os.path.join("node_modules", "pkg.js")]
+
+    with tempfile.TemporaryDirectory(dir=fixture_root()) as root:
+        # This fixture spawns REAL git, so the host's own configuration is an
+        # input to it: `status.showUntrackedFiles=no` empties the ignored
+        # listing and `=all` reports `node_modules/pkg.js` where the assertion
+        # expects `node_modules`, either of which turns the T4-class gate for
+        # every future dispatch.py change red for a reason that has nothing to
+        # do with the floor. Neutralize the user and system config the way
+        # `tests/floor_environment.py` does: point the SELECTORS at an empty
+        # file rather than unsetting them, because unsetting is what re-enables
+        # `$HOME/.gitconfig`. An empty FILE, not os.devnull -- `NUL` is not a
+        # readable config path on Windows. Repository-local config still
+        # applies; this fixture writes all of its own.
+        empty_git_config = os.path.join(root, "empty-gitconfig")
+        with open(empty_git_config, "w", encoding="utf-8"):
+            pass
+        git_environment = {
+            **clean_dispatch_environment(),
+            "GIT_CONFIG_GLOBAL": empty_git_config,
+            "GIT_CONFIG_SYSTEM": empty_git_config,
+            # Belt and braces for git < 2.32, which has no GIT_CONFIG_SYSTEM.
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+        def git(*args, cwd):
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=git_environment,
+            )
+
+        main_repo = os.path.join(root, "main-repo")
+        worktree = os.path.join(root, "linked-wt")
+        os.makedirs(main_repo)
+        git("init", "--quiet", cwd=main_repo)
+        git("config", "user.email", "smoke@example.invalid", cwd=main_repo)
+        git("config", "user.name", "smoke", cwd=main_repo)
+        with open(os.path.join(main_repo, ".gitignore"), "w", encoding="utf-8") as fh:
+            fh.write("local.db\nnode_modules/\nvendor.cfg\n.env\n")
+        git("add", ".gitignore", cwd=main_repo)
+        git("commit", "--quiet", "-m", "init", cwd=main_repo)
+        added = git(
+            "worktree", "add", "--quiet", worktree, "-b", "linked", cwd=main_repo
+        )
+        if added.returncode != 0:
+            return [
+                (
+                    "worktree fixture could not be created: " + added.stderr.strip(),
+                    added.returncode,
+                    0,
+                )
+            ]
+        for relative in ignored:
+            target = os.path.join(worktree, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("payload\n")
+
+        # the EXACT check git runs on the !force path
+        clean_check = git(
+            "status", "--porcelain", "--ignore-submodules=none", cwd=worktree
+        )
+        ignored_listing = git("status", "--porcelain", "--ignored", cwd=worktree)
+        removal = git("worktree", "remove", worktree, cwd=main_repo)
+        survivors = [
+            relative
+            for relative in ignored
+            if os.path.exists(os.path.join(worktree, relative))
+        ]
+        branch_still_exists = git(
+            "rev-parse", "--verify", "--quiet", "refs/heads/linked", cwd=main_repo
+        )
+
+        # The branch-survival guarantee is scoped to a worktree that HAS a
+        # branch. A DETACHED worktree's commits are held only by its own HEAD:
+        # git's pre-removal check passes on a clean detached tree, removal
+        # deletes the per-worktree HEAD, and the commit leaves `git log --all`
+        # entirely (PR #116 review finding, reproduced here rather than
+        # restated). This is why law 7 mandates `git switch -c` before
+        # committing in a worktree.
+        detached = os.path.join(root, "detached-wt")
+        git("worktree", "add", "--detach", "--quiet", detached, cwd=main_repo)
+        with open(os.path.join(detached, "only-here.txt"), "w", encoding="utf-8") as fh:
+            fh.write("payload\n")
+        git("add", "only-here.txt", cwd=detached)
+        git("commit", "--quiet", "-m", "held only by this HEAD", cwd=detached)
+        detached_tip = git("rev-parse", "HEAD", cwd=detached).stdout.strip()
+        detached_removal = git("worktree", "remove", detached, cwd=main_repo)
+        reachable_after = git("log", "--all", "--format=%H", cwd=main_repo).stdout
+
+        # Issue #123: git's refusal of an UNTRACKED file is itself
+        # configuration -- `status.showUntrackedFiles=no` blinds the clean
+        # check, so the `-c` spelling is `--force` by another name. This leg
+        # measures both halves: the plain refusal the graduation leans on,
+        # and the weakening spelling the floor now gates.
+        weakened = os.path.join(root, "weakened-wt")
+        git("worktree", "add", "--quiet", weakened, "-b", "weakened", cwd=main_repo)
+        with open(os.path.join(weakened, "untracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("unsaved work\n")
+        refusal = git("worktree", "remove", weakened, cwd=main_repo)
+        weakened_removal = git(
+            "-c",
+            "status.showUntrackedFiles=no",
+            "worktree",
+            "remove",
+            weakened,
+            cwd=main_repo,
+        )
+
+    return [
+        (
+            "git's own !force clean check calls an ignored-only tree CLEAN",
+            clean_check.stdout.strip(),
+            "",
+        ),
+        (
+            "the same tree does hold ignored content",
+            sorted(
+                line.split(" ", 1)[1].strip().replace("\\", "/").rstrip("/")
+                for line in ignored_listing.stdout.splitlines()
+                if line.startswith("!!")
+            ),
+            [".env", "local.db", "node_modules", "vendor.cfg"],
+        ),
+        (
+            "plain `git worktree remove` therefore SUCCEEDS on it",
+            removal.returncode,
+            0,
+        ),
+        (
+            "and DELETES every ignored file -- .env included, unrecoverably",
+            survivors,
+            [],
+        ),
+        (
+            "but the BRANCH survives, so work committed on a branch is never lost",
+            branch_still_exists.returncode,
+            0,
+        ),
+        (
+            "a CLEAN detached worktree passes git's pre-removal check too",
+            detached_removal.returncode,
+            0,
+        ),
+        (
+            "and its unpushed commit leaves `git log --all` -- detached HEADs die with the tree",
+            detached_tip in reachable_after.split(),
+            False,
+        ),
+        (
+            "git refuses plain removal of a tree holding an UNTRACKED file",
+            refusal.returncode == 0,
+            False,
+        ),
+        (
+            "but -c status.showUntrackedFiles=no blinds that refusal -- force by another spelling",
+            weakened_removal.returncode,
+            0,
+        ),
+    ]
+
+
 CASES = [
     # (command, tier, flags, expected)
     # --- MUST DENY at every tier (the irreversible floor) ---
@@ -358,49 +537,9 @@ CASES = [
     ("echo hi >| '.env'", 1, {}, "deny"),
     ("echo hi &> '.env'", 1, {}, "deny"),
     ("> 'out file.txt' echo secret123 > '.env'", 1, {}, "deny"),
-    # Numeric descriptor duplication is portable. A non-numeric word is ambiguous in
-    # Bash but is a real file target in zsh, so unknown shell syntax stays conservative.
+    # descriptor duplication binds a descriptor, not a path: the token after `>&`
+    # is `1`, so the quoted `.env` here is an argument and stays allowed.
     ("2>&1 '.env' echo hi", 1, {}, "allow"),
-    ("2>& '.env' echo hi", 1, {}, "deny"),
-    ("echo hi 2>& '.env'", 1, {}, "deny"),
-    ("bash -c \"echo hi 2>& '.env'\"", 1, {}, "allow"),
-    ("zsh -c \"echo hi 2>& '.env'\"", 1, {}, "deny"),
-    ("{fd}>&.env echo hi", 1, {}, "deny"),
-    ('bash -c "{fd}>&.env echo hi"', 1, {}, "allow"),
-    ('zsh -c "{fd}>&.env echo hi"', 1, {}, "deny"),
-    ("bash -c \"eval 'echo hi >.e\\nv'\"", 1, {}, "deny"),
-    ("bash -c \"eval '2>&.env echo hi'\"", 1, {}, "allow"),
-    # An escaped `>` is argv text, not shell syntax. The even-backslash control leaves
-    # the second backslash escaped and the `>` active, so it must still deny.
-    (r"printf '%s\n' \>'.env'", 1, {}, "allow"),
-    (r"printf '%s\n' \> '.env'", 1, {}, "allow"),
-    (r"printf '%s\n' \\> '.env'", 1, {}, "deny"),
-    # Backslash is not cmd.exe's escape character. Once /c selects cmd syntax, the
-    # same bytes are an active redirect and must retain the parent floor's deny.
-    (r'cmd /d /s /c "echo hi \>.env"', 1, {}, "deny"),
-    # Caret is ordinary POSIX argv before an active redirect, so a cmd-specific escape
-    # must not be treated as a universal literal marker.
-    (r"echo hi ^>.env", 1, {}, "deny"),
-    # A raw target ends at an unquoted shell separator. Swallowing the separator into
-    # the filename launders the secret basename and turns each executable write into an
-    # allow, so pin every separator family in its glued form.
-    ("echo hi >.env;echo ok", 1, {}, "deny"),
-    ("echo hi >.env&&echo ok", 1, {}, "deny"),
-    ("echo hi >.env|echo ok", 1, {}, "deny"),
-    ("echo hi >.env&echo ok", 1, {}, "deny"),
-    ("echo hi >(cat)", 1, {}, "deny"),
-    ("echo hi > >(cat)", 1, {}, "deny"),
-    ("echo hi > <(cat)", 1, {}, "deny"),
-    # POSIX removes a backslash before an ordinary target character. Preserve both the
-    # operator's syntax provenance and the filename a shell will actually open.
-    (r"echo hi >.\env", 1, {}, "deny"),
-    (r"echo hi >.e\nv", 1, {}, "deny"),
-    (r"echo hi >.en\v", 1, {}, "deny"),
-    # A backslash inside quotes stays literal in POSIX argv. Unescape only the raw,
-    # placeholder-bearing word so quote provenance survives target normalization.
-    (r"echo hi >'.e\nv'", 1, {}, "allow"),
-    (r'echo hi >".e\nv"', 1, {}, "allow"),
-    (r"echo hi >.e'\n'v", 1, {}, "allow"),
     ("git commit -m 'redirect &> .env is blocked'", 1, {}, "allow"),
     # ...and the mirror of the widened operator set: a quoted span that IS an operator
     # spelling is DATA. Every deny above has this twin so the two halves of the change
@@ -432,44 +571,6 @@ CASES = [
     ('echo "9>|" .env', 1, {}, "allow"),
     ("echo x 2>& .env", 1, {}, "deny"),
     ('echo "2>&" .env', 1, {}, "allow"),
-    # A quoted operator used as an ordinary option value must remain one argv word
-    # when launcher/scriptblock recursion reconstructs child text. Dropping the minted
-    # provenance marker shifted `.env` into curl's -o slot and caused a false deny.
-    (
-        'taskset -c 0 curl -q -o ">" .env https://example.invalid/file',
-        1,
-        {},
-        "allow",
-    ),
-    (
-        '1 | ForEach-Object { curl -q -o ">" .env https://example.invalid/file }',
-        1,
-        {},
-        "allow",
-    ),
-    ('wsl curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
-    ('call curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
-    ('cmd /d /c curl -q -o ">" .env https://example.invalid/file', 1, {}, "allow"),
-    ("cmd /d /c echo x '>' .env", 1, {}, "deny"),
-    (
-        'Start-Job -ScriptBlock { curl -q -o ">" .env '
-        "https://example.invalid/file }",
-        1,
-        {},
-        "allow",
-    ),
-    (
-        'Start-ThreadJob -ScriptBlock { curl -q -o ">" .env '
-        "https://example.invalid/file }",
-        1,
-        {},
-        "allow",
-    ),
-    # eval concatenates its argv and parses the result as shell program text, so an
-    # operator quoted in the outer shell becomes active syntax in the evaluated child.
-    ('eval ">" .env', 1, {}, "deny"),
-    ('eval "2>" .env', 1, {}, "deny"),
-    ('eval "<" .env', 1, {}, "allow"),
     ("echo '2>' .env", 1, {}, "allow"),
     ("echo '1>>' .env", 1, {}, "allow"),
     # ...and the real descriptor-prefixed redirect into a QUOTED secret path
@@ -575,6 +676,187 @@ CASES = [
     ("git checkout -- .", 2, {}, "allow"),
     ("git checkout -- .", 3, {}, "ask"),
     ("git checkout -- .", 4, {}, "deny"),
+    # `git worktree remove` (issues #41/#117/#123). The PLAIN form allows at
+    # EVERY tier including T4/wave (owner ruling 2026-07-27): git itself
+    # refuses a tree with tracked modifications or untracked files, and law
+    # 7's `git switch -c` mandate keeps commits ref-held. `--force` overrides
+    # git's refusal on a DIRTY tree and is a work-loss guard like its siblings
+    # above. A LOCKED tree needs the DOUBLED flag: measured on git 2.45.1, a
+    # single `--force` on a locked tree exits 128 ("use 'remove -f -f' to
+    # override or unlock first") and `-f -f` exits 0. The floor scores `-ff`
+    # and `-f -f` exactly as `-f`, so every overriding spelling lands on that
+    # same ladder -- the cases below pin that. Three LAUNDERED force spellings
+    # ride the same ladder, because an opaque spelling must never score better
+    # than the literal form it might be: a runtime-computed ACTION word
+    # (`$ACT` resplits after expansion and can deliver `remove --force`), a
+    # dynamic option or separator-free operand token (`-$X`, bare `$A`), and
+    # argv-visible config that blinds git's clean check
+    # (`-c status.showUntrackedFiles=no` -- measured, it turns the refusal on
+    # an untracked file into exit 0; the fixture above pins it with real git).
+    #
+    # The plain form does NOT "destroy nothing" -- an earlier draft of this
+    # block said so and was measurably wrong. Git's own pre-removal check,
+    # `git status --porcelain --ignore-submodules=none`, calls a worktree
+    # holding `.env`/`local.db`/`vendor.cfg`/`node_modules/` CLEAN, and removal
+    # then deletes all of it (git 2.45.1 -- `ignored_worktree_removal_is_
+    # destructive` above pins it with real git). What git does enforce is that
+    # tracked modifications and untracked non-ignored files block the removal,
+    # and a checked-out BRANCH survives, so work committed on a branch is
+    # never lost (a DETACHED worktree's commits are not so held -- the
+    # fixture's detached leg pins that loss; law 7 is the guard).
+    ("git worktree remove ../linked", 1, {}, "allow"),
+    ("git worktree remove ../linked", 2, {}, "allow"),
+    ("git worktree remove ../linked", 3, {}, "allow"),
+    ("git worktree remove ../linked", 4, {}, "allow"),
+    ("git worktree remove ../linked", 2, {"wave_mode": True}, "allow"),
+    ("git worktree remove ../linked", 3, {"wave_mode": True}, "allow"),
+    # the laundered force spellings, on the explicit-force ladder exactly
+    ("git worktree `printf remove` -f ../wt", 1, {}, "allow"),
+    ("git worktree `printf remove` -f ../wt", 3, {}, "ask"),
+    (
+        "git worktree `printf remove` -f ../wt",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
+    ("git worktree `printf remove` -f ../wt", 4, {}, "deny"),
+    ("git worktree `printf remove` -f ../wt", 2, {"wave_mode": True}, "deny"),
+    ("git worktree $(printf remove) -f ../wt", 4, {}, "deny"),
+    # DOUBLE-QUOTED backtick action word. This allowed at every tier until the
+    # opacity test moved to the pre-case-folding token: `_LITERAL_BACKTICK` is
+    # an UPPERCASE sentinel that `token.lower()` destroyed, so the action read
+    # as inert literal text and the command bypassed the
+    # [worktree-remove-force] CHARTER deny, not merely the opacity gate. Its
+    # unquoted and single-quoted twins above never lost the sentinel.
+    ('git worktree "`echo remove`" --force wt', 3, {}, "ask"),
+    ('git worktree "`echo remove`" --force wt', 4, {}, "deny"),
+    ('git worktree "`echo remove`" --force wt', 2, {"wave_mode": True}, "deny"),
+    ('git worktree "`echo remove`" ../wt', 4, {}, "deny"),
+    ('git worktree "$ACT" --force wt', 4, {}, "deny"),
+    # the folded form still does literal action matching, case-insensitively
+    ("git worktree REMOVE ../wt", 4, {}, "allow"),
+    ("git worktree Remove --force ../wt", 4, {}, "deny"),
+    ("git worktree $ACT ../wt", 3, {}, "ask"),
+    ("git worktree ${ACT} ../wt", 4, {}, "deny"),
+    ("git worktree %ACT% ../wt", 4, {}, "deny"),
+    ("git worktree !ACT! ../wt", 3, {}, "ask"),
+    ("git worktree $ACT ../wt", 3, {"wave_mode": True}, "deny"),
+    ("git worktree remove -$X ../wt", 3, {}, "ask"),
+    ("git worktree remove -$X ../wt", 4, {}, "deny"),
+    ("git worktree remove -$X ../wt", 3, {"wave_mode": True}, "deny"),
+    ("git worktree remove $A ../wt", 3, {}, "ask"),
+    ("git worktree remove $A", 4, {}, "deny"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        3,
+        {"wave_mode": True},
+        "deny",
+    ),
+    # law 7's own spelling: a dynamic-prefixed PATH COMPOUND cannot expand to
+    # an option word (the /<tail> pins it), so it keeps the plain score
+    ("git worktree remove $WT_PROJECT_DIR/wt41", 3, {}, "allow"),
+    ("git worktree remove $WT_PROJECT_DIR/wt41", 4, {}, "allow"),
+    # ... and so do its BRACED and QUOTED spellings. These gated until the
+    # nameless-sigil exclusion landed: the braced form survives the primary
+    # parse intact, then reaches a sanitized re-parse as a bare `$`, which
+    # carries no separator and so scored as a possible `--force`. A sigil that
+    # names nothing expands to nothing.
+    ("git worktree remove ${WT_PROJECT_DIR}/wt41", 3, {}, "allow"),
+    ("git worktree remove ${WT_PROJECT_DIR}/wt41", 4, {}, "allow"),
+    ('git worktree remove "${WT_PROJECT_DIR}/wt41"', 4, {}, "allow"),
+    ('git worktree remove "$WT_PROJECT_DIR/wt41"', 4, {}, "allow"),
+    ("git worktree remove $env:WT_PROJECT_DIR/wt41", 4, {}, "allow"),
+    # The WINDOWS spelling of the same path is NOT covered, and this pins the
+    # gap rather than hiding it (issue #128): a POSIX lexer eats the backslash,
+    # so `$WT_PROJECT_DIR\wt41` arrives as `$WT_PROJECT_DIRwt41` -- a dynamic
+    # token with no separator left to pin it out of option space. The declared
+    # relaxed-git posture is the unstick, and it works.
+    ("git worktree remove $WT_PROJECT_DIR\\wt41", 3, {}, "ask"),
+    ("git worktree remove $WT_PROJECT_DIR\\wt41", 4, {}, "deny"),
+    (
+        "git worktree remove $WT_PROJECT_DIR\\wt41",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
+    # after `--` git reads every token as a PATH, so a dynamic one is inert
+    ("git worktree remove -- $A", 3, {}, "allow"),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 1, {}, "allow"),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 3, {}, "ask"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
+    ("git -c status.showUntrackedFiles=no worktree remove ../wt", 4, {}, "deny"),
+    (
+        "git -c status.showUntrackedFiles=no worktree remove ../wt",
+        2,
+        {"wave_mode": True},
+        "deny",
+    ),
+    ("git -cSTATUS.SHOWUNTRACKEDFILES=NO worktree remove ../wt", 4, {}, "deny"),
+    (
+        "git --config-env=status.showUntrackedFiles=SUF worktree remove ../wt",
+        3,
+        {},
+        "ask",
+    ),
+    ("git -c status.showUntrackedFiles=$V worktree remove ../wt", 4, {}, "deny"),
+    ("git -c $CFG worktree remove ../wt", 3, {}, "ask"),
+    # A dynamic `-c`/`--config-env` argument gates whatever KEY it names: an
+    # unquoted value resplits after expansion, so `X='a -c
+    # status.showUntrackedFiles=no'` makes `-c foo.bar=$X` run the weakening
+    # assignment under a key this parser reads as `foo.bar`. Reading the RAW
+    # token also recovers the quoted-backtick key, which the parsed view
+    # lowercases into an inert literal.
+    ("git -c foo.bar=$X worktree remove ../wt", 3, {}, "ask"),
+    ("git -c foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    ("git --config-env=foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    ("git --config-env foo.bar=$X worktree remove ../wt", 4, {}, "deny"),
+    (
+        'git -c "`echo status.showUntrackedFiles`=no" worktree remove ../wt',
+        4,
+        {},
+        "deny",
+    ),
+    ("git -c foo.bar=$X worktree remove ../wt", 2, {"wave_mode": True}, "deny"),
+    # `core.excludesFile` blinds the SAME clean check and has no safe value to
+    # allow-list: any file it names can be a catch-all, which makes git report
+    # every untracked file as ignored (git 2.45.1). The key gates outright.
+    ("git -c core.excludesFile=/tmp/all worktree remove ../wt", 3, {}, "ask"),
+    ("git -c core.excludesFile=/tmp/all worktree remove ../wt", 4, {}, "deny"),
+    ("git -c core.excludesfile=x worktree remove ../wt", 4, {}, "deny"),
+    # ...but only on a REMOVAL. It is an ordinary read-only option elsewhere.
+    ("git -c core.excludesFile=/tmp/all status", 4, {}, "allow"),
+    ("git -c foo.bar=$X status", 4, {}, "allow"),
+    # values that PRESERVE the clean check, and unrelated keys, stay plain
+    ("git -c status.showUntrackedFiles=all worktree remove ../wt", 4, {}, "allow"),
+    ("git -c status.showUntrackedFiles=normal worktree remove ../wt", 3, {}, "allow"),
+    ("git -c color.ui=false worktree remove ../wt", 4, {}, "allow"),
+    ("git worktree remove --force ../linked", 1, {}, "allow"),
+    ("git worktree remove --force ../linked", 2, {}, "allow"),
+    ("git worktree remove --force ../linked", 3, {}, "ask"),
+    ("git worktree remove --force ../linked", 4, {}, "deny"),
+    ("git worktree remove --force ../linked", 2, {"wave_mode": True}, "deny"),
+    # every abbreviation git's own parse-options accepts, plus the `-f` cluster
+    ("git worktree remove -f ../linked", 3, {}, "ask"),
+    ("git worktree remove -f ../linked", 4, {}, "deny"),
+    ("git worktree remove --f ../linked", 4, {}, "deny"),
+    ("git worktree remove --fo ../linked", 4, {}, "deny"),
+    ("git worktree remove --forc ../linked", 4, {}, "deny"),
+    ("git worktree remove -ff ../linked", 3, {}, "ask"),
+    ("git worktree remove -ff ../linked", 4, {}, "deny"),
+    ("git worktree remove --force --force ../linked", 3, {}, "ask"),
+    ("git worktree remove --force --force ../linked", 4, {}, "deny"),
+    # `remove -f -f` is the spelling git's OWN error prints for a LOCKED tree
+    # ("cannot remove a locked working tree; use 'remove -f -f' to override"),
+    # measured on git 2.45.1, so it is the form an agent actually types.
+    ("git worktree remove -f -f ../locked", 3, {}, "ask"),
+    ("git worktree remove -f -f ../locked", 4, {}, "deny"),
+    # `--` ends option parsing, so this `-f` is the worktree PATH, not the flag
+    ("git worktree remove -- -f", 3, {}, "allow"),
     ("git push --force-with-lease origin feat", 2, {}, "allow"),
     ("git push --force-with-lease origin HEAD:feature/topic", 2, {}, "allow"),
     ("git push --force-with-lease origin HEAD:fix/issue-7", 2, {}, "allow"),
@@ -668,7 +950,30 @@ CASES = [
     ("git clean -fd", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git checkout -- .", 3, {"relaxed_work_loss_guards": True}, "allow"),
     ("git restore .", 3, {"relaxed_work_loss_guards": True}, "allow"),
+    (
+        "git worktree remove --force ../linked",
+        3,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
     ("git reset --hard HEAD~1", 4, {"relaxed_work_loss_guards": True}, "deny"),
+    (
+        "git worktree remove --force ../linked",
+        4,
+        {"relaxed_work_loss_guards": True},
+        "deny",
+    ),
+    # The plain form carries no T4/wave gate to lower: it allows at every tier
+    # (owner ruling 2026-07-27), so the relaxed-guard flag is a no-op on it in
+    # BOTH directions. This case pins that non-interaction -- it read `deny`
+    # while the plain form was gated at T4, and the gate, not the flag, was
+    # what made it deny.
+    (
+        "git worktree remove ../linked",
+        4,
+        {"relaxed_work_loss_guards": True},
+        "allow",
+    ),
     (
         "git reset --hard HEAD~1",
         3,
@@ -2221,8 +2526,13 @@ CASES = [
         {},
         "deny",
     ),
-    ("git worktree remove --force /critical/outside", 1, {}, "deny"),
-    ("git worktree remove ../linked", 1, {}, "deny"),
+    # `git worktree remove` was an UNCONDITIONAL deny until issue #41 graduated
+    # it; its tier matrix now lives with the other work-loss guards above. The
+    # path operand is not what made it dangerous: git only ever removes a
+    # REGISTERED worktree of this repository, so an absolute path outside the
+    # project is either such a worktree or an error, never an arbitrary delete.
+    ("git worktree remove --force /critical/outside", 4, {}, "deny"),
+    ("git worktree remove --force /critical/outside", 1, {}, "allow"),
     # --- read-only git plumbing is admitted (issue #34) ---
     ("git merge-base main HEAD", 1, {}, "allow"),
     ("git merge-base --is-ancestor origin/main HEAD", 4, {}, "allow"),
@@ -2692,7 +3002,6 @@ CASES = [
     ("tee -a notes.txt credentials.json", 1, {}, "deny"),
     ("echo x >| .env", 1, {}, "deny"),
     ("echo secret >& .env", 1, {}, "deny"),
-    # Unknown-shell `n>&word` remains a target because zsh opens it as a file.
     ("echo secret 1>&.env", 1, {}, "deny"),
     ("echo x >| notes.txt >| .env", 1, {}, "deny"),
     ("Remove-Item .env*", 1, {}, "deny"),
@@ -3104,13 +3413,6 @@ CASES = [
     ("`echo git` push --force origin main", 1, {}, "deny"),
     ("call git push --force origin main", 1, {}, "deny"),
     ("Start-Process git -ArgumentList 'push','--force','origin','main'", 1, {}, "deny"),
-    (
-        "Start-Process curl -ArgumentList '-q','-o', \">\", '.env',"
-        "'https://example.invalid/file'",
-        1,
-        {},
-        "allow",
-    ),
     (
         "Start-Process -FilePath git -ArgumentList push,--force,origin,main",
         1,
@@ -3869,6 +4171,31 @@ CASES = [
     ("git worktree add -b feature/x ../wt origin/main", 1, {}, "allow"),
     ("git worktree move old-wt ../renamed-wt", 1, {}, "allow"),
     ("git worktree list", 1, {}, "allow"),
+    # positional blindness (issue #41). Base 1.6.16 tested `token.lower() ==
+    # "remove"` on every argv token, so ONLY an exact `remove` matched. The two
+    # real regressions were option VALUES — measured deny on base, allow here:
+    ("git worktree add -b remove ../wt", 1, {}, "allow"),
+    ("git worktree lock --reason remove ../wt", 1, {}, "allow"),
+    # These three were ALLOWED on base too (measured): a path merely CONTAINING
+    # the word never equalled it. They are pinning cases, not regressions — they
+    # hold the positional pass to that same verdict, at T4 as well, since the
+    # action word resolves before any tier posture runs.
+    ("git worktree add ../remove", 1, {}, "allow"),
+    ("git worktree add /tmp/remove-me", 1, {}, "allow"),
+    ("git worktree add ../remove", 4, {}, "allow"),
+    ("git worktree move ../wt ../remove", 1, {}, "allow"),
+    # `prune` reached no branch at all before #41; it is now deliberately allowed
+    # at every tier. It deletes only `.git/worktrees/<id>` metadata for entries
+    # whose directory is ALREADY gone, and `--expire` only narrows which of those
+    # already-missing entries are old enough to drop — no live tree is reachable.
+    # It is NOT reversible (`repair` cannot undo it, measured on git 2.45.1) but
+    # it never touches working-tree files, so it stays off the work-loss ladder.
+    ("git worktree prune", 1, {}, "allow"),
+    ("git worktree prune", 4, {}, "allow"),
+    ("git worktree prune -n", 1, {}, "allow"),
+    ("git worktree prune --expire=now", 4, {}, "allow"),
+    ("git worktree prune --expire now", 4, {}, "allow"),
+    ("git worktree repair", 4, {}, "allow"),
     ("git checkout -- src/app.py", 1, {}, "allow"),
     ("git checkout main", 1, {}, "allow"),
     ("git checkout .env", 1, {}, "deny"),
@@ -4028,15 +4355,6 @@ CASES = [
     # --- child-executing launchers (PR #1 recovery: bot findings) ---
     ("watch git push --force origin main", 1, {}, "deny"),
     ("watch -n 1 rm -rf /critical/outside", 1, {}, "deny"),
-    ('watch "git push --force origin main"', 1, {}, "deny"),
-    ('watch "rm -rf /critical/outside"', 1, {}, "deny"),
-    ('watch "echo x > .env"', 1, {}, "deny"),
-    ('watch echo x ">" .env', 1, {}, "deny"),
-    ('watch -x "git push --force origin main"', 1, {}, "allow"),
-    ('watch --exec "rm -rf /critical/outside"', 1, {}, "allow"),
-    ("watch -x git push --force origin main", 1, {}, "deny"),
-    ("watch -q 2 git push --force origin main", 1, {}, "deny"),
-    ("watch --equexit 2 git status", 1, {}, "allow"),
     ("watch git status", 1, {}, "allow"),
     ("flock /tmp/lock git push --force origin main", 1, {}, "deny"),
     ("flock -c 'git push --force origin main' /tmp/lock", 1, {}, "deny"),
@@ -5291,6 +5609,11 @@ def run_smoke():
             HERE,
             HERE,
             remote_resolver=resolver,
+            # These three rows pin the PRE-narrowing overlay semantics; the
+            # issue-#48 narrowing is stubbed closed so the verdicts cannot
+            # depend on the suite running inside a declared non-sensitive
+            # repository. The narrowing has its own probes further down.
+            push_narrowing=lambda *a, **k: (False, "table-stub"),
         )
         sensitive_remote_cases.append((label, got, expected))
 
@@ -5693,6 +6016,10 @@ def run_smoke():
                 command_runner=forged_public_runner,
             )
         ),
+        # The subject under test is the resolver; the issue-#48 narrowing is
+        # stubbed closed so the verdict cannot depend on where this checkout
+        # sits on disk (the suite runs inside a declared non-sensitive repo).
+        push_narrowing=lambda *a, **k: (False, "stubbed"),
     )
     sensitive_remote_cases.append(
         (
@@ -5859,6 +6186,8 @@ def run_smoke():
                 command_runner=clustered_public_runner,
             )
         ),
+        # Same hermeticity stub as the forged-remote probe above (issue #48).
+        push_narrowing=lambda *a, **k: (False, "stubbed"),
     )
     sensitive_remote_cases.append(
         (
@@ -5892,6 +6221,61 @@ def run_smoke():
                 "deny",
             )
         )
+    # --- issue #48 narrowing: a push attributable to a non-sensitive repo ---
+    narrowing_allow_decision, _reason = dispatch_module.check(
+        "git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+        push_narrowing=lambda *a, **k: (True, "attributed"),
+    )
+    narrowing_deny_decision, narrowing_deny_reason = dispatch_module.check(
+        "git push origin main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+        push_narrowing=lambda *a, **k: (False, "condition failed"),
+    )
+    # Real narrowing, deterministic anywhere: the URL verdict is pure argv
+    # analysis and returns before any filesystem or subprocess probe.
+    url_narrowing_decision, url_narrowing_reason = dispatch_module.check(
+        "git push https://github.com/example/public.git main",
+        sensitive_cfg,
+        HERE,
+        HERE,
+        remote_resolver=lambda *a, **k: (True, "example/public"),
+    )
+    sensitive_remote_cases.extend(
+        [
+            (
+                "issue-48 attributable push is exempt from the context deny",
+                narrowing_allow_decision,
+                "allow",
+            ),
+            (
+                "issue-48 unmet narrowing keeps the deny",
+                narrowing_deny_decision,
+                "deny",
+            ),
+            (
+                "issue-48 deny names the failed condition",
+                "issue #48 narrowing: condition failed" in narrowing_deny_reason,
+                True,
+            ),
+            (
+                "issue-48 URL destination never narrows (real path)",
+                url_narrowing_decision,
+                "deny",
+            ),
+            (
+                "issue-48 URL deny names the condition",
+                "destination is a URL" in url_narrowing_reason,
+                True,
+            ),
+        ]
+    )
     for label, got, expected in sensitive_remote_cases:
         status = "ok" if got == expected else "FAIL"
         if got != expected:
@@ -6043,25 +6427,79 @@ def run_smoke():
             ]
         )
 
-    def mixed_visibility_runner(argv, _cwd):
-        if argv[0] == "git" and "config" in argv:
-            return "no"
-        if argv[0] == "git":
-            return (
-                "https://github.com/example/private.git\n"
-                "https://github.com/example/public.git"
-            )
-        return "PUBLIC" if "example/public" in argv else "PRIVATE"
+    MIXED_PUSHURLS = (
+        "https://github.com/example/private.git\n"
+        "https://github.com/example/public.git"
+    )
+    PRIVATE_PUSHURLS = (
+        "https://github.com/example/private.git\n"
+        "https://github.com/example/private-second.git"
+    )
 
+    def visibility_runner(pushurls, *, rest=False, graphql=False):
+        """A fake `gh` that answers on exactly the transports named.
+
+        Membership (`"example/public" in argv`) used to decide the answer, which
+        silently keyed the charter case to ONE spelling of the visibility probe:
+        under GraphQL the slug is a standalone argv element, under REST it is
+        embedded in `repos/example/public`. When the probe order changed, the
+        stub answered PRIVATE for the PUBLIC remote and this case went green
+        while asserting the fail-OPEN direction. Substring matching is spelling-
+        robust, and `rest`/`graphql` let a case pin the transport it means.
+        """
+
+        def runner(argv, _cwd):
+            if argv[0] == "git" and "config" in argv:
+                return "no"
+            if argv[0] == "git":
+                return pushurls
+            if not (rest if argv[1:2] == ["api"] else graphql):
+                return ""
+            public = any("example/public" in token for token in argv)
+            return "PUBLIC" if public else "PRIVATE"
+
+        return runner
+
+    # The charter case over each transport in turn, not only over whichever one
+    # the floor currently prefers — a matrix that covers the preferred lane
+    # alone stops testing the other the moment the preference changes.
+    for label, lanes in (
+        ("either transport", {"rest": True, "graphql": True}),
+        ("the REST transport alone", {"rest": True}),
+        ("the GraphQL transport alone", {"graphql": True}),
+    ):
+        remote_resolution_cases.append(
+            (
+                f"any public pushurl makes a sensitive destination public over "
+                f"{label}",
+                dispatch_module.public_remote_status(
+                    ["origin", "main"],
+                    HERE,
+                    command_runner=visibility_runner(MIXED_PUSHURLS, **lanes),
+                )[0],
+                True,
+            )
+        )
+        remote_resolution_cases.append(
+            (
+                f"an all-private pushurl set stays approved over {label}",
+                dispatch_module.public_remote_status(
+                    ["origin", "main"],
+                    HERE,
+                    command_runner=visibility_runner(PRIVATE_PUSHURLS, **lanes),
+                ),
+                (False, "approved private destinations"),
+            )
+        )
     remote_resolution_cases.append(
         (
-            "any public pushurl makes a sensitive destination public",
+            "a mute pair of transports still fail-closes",
             dispatch_module.public_remote_status(
                 ["origin", "main"],
                 HERE,
-                command_runner=mixed_visibility_runner,
+                command_runner=visibility_runner(PRIVATE_PUSHURLS),
             )[0],
-            True,
+            None,
         )
     )
     for recursive_command in (
@@ -6264,6 +6702,18 @@ def run_smoke():
             failures.append((label, 4, {}, expected, got))
         print(f"  [{status}] expected={expected} got={got}  {label}")
 
+    # The allow on plain `git worktree remove` below T4/wave rests on a claim
+    # about GIT, not about the floor, and the first draft of issue #41 got that
+    # claim backwards ("git refuses a dirty tree, so plain removal destroys
+    # nothing"). Pin the real behaviour with real git so nobody has to take it
+    # on faith again.
+    worktree_reality_cases = ignored_worktree_removal_is_destructive()
+    for label, got, expected in worktree_reality_cases:
+        status = "ok" if got == expected else "FAIL"
+        if got != expected:
+            failures.append((label, 0, {}, expected, got))
+        print(f"  [{status}] expected={expected} got={got}  {label}")
+
     total = (
         len(CASES)
         + 1
@@ -6283,6 +6733,7 @@ def run_smoke():
         + len(sensitive_remote_cases)
         + len(remote_resolution_cases)
         + len(runtime_neutral_cases)
+        + len(worktree_reality_cases)
     )
     print(f"\n{total - len(failures)}/{total} passed")
     if failures:

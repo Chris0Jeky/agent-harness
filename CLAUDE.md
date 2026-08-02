@@ -10,7 +10,7 @@ and parsing; runtime-specific hook output stays explicit.
 
 Doc hierarchy — read in this order, only as deep as needed:
 - `README.md` — executable commands and current shipped state
-- `BLUEPRINT.md` — durable policy (tier ladder, the ten laws, regions, model routing)
+- `BLUEPRINT.md` — durable policy (tier ladder, the twelve laws, regions, model routing)
 - `SPECS.md` — schemas, budgets, hook wiring, deny-floor test matrix
 - `BOOK.md` — rationale only; never needed for routine work
 - `legacy/` — historical source material; never run anything in it
@@ -39,6 +39,8 @@ py -3 harness.py doctor [--repo <path>] [--offline]
 py -3 harness.py audit <repo> [--json] [--offline]
 py -3 harness.py seed <repo> --tier N [--sensitive-data]
 py -3 harness.py sync-global --config-root <claude-config checkout> [--apply]
+py -3 harness.py worktree-lease --repo <linked-worktree> --action <status|acquire|renew|release> [--claimant <id>]
+py -3 harness.py worktrees --repo <repo> [--refresh] [--claimant <id>] [--apply] [--json]
 ```
 
 `.github/workflows/ci.yml` is the single source of that file list — it had drifted to 19 entries
@@ -49,9 +51,11 @@ py_compile) or they are silently unlinted.
 
 Two Python artifacts, both deliberately dependency-free (stdlib only):
 
-**`harness.py`** — single-file CLI with four subcommands:
-- `audit` — validates a repo's tier declaration, doc line budgets (CLAUDE.md is capped per
-  tier: T3 = 150 lines), and scans `SCAN_PATHS` files for stale hard-coded user-profile paths.
+**`harness.py`** — single-file CLI with six subcommands:
+- `audit` — validates every tier declaration a repo carries (`.agent-harness/tier.json` and a
+  legacy `.claude/tier.json` bind to the STRICTEST union, exactly as the dispatcher resolves
+  them), doc line budgets (CLAUDE.md is capped per tier: T3 = 150 lines), and scans
+  `SCAN_PATHS` files for stale hard-coded user-profile paths.
   It also runs the **reality checks** (`reality_findings`): declared `sensitive_data` vs each
   remote's real host visibility, vendored floor bytes (`hooks/` or `.claude/hooks/`) vs the
   canonical template, and declared `human_todo` vs a file that exists. `MISMATCH` fails;
@@ -72,6 +76,15 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   blockers fail closed. It does not fully validate unrelated config fields, prove runtime/cloud
   overrides, or execute the hook — a CWD-specific new-session `/hooks` review and live safe/deny
   canary remain mandatory.
+- `worktree-lease` — explicitly acquires, renews, releases, or reads one self-declared cooperative
+  owner lease in linked-worktree Git metadata; it is coordination, not process detection or
+  authentication
+- `worktrees` — reports linked worktrees without mutation by default; an explicit all-remote
+  refresh plus a matching active owner lease and `--apply` removes only clean, locally attached,
+  canonically contained, remote-reachable candidates with no hidden mode, index resolve-undo,
+  pending commit-message, recovery-ref, reflog, or administrative state after short-lived
+  fingerprint and lease revalidation, using plain removal, retaining every branch, and never
+  globally pruning worktree metadata
 
 Roughly half of `harness.py` is the static analyzer for Codex hook commands
 (`shell_command_segments`, `segment_invokes_direct_floor`, `command_binds_pin`, …). It is
@@ -79,7 +92,7 @@ intentionally conservative: reject anything it cannot prove safe.
 
 **`templates/hooks/dispatch.py`** — the canonical shared Claude/Codex deny floor (~8.5k lines).
 Invoked as a PreToolUse hook with `--event pre --runtime claude|codex`; reads the repo's tier
-from `.agent-harness/tier.json` (falling back to `.claude/`) and emits the runtime-appropriate
+from `.agent-harness/tier.json` (strictest of it and legacy `.claude/`) and emits the
 allow/ask/deny JSON. Contract (docstring + BLUEPRINT §2, SPECS §5-6):
 - Blocks only the irreversible at every tier (force-push, rm -rf outside project, pipe-to-shell
   installs, sudo, secret-file mutation); work-loss guards are tier-dependent
@@ -106,7 +119,10 @@ harness.py), then a new-session `/hooks` re-trust per repo. Never call it runtim
 
 - `templates/hooks/dispatch.py` is T4-class shared infrastructure regardless of this repo's
   tier: any change requires the smoke suite, the harness unit tests, and an independent
-  read-only review before merge.
+  read-only review before merge. It is FEATURE-FROZEN (BLUEPRINT §2; issue #96): only
+  false-positive fixes and the ratified #21 slices may change it — a new bypass family
+  becomes a `FLOOR_LIMITATIONS.md` line, never a fix — unless it regresses the SPECS §6
+  charter matrix in canonical form, which is always repaired.
 - Keep `harness.py` and `dispatch.py` stdlib-only and portable across Windows/macOS/Linux.
 - Never hard-code a user profile path (audit flags it); discover `$HOME`, `$CODEX_HOME`, and
   Git roots at runtime.

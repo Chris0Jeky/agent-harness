@@ -21,12 +21,54 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from datetime import date, datetime, time, timezone
+from collections.abc import Mapping
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import Any
 
 DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [".git"]
+
+WORKTREE_PLAN_SCHEMA_VERSION = 3
+WORKTREE_FINGERPRINT_LEASE_SECONDS = 60.0
+WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
+WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION = 1
+WORKTREE_OWNERSHIP_LEASE_SCOPE = "exclusive-plain-worktree-remove"
+WORKTREE_OWNERSHIP_LEASE_FILENAME = "agent-harness-closeout-lease.json"
+WORKTREE_OWNERSHIP_LOCK_DIRECTORY = "agent-harness-closeout-lease.lock"
+WORKTREE_OWNERSHIP_DEFAULT_SECONDS = 300.0
+WORKTREE_OWNERSHIP_MAX_SECONDS = 3600.0
+WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS = 10.0
+WORKTREE_GIT_CONTEXT_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_WORK_TREE",
+)
+WORKTREE_ADMIN_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        "HEAD",
+        "ORIG_HEAD",
+        "COMMIT_EDITMSG",
+        "commondir",
+        "gitdir",
+        "index",
+        "logs",
+        "refs",
+        WORKTREE_OWNERSHIP_LEASE_FILENAME,
+    }
+)
 
 CODEX_HOOK_EVENT_NAMES = (
     "PreToolUse",
@@ -40,6 +82,42 @@ CODEX_HOOK_EVENT_NAMES = (
     "SubagentStart",
     "SubagentStop",
     "Stop",
+)
+# This is the documented static vocabulary. Doctor inventories only the Claude
+# settings events whose on-disk shape it can name without consulting a running
+# Claude session; future events must be surfaced as UNPROVEN instead of being
+# silently treated as harmless configuration.
+CLAUDE_HOOK_EVENT_NAMES = (
+    "SessionStart",
+    "Setup",
+    "InstructionsLoaded",
+    "UserPromptSubmit",
+    "UserPromptExpansion",
+    "MessageDisplay",
+    "PreToolUse",
+    "PermissionRequest",
+    "PermissionDenied",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    "Notification",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskCreated",
+    "PreCompact",
+    "PostCompact",
+    "Stop",
+    "StopFailure",
+    "TeammateIdle",
+    "TaskCompleted",
+    "ConfigChange",
+    "CwdChanged",
+    "FileChanged",
+    "WorktreeCreate",
+    "WorktreeRemove",
+    "Elicitation",
+    "ElicitationResult",
 )
 I64_MAX = (1 << 63) - 1
 U64_MAX = (1 << 64) - 1
@@ -71,12 +149,313 @@ class HarnessError(RuntimeError):
     """A user-actionable harness failure."""
 
 
+# --- Probe binary resolution -------------------------------------------------
+#
+# Every helper this file spawns — `git`, `gh`, `powershell`, `taskkill` — used to
+# be handed to the operating system as a BARE NAME. On Windows that is a hole:
+# `CreateProcess` searches the calling process's current directory before it
+# reaches PATH, and `audit`/`doctor` are run from, or against, a repository the
+# operator does not fully trust. A repository shipping a `git.exe` therefore got
+# to run it inside the auditor. (Measured, not reasoned about: the shadow is
+# taken whenever `NoDefaultCurrentDirectoryInExePath` is unset, which is every
+# plain PowerShell and cmd session — Git Bash happens to set it, which is why
+# this stayed invisible.)
+#
+# The deny floor closed the identical lane in 1.6.16. This is the harness's own
+# implementation of that contract — the two files may not import each other, so
+# each carries its own readable copy — and it holds four rules:
+#
+#   1. A bare argv[0] is resolved against ABSOLUTE PATH entries only. Never the
+#      cwd; never a relative entry, including the empty one Windows reads as
+#      ".". A name that cannot be resolved is a NAMED failure, not a spawn.
+#   2. A non-re-parsing image (`.EXE`/`.COM`) anywhere on PATH outranks a script
+#      shim (`.CMD`/`.BAT`) everywhere on PATH. This deliberately inverts the
+#      shell's per-directory PATHEXT walk, so a directory early on PATH cannot
+#      turn a plain spawn into a `cmd.exe` one that re-reads the command line.
+#   3. When a shim is the only answer it may still be spawned — a box whose `gh`
+#      is genuinely a `.cmd` must remain auditable — but only with argv that
+#      survives `cmd.exe` re-parsing intact.
+#   4. An argv[0] that already carries a directory keeps its meaning verbatim;
+#      searching for it would change what the caller asked for.
+NON_REPARSING_PROBE_SUFFIXES = frozenset({".exe", ".com"})
+WINDOWS_COMMAND_SHIM_SUFFIXES = frozenset({".cmd", ".bat"})
+# Windows' own default, used when PATHEXT is absent or empty. Treating an empty
+# PATHEXT as "no suffixes" would leave every probe on that box unresolvable.
+DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+# Two populations of token, two opposite rules.
+#
+# argv[1:] carries text the inspected repository influences — a remote name, a
+# repository slug, a ref — so it gets an ALLOWLIST of the characters those
+# legitimately hold, and anything else is refused.
+#
+# argv[0] is this resolver's own output: an absolute PATH directory chosen by
+# whoever installed the machine. An allowlist there rejects ordinary installs
+# (`Program Files (x86)`, an accented user name) and would make every probe on
+# such a box a permanent UNPROVEN, so it gets a DENYLIST in two parts: the
+# characters `cmd.exe` acts on even inside quotes, and its token delimiters,
+# which split an UNQUOTED command name (`C:\dev\a,b\gh.cmd` runs `C:\dev\a`).
+PROBE_SHIM_FATAL_IMAGE_CHARACTERS = re.compile('[&|<>^"%!\r\n]')
+PROBE_SHIM_SPLITTING_IMAGE_CHARACTERS = re.compile(r"[,;=()]")
+PROBE_SHIM_SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9._:/@~=+\\-]*")
+
+# Keyed by the environment that produced the answer, so an injected PATH never
+# reads a resolution made under a different one.
+_PROBE_BINARY_CACHE: dict[tuple[str, str, str], str | None] = {}
+
+
+def reset_probe_binary_cache() -> None:
+    """Forget every resolution. For tests that plant binaries as they go."""
+    _PROBE_BINARY_CACHE.clear()
+
+
+def probe_environment(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    """The environment a resolution reads; the process's own unless injected."""
+    return os.environ if env is None else env
+
+
+def probe_search_directories(env: Mapping[str, str] | None = None) -> list[str]:
+    """The directories a bare probe name may be resolved from.
+
+    Absolute entries only. A relative entry — `tools`, `.`, or the empty string
+    Windows reads as the current directory — resolves against the cwd, and the
+    cwd is exactly what this resolver exists to keep out of the search.
+    """
+    raw = probe_environment(env).get("PATH", "")
+    return [entry for entry in raw.split(os.pathsep) if entry and os.path.isabs(entry)]
+
+
+def probe_search_suffixes(env: Mapping[str, str] | None = None) -> list[str]:
+    """The suffixes a bare probe name may acquire. None off Windows."""
+    if os.name != "nt":
+        return []
+    raw = probe_environment(env).get("PATHEXT", "") or DEFAULT_WINDOWS_PATHEXT
+    return [entry.strip() for entry in raw.split(os.pathsep) if entry.strip()]
+
+
+def probe_candidate_paths(
+    name: str, directories: list[str], suffixes: list[str]
+) -> list[str]:
+    """The absolute candidates for `name`, in the order they may be tried.
+
+    Two passes, images before shims: every directory is searched for a
+    `.EXE`/`.COM` before any directory is allowed to answer with a `.CMD`/`.BAT`.
+    PATH order is preserved within a pass, so this only ever demotes a shim —
+    it never promotes a directory over one earlier on PATH. Off Windows there
+    are no suffixes and the result is plain PATH order.
+    """
+    if not suffixes:
+        return [os.path.join(directory, name) for directory in directories]
+    images = [
+        suffix for suffix in suffixes if suffix.lower() in NON_REPARSING_PROBE_SUFFIXES
+    ]
+    shims = [
+        suffix
+        for suffix in suffixes
+        if suffix.lower() not in NON_REPARSING_PROBE_SUFFIXES
+    ]
+    declared = os.path.splitext(name)[1].lower()
+    if declared in {suffix.lower() for suffix in suffixes}:
+        # `gh.cmd` names its own suffix, so the verbatim name is a candidate —
+        # but it joins the pass that suffix belongs to, so spelling out a shim
+        # still cannot outrank a real image found further along PATH.
+        target = images if declared in NON_REPARSING_PROBE_SUFFIXES else shims
+        target.insert(0, "")
+    candidates: list[str] = []
+    for pass_suffixes in (images, shims):
+        for directory in directories:
+            stem = os.path.join(directory, name)
+            candidates.extend(stem + suffix for suffix in pass_suffixes)
+    return candidates
+
+
+def windows_command_candidate_paths(
+    name: str, directories: list[str], suffixes: list[str]
+) -> list[str]:
+    """Return the PATH/PATHEXT order a bare Windows command name sees.
+
+    This intentionally differs from ``probe_candidate_paths``: Windows walks
+    every PATHEXT suffix in one PATH directory before it moves to the next one.
+    It answers what a bare command would reach, while probes retain their
+    images-first resolver so they never have to launch that batch shim.
+    """
+    declared = os.path.splitext(name)[1]
+    if declared:
+        return [os.path.join(directory, name) for directory in directories]
+    return [
+        os.path.join(directory, name) + suffix
+        for directory in directories
+        for suffix in suffixes
+    ]
+
+
+def probe_candidate_is_runnable(path: str) -> bool:
+    """Whether the operating system would actually execute this candidate."""
+    if not os.path.isfile(path):
+        return False
+    return os.name == "nt" or os.access(path, os.X_OK)
+
+
+def probe_image_reparses(path: str) -> bool:
+    """Whether spawning `path` hands the command line to a re-parsing shell.
+
+    Windows runs a `.CMD`/`.BAT` target through `cmd.exe`, which re-reads the
+    whole line, so `&`, `|` or `>` inside an argument stop being text. A POSIX
+    `#!` script receives its argv as an array and re-parses nothing.
+    """
+    if os.name != "nt":
+        return False
+    return os.path.splitext(path)[1].lower() not in NON_REPARSING_PROBE_SUFFIXES
+
+
+def probe_image_is_quoted(image: str) -> bool:
+    """Whether the spawn will wrap argv[0] in quotes, so cmd.exe sees one token.
+
+    Asked of `subprocess` rather than restated here: the quoting rule belongs to
+    the module that builds the command line, and a second copy of it can drift.
+    """
+    return subprocess.list2cmdline([image]).startswith('"')
+
+
+def probe_shim_hazard(argv: list[str]) -> str:
+    """Name why `argv` must not be re-read by `cmd.exe`, or "" when it is safe.
+
+    The causes are kept apart because they mean different things to whoever
+    reads the diagnosis: a refused argument is repository-influenced text the
+    harness declines to pass on, while a refused image path is the machine's own
+    installation layout, which no repository can change.
+    """
+    if not argv:
+        return "the command is empty"
+    image = argv[0]
+    if PROBE_SHIM_FATAL_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds a cmd.exe metacharacter"
+    if not probe_image_is_quoted(
+        image
+    ) and PROBE_SHIM_SPLITTING_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds an unquoted cmd.exe delimiter"
+    if not all(PROBE_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:]):
+        # Deliberately not echoed: the offending token is repository-influenced
+        # text, and this string is recorded in a finding.
+        return "an argument holds text cmd.exe would re-read as syntax"
+    return ""
+
+
+def resolve_probe_binary(name: str, env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve a probe binary against PATH only — never the cwd, images first.
+
+    Returns the absolute path to spawn, or None when nothing on PATH answers to
+    the name. None is a real answer: the caller reports it, rather than falling
+    back to the implicit resolution this function exists to replace.
+    """
+    if os.path.dirname(name):
+        return name if os.path.isfile(name) else None
+    environment = probe_environment(env)
+    key = (name, environment.get("PATH", ""), environment.get("PATHEXT", ""))
+    if key in _PROBE_BINARY_CACHE:
+        return _PROBE_BINARY_CACHE[key]
+    resolved = None
+    for candidate in probe_candidate_paths(
+        name,
+        probe_search_directories(environment),
+        probe_search_suffixes(environment),
+    ):
+        if probe_candidate_is_runnable(candidate):
+            resolved = candidate
+            break
+    _PROBE_BINARY_CACHE[key] = resolved
+    return resolved
+
+
+def resolve_windows_command_binary(
+    name: str, env: Mapping[str, str] | None = None
+) -> str | None:
+    """Resolve a bare command in Windows' PATH/PATHEXT order without spawning.
+
+    This is diagnostic-only. Production probes use ``resolve_probe_binary`` so
+    a later native image can safely outrank an earlier command shim.
+    """
+    if os.name != "nt":
+        return None
+    if os.path.dirname(name):
+        return name if probe_candidate_is_runnable(name) else None
+    environment = probe_environment(env)
+    for candidate in windows_command_candidate_paths(
+        name,
+        probe_search_directories(environment),
+        probe_search_suffixes(environment),
+    ):
+        if probe_candidate_is_runnable(candidate):
+            return candidate
+    return None
+
+
+def probe_spawn_argv(
+    argv: list[str], env: Mapping[str, str] | None = None
+) -> tuple[list[str], str]:
+    """Rewrite a probe's argv onto a resolved image, or say why it was refused.
+
+    Returns `(spawn argv, failure text)` with exactly one side filled in. Every
+    spawn in this file goes through here; a caller that skips it is back to the
+    implicit, cwd-searching resolution.
+    """
+    if not argv:
+        return [], "empty probe command"
+    executable = resolve_probe_binary(argv[0], env)
+    if executable is None:
+        return [], f"{argv[0]}: no executable of that name on PATH"
+    spawned = [executable, *argv[1:]]
+    if probe_image_reparses(executable):
+        hazard = probe_shim_hazard(spawned)
+        if hazard:
+            return [], (
+                f"{argv[0]}: only a script shim on PATH, and it cannot be "
+                f"spawned safely because {hazard}"
+            )
+    return spawned, ""
+
+
+def git_command_fidelity_status(
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Report whether Doctor's resolved Git command preserves Windows argv.
+
+    A successful ``git --version`` does not prove that a Windows batch shim
+    preserves a revision expression: ``cmd.exe`` re-parses the complete command
+    line before the shim forwards it. This is deliberately static: Doctor names
+    a risky command boundary without sending a synthetic ref through a local shim.
+    """
+    safe_executable = resolve_probe_binary("git", env)
+    if safe_executable is None:
+        return False, "Git could not be resolved from absolute PATH entries"
+    effective_executable = resolve_windows_command_binary("git", env)
+    if effective_executable is None:
+        return True, f"safe Git target {safe_executable} preserves argv"
+    suffix = os.path.splitext(effective_executable)[1].lower()
+    if suffix in WINDOWS_COMMAND_SHIM_SUFFIXES:
+        return False, (
+            f"effective Git target {effective_executable} is a {suffix} shim; "
+            f"safe Git target is {safe_executable}. cmd.exe can "
+            "re-parse caret-bearing revision expressions such as HEAD^{commit}. "
+            "Invoke Git for Windows directly or remove/replace the shim"
+        )
+    return True, (
+        f"effective Git target {effective_executable}; safe Git target "
+        f"{safe_executable} preserves argv"
+    )
+
+
 def run(
     command: list[str], cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
+    spawn_argv, failure = probe_spawn_argv(command)
+    if failure:
+        # 127 is the shell's own "command not found", and the caller already
+        # treats any non-zero return as "this resolver did not answer".
+        return subprocess.CompletedProcess(command, 127, "", failure)
     try:
         return subprocess.run(
-            command, cwd=cwd, capture_output=True, text=True, check=False
+            spawn_argv, cwd=cwd, capture_output=True, text=True, check=False
         )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
@@ -203,6 +582,1803 @@ def root_checkout(path: Path) -> tuple[Path, Path]:
     )
 
 
+# --- Guarded linked-worktree closeout ---------------------------------------
+
+
+def worktree_git_environment() -> dict[str, str]:
+    """Return an environment that cannot redirect Git away from the named repo."""
+
+    environment = os.environ.copy()
+    for name in WORKTREE_GIT_CONTEXT_ENV:
+        environment.pop(name, None)
+    for name in list(environment):
+        if name == "GIT_CONFIG_COUNT" or name.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            environment.pop(name, None)
+    # Reachability must use the stored commit graph, never replace refs inherited
+    # from the caller. Grafts are rejected separately because Git has no
+    # equivalent process-level switch for them.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    return environment
+
+
+def worktree_git_runner(
+    command: list[str], cwd: Path, *, stdin_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded Git command for the guarded worktree workflow."""
+
+    if not command or command[0] != "git":
+        return subprocess.CompletedProcess(command, 127, "", "only git is supported")
+    spawn_argv, failure = probe_spawn_argv(command, worktree_git_environment())
+    if failure:
+        return subprocess.CompletedProcess(command, 127, "", failure)
+    try:
+        return subprocess.run(
+            spawn_argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            input=stdin_text,
+            check=False,
+            timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+            env=worktree_git_environment(),
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(command, 124, "", "command timed out")
+    except UnicodeError as exc:
+        return subprocess.CompletedProcess(command, 125, "", type(exc).__name__)
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+
+
+def worktree_git_result(
+    command_runner: Any,
+    args: list[str],
+    cwd: Path,
+    *,
+    stdin_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = ["git", *args]
+    if stdin_text is None:
+        result = command_runner(command, cwd)
+    else:
+        result = command_runner(command, cwd, stdin_text=stdin_text)
+    if not isinstance(result, subprocess.CompletedProcess):
+        raise HarnessError("worktree command runner returned an invalid result")
+    return result
+
+
+def canonical_worktree_path(path: Path, *, strict: bool = True) -> Path:
+    """Return the one physical path spelling used by the closeout workflow."""
+
+    absolute = Path(os.path.abspath(path.expanduser()))
+    try:
+        return absolute.resolve(strict=strict)
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError(
+            f"cannot canonicalize worktree path {absolute}: {exc}"
+        ) from exc
+
+
+def worktree_path_key(path: Path) -> str:
+    """Return a comparison key for an already-canonical physical path."""
+
+    return os.path.normcase(str(path))
+
+
+def same_worktree_path(left: Path, right: Path) -> bool:
+    return worktree_path_key(left) == worktree_path_key(right)
+
+
+def worktree_path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        return os.path.commonpath(
+            [worktree_path_key(path), worktree_path_key(parent)]
+        ) == worktree_path_key(parent)
+    except ValueError:
+        return False
+
+
+def worktree_mode_drift_is_observable() -> bool:
+    """Return whether the native runtime exposes Unix executable-bit drift."""
+
+    # Git for Windows cannot represent the working-tree executable bit. Forcing
+    # core.fileMode=true there turns every clean 100755 baseline into a synthetic
+    # 100755 -> 100644 difference. POSIX still needs the forced comparison because
+    # a user may set core.fileMode=false on a filesystem where chmod remains real.
+    return os.name != "nt"
+
+
+def parse_worktree_list(output: str) -> list[dict[str, Any]]:
+    """Parse `git worktree list --porcelain -z` without path quoting."""
+
+    records: list[dict[str, Any]] = []
+    for raw_record in output.split("\0\0"):
+        if not raw_record:
+            continue
+        record: dict[str, Any] = {
+            "path": "",
+            "head": "",
+            "branch": None,
+            "detached": False,
+            "bare": False,
+            "locked": False,
+            "lock_reason": "",
+            "prunable": False,
+            "prunable_reason": "",
+        }
+        for field in raw_record.split("\0"):
+            if field.startswith("worktree "):
+                record["path"] = field.removeprefix("worktree ")
+            elif field.startswith("HEAD "):
+                record["head"] = field.removeprefix("HEAD ")
+            elif field.startswith("branch "):
+                record["branch"] = field.removeprefix("branch ")
+            elif field == "detached":
+                record["detached"] = True
+            elif field == "bare":
+                record["bare"] = True
+            elif field == "locked" or field.startswith("locked "):
+                record["locked"] = True
+                record["lock_reason"] = field.removeprefix("locked").strip()
+            elif field == "prunable" or field.startswith("prunable "):
+                record["prunable"] = True
+                record["prunable_reason"] = field.removeprefix("prunable").strip()
+        if not record["path"]:
+            raise HarnessError("git worktree list returned a record without a path")
+        records.append(record)
+    if not records:
+        raise HarnessError("git worktree list returned no worktrees")
+    return records
+
+
+def list_worktrees(primary: Path, command_runner: Any) -> list[dict[str, Any]]:
+    result = worktree_git_result(
+        command_runner, ["worktree", "list", "--porcelain", "-z"], primary
+    )
+    if result.returncode:
+        raise HarnessError(f"git worktree list failed with exit {result.returncode}")
+    return parse_worktree_list(result.stdout)
+
+
+def canonicalize_worktree_records(
+    records: list[dict[str, Any]], *, relative_to: Path
+) -> list[dict[str, Any]]:
+    canonical_records: list[dict[str, Any]] = []
+    for source in records:
+        record = source.copy()
+        raw_path = Path(record["path"])
+        if not raw_path.is_absolute():
+            raw_path = relative_to / raw_path
+        try:
+            canonical = canonical_worktree_path(raw_path)
+            record["path"] = str(canonical)
+            record["path_key"] = worktree_path_key(canonical)
+            record["path_error"] = ""
+        except HarnessError as exc:
+            record["path"] = str(canonical_worktree_path(raw_path, strict=False))
+            record["path_key"] = None
+            record["path_error"] = str(exc)
+        canonical_records.append(record)
+    return canonical_records
+
+
+def registered_worktree_context(
+    path: Path, command_runner: Any
+) -> tuple[Path, Path, Path, list[dict[str, Any]]]:
+    """Resolve a requested path without trusting configurable core.worktree."""
+
+    requested_input = canonical_worktree_path(path)
+    records = canonicalize_worktree_records(
+        list_worktrees(requested_input, command_runner), relative_to=requested_input
+    )
+    if records[0]["bare"] or records[0]["path_key"] is None:
+        raise HarnessError("bare or unavailable repositories have no worktree root")
+    primary = Path(records[0]["path"])
+    matches = [
+        Path(record["path"])
+        for record in records
+        if record["path_key"] is not None
+        and worktree_path_is_within(requested_input, Path(record["path"]))
+    ]
+    if not matches:
+        raise HarnessError(
+            f"requested path is not inside a registered Git worktree: {requested_input}"
+        )
+    requested = max(matches, key=lambda item: len(worktree_path_key(item)))
+    common_git_dir = resolve_common_git_dir(primary, command_runner)
+    return requested, primary, common_git_dir, records
+
+
+def resolve_worktree_checkout(path: Path, command_runner: Any) -> Path:
+    requested, _primary, _common_git_dir, _records = registered_worktree_context(
+        path, command_runner
+    )
+    return requested
+
+
+def resolve_common_git_dir(primary: Path, command_runner: Any) -> Path:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--git-common-dir"], primary
+    )
+    if result.returncode or not result.stdout.strip():
+        raise HarnessError("cannot resolve the repository's common Git directory")
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = primary / common
+    return canonical_worktree_path(common)
+
+
+def registered_worktree_toplevel(
+    path: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(command_runner, ["rev-parse", "--show-toplevel"], path)
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --show-toplevel failed with exit {result.returncode}",
+        )
+    top = Path(result.stdout.strip())
+    if not top.is_absolute():
+        top = path / top
+    try:
+        return canonical_worktree_path(top), ""
+    except HarnessError as exc:
+        return None, str(exc)
+
+
+def linked_worktree_git_dir(
+    path: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[Path | None, str]:
+    result = worktree_git_result(
+        command_runner, ["rev-parse", "--absolute-git-dir"], path
+    )
+    if result.returncode or not result.stdout.strip():
+        return (
+            None,
+            f"git rev-parse --absolute-git-dir failed with exit {result.returncode}",
+        )
+    try:
+        git_dir = canonical_worktree_path(Path(result.stdout.strip()))
+        worktrees_admin = canonical_worktree_path(common_git_dir / "worktrees")
+    except HarnessError as exc:
+        return None, str(exc)
+    if same_worktree_path(git_dir, common_git_dir) or not worktree_path_is_within(
+        git_dir, worktrees_admin
+    ):
+        return None, "candidate does not have linked-worktree administrative metadata"
+    return git_dir, ""
+
+
+def worktree_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def validate_worktree_claimant(claimant: str | None) -> str:
+    if claimant is None:
+        raise HarnessError("a cooperative lease claimant is required")
+    normalized = claimant.strip()
+    if (
+        not normalized
+        or len(normalized) > 200
+        or not normalized.isprintable()
+        or any(character in normalized for character in "\r\n\0")
+    ):
+        raise HarnessError("claimant must be 1-200 printable single-line characters")
+    return normalized
+
+
+def parse_worktree_lease_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def render_worktree_lease_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def worktree_lease_digest(record: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_worktree_lease(path: Path) -> tuple[dict[str, Any] | None, str, bool]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "cooperative_lease_missing", True
+    except (OSError, UnicodeError):
+        return None, "cooperative_lease_probe_failed", False
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        return None, "cooperative_lease_malformed", True
+    if not isinstance(value, dict):
+        return None, "cooperative_lease_malformed", True
+    return value, "", True
+
+
+def inspect_worktree_lease(
+    path: Path,
+    *,
+    claimant: str | None,
+    common_git_dir: Path,
+    worktree: Path,
+    now: datetime,
+    minimum_remaining_seconds: float = WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS,
+) -> tuple[dict[str, Any], str, bool]:
+    """Validate one cooperative ownership record without authenticating its claim."""
+
+    info: dict[str, Any] = {
+        "path": str(path),
+        "status": "unknown",
+        "claimant": None,
+        "lease_id": None,
+        "expires_at": None,
+        "remaining_seconds": None,
+        "digest": None,
+    }
+    record, reason, complete = load_worktree_lease(path)
+    if record is None:
+        info["status"] = reason
+        return info, reason, complete
+
+    expected_fields = {
+        "schema_version",
+        "lease_id",
+        "claimant",
+        "scope",
+        "common_git_dir",
+        "worktree",
+        "created_at",
+        "renewed_at",
+        "expires_at",
+    }
+    if set(record) != expected_fields:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("schema_version") != WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION:
+        info["status"] = "cooperative_lease_schema_mismatch"
+        return info, "cooperative_lease_schema_mismatch", True
+    try:
+        uuid.UUID(str(record.get("lease_id")))
+    except (ValueError, AttributeError, TypeError):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    record_claimant = record.get("claimant")
+    try:
+        normalized_claimant = validate_worktree_claimant(record_claimant)
+    except HarnessError:
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+    if record.get("scope") != WORKTREE_OWNERSHIP_LEASE_SCOPE:
+        info["status"] = "cooperative_lease_scope_mismatch"
+        return info, "cooperative_lease_scope_mismatch", True
+    if record.get("common_git_dir") != str(common_git_dir) or record.get(
+        "worktree"
+    ) != str(worktree):
+        info["status"] = "cooperative_lease_identity_mismatch"
+        return info, "cooperative_lease_identity_mismatch", True
+
+    created = parse_worktree_lease_timestamp(record.get("created_at"))
+    renewed = parse_worktree_lease_timestamp(record.get("renewed_at"))
+    expires = parse_worktree_lease_timestamp(record.get("expires_at"))
+    if (
+        created is None
+        or renewed is None
+        or expires is None
+        or not (created <= renewed < expires)
+        or (expires - renewed).total_seconds() > WORKTREE_OWNERSHIP_MAX_SECONDS
+    ):
+        info["status"] = "cooperative_lease_malformed"
+        return info, "cooperative_lease_malformed", True
+
+    current = now.astimezone(timezone.utc)
+    remaining = (expires - current).total_seconds()
+    info.update(
+        {
+            "claimant": normalized_claimant,
+            "lease_id": record["lease_id"],
+            "expires_at": render_worktree_lease_timestamp(expires),
+            "remaining_seconds": max(0.0, remaining),
+            "digest": worktree_lease_digest(record),
+            "record": record,
+        }
+    )
+    if renewed > current:
+        reason = "cooperative_lease_not_yet_valid"
+    elif remaining <= 0:
+        reason = "cooperative_lease_expired"
+    elif claimant is None:
+        reason = "cooperative_lease_claimant_not_supplied"
+    elif normalized_claimant != claimant:
+        reason = "cooperative_lease_owned_by_other"
+    elif remaining < minimum_remaining_seconds:
+        reason = "cooperative_lease_expires_too_soon"
+    else:
+        reason = ""
+    info["status"] = reason or "active_owned"
+    return info, reason, True
+
+
+def worktree_lease_target(repo: Path, command_runner: Any) -> tuple[Path, Path, Path]:
+    requested, primary, common_git_dir, _records = registered_worktree_context(
+        repo, command_runner
+    )
+    if same_worktree_path(requested, primary):
+        raise HarnessError("the primary checkout cannot hold a closeout lease")
+    worktree_directory = canonical_worktree_path(primary / ".worktrees")
+    if (
+        not worktree_path_is_within(worktree_directory, primary)
+        or same_worktree_path(worktree_directory, primary)
+        or not worktree_path_is_within(requested, worktree_directory)
+        or same_worktree_path(requested, worktree_directory)
+    ):
+        raise HarnessError(
+            "worktree is outside the primary checkout's .worktrees directory"
+        )
+    top, top_error = registered_worktree_toplevel(requested, command_runner)
+    if top_error or top is None or not same_worktree_path(top, requested):
+        raise HarnessError(
+            "Git work-tree configuration redirects away from the registered path"
+        )
+    git_dir, git_dir_error = linked_worktree_git_dir(
+        requested, common_git_dir, command_runner
+    )
+    if git_dir is None:
+        raise HarnessError(f"cannot resolve linked-worktree metadata: {git_dir_error}")
+    return requested, common_git_dir, git_dir
+
+
+def write_worktree_lease(path: Path, record: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(record, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def mutate_worktree_lease(
+    repo: Path,
+    *,
+    action: str,
+    claimant: str | None,
+    ttl_seconds: float = WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    replace_stale: bool = False,
+    command_runner: Any = worktree_git_runner,
+    now: Any = worktree_utc_now,
+) -> dict[str, Any]:
+    """Create, renew, release, or inspect one cooperative ownership lease."""
+
+    if action not in {"status", "acquire", "renew", "release"}:
+        raise HarnessError(f"unsupported worktree lease action: {action}")
+    if replace_stale and action != "acquire":
+        raise HarnessError("--replace-stale is valid only with --action acquire")
+    if action != "status":
+        claimant = validate_worktree_claimant(claimant)
+    elif claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    if not (1.0 <= ttl_seconds <= WORKTREE_OWNERSHIP_MAX_SECONDS):
+        raise HarnessError(
+            f"lease TTL must be between 1 and {WORKTREE_OWNERSHIP_MAX_SECONDS:g} seconds"
+        )
+
+    worktree, common_git_dir, git_dir = worktree_lease_target(repo, command_runner)
+    lease_path = git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME
+    current_time = now().astimezone(timezone.utc)
+    if action == "status":
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        status_without_claimant = (
+            claimant is None and reason == "cooperative_lease_claimant_not_supplied"
+        )
+        if status_without_claimant:
+            info["status"] = "active"
+            reason = ""
+        return {
+            "action": action,
+            "ok": complete and not reason,
+            "reason": reason,
+            "worktree": str(worktree),
+            "common_git_dir": str(common_git_dir),
+            "lease": info,
+        }
+
+    lock_directory = git_dir / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+    try:
+        lock_directory.mkdir()
+    except FileExistsError as exc:
+        raise HarnessError(
+            "lease mutation lock already exists; inspect it before any manual recovery"
+        ) from exc
+    try:
+        info, reason, complete = inspect_worktree_lease(
+            lease_path,
+            claimant=claimant,
+            common_git_dir=common_git_dir,
+            worktree=worktree,
+            now=current_time,
+            minimum_remaining_seconds=0.0,
+        )
+        if not complete:
+            raise HarnessError("cannot safely read the existing cooperative lease")
+        existing = info.get("record")
+
+        if action == "acquire":
+            if existing is not None and not (
+                reason == "cooperative_lease_expired" and replace_stale
+            ):
+                raise HarnessError(
+                    "lease already exists; only explicit --replace-stale may replace an expired lease"
+                )
+            if existing is None and reason != "cooperative_lease_missing":
+                raise HarnessError(f"cannot replace unsafe lease state: {reason}")
+            record = {
+                "schema_version": WORKTREE_OWNERSHIP_LEASE_SCHEMA_VERSION,
+                "lease_id": str(uuid.uuid4()),
+                "claimant": claimant,
+                "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+                "common_git_dir": str(common_git_dir),
+                "worktree": str(worktree),
+                "created_at": render_worktree_lease_timestamp(current_time),
+                "renewed_at": render_worktree_lease_timestamp(current_time),
+                "expires_at": render_worktree_lease_timestamp(
+                    current_time + timedelta(seconds=ttl_seconds)
+                ),
+            }
+            write_worktree_lease(lease_path, record)
+        elif action == "renew":
+            if reason:
+                raise HarnessError(f"lease renewal refused: {reason}")
+            assert existing is not None
+            record = existing.copy()
+            record["renewed_at"] = render_worktree_lease_timestamp(current_time)
+            record["expires_at"] = render_worktree_lease_timestamp(
+                current_time + timedelta(seconds=ttl_seconds)
+            )
+            write_worktree_lease(lease_path, record)
+        else:
+            if existing is None or info.get("claimant") != claimant:
+                raise HarnessError(f"lease release refused: {reason}")
+            if reason not in {
+                "",
+                "cooperative_lease_expired",
+                "cooperative_lease_expires_too_soon",
+            }:
+                raise HarnessError(f"lease release refused: {reason}")
+            lease_path.unlink()
+            return {
+                "action": action,
+                "ok": True,
+                "reason": "",
+                "worktree": str(worktree),
+                "common_git_dir": str(common_git_dir),
+                "lease": {"path": str(lease_path), "status": "released"},
+            }
+    finally:
+        try:
+            lock_directory.rmdir()
+        except FileNotFoundError:
+            pass
+
+    verified, verified_reason, verified_complete = inspect_worktree_lease(
+        lease_path,
+        claimant=claimant,
+        common_git_dir=common_git_dir,
+        worktree=worktree,
+        now=current_time,
+        minimum_remaining_seconds=0.0,
+    )
+    return {
+        "action": action,
+        "ok": verified_complete and not verified_reason,
+        "reason": verified_reason,
+        "worktree": str(worktree),
+        "common_git_dir": str(common_git_dir),
+        "lease": verified,
+    }
+
+
+def worktree_lease_command(args: argparse.Namespace) -> int:
+    result = mutate_worktree_lease(
+        Path(args.repo),
+        action=args.action,
+        claimant=args.claimant,
+        ttl_seconds=args.ttl_seconds,
+        replace_stale=args.replace_stale,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        state = "ok" if result["ok"] else "keep"
+        detail = result["reason"] or result["lease"]["status"]
+        print(f"[{state}] {result['worktree']}: {detail}")
+    return 0 if result["ok"] else 1
+
+
+def configured_worktree_remotes(
+    primary: Path, command_runner: Any
+) -> tuple[list[str], str]:
+    result = worktree_git_result(command_runner, ["remote"], primary)
+    if result.returncode:
+        return [], f"git remote failed with exit {result.returncode}"
+    remotes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not remotes:
+        return [], "no configured remotes"
+    return sorted(set(remotes)), ""
+
+
+def refresh_worktree_remotes(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for remote in remotes:
+        refspec = f"+refs/heads/*:refs/remotes/{remote}/*"
+        result = worktree_git_result(
+            command_runner,
+            [
+                "fetch",
+                "--prune",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                remote,
+                refspec,
+            ],
+            primary,
+        )
+        results.append(
+            {
+                "remote": remote,
+                "ok": result.returncode == 0,
+                "exit_code": result.returncode,
+            }
+        )
+    return results
+
+
+def remote_tracking_refs(
+    primary: Path, remotes: list[str], command_runner: Any
+) -> tuple[dict[str, str], str]:
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"],
+        primary,
+    )
+    if result.returncode:
+        return {}, f"git for-each-ref failed with exit {result.returncode}"
+    prefixes = tuple(f"refs/remotes/{remote}/" for remote in remotes)
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return {}, "git for-each-ref returned an invalid record"
+        if not ref.startswith(prefixes) or ref.endswith("/HEAD"):
+            continue
+        refs[ref] = object_id.strip()
+    if not refs:
+        return {}, "fetch produced no remote-tracking refs"
+    return refs, ""
+
+
+def worktree_history_rewrite_evidence(
+    primary: Path, common_git_dir: Path, command_runner: Any
+) -> tuple[dict[str, Any], bool]:
+    evidence: dict[str, Any] = {
+        "ok": False,
+        "grafts_file": str(common_git_dir / "info" / "grafts"),
+        "grafts_present": False,
+        "replace_refs": [],
+        "error": "",
+    }
+    try:
+        evidence["grafts_present"] = (common_git_dir / "info" / "grafts").exists()
+    except OSError as exc:
+        evidence["error"] = f"cannot inspect grafts metadata: {type(exc).__name__}"
+        return evidence, False
+    result = worktree_git_result(
+        command_runner,
+        ["for-each-ref", "--format=%(refname)", "refs/replace/"],
+        primary,
+    )
+    if result.returncode:
+        evidence["error"] = f"replace-ref probe failed with exit {result.returncode}"
+        return evidence, False
+    evidence["replace_refs"] = sorted(
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    )
+    evidence["ok"] = not evidence["grafts_present"] and not evidence["replace_refs"]
+    return evidence, True
+
+
+def refs_containing_head(
+    primary: Path,
+    head: str,
+    refs: dict[str, str],
+    command_runner: Any,
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            f"--contains={head}",
+            "refs/remotes/",
+        ],
+        primary,
+    )
+    if result.returncode:
+        return [], f"reachability probe failed with exit {result.returncode}"
+    containing = []
+    for ref in result.stdout.splitlines():
+        ref = ref.strip()
+        if ref in refs:
+            containing.append({"ref": ref, "oid": refs[ref]})
+    return sorted(containing, key=lambda item: item["ref"]), ""
+
+
+def worktree_local_refs(
+    path: Path, command_runner: Any
+) -> tuple[list[dict[str, str]], str]:
+    result = worktree_git_result(
+        command_runner,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/bisect/",
+            "refs/worktree/",
+            "refs/rewritten/",
+        ],
+        path,
+    )
+    if result.returncode:
+        return [], f"worktree-local ref probe failed with exit {result.returncode}"
+    refs: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        try:
+            ref, object_id = line.split(" ", 1)
+        except ValueError:
+            return [], "worktree-local ref probe returned an invalid record"
+        object_id = object_id.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "worktree-local ref probe returned an invalid object id"
+        refs.append({"ref": ref, "oid": object_id})
+    return sorted(refs, key=lambda item: item["ref"]), ""
+
+
+def worktree_administrative_state(git_dir: Path) -> tuple[list[str], str]:
+    """List linked-worktree metadata that plain removal would discard."""
+
+    try:
+        top_level = sorted(entry.name for entry in git_dir.iterdir())
+    except OSError as exc:
+        return [], f"cannot inspect worktree metadata: {type(exc).__name__}"
+    state = [name for name in top_level if name not in WORKTREE_ADMIN_ALLOWED_TOP_LEVEL]
+    for directory_name, allowed_names in (("logs", {"HEAD"}), ("refs", set())):
+        directory = git_dir / directory_name
+        try:
+            directory_stat = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            state.append(directory_name)
+            continue
+        try:
+            children = sorted(entry.name for entry in directory.iterdir())
+        except FileNotFoundError:
+            # A concurrent metadata mutation is not safe evidence.
+            return [], f"worktree {directory_name} metadata changed during inspection"
+        except OSError as exc:
+            return [], (
+                f"cannot inspect worktree {directory_name} metadata: "
+                f"{type(exc).__name__}"
+            )
+        state.extend(
+            f"{directory_name}/{name}" for name in children if name not in allowed_names
+        )
+        for name in children:
+            if name not in allowed_names:
+                continue
+            child = directory / name
+            try:
+                child_stat = child.lstat()
+            except FileNotFoundError:
+                return [], (
+                    f"worktree {directory_name}/{name} metadata changed "
+                    "during inspection"
+                )
+            except OSError as exc:
+                return [], (
+                    f"cannot inspect worktree {directory_name}/{name} metadata: "
+                    f"{type(exc).__name__}"
+                )
+            if not stat.S_ISREG(child_stat.st_mode):
+                state.append(f"{directory_name}/{name}")
+    return sorted(state), ""
+
+
+def normalized_commit_message(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def worktree_commit_editmsg_status(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[str, str]:
+    message_path = git_dir / "COMMIT_EDITMSG"
+    try:
+        proposed = message_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "absent", ""
+    except (OSError, UnicodeError) as exc:
+        return "unknown", f"cannot read COMMIT_EDITMSG: {type(exc).__name__}"
+    head_message = worktree_git_result(
+        command_runner, ["log", "-1", "--format=%B", "HEAD"], path
+    )
+    if head_message.returncode:
+        return "unknown", (
+            f"HEAD commit-message probe failed with exit {head_message.returncode}"
+        )
+    if normalized_commit_message(proposed) == normalized_commit_message(
+        head_message.stdout
+    ):
+        return "matches_head", ""
+    return "differs_from_head", ""
+
+
+def worktree_head_reflog_commits(git_dir: Path) -> tuple[list[str], str]:
+    reflog_path = git_dir / "logs" / "HEAD"
+    try:
+        records = reflog_path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return [], ""
+    except OSError as exc:
+        return [], f"cannot read HEAD reflog: {type(exc).__name__}"
+
+    commits: list[str] = []
+    for record in records:
+        fields = record.split(b" ", 2)
+        if len(fields) != 3:
+            return [], "HEAD reflog contains an invalid record"
+        for raw_object_id in fields[:2]:
+            try:
+                object_id = raw_object_id.decode("ascii").lower()
+            except UnicodeDecodeError:
+                return [], "HEAD reflog contains a non-ASCII object id"
+            if len(object_id) in (40, 64) and not object_id.strip("0"):
+                continue
+            if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id):
+                return [], "HEAD reflog contains an invalid object id"
+            commits.append(object_id)
+    return sorted(set(commits)), ""
+
+
+def worktree_orig_head_object(
+    path: Path, git_dir: Path, command_runner: Any
+) -> tuple[dict[str, str] | None, str]:
+    orig_head_path = git_dir / "ORIG_HEAD"
+    try:
+        orig_head_stat = orig_head_path.lstat()
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        return None, f"cannot inspect ORIG_HEAD: {type(exc).__name__}"
+    if not stat.S_ISREG(orig_head_stat.st_mode):
+        return None, "ORIG_HEAD is not a regular file"
+    try:
+        with orig_head_path.open("rb") as stream:
+            raw_object_id = stream.read(67)
+    except OSError as exc:
+        return None, f"cannot read ORIG_HEAD: {type(exc).__name__}"
+    if not re.fullmatch(
+        rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?:\r?\n)?", raw_object_id
+    ):
+        return None, "ORIG_HEAD contains an invalid object id"
+    object_id = raw_object_id.rstrip(b"\r\n").decode("ascii").lower()
+    object_type_result = worktree_git_result(
+        command_runner,
+        ["cat-file", "-t", object_id],
+        path,
+    )
+    if object_type_result.returncode:
+        return (
+            None,
+            "ORIG_HEAD object-type probe failed with exit "
+            f"{object_type_result.returncode}",
+        )
+    object_type = object_type_result.stdout.strip()
+    if object_type not in {"blob", "commit", "tag", "tree"}:
+        return None, "ORIG_HEAD object-type probe returned an invalid type"
+    return {"oid": object_id, "type": object_type}, ""
+
+
+def worktree_recovery_commits(
+    git_dir: Path, orig_head_object: dict[str, str] | None
+) -> tuple[list[str], str]:
+    commits, reflog_error = worktree_head_reflog_commits(git_dir)
+    if reflog_error:
+        return [], reflog_error
+    if orig_head_object is not None and orig_head_object["type"] == "commit":
+        commits.append(orig_head_object["oid"])
+    return sorted(set(commits)), ""
+
+
+def commits_without_local_retention(
+    primary: Path, commits: list[str], command_runner: Any
+) -> tuple[list[str], str]:
+    if not commits:
+        return [], ""
+    result = worktree_git_result(
+        command_runner,
+        [
+            "rev-list",
+            "--no-walk",
+            "--stdin",
+            "--not",
+            "--branches",
+            "--tags",
+        ],
+        primary,
+        stdin_text="".join(f"{object_id}\n" for object_id in commits),
+    )
+    if result.returncode:
+        return (
+            [],
+            f"recovery reachability probe failed with exit {result.returncode}",
+        )
+    unreachable: list[str] = []
+    for line in result.stdout.splitlines():
+        object_id = line.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], "recovery reachability probe returned an invalid object id"
+        unreachable.append(object_id)
+    return sorted(set(unreachable)), ""
+
+
+def worktree_candidate_fingerprint(
+    candidate: dict[str, Any], common_git_dir: Path
+) -> str:
+    state = {
+        "path": candidate["path"],
+        "path_key": candidate.get("path_key"),
+        "common_git_dir": str(common_git_dir),
+        "head": candidate["head"],
+        "branch": candidate["branch"],
+        "detached": candidate["detached"],
+        "locked": candidate["locked"],
+        "lock_reason": candidate["lock_reason"],
+        "prunable": candidate["prunable"],
+        "prunable_reason": candidate["prunable_reason"],
+        "changes": candidate["changes"],
+        "ignored": candidate["ignored"],
+        "index_preservation_flags": candidate["index_preservation_flags"],
+        "index_resolve_undo": candidate["index_resolve_undo"],
+        "commit_editmsg_status": candidate["commit_editmsg_status"],
+        "tracked_mode_changes": candidate["tracked_mode_changes"],
+        "worktree_local_refs": candidate["worktree_local_refs"],
+        "worktree_administrative_state": candidate["worktree_administrative_state"],
+        "orig_head_object": candidate["orig_head_object"],
+        "recovery_commits": candidate["recovery_commits"],
+        "unretained_recovery_commits": candidate["unretained_recovery_commits"],
+        "containing_remote_refs": candidate["containing_remote_refs"],
+        "history_rewrite": candidate["history_rewrite"],
+        "lease_digest": candidate["lease"].get("digest"),
+        "lease_status": candidate["lease"].get("status"),
+        "reasons": candidate["reasons"],
+    }
+    encoded = json.dumps(
+        state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def inspect_worktree_candidate(
+    record: dict[str, Any],
+    *,
+    primary: Path,
+    requested: Path,
+    process_cwd: Path,
+    worktree_dir: Path,
+    common_git_dir: Path,
+    remote_evidence_ready: bool,
+    remote_evidence_requested: bool,
+    refs: dict[str, str],
+    history_rewrite: dict[str, Any],
+    history_rewrite_complete: bool,
+    claimant: str | None,
+    command_runner: Any,
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    path = Path(record["path"])
+    candidate: dict[str, Any] = {
+        "path": str(path),
+        "path_key": record.get("path_key"),
+        "head": record["head"],
+        "branch": record["branch"],
+        "detached": record["detached"],
+        "locked": record["locked"],
+        "lock_reason": record["lock_reason"],
+        "prunable": record["prunable"],
+        "prunable_reason": record["prunable_reason"],
+        "changes": [],
+        "ignored": [],
+        "index_preservation_flags": [],
+        "index_resolve_undo": [],
+        "commit_editmsg_status": "not_inspected",
+        "tracked_mode_changes": [],
+        "worktree_local_refs": [],
+        "worktree_administrative_state": [],
+        "orig_head_object": None,
+        "recovery_commits": [],
+        "unretained_recovery_commits": [],
+        "containing_remote_refs": [],
+        "history_rewrite": history_rewrite.copy(),
+        "lease": {
+            "path": None,
+            "status": "not_inspected",
+            "claimant": None,
+            "lease_id": None,
+            "expires_at": None,
+            "remaining_seconds": None,
+            "digest": None,
+        },
+        "reasons": [],
+        "verdict": "keep",
+        "fingerprint": "",
+        "revalidation": "not_requested",
+        "apply": "not_requested",
+    }
+    complete = True
+
+    def keep(reason: str) -> None:
+        if reason not in candidate["reasons"]:
+            candidate["reasons"].append(reason)
+
+    if record.get("path_key") is None:
+        keep("path_unavailable")
+        candidate["path_error"] = record.get("path_error", "")
+        complete = False
+    if record.get("path_key") is not None and same_worktree_path(path, primary):
+        keep("primary_checkout")
+    if record.get("path_key") is not None and same_worktree_path(path, requested):
+        keep("requested_checkout")
+    if record["bare"]:
+        keep("bare_repository")
+    if record["locked"]:
+        keep("git_locked")
+    if record["prunable"]:
+        keep("prunable_metadata")
+    if record["detached"]:
+        keep("detached_head")
+    if not isinstance(record["branch"], str) or not record["branch"].startswith(
+        "refs/heads/"
+    ):
+        keep("head_not_on_local_branch")
+
+    shape_is_probeable = record.get("path_key") is not None and not record["bare"]
+    contained = False
+    if shape_is_probeable and not same_worktree_path(path, primary):
+        if (
+            not worktree_path_is_within(worktree_dir, primary)
+            or same_worktree_path(worktree_dir, primary)
+            or not worktree_path_is_within(path, worktree_dir)
+            or same_worktree_path(path, worktree_dir)
+        ):
+            keep("outside_worktree_directory")
+        else:
+            contained = True
+            if worktree_path_is_within(process_cwd, path):
+                keep("process_cwd_occupied")
+
+    top_matches = False
+    if contained:
+        measured_top, top_error = registered_worktree_toplevel(path, command_runner)
+        if top_error or measured_top is None:
+            keep("worktree_toplevel_probe_failed")
+            candidate["worktree_toplevel_error"] = top_error
+            complete = False
+        elif not same_worktree_path(measured_top, path):
+            keep("worktree_path_redirected")
+            candidate["measured_toplevel"] = str(measured_top)
+        else:
+            top_matches = True
+
+    if top_matches:
+        head_result = worktree_git_result(command_runner, ["rev-parse", "HEAD"], path)
+        if head_result.returncode or not head_result.stdout.strip():
+            keep("head_probe_failed")
+            complete = False
+        else:
+            measured_head = head_result.stdout.strip()
+            if measured_head != record["head"]:
+                keep("head_changed_during_audit")
+            candidate["head"] = measured_head
+
+    if top_matches:
+        status_result = worktree_git_result(
+            command_runner,
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            path,
+        )
+        if status_result.returncode:
+            keep("status_probe_failed")
+            complete = False
+        else:
+            entries = [entry for entry in status_result.stdout.split("\0") if entry]
+            candidate["ignored"] = [
+                entry.removeprefix("!! ")
+                for entry in entries
+                if entry.startswith("!! ")
+            ]
+            candidate["changes"] = [
+                entry for entry in entries if not entry.startswith("!! ")
+            ]
+            if candidate["changes"]:
+                keep("tracked_or_untracked_changes")
+            if candidate["ignored"]:
+                keep("ignored_files")
+            index_result = worktree_git_result(
+                command_runner, ["ls-files", "-v", "-z"], path
+            )
+            if index_result.returncode:
+                keep("index_probe_failed")
+                complete = False
+            else:
+                flagged = []
+                for entry in index_result.stdout.split("\0"):
+                    if len(entry) < 3 or entry[1] != " ":
+                        continue
+                    tag = entry[0]
+                    if tag == "S" or tag.islower():
+                        flagged.append(entry)
+                candidate["index_preservation_flags"] = flagged
+                if flagged:
+                    keep("index_preservation_flags")
+            resolve_undo_result = worktree_git_result(
+                command_runner, ["ls-files", "--resolve-undo", "-z"], path
+            )
+            if resolve_undo_result.returncode:
+                keep("index_resolve_undo_probe_failed")
+                complete = False
+            else:
+                candidate["index_resolve_undo"] = [
+                    entry for entry in resolve_undo_result.stdout.split("\0") if entry
+                ]
+                if candidate["index_resolve_undo"]:
+                    keep("index_resolve_undo")
+
+    if top_matches and worktree_mode_drift_is_observable():
+        mode_result = worktree_git_result(
+            command_runner,
+            [
+                "-c",
+                "core.fileMode=true",
+                "diff-files",
+                "--summary",
+                "-z",
+                "--ignore-submodules=none",
+                "--",
+            ],
+            path,
+        )
+        if mode_result.returncode:
+            keep("tracked_mode_probe_failed")
+            complete = False
+        else:
+            candidate["tracked_mode_changes"] = [
+                entry for entry in mode_result.stdout.split("\0") if entry
+            ]
+            if candidate["tracked_mode_changes"]:
+                keep("tracked_mode_changes")
+
+    git_dir: Path | None = None
+    git_dir_error = ""
+    if top_matches:
+        git_dir, git_dir_error = linked_worktree_git_dir(
+            path, common_git_dir, command_runner
+        )
+        if git_dir is None:
+            keep("worktree_git_dir_probe_failed")
+            candidate["worktree_git_dir_error"] = git_dir_error
+            complete = False
+
+    if top_matches:
+        local_refs, local_refs_error = worktree_local_refs(path, command_runner)
+        if local_refs_error:
+            keep("worktree_local_ref_probe_failed")
+            candidate["worktree_local_ref_error"] = local_refs_error
+            complete = False
+        else:
+            candidate["worktree_local_refs"] = local_refs
+            if local_refs:
+                keep("worktree_local_refs")
+
+    if git_dir is not None:
+        administrative_state, administrative_error = worktree_administrative_state(
+            git_dir
+        )
+        if administrative_error:
+            keep("worktree_administrative_state_probe_failed")
+            candidate["worktree_administrative_state_error"] = administrative_error
+            complete = False
+        else:
+            candidate["worktree_administrative_state"] = administrative_state
+            if administrative_state:
+                keep("worktree_administrative_state")
+
+        commit_editmsg_status, commit_editmsg_error = worktree_commit_editmsg_status(
+            path, git_dir, command_runner
+        )
+        candidate["commit_editmsg_status"] = commit_editmsg_status
+        if commit_editmsg_error:
+            keep("commit_editmsg_probe_failed")
+            candidate["commit_editmsg_error"] = commit_editmsg_error
+            complete = False
+        elif commit_editmsg_status == "differs_from_head":
+            keep("commit_editmsg_uncommitted")
+
+    orig_head_error = ""
+    if git_dir is not None:
+        orig_head_object, orig_head_error = worktree_orig_head_object(
+            path, git_dir, command_runner
+        )
+        candidate["orig_head_object"] = orig_head_object
+        if orig_head_error:
+            keep("worktree_recovery_probe_failed")
+            candidate["worktree_recovery_error"] = orig_head_error
+            complete = False
+        elif orig_head_object is not None and orig_head_object["type"] != "commit":
+            keep("non_commit_orig_head")
+
+    if (
+        git_dir is not None
+        and not orig_head_error
+        and "logs/HEAD" not in candidate["worktree_administrative_state"]
+    ):
+        recovery_commits, recovery_error = worktree_recovery_commits(
+            git_dir, candidate["orig_head_object"]
+        )
+        if recovery_error:
+            keep("worktree_recovery_probe_failed")
+            candidate["worktree_recovery_error"] = recovery_error
+            complete = False
+        else:
+            candidate["recovery_commits"] = recovery_commits
+            unretained, retention_error = commits_without_local_retention(
+                primary, recovery_commits, command_runner
+            )
+            if retention_error:
+                keep("worktree_recovery_reachability_probe_failed")
+                candidate["worktree_recovery_reachability_error"] = retention_error
+                complete = False
+            else:
+                candidate["unretained_recovery_commits"] = unretained
+                if unretained:
+                    keep("unretained_recovery_commits")
+
+    if top_matches:
+        if not remote_evidence_ready:
+            keep(
+                "remote_refresh_failed"
+                if remote_evidence_requested
+                else "remote_evidence_not_refreshed"
+            )
+        elif not history_rewrite_complete:
+            keep("history_rewrite_probe_failed")
+            complete = False
+        elif not history_rewrite["ok"]:
+            keep("history_rewrite_metadata_present")
+        else:
+            containing, reachability_error = refs_containing_head(
+                primary, candidate["head"], refs, command_runner
+            )
+            if reachability_error:
+                keep("reachability_probe_failed")
+                candidate["reachability_error"] = reachability_error
+                complete = False
+            elif not containing:
+                keep("head_not_on_fetched_remote_ref")
+            else:
+                candidate["containing_remote_refs"] = containing
+
+    if top_matches:
+        if git_dir is None:
+            keep("cooperative_lease_probe_failed")
+            candidate["lease"]["status"] = "cooperative_lease_probe_failed"
+            candidate["lease_error"] = git_dir_error
+            complete = False
+        else:
+            lease_info, lease_reason, lease_complete = inspect_worktree_lease(
+                git_dir / WORKTREE_OWNERSHIP_LEASE_FILENAME,
+                claimant=claimant,
+                common_git_dir=common_git_dir,
+                worktree=path,
+                now=now,
+            )
+            candidate["lease"] = lease_info
+            if lease_reason:
+                keep(lease_reason)
+            complete = complete and lease_complete
+
+    if not candidate["reasons"]:
+        candidate["verdict"] = "remove"
+    candidate["fingerprint"] = worktree_candidate_fingerprint(candidate, common_git_dir)
+    return candidate, complete
+
+
+def worktree_plan(
+    repo: Path,
+    *,
+    refresh: bool,
+    claimant: str | None = None,
+    command_runner: Any = worktree_git_runner,
+    process_cwd: Path | None = None,
+    clock: Any = monotonic,
+    now: Any = worktree_utc_now,
+) -> dict[str, Any]:
+    if claimant is not None:
+        claimant = validate_worktree_claimant(claimant)
+    requested, primary, common_git_dir, records = registered_worktree_context(
+        repo, command_runner
+    )
+    worktree_dir = canonical_worktree_path(primary / ".worktrees", strict=False)
+    current = canonical_worktree_path(process_cwd or Path.cwd())
+    generated_monotonic = clock()
+    generated_time = now().astimezone(timezone.utc)
+
+    remotes, remote_error = configured_worktree_remotes(primary, command_runner)
+    fetch_results: list[dict[str, Any]] = []
+    refs: dict[str, str] = {}
+    refresh_error = remote_error
+    if refresh and not refresh_error:
+        fetch_results = refresh_worktree_remotes(primary, remotes, command_runner)
+        failed = [item for item in fetch_results if not item["ok"]]
+        if failed:
+            names = ", ".join(item["remote"] for item in failed)
+            refresh_error = f"fetch failed for: {names}"
+        else:
+            refs, refresh_error = remote_tracking_refs(primary, remotes, command_runner)
+    remote_evidence_ready = refresh and not refresh_error
+    history_rewrite, history_rewrite_complete = worktree_history_rewrite_evidence(
+        primary, common_git_dir, command_runner
+    )
+
+    candidates = []
+    complete = not (refresh and refresh_error)
+    for record in records:
+        candidate, candidate_complete = inspect_worktree_candidate(
+            record,
+            primary=primary,
+            requested=requested,
+            process_cwd=current,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=remote_evidence_ready,
+            remote_evidence_requested=refresh,
+            refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_rewrite_complete,
+            claimant=claimant,
+            command_runner=command_runner,
+            now=generated_time,
+        )
+        candidates.append(candidate)
+        complete = complete and candidate_complete
+
+    return {
+        "schema_version": WORKTREE_PLAN_SCHEMA_VERSION,
+        "generated_at": render_worktree_lease_timestamp(generated_time),
+        "fingerprint_lease_seconds": WORKTREE_FINGERPRINT_LEASE_SECONDS,
+        "cooperative_lease": {
+            "claimant": claimant,
+            "scope": WORKTREE_OWNERSHIP_LEASE_SCOPE,
+            "minimum_apply_remaining_seconds": (
+                WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS
+            ),
+            "noncooperating_processes_detected": False,
+        },
+        "repo": str(requested),
+        "primary": str(primary),
+        "common_git_dir": str(common_git_dir),
+        "worktree_directory": str(worktree_dir),
+        "refresh": {
+            "requested": refresh,
+            "ok": remote_evidence_ready,
+            "remotes": remotes,
+            "fetches": fetch_results,
+            "error": refresh_error,
+            "remote_refs": [
+                {"ref": ref, "oid": oid} for ref, oid in sorted(refs.items())
+            ],
+        },
+        "history_rewrite": history_rewrite,
+        "apply_requested": False,
+        "branch_deletion": "not_performed",
+        "administrative_cleanup": "plain_remove_only_no_global_prune",
+        "complete": complete,
+        "worktrees": candidates,
+        "summary": {},
+        "_fingerprint_created_monotonic": generated_monotonic,
+    }
+
+
+def find_worktree_record(
+    records: list[dict[str, Any]], candidate_path: Path
+) -> dict[str, Any] | None:
+    for record in records:
+        if record.get("path_key") == worktree_path_key(candidate_path):
+            return record
+    return None
+
+
+def worktree_fingerprint_freshness_reason(
+    fingerprint_started: float,
+    generated_at: datetime,
+    *,
+    current_monotonic: float,
+    current_time: datetime,
+) -> str:
+    """Return a fail-closed reason when either fingerprint clock is invalid."""
+
+    active_age = current_monotonic - fingerprint_started
+    utc_age = (current_time.astimezone(timezone.utc) - generated_at).total_seconds()
+    if utc_age < 0:
+        return "fingerprint_utc_clock_rollback"
+    if (
+        active_age > WORKTREE_FINGERPRINT_LEASE_SECONDS
+        or utc_age > WORKTREE_FINGERPRINT_LEASE_SECONDS
+    ):
+        return "fingerprint_lease_expired"
+    return ""
+
+
+def apply_worktree_plan(
+    plan: dict[str, Any],
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+    now: Any = worktree_utc_now,
+) -> bool:
+    """Apply one fresh plan; return false when any requested removal is refused."""
+
+    plan["apply_requested"] = True
+    if not plan["refresh"]["ok"]:
+        plan["apply_error"] = "remote_refresh_failed"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    if not plan["complete"]:
+        plan["apply_error"] = "audit_incomplete"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    claimant = plan.get("cooperative_lease", {}).get("claimant")
+    if not claimant:
+        plan["apply_error"] = "cooperative_lease_claimant_required"
+        for candidate in plan["worktrees"]:
+            candidate["apply"] = "kept"
+        return False
+    primary = Path(plan["primary"])
+    requested = Path(plan["repo"])
+    common_git_dir = Path(plan["common_git_dir"])
+    worktree_dir = Path(plan["worktree_directory"])
+    process_cwd = canonical_worktree_path(Path.cwd())
+    remotes = list(plan["refresh"]["remotes"])
+    fingerprint_started = plan.get("_fingerprint_created_monotonic")
+    fingerprint_generated_at = parse_worktree_lease_timestamp(plan.get("generated_at"))
+    if not isinstance(fingerprint_started, (int, float)) or (
+        fingerprint_generated_at is None
+    ):
+        plan["apply_error"] = "fingerprint_origin_missing"
+        return False
+    last_utc_sample = fingerprint_generated_at
+
+    def sample_fingerprint_freshness() -> tuple[str, datetime]:
+        nonlocal last_utc_sample
+        current_monotonic = clock()
+        current_time = now().astimezone(timezone.utc)
+        if current_time < last_utc_sample:
+            return "fingerprint_utc_clock_rollback", current_time
+        last_utc_sample = current_time
+        return (
+            worktree_fingerprint_freshness_reason(
+                fingerprint_started,
+                fingerprint_generated_at,
+                current_monotonic=current_monotonic,
+                current_time=current_time,
+            ),
+            current_time,
+        )
+
+    def refuse_fingerprint_failure(
+        candidate_index: int, candidate: dict[str, Any], reason: str
+    ) -> bool:
+        candidate["apply"] = "kept"
+        candidate["apply_reason"] = reason
+        candidate["revalidation"] = (
+            "expired" if reason == "fingerprint_lease_expired" else "invalid"
+        )
+        for remaining in plan["worktrees"][candidate_index + 1 :]:
+            remaining["apply"] = "kept"
+            if remaining["verdict"] == "remove":
+                remaining["apply_reason"] = "not_attempted_after_fingerprint_failure"
+                remaining["revalidation"] = "not_attempted"
+        return False
+
+    apply_ok = True
+
+    for candidate_index, candidate in enumerate(plan["worktrees"]):
+        if candidate["verdict"] != "remove":
+            candidate["apply"] = "kept"
+            continue
+        freshness_reason, _ = sample_fingerprint_freshness()
+        if freshness_reason:
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
+            )
+
+        try:
+            current_records = canonicalize_worktree_records(
+                list_worktrees(primary, command_runner), relative_to=primary
+            )
+        except HarnessError:
+            plan["apply_error"] = "partial_apply_revalidation_failed"
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "revalidation_probe_failed"
+            candidate["revalidation"] = "unavailable"
+            for remaining in plan["worktrees"][candidate_index + 1 :]:
+                remaining["apply"] = "kept"
+                if remaining["verdict"] == "remove":
+                    remaining["apply_reason"] = (
+                        "not_attempted_after_revalidation_failure"
+                    )
+            return False
+        current_record = find_worktree_record(current_records, Path(candidate["path"]))
+        refs, refs_error = remote_tracking_refs(primary, remotes, command_runner)
+        if current_record is None or refs_error:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = (
+                "worktree_disappeared" if current_record is None else "ref_probe_failed"
+            )
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        history_rewrite, history_complete = worktree_history_rewrite_evidence(
+            primary, common_git_dir, command_runner
+        )
+        freshness_reason, revalidation_time = sample_fingerprint_freshness()
+        if freshness_reason:
+            return refuse_fingerprint_failure(
+                candidate_index, candidate, freshness_reason
+            )
+        current, current_complete = inspect_worktree_candidate(
+            current_record,
+            primary=primary,
+            requested=requested,
+            process_cwd=process_cwd,
+            worktree_dir=worktree_dir,
+            common_git_dir=common_git_dir,
+            remote_evidence_ready=True,
+            remote_evidence_requested=True,
+            refs=refs,
+            history_rewrite=history_rewrite,
+            history_rewrite_complete=history_complete,
+            claimant=claimant,
+            command_runner=command_runner,
+            now=revalidation_time,
+        )
+        if (
+            not current_complete
+            or current["verdict"] != "remove"
+            or current["fingerprint"] != candidate["fingerprint"]
+        ):
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "state_changed_since_audit"
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+
+        final_lease_path = current["lease"].get("path")
+        if not final_lease_path:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+            candidate["revalidation"] = "changed"
+            apply_ok = False
+            continue
+        final_lease_path = Path(final_lease_path)
+        mutation_lock = final_lease_path.parent / WORKTREE_OWNERSHIP_LOCK_DIRECTORY
+        try:
+            mutation_lock.mkdir()
+        except FileExistsError:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_mutation_in_progress"
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        except OSError as exc:
+            candidate["apply"] = "kept"
+            candidate["apply_reason"] = "cooperative_lease_lock_failed"
+            candidate["lease_lock_error"] = type(exc).__name__
+            candidate["revalidation"] = "unavailable"
+            apply_ok = False
+            continue
+        try:
+            freshness_reason, lease_probe_time = sample_fingerprint_freshness()
+            if freshness_reason:
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
+                )
+            final_lease, final_lease_reason, final_lease_complete = (
+                inspect_worktree_lease(
+                    final_lease_path,
+                    claimant=claimant,
+                    common_git_dir=common_git_dir,
+                    worktree=Path(current["path"]),
+                    now=lease_probe_time,
+                )
+            )
+            freshness_reason, _ = sample_fingerprint_freshness()
+            if freshness_reason:
+                return refuse_fingerprint_failure(
+                    candidate_index, candidate, freshness_reason
+                )
+            if (
+                not final_lease_complete
+                or final_lease_reason
+                or final_lease.get("digest") != current["lease"].get("digest")
+            ):
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "cooperative_lease_revalidation_failed"
+                candidate["revalidation"] = "changed"
+                apply_ok = False
+                continue
+
+            remove_result = worktree_git_result(
+                command_runner,
+                ["worktree", "remove", "--", current["path"]],
+                primary,
+            )
+            candidate["remove_exit_code"] = remove_result.returncode
+            candidate["revalidated_fingerprint"] = current["fingerprint"]
+            candidate["revalidation"] = "matched"
+            if remove_result.returncode:
+                candidate["apply"] = "kept"
+                candidate["apply_reason"] = "plain_remove_refused"
+                apply_ok = False
+            else:
+                candidate["apply"] = "removed"
+        finally:
+            try:
+                mutation_lock.rmdir()
+            except FileNotFoundError:
+                pass
+    return apply_ok
+
+
+def summarize_worktree_plan(plan: dict[str, Any]) -> None:
+    candidates = plan["worktrees"]
+    plan["summary"] = {
+        "total": len(candidates),
+        "would_remove": sum(item["verdict"] == "remove" for item in candidates),
+        "kept": sum(item["verdict"] != "remove" for item in candidates),
+        "removed": sum(item["apply"] == "removed" for item in candidates),
+        "apply_refusals": sum(
+            item["apply"] == "kept" and item["verdict"] == "remove"
+            for item in candidates
+        ),
+    }
+
+
+def render_worktree_plan(plan: dict[str, Any]) -> None:
+    print(f"repo: {plan['repo']}")
+    print(f"worktree directory: {plan['worktree_directory']}")
+    claimant = plan["cooperative_lease"]["claimant"]
+    if claimant:
+        print(f"cooperative claimant: {claimant}")
+    else:
+        print("[read-only] no cooperative claimant was supplied")
+    print(
+        "[limit] non-cooperating external processes are not detected; "
+        "their writes can still race plain removal"
+    )
+    refresh = plan["refresh"]
+    if refresh["requested"]:
+        state = "ok" if refresh["ok"] else "FAIL"
+        detail = refresh["error"] or f"{len(refresh['remote_refs'])} refs refreshed"
+        print(f"[{state}] remote evidence: {detail}")
+    else:
+        print("[read-only] remote evidence was not refreshed")
+    if plan.get("apply_error"):
+        print(f"[FAIL] apply: {plan['apply_error']}")
+    for candidate in plan["worktrees"]:
+        detail = ", ".join(candidate["reasons"]) or "safe after revalidation"
+        print(f"[{candidate['verdict']}] {candidate['path']}: {detail}")
+        if candidate["apply"] == "removed":
+            print("  applied: removed with plain git worktree remove")
+        elif candidate.get("apply_reason"):
+            print(f"  applied: kept ({candidate['apply_reason']})")
+    summary = plan["summary"]
+    print(
+        "summary: "
+        f"{summary['would_remove']} removable, {summary['kept']} kept, "
+        f"{summary['removed']} removed, {summary['apply_refusals']} apply refusals"
+    )
+
+
+def worktrees_command(
+    args: argparse.Namespace,
+    *,
+    command_runner: Any = worktree_git_runner,
+    clock: Any = monotonic,
+    now: Any = worktree_utc_now,
+) -> int:
+    if args.apply and not args.refresh:
+        raise HarnessError("--apply requires --refresh")
+    claimant = getattr(args, "claimant", None)
+    if args.apply and not claimant:
+        raise HarnessError(
+            "--apply requires --claimant with an active cooperative lease"
+        )
+    plan = worktree_plan(
+        Path(args.repo),
+        refresh=args.refresh,
+        claimant=claimant,
+        command_runner=command_runner,
+        clock=clock,
+        now=now,
+    )
+    apply_ok = True
+    if args.apply:
+        apply_ok = apply_worktree_plan(
+            plan, command_runner=command_runner, clock=clock, now=now
+        )
+    summarize_worktree_plan(plan)
+    plan.pop("_fingerprint_created_monotonic", None)
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        render_worktree_plan(plan)
+    return 0 if plan["complete"] and apply_ok else 1
+
+
 def codex_hook_source_status(
     requested_checkout: Path, authoritative_checkout: Path
 ) -> tuple[Path, bool, str]:
@@ -269,6 +2445,371 @@ def read_optional_bytes(path: Path) -> bytes | None:
         raise HarnessError(f"cannot read {path}: {exc}") from exc
 
 
+def claude_supported_matcher(matcher: Any) -> tuple[str, tuple[str, ...]] | None:
+    """Normalize only the literal tool-matchers Doctor can prove.
+
+    Claude treats an exact-string subset as literal tool names and its other
+    matchers as regular expressions. Literal names and an anchored literal are
+    finite cases; wildcard and richer regex forms need Claude's runtime
+    matcher and therefore stay UNPROVEN here.
+    """
+    if matcher is None or (isinstance(matcher, str) and matcher in {"", "*"}):
+        return "*", ("*",)
+    if not isinstance(matcher, str):
+        return None
+    normalized = matcher
+    anchored = re.fullmatch(r"\^([A-Za-z0-9_ -]+)\$", matcher)
+    if anchored is not None:
+        normalized = anchored.group(1)
+    if not re.fullmatch(r"[A-Za-z0-9_ -]+(?:[|,][A-Za-z0-9_ -]+)*", normalized):
+        return None
+    tools = [tool.strip() for tool in re.split(r"[|,]", normalized)]
+    if not all(tools):
+        return None
+    coverage = tuple(sorted(set(tools)))
+    return "|".join(coverage), coverage
+
+
+def claude_target_overlap(left: list[str], right: list[str]) -> list[str]:
+    """Return only the tool coverage two static matchers provably share."""
+    left_universal = left == ["*"]
+    right_universal = right == ["*"]
+    if left_universal and right_universal:
+        return ["*"]
+    if left_universal:
+        return right
+    if right_universal:
+        return left
+    return sorted(set(left).intersection(right))
+
+
+def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
+    """Recognize the controlled dispatcher path without POSIX case folding."""
+    expected = str(dispatcher.resolve()).replace("\\", "/")
+    candidate = command.replace("\\", "/")
+    if os.name == "nt":
+        expected = expected.casefold()
+        candidate = candidate.casefold()
+    # This is intentionally a token check, not a shell parser: static Doctor
+    # can identify the exact controlled path but cannot prove what a shell will
+    # execute. The boundaries reject a path merely embedded in another token.
+    return bool(
+        re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate)
+    )
+
+
+def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
+    """Return an internal policy equality key; never render the raw command."""
+    dispatcher = claude_home / "hooks" / "dispatch.py"
+    if claude_command_points_to_dispatcher(command, dispatcher):
+        return ("shared-dispatcher", "")
+    return ("command", command)
+
+
+def claude_handler_identity(
+    handler: dict[str, Any], claude_home: Path
+) -> tuple[str, str] | None:
+    """Return an internal equality key for one statically valid handler."""
+    handler_type = handler.get("type")
+    if handler_type == "command":
+        command = handler.get("command")
+        return (
+            claude_policy_source_identity(command, claude_home)
+            if isinstance(command, str)
+            else None
+        )
+    required_fields = {
+        "http": ("url",),
+        "mcp_tool": ("server", "tool"),
+        "prompt": ("prompt",),
+        "agent": ("prompt",),
+    }
+    if handler_type not in required_fields or any(
+        not isinstance(handler.get(field), str) or not handler[field]
+        for field in required_fields[handler_type]
+    ):
+        return None
+    encoded = json.dumps(
+        handler, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return (handler_type, encoded)
+
+
+def claude_render_policy_sources(entries: list[dict[str, Any]]) -> None:
+    """Assign deterministic report-local labels without rendering identity bytes."""
+    labels: dict[tuple[str, str], str] = {}
+    counts: dict[str, int] = {}
+    for entry in entries:
+        identity = entry["_policy_identity"]
+        if identity not in labels:
+            handler_type, _ = identity
+            if handler_type == "shared-dispatcher":
+                labels[identity] = "shared-dispatcher"
+            else:
+                counts[handler_type] = counts.get(handler_type, 0) + 1
+                labels[identity] = f"opaque-{handler_type}-{counts[handler_type]}"
+        entry["policy_source"] = labels[identity]
+
+
+def claude_hook_topology(
+    claude_home: Path,
+    requested_repo: Path,
+    *,
+    linked_worktree_source_ambiguous: bool = False,
+) -> list[dict[str, Any]]:
+    """Inventory the two inspectable Claude hook layers without running them.
+
+    This is diagnostic evidence only.  It intentionally does not infer
+    Claude's effective managed, organization, session, plugin, or trust state,
+    and it does not turn a handler-process ``shell`` field into tool coverage.
+    """
+    findings: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
+    sources = (
+        ("user", claude_home / "settings.json"),
+        ("project", requested_repo / ".claude" / "settings.json"),
+        ("local", requested_repo / ".claude" / "settings.local.json"),
+    )
+    for provenance, source in sources:
+        if provenance != "user" and linked_worktree_source_ambiguous:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": (
+                        "linked-worktree project settings source is not statically "
+                        "proven; user-layer inventory remains available"
+                    ),
+                }
+            )
+            continue
+        try:
+            text = read_optional_text(source)
+        except HarnessError as exc:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": str(exc),
+                }
+            )
+            continue
+        if text is None:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": "settings file is absent; static registration is unproven",
+                }
+            )
+            continue
+        try:
+            document = json.loads(text)
+        except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as exc:
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": f"settings.json is invalid: {exc}",
+                }
+            )
+            continue
+        if not isinstance(document, dict) or not isinstance(
+            document.get("hooks"), dict
+        ):
+            findings.append(
+                {
+                    "status": REALITY_UNPROVEN,
+                    "kind": "source",
+                    "provenance": provenance,
+                    "source": str(source),
+                    "detail": "settings.json has no inspectable hooks object",
+                }
+            )
+            continue
+        for event in sorted(document["hooks"]):
+            groups = document["hooks"][event]
+            if event not in CLAUDE_HOOK_EVENT_NAMES:
+                findings.append(
+                    {
+                        "status": REALITY_UNPROVEN,
+                        "kind": "event",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": "unsupported",
+                        "detail": "settings.json declares an unsupported hook event",
+                    }
+                )
+                continue
+            if not isinstance(groups, list):
+                findings.append(
+                    {
+                        "status": REALITY_UNPROVEN,
+                        "kind": "event",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": event,
+                        "detail": "supported hook event does not contain a group list",
+                    }
+                )
+                continue
+            for group_index, group in enumerate(groups):
+                if not isinstance(group, dict) or not isinstance(
+                    group.get("hooks"), list
+                ):
+                    findings.append(
+                        {
+                            "status": REALITY_UNPROVEN,
+                            "kind": "group",
+                            "provenance": provenance,
+                            "source": str(source),
+                            "event": event,
+                            "detail": "supported hook group is not statically inspectable",
+                        }
+                    )
+                    continue
+                normalized_matcher = "not-applicable"
+                targets: tuple[str, ...] = ()
+                if event == "PreToolUse":
+                    matcher = claude_supported_matcher(group.get("matcher"))
+                    if matcher is None:
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "matcher",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "normalized_matcher": "UNPROVEN",
+                                "detail": "PreToolUse matcher is missing or outside the supported literal subset",
+                            }
+                        )
+                        continue
+                    normalized_matcher, targets = matcher
+                for handler_index, handler in enumerate(group["hooks"]):
+                    if not isinstance(handler, dict):
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "handler",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "detail": "supported hook handler is not an object",
+                            }
+                        )
+                        continue
+                    policy_identity = claude_handler_identity(handler, claude_home)
+                    if policy_identity is None:
+                        findings.append(
+                            {
+                                "status": REALITY_UNPROVEN,
+                                "kind": "handler",
+                                "provenance": provenance,
+                                "source": str(source),
+                                "event": event,
+                                "detail": "handler type is unsupported or its command is missing",
+                            }
+                        )
+                        continue
+                    entry = {
+                        "status": "ok",
+                        "kind": "inventory",
+                        "provenance": provenance,
+                        "source": str(source),
+                        "event": event,
+                        "normalized_matcher": normalized_matcher,
+                        "target_tools": list(targets),
+                        "_policy_identity": policy_identity,
+                        "group_index": group_index,
+                        "handler_index": handler_index,
+                    }
+                    entries.append(entry)
+                    findings.append(entry)
+
+    claude_render_policy_sources(entries)
+
+    user_pre = [
+        entry
+        for entry in entries
+        if entry["provenance"] == "user" and entry["event"] == "PreToolUse"
+    ]
+    non_user_pre = [
+        entry
+        for entry in entries
+        if entry["provenance"] != "user" and entry["event"] == "PreToolUse"
+    ]
+    for user_entry in user_pre:
+        for other_entry in non_user_pre:
+            overlap = claude_target_overlap(
+                user_entry["target_tools"], other_entry["target_tools"]
+            )
+            if not overlap:
+                continue
+            kind = (
+                "exact_duplicate"
+                if user_entry["_policy_identity"] == other_entry["_policy_identity"]
+                else "likely_overlap"
+            )
+            findings.append(
+                {
+                    "status": kind,
+                    "kind": kind,
+                    "event": "PreToolUse",
+                    "target_tools": overlap,
+                    "user_source": user_entry["source"],
+                    "other_provenance": other_entry["provenance"],
+                    "other_source": other_entry["source"],
+                    "user_matcher": user_entry["normalized_matcher"],
+                    "other_matcher": other_entry["normalized_matcher"],
+                    "user_policy_source": user_entry["policy_source"],
+                    "other_policy_source": other_entry["policy_source"],
+                    "detail": (
+                        "static registration only; it does not prove execution, trust, "
+                        "organization, managed, session, or plugin state"
+                    ),
+                }
+            )
+    for entry in entries:
+        del entry["_policy_identity"]
+    return findings
+
+
+def claude_topology_summary(findings: list[dict[str, Any]]) -> str:
+    """Render deterministic, redaction-safe actionable Claude evidence."""
+    rendered: list[str] = []
+    for finding in findings:
+        kind = finding["kind"]
+        if kind in {"exact_duplicate", "likely_overlap"}:
+            rendered.append(
+                f"[{kind}] user {finding['user_source']} "
+                f"PreToolUse({finding['user_matcher']}) policy="
+                f"{finding['user_policy_source']}; "
+                f"{finding['other_provenance']} {finding['other_source']} PreToolUse("
+                f"{finding['other_matcher']}) policy="
+                f"{finding['other_policy_source']}; coverage="
+                f"{'|'.join(finding['target_tools'])}"
+            )
+            continue
+        if finding["status"] != REALITY_UNPROVEN:
+            continue
+        location = " ".join(
+            str(finding[key])
+            for key in ("provenance", "source", "event", "normalized_matcher")
+            if key in finding
+        )
+        rendered.append(f"[UNPROVEN] {kind} {location}: {finding['detail']}")
+    return "; ".join(rendered)
+
+
 def toml_config(config_path: Path) -> dict[str, Any] | None:
     """Return one TOML config document, or ``None`` when it is absent."""
     contents = read_optional_text(config_path)
@@ -282,6 +2823,319 @@ def toml_config(config_path: Path) -> dict[str, Any] | None:
         raise HarnessError(f"invalid Codex config {config_path}: {exc}") from exc
     validate_toml_integer_range(config, str(config_path))
     return config
+
+
+def display_mcp_server_name(name: str) -> str:
+    """Render a server name without allowing it to forge a diagnostic line."""
+    return json.dumps(name, ensure_ascii=True)
+
+
+def mcp_config_identity(config_path: Path) -> Path:
+    """Use the filesystem's canonical spelling when comparing MCP sources."""
+    return config_path.resolve()
+
+
+def distinct_mcp_config_paths(config_paths: list[Path]) -> list[Path]:
+    """Deduplicate config sources by filesystem identity, not path spelling."""
+    paths: list[Path] = []
+    identities: set[str] = set()
+    for config_path in config_paths:
+        resolved = mcp_config_identity(config_path)
+        identity = str(resolved)
+        if os.name == "nt":
+            identity = identity.casefold()
+        if identity not in identities:
+            identities.add(identity)
+            paths.append(resolved)
+    return paths
+
+
+def mcp_server_patches(
+    config_path: Path,
+) -> list[tuple[str, Path, dict[str, Any]]]:
+    """Return validated MCP fields needed to model layered spawning state."""
+    config_path = mcp_config_identity(config_path)
+    config = toml_config(config_path)
+    if config is None or "mcp_servers" not in config:
+        return []
+    servers = config["mcp_servers"]
+    if not isinstance(servers, dict):
+        raise HarnessError(f"mcp_servers in {config_path} must be a table")
+
+    declarations: list[tuple[str, Path, dict[str, Any]]] = []
+    for name, entry in servers.items():
+        rendered_name = display_mcp_server_name(name)
+        if not isinstance(entry, dict):
+            raise HarnessError(
+                f"mcp_servers.{rendered_name} in {config_path} must be a table"
+            )
+        patch: dict[str, Any] = {}
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise HarnessError(
+                f"mcp_servers.{rendered_name}.enabled in {config_path} must be a boolean"
+            )
+        if "enabled" in entry:
+            patch["enabled"] = entry["enabled"]
+        if "command" in entry and "url" in entry:
+            raise HarnessError(
+                f"mcp_servers.{rendered_name} in {config_path} must not declare both "
+                "command and url"
+            )
+        if "command" in entry and (
+            not isinstance(entry["command"], str) or not entry["command"].strip()
+        ):
+            raise HarnessError(
+                f"mcp_servers.{rendered_name}.command in {config_path} must be a "
+                "non-empty string"
+            )
+        if "command" in entry:
+            patch["command"] = entry["command"]
+        if "url" in entry and (
+            not isinstance(entry["url"], str) or not entry["url"].strip()
+        ):
+            raise HarnessError(
+                f"mcp_servers.{rendered_name}.url in {config_path} must be a "
+                "non-empty string"
+            )
+        if "url" in entry:
+            patch["url"] = entry["url"]
+        if "args" in entry and (
+            not isinstance(entry["args"], list)
+            or not all(isinstance(argument, str) for argument in entry["args"])
+        ):
+            raise HarnessError(
+                f"mcp_servers.{rendered_name}.args in {config_path} must be an "
+                "array of strings"
+            )
+        if "args" in entry:
+            patch["args"] = tuple(entry["args"])
+        declarations.append((name, config_path, patch))
+    return declarations
+
+
+def layered_mcp_server_states(config_paths: list[Path]) -> dict[str, dict[str, Any]]:
+    """Merge inspectable MCP fields in Codex's base-to-project layer order."""
+    states: dict[str, dict[str, Any]] = {}
+    for config_path in distinct_mcp_config_paths(config_paths):
+        for name, source, patch in mcp_server_patches(config_path):
+            state = states.setdefault(
+                name,
+                {
+                    "enabled": True,
+                    "command": None,
+                    "command_source": None,
+                    "url": None,
+                    "url_source": None,
+                    "args": (),
+                    "args_source": None,
+                },
+            )
+            if "enabled" in patch:
+                state["enabled"] = patch["enabled"]
+            if "command" in patch:
+                state["command"] = patch["command"]
+                state["command_source"] = source
+            if "url" in patch:
+                state["url"] = patch["url"]
+                state["url_source"] = source
+            if "args" in patch:
+                state["args"] = patch["args"]
+                state["args_source"] = source
+    for name, state in states.items():
+        if state["command"] is not None and state["url"] is not None:
+            raise HarnessError(
+                f"effective mcp_servers.{display_mcp_server_name(name)} mixes "
+                f"command from {state['command_source']} and url from "
+                f"{state['url_source']}"
+            )
+    return states
+
+
+_DOCKER_BOOLEAN_GLOBAL_OPTIONS = frozenset({"-D", "--debug", "--tls", "--tlsverify"})
+_DOCKER_VALUE_GLOBAL_OPTIONS = frozenset(
+    {
+        "--config",
+        "-c",
+        "--context",
+        "-H",
+        "--host",
+        "-l",
+        "--log-level",
+        "--tlscacert",
+        "--tlscert",
+        "--tlskey",
+    }
+)
+_DOCKER_TERMINAL_GLOBAL_OPTIONS = frozenset({"-h", "--help", "-v", "--version"})
+_DOCKER_SHORT_VALUE_OPTIONS = ("-c", "-H", "-l")
+_DOCKER_TRUE_VALUES = frozenset({"1", "t", "true"})
+_DOCKER_FALSE_VALUES = frozenset({"0", "f", "false"})
+
+
+def _docker_boolean_value(value: str) -> bool | None:
+    """Parse the Boolean spellings accepted by Docker's root flags."""
+    normalized = value.casefold()
+    if normalized in _DOCKER_TRUE_VALUES:
+        return True
+    if normalized in _DOCKER_FALSE_VALUES:
+        return False
+    return None
+
+
+def _docker_short_options_next_index(
+    args: tuple[str, ...], index: int, argument: str
+) -> int | None:
+    """Consume one bounded Docker short-option token or reject it."""
+    name, separator, assigned_value = argument.partition("=")
+    shorthands = name[1:]
+    if not shorthands:
+        return None
+    for shorthand_index, character in enumerate(shorthands):
+        shorthand = f"-{character}"
+        is_last = shorthand_index + 1 == len(shorthands)
+        if shorthand in (
+            _DOCKER_BOOLEAN_GLOBAL_OPTIONS | _DOCKER_TERMINAL_GLOBAL_OPTIONS
+        ):
+            boolean_value = True
+            if is_last and separator:
+                parsed_value = _docker_boolean_value(assigned_value)
+                if parsed_value is None:
+                    return None
+                boolean_value = parsed_value
+            if shorthand in _DOCKER_TERMINAL_GLOBAL_OPTIONS and boolean_value:
+                return None
+            continue
+        if shorthand not in _DOCKER_SHORT_VALUE_OPTIONS:
+            return None
+        if not is_last or separator:
+            return index + 1
+        return index + 2 if index + 1 < len(args) else None
+    return index + 1
+
+
+def _docker_subcommand_index(args: tuple[str, ...]) -> int | None:
+    """Locate Docker's subcommand after its bounded root-option prefix."""
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--":
+            index += 1
+            return index if index < len(args) else None
+        if argument in _DOCKER_TERMINAL_GLOBAL_OPTIONS:
+            return None
+        if argument in _DOCKER_BOOLEAN_GLOBAL_OPTIONS:
+            index += 1
+            continue
+        if argument in _DOCKER_VALUE_GLOBAL_OPTIONS:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        if argument.startswith("-") and not argument.startswith("--"):
+            next_index = _docker_short_options_next_index(args, index, argument)
+            if next_index is None:
+                return None
+            index = next_index
+            continue
+        name, separator, value = argument.partition("=")
+        if separator:
+            if name in _DOCKER_TERMINAL_GLOBAL_OPTIONS:
+                if _docker_boolean_value(value) is False:
+                    index += 1
+                    continue
+                return None
+            if (
+                name in _DOCKER_BOOLEAN_GLOBAL_OPTIONS
+                and _docker_boolean_value(value) is not None
+            ):
+                index += 1
+                continue
+            if name in _DOCKER_VALUE_GLOBAL_OPTIONS:
+                index += 1
+                continue
+            return None
+        if argument.startswith("--"):
+            return None
+        return index
+    return None
+
+
+def unbounded_docker_mcp_gateway(command: str, args: tuple[str, ...]) -> bool:
+    """Recognize a Docker MCP gateway that can load the whole registry."""
+    executable = re.split(r"[\\/]", command)[-1].casefold()
+    if executable not in {"docker", "docker.exe", "docker.cmd", "docker.bat"}:
+        return False
+    subcommand_index = _docker_subcommand_index(args)
+    if subcommand_index is None or args[subcommand_index : subcommand_index + 3] != (
+        "mcp",
+        "gateway",
+        "run",
+    ):
+        return False
+    gateway_args = args[subcommand_index + 3 :]
+    return not any(
+        argument in {"--servers", "--profile"}
+        or argument.startswith("--servers=")
+        or argument.startswith("--profile=")
+        for argument in gateway_args
+    )
+
+
+def codex_mcp_topology_status(
+    codex_home: Path, project_config_paths: list[Path]
+) -> tuple[bool, str]:
+    """Check the static user/project MCP process-spawning topology."""
+    config_paths = distinct_mcp_config_paths(
+        [codex_home / "config.toml", *project_config_paths]
+    )
+    user_path, *project_paths = config_paths
+    user_states = layered_mcp_server_states([user_path])
+    project_states = layered_mcp_server_states(project_paths)
+    effective_states = layered_mcp_server_states([user_path, *project_paths])
+    user_declarations = {
+        name: state
+        for name, state in user_states.items()
+        if state["enabled"] and state["command"] is not None
+    }
+    project_declarations = {
+        name: state
+        for name, state in project_states.items()
+        if state["enabled"] and state["command"] is not None
+    }
+
+    findings: list[str] = []
+    for name in sorted(user_declarations.keys() & project_declarations.keys()):
+        findings.append(
+            f"active command-backed MCP server {display_mcp_server_name(name)} is "
+            f"duplicated across user {user_declarations[name]['command_source']} "
+            f"and project {project_declarations[name]['command_source']}"
+        )
+    for name, state in effective_states.items():
+        if (
+            state["enabled"]
+            and state["command"] is not None
+            and unbounded_docker_mcp_gateway(state["command"], state["args"])
+        ):
+            argument_source = state["args_source"] or state["command_source"]
+            findings.append(
+                f"active Docker MCP gateway {display_mcp_server_name(name)} has "
+                f"command in {state['command_source']} and arguments in "
+                f"{argument_source}; neither --servers nor --profile bound"
+            )
+
+    scope = (
+        f"inspected base user config {user_path} and {len(project_paths)} active "
+        "project config path(s); stored profiles, system/managed policy, CLI "
+        "overrides, and runtime process state are outside this static check"
+    )
+    if findings:
+        return False, f"{'; '.join(findings)}; {scope}"
+    return (
+        True,
+        f"{len(user_declarations)} active user and {len(project_declarations)} "
+        f"active project command-backed MCP declaration(s); no cross-scope "
+        f"duplicate spawning name or unbounded Docker gateway; {scope}",
+    )
 
 
 def validate_toml_integer_range(value: Any, location: str) -> None:
@@ -1016,27 +3870,148 @@ def codex_hook_sources_status(
     )
 
 
+def tier_paths(repo: Path) -> list[Path]:
+    """Every tier declaration this repo carries, highest precedence first.
+
+    `.agent-harness/tier.json` is the runtime-neutral home and `.claude/` the
+    legacy one a migrating repo may still carry. Precedence orders the fields
+    that are not comparable (`human_todo`, `budgets`); it never decides the
+    posture — see `merge_tier_declarations`.
+    """
+    return [
+        repo / directory / "tier.json"
+        for directory in (".agent-harness", ".claude")
+        if (repo / directory / "tier.json").is_file()
+    ]
+
+
 def tier_path(repo: Path) -> Path | None:
-    for candidate in (
-        repo / ".agent-harness" / "tier.json",
-        repo / ".claude" / "tier.json",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
+    """The declaration `seed` must refuse to write over, if any exists."""
+    paths = tier_paths(repo)
+    return paths[0] if paths else None
 
 
-def load_tier(repo: Path) -> tuple[Path | None, dict[str, Any]]:
-    path = tier_path(repo)
-    if path is None:
-        return None, {}
+def read_tier_file(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HarnessError(f"invalid tier file {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise HarnessError(f"tier file must contain an object: {path}")
-    return path, data
+    return data
+
+
+# Weakest first: the strictest declaration binds, so a legacy `human-only`
+# merge gate cannot be masked by a newer `free` one.
+AUTHORITY_STRICTNESS = ("free", "gated", "human-only")
+
+
+def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+    """The one posture co-located declarations bind to: the strictest.
+
+    Law 9 and the dispatcher (`dispatch.load_tier`, SPECS §5) agree on the
+    rules, and this mirrors them exactly rather than inventing a second
+    semantics for the auditing tool:
+
+    * the HIGHEST declared tier wins;
+    * tightening flags are ORed, so a stale `.claude/tier.json` carrying
+      `sensitive_data` keeps binding after the new file omits it;
+    * `relaxed_work_loss_guards` is the one RELAXATION, so it applies only
+      when EVERY declaration agrees — a single silent file must not hand a
+      repo a looser git posture than it declared;
+    * `authority.push`/`.merge` take the strictest value declared.
+
+    Reading `.agent-harness/tier.json` with FALLBACK to the legacy file was
+    first-found-wins, so a repo declaring T1 in the new file while a surviving
+    T4 + sensitive_data legacy file sat beside it audited at the WEAKER posture
+    the dispatcher would never grant it (issue #99).
+
+    Fields that express no posture — `name`, `human_todo`, `budgets`,
+    `last_reviewed` — are not comparable, so the highest-precedence
+    declaration that CONTAINS the key supplies it (an explicit `null` is a
+    declaration, not an omission). Each file is still validated on its own by
+    `validate_tier`; this merge is about what binds, not about what is legal.
+    """
+    if not declarations:
+        return {}
+    merged: dict[str, Any] = {}
+    for declaration in reversed(declarations):
+        merged.update(declaration)
+    tiers = [
+        declaration["tier"]
+        for declaration in declarations
+        if declaration.get("tier") in TIER_NAMES
+    ]
+    if tiers:
+        merged["tier"] = max(tiers)
+    merged["flags"] = merge_tier_flags(declarations)
+    authority = merge_tier_authority(declarations)
+    if authority is not None:
+        merged["authority"] = authority
+    return merged
+
+
+def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
+    """OR every tightening flag; require unanimity for the one relaxation."""
+    flag_sets = [
+        declaration.get("flags")
+        for declaration in declarations
+        if isinstance(declaration.get("flags"), dict)
+    ]
+    if not flag_sets:
+        # Nothing mergeable: keep what the highest-precedence file declared so
+        # `validate_tier` still reports the malformed value it reported before.
+        return declarations[0].get("flags")
+    flags: dict[str, Any] = {}
+    for flag_set in flag_sets:
+        for key, value in flag_set.items():
+            if key == "relaxed_work_loss_guards":
+                continue
+            if isinstance(value, bool):
+                flags[key] = bool(flags.get(key)) or value
+            elif key not in flags:
+                flags[key] = value
+    flags["relaxed_work_loss_guards"] = all(
+        bool(flag_set.get("relaxed_work_loss_guards")) for flag_set in flag_sets
+    )
+    return flags
+
+
+def merge_tier_authority(declarations: list[dict[str, Any]]) -> Any:
+    """The strictest push/merge dial any declaration sets, or None."""
+    authorities = [
+        declaration.get("authority")
+        for declaration in declarations
+        if isinstance(declaration.get("authority"), dict)
+    ]
+    if not authorities:
+        return None
+    merged = dict(authorities[-1])
+    for authority in reversed(authorities):
+        for key, value in authority.items():
+            current = merged.get(key)
+            if (
+                value in AUTHORITY_STRICTNESS
+                and current in AUTHORITY_STRICTNESS
+                and AUTHORITY_STRICTNESS.index(value)
+                <= AUTHORITY_STRICTNESS.index(current)
+            ):
+                continue
+            merged[key] = value
+    return merged
+
+
+def tier_declarations(repo: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Read every declaration this repo carries, highest precedence first."""
+    return [(path, read_tier_file(path)) for path in tier_paths(repo)]
+
+
+def load_tier(repo: Path) -> tuple[list[Path], dict[str, Any]]:
+    """(the declaration files, the strictest posture they bind to)."""
+    declarations = tier_declarations(repo)
+    return [path for path, _ in declarations], merge_tier_declarations(
+        [data for _, data in declarations]
+    )
 
 
 def validate_tier(data: dict[str, Any]) -> list[str]:
@@ -1083,6 +4058,17 @@ def budget_issues(repo: Path, tier: int) -> list[str]:
         )
     if (repo / "AGENT_MAP.md").is_file():
         checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
+    # The deny-floor ledger declares its own cap and rotation target in its
+    # header (SPECS §3). Unregistered, an overflowing ledger was reported by
+    # nothing at all.
+    if (repo / "FLOOR_LIMITATIONS.md").is_file():
+        checks.append(
+            (
+                repo / "FLOOR_LIMITATIONS.md",
+                120,
+                "rotate to archive/floor-limitations-<year>.md",
+            )
+        )
     for skill in (
         (repo / ".agents" / "skills").glob("*/SKILL.md")
         if (repo / ".agents" / "skills").is_dir()
@@ -1214,7 +4200,24 @@ def bounded_command_output(
     cwd: Path | None = None,
     timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
+    """`bounded_command_result` for the callers that need no failure text."""
+    resolved, stdout, _failure = bounded_command_result(argv, cwd, timeout)
+    return resolved, stdout
+
+
+def bounded_command_result(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str, str]:
     """Run one read-only resolver under a hard timeout; never raise.
+
+    Returns `(resolved, stdout, failure text)`. The third element is what a
+    failed probe SAID — its stderr, or why it never started — so an UNPROVEN
+    finding can name its own cause (a `gh` GraphQL quota refusal, an expired
+    credential) instead of being mute. It is never a substitute for
+    `resolved`: a resolver that answers leaves it empty.
+
 
     Decoding is explicit and tolerant. Under `text=True` alone, a resolver that
     emits bytes the platform locale cannot decode — a non-UTF-8 configured
@@ -1233,13 +4236,20 @@ def bounded_command_output(
     (POSIX) and the whole tree is killed on timeout (`taskkill /T` on Windows);
     the pipes are then closed without a second blocking read, so the bound
     holds even if a descendant survives.
+
+    argv[0] is resolved against PATH before the spawn (`probe_spawn_argv`).
+    These probes run with `cwd` set to the repository under inspection, and
+    Windows would otherwise let that repository answer to the name `git`.
     """
+    spawn_argv, unresolved = probe_spawn_argv(argv)
+    if unresolved:
+        return False, "", unresolved
     popen_kwargs: dict[str, Any] = {}
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
-            argv,
+            spawn_argv,
             cwd=str(cwd) if cwd is not None else None,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1248,17 +4258,21 @@ def bounded_command_output(
             errors="replace",
             **popen_kwargs,
         )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False, ""
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # The resolver never ran: an absent `gh` is a NAMED diagnosis here and
+        # an indistinguishable empty answer without it.
+        return False, "", f"{argv[0]} could not be started: {exc}"
     try:
-        stdout, _stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         terminate_process_tree(proc)
-        return False, ""
-    except (OSError, ValueError, UnicodeError):
+        return False, "", f"{argv[0]} did not answer within {timeout:.1f}s"
+    except (OSError, ValueError, UnicodeError) as exc:
         terminate_process_tree(proc)
-        return False, ""
-    return proc.returncode == 0, (stdout or "").strip()
+        return False, "", f"{argv[0]} could not be read: {exc}"
+    if proc.returncode == 0:
+        return True, (stdout or "").strip(), ""
+    return False, (stdout or "").strip(), (stderr or "").strip()
 
 
 def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
@@ -1270,12 +4284,21 @@ def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
     """
     try:
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
-                check=False,
+            # Resolved like every other spawn: this runs with the harness's own
+            # cwd, which for `audit .` is the repository under inspection, and a
+            # planted `taskkill.exe` would be handed a hostile process tree.
+            # An unresolvable taskkill is not fatal — `proc.kill()` below still
+            # reaches the direct child.
+            killer, unresolved = probe_spawn_argv(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)]
             )
+            if not unresolved:
+                subprocess.run(
+                    killer,
+                    capture_output=True,
+                    timeout=REALITY_COMMAND_TIMEOUT_SECONDS,
+                    check=False,
+                )
         else:
             os.killpg(proc.pid, signal.SIGKILL)
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -1342,14 +4365,36 @@ def local_only_command_output(
     reports as UNPROVEN — the audit stays honest about what it did not
     measure instead of pretending an unmeasured remote is fine.
     """
+    resolved, stdout, _failure = local_only_command_result(argv, cwd, timeout)
+    return resolved, stdout
+
+
+def local_only_command_result(
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = REALITY_COMMAND_TIMEOUT_SECONDS,
+) -> tuple[bool, str, str]:
+    """`local_only_command_output`, keeping the reason it refused."""
     if command_reaches_the_network(argv):
-        return False, ""
-    return bounded_command_output(argv, cwd, timeout)
+        return False, "", f"--offline refused the network resolver `{argv[0]}`"
+    return bounded_command_result(argv, cwd, timeout)
 
 
 # The runners that accept a `timeout`, and so can be clamped to what is left of
 # the aggregate budget. A test's fake runner is deliberately not one of them.
-CLAMPABLE_COMMAND_RUNNERS = (bounded_command_output, local_only_command_output)
+CLAMPABLE_COMMAND_RUNNERS = (
+    bounded_command_output,
+    local_only_command_output,
+    bounded_command_result,
+    local_only_command_result,
+)
+# The failure-text twin of each production runner. A probe that needs to NAME
+# why it failed is routed through the twin; an injected fake runner has none
+# and keeps its two-element contract.
+COMMAND_RESULT_RUNNERS = {
+    bounded_command_output: bounded_command_result,
+    local_only_command_output: local_only_command_result,
+}
 
 
 def output_before_deadline(
@@ -1358,6 +4403,19 @@ def output_before_deadline(
     cwd: Path | None,
     deadline: float | None,
 ) -> tuple[bool, str]:
+    """`result_before_deadline` for callers that report no failure text."""
+    resolved, output, _failure = result_before_deadline(
+        command_runner, argv, cwd, deadline
+    )
+    return resolved, output
+
+
+def result_before_deadline(
+    command_runner: Any,
+    argv: list[str],
+    cwd: Path | None,
+    deadline: float | None,
+) -> tuple[bool, str, str]:
     """Run a resolver without overrunning the audit's aggregate budget.
 
     The clock is read ONCE, before the call: an exhausted budget starts no new
@@ -1367,22 +4425,38 @@ def output_before_deadline(
     must not delay a tool call, but an audit has no latency contract, and
     throwing away a measurement that already proved a remote PUBLIC would turn
     the exact finding this exists to make into an UNPROVEN.
+
+    Returns `(resolved, stdout, failure text)`. A runner that answers with the
+    two-element contract — every injected fake — simply reports no failure
+    text; the production runners are swapped for the twin that keeps it.
     """
+    runner = COMMAND_RESULT_RUNNERS.get(command_runner, command_runner)
     if deadline is None:
-        return command_runner(argv, cwd)
+        return normalized_command_result(runner(argv, cwd))
     remaining = deadline - monotonic()
     if remaining <= 0:
-        return False, ""
+        return False, "", "the probe budget expired before this command ran"
     # Every production runner takes the clamp, not just the network one:
     # `--offline` still shells out to local git, and a `status`/`ls-files`/
     # `rev-list` on a network-mounted checkout can be slow enough to overrun
     # the advertised aggregate budget with its own 3s default. A test's fake
     # runner takes no timeout, so it is called with the plain signature.
-    if command_runner in CLAMPABLE_COMMAND_RUNNERS:
-        return command_runner(
-            argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining)
+    if runner in CLAMPABLE_COMMAND_RUNNERS:
+        return normalized_command_result(
+            runner(argv, cwd, timeout=min(REALITY_COMMAND_TIMEOUT_SECONDS, remaining))
         )
-    return command_runner(argv, cwd)
+    return normalized_command_result(runner(argv, cwd))
+
+
+def normalized_command_result(result: Any) -> tuple[bool, str, str]:
+    """Accept either runner contract: `(resolved, stdout[, failure text])`."""
+    values = tuple(result)
+    if len(values) == 3:
+        resolved, stdout, failure = values
+    else:
+        resolved, stdout = values
+        failure = ""
+    return bool(resolved), stdout, failure
 
 
 def reality_finding(check: str, status: str, detail: str) -> dict[str, str]:
@@ -1416,6 +4490,79 @@ def redact_remote_url(url: str) -> str:
     if len(parts) == 1:
         return redacted
     return f"{parts[0]}{parts[1]}<redacted>"
+
+
+# A probe's own output is not a URL this module composed: `git` echoes whole
+# remotes on failure and `gh` echoes tokens from a misconfigured credential
+# helper, so every known credential shape is masked before the text is stored
+# in a finding. The last pattern is deliberately shape-blind — it catches the
+# token format that has not been invented yet.
+_PROBE_SECRET_PATTERNS = (
+    re.compile(r"(?<=//)[^/@\s]+(?=@)"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{4,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{4,}"),
+    re.compile(r"[A-Za-z0-9+/_]{24,}={0,2}"),
+)
+# Ordered: GitHub answers an exhausted quota with an HTTP 403, so the rate
+# limit must be recognized before the authentication pattern claims it.
+_PROBE_FAILURE_CAUSES = (
+    (re.compile(r"rate[\s_-]?limit", re.IGNORECASE), "quota exhausted"),
+    (
+        re.compile(
+            r"\b(401|403)\b|unauthorized|bad credentials|authentication"
+            r"|gh auth login|not logged in",
+            re.IGNORECASE,
+        ),
+        "authentication",
+    ),
+    (re.compile(r"\b404\b|not found", re.IGNORECASE), "not found"),
+    (
+        re.compile(
+            r"could not resolve host|connection (refused|reset)|no such host"
+            r"|network is unreachable|i/o timeout|tls handshake|did not answer",
+            re.IGNORECASE,
+        ),
+        "network",
+    ),
+)
+
+
+def redact_probe_text(text: str) -> str:
+    """Mask every credential shape a probe's own output is known to carry."""
+    for pattern in _PROBE_SECRET_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
+def classify_probe_failure(text: str) -> str:
+    """Name a probe failure's cause when the text makes it recognizable."""
+    for pattern, cause in _PROBE_FAILURE_CAUSES:
+        if pattern.search(text):
+            return cause
+    return ""
+
+
+def probe_failure_note(argv: list[str], failure: str, limit: int = 160) -> str:
+    """One line naming what a probe was and what it said when it failed.
+
+    An UNPROVEN visibility line used to report only that `gh` "returned <no
+    output>", which is the same sentence for an exhausted GraphQL quota, an
+    expired token and an absent binary (issue #106 / #90). Quoting the probe's
+    own words names the cause; redaction runs BEFORE the text is stored,
+    because every finding reaches stdout, `--json` and the `doctor` detail.
+    """
+    label = redact_probe_text(" ".join(argv))
+    head = ""
+    for line in failure.splitlines():
+        if line.strip():
+            head = redact_probe_text(line.strip())
+            break
+    if len(head) > limit:
+        head = head[: limit - 3] + "..."
+    if not head:
+        return f"`{label}` did not answer"
+    cause = classify_probe_failure(head)
+    return f"`{label}` failed{f' ({cause})' if cause else ''}: {head}"
 
 
 def github_repo_slug(remote: str) -> str:
@@ -1599,20 +4746,80 @@ def publishing_remote_endpoints(
     return sorted(entries, key=lambda entry: not entry[2])
 
 
+# The only three answers either transport may give. Anything else — a literal
+# `null`, an error page, a spelling GitHub has not shipped yet — is not a
+# verdict, and must fall through to the other lane rather than be believed.
+KNOWN_VISIBILITIES = frozenset({"PUBLIC", "PRIVATE", "INTERNAL"})
+_REST_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def github_rest_repo_path(slug: str) -> str:
+    """Map a repository slug onto the REST route's `owner/repo` pair.
+
+    The result is interpolated into argv, so validation is an ALLOWLIST and
+    every rejection returns "" — the REST lane is skipped and GraphQL answers.
+    Exactly two segments, each of the characters GitHub allows in an owner or
+    repository name and never all dots: `../x` must not become `repos/../x`,
+    and `a&b/c` must never reach a command line at all. The host is pinned at
+    the call site with `--hostname github.com`, not here.
+    """
+    path = slug.strip().strip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if path.lower().startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    segments = path.split("/")
+    if len(segments) != 2:
+        return ""
+    for segment in segments:
+        if not _REST_PATH_SEGMENT.fullmatch(segment) or not segment.strip("."):
+            return ""
+    return path
+
+
 def github_visibility(
     slug: str, repo: Path, command_runner: Any, deadline: float | None
-) -> str:
-    """PUBLIC/PRIVATE/INTERNAL, or "" when the host could not be asked.
+) -> tuple[str, str]:
+    """(PUBLIC/PRIVATE/INTERNAL or "", the evidence or the failures).
 
-    The slug is pinned to `github.com/`. `gh repo view` accepts
-    `[HOST/]OWNER/REPO` and resolves a bare `OWNER/REPO` against `GH_HOST` or
-    the default authenticated host, so on a machine pointed at a GitHub
+    REST first. `gh repo view` is a GraphQL call, and an agent fleet exhausts
+    the hourly GraphQL quota while the REST core quota is barely touched
+    (measured 2026-07-27: GraphQL 0 remaining, REST 4925/5000, same answer in
+    0.49s) — so every audit of a `sensitive_data` repo printed UNPROVEN for a
+    remote that was verifiably private one REST call away (issue #106, the
+    floor's #90). GraphQL stays as the fallback: it is the lane that works
+    where `gh api` is unavailable or the REST shape changes.
+
+    Both lanes pin the host. `gh` resolves a bare `OWNER/REPO` against `GH_HOST`
+    or the default authenticated host, so on a machine pointed at a GitHub
     Enterprise instance the probe could answer PRIVATE about an entirely
-    different repository that happens to share the slug — while the
-    github.com remote this finding is about is public.
+    different repository that happens to share the slug — while the github.com
+    remote this finding is about is public.
+
+    When nothing answers, the second element carries what the probes SAID, so
+    the UNPROVEN line names quota exhaustion instead of being mute.
     """
-    resolved, output = output_before_deadline(
-        command_runner,
+    diagnostics: list[str] = []
+    lanes: list[list[str]] = []
+    rest_path = github_rest_repo_path(slug)
+    if rest_path:
+        lanes.append(
+            [
+                "gh",
+                "api",
+                "--hostname",
+                "github.com",
+                f"repos/{rest_path}",
+                "--jq",
+                ".visibility",
+            ]
+        )
+    else:
+        diagnostics.append(
+            f"the REST lane was skipped: {redact_probe_text(slug)!r} is not an "
+            "owner/repo pair"
+        )
+    lanes.append(
         [
             "gh",
             "repo",
@@ -1622,11 +4829,23 @@ def github_visibility(
             "visibility",
             "--jq",
             ".visibility",
-        ],
-        repo,
-        deadline,
+        ]
     )
-    return output.strip().upper() if resolved else ""
+    for argv in lanes:
+        resolved, output, failure = result_before_deadline(
+            command_runner, argv, repo, deadline
+        )
+        visibility = output.strip().upper()
+        if resolved and visibility in KNOWN_VISIBILITIES:
+            return visibility, f"`{' '.join(argv)}` -> {visibility}"
+        if resolved:
+            answer = redact_probe_text(visibility[:24]) or "<no output>"
+            diagnostics.append(
+                f"`{' '.join(argv)}` answered {answer!r}, which is not a visibility"
+            )
+        else:
+            diagnostics.append(probe_failure_note(argv, failure))
+    return "", "; ".join(diagnostics)
 
 
 def privacy_claim_findings(repo: Path) -> list[dict[str, str]]:
@@ -1732,7 +4951,7 @@ def sensitive_data_findings(
                 )
             )
             continue
-        visibility = github_visibility(slug, repo, command_runner, deadline)
+        visibility, evidence = github_visibility(slug, repo, command_runner, deadline)
         if visibility == "PUBLIC":
             # A public endpoint work is actually PUSHED to is the exposure this
             # check exists to catch. Anything else — the upstream of a private
@@ -1746,11 +4965,10 @@ def sensitive_data_findings(
                     REALITY_MISMATCH if publishes else REALITY_ADVISORY,
                     f"flags.sensitive_data is declared true but remote {name} "
                     f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
-                    f"`gh repo view {slug} --json visibility` -> PUBLIC"
-                    + (f"; {note}" if note else ""),
+                    f"{evidence}" + (f"; {note}" if note else ""),
                 )
             )
-        elif visibility in {"PRIVATE", "INTERNAL"}:
+        elif visibility in KNOWN_VISIBILITIES:
             findings.append(
                 reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")
             )
@@ -1759,9 +4977,8 @@ def sensitive_data_findings(
                 reality_finding(
                     check,
                     REALITY_UNPROVEN,
-                    f"{name} {slug}: `gh repo view` returned "
-                    f"{visibility or '<no output>'}; visibility is unmeasured "
-                    "(offline, unauthenticated, or gh is absent)",
+                    f"{name} {slug}: visibility is unmeasured (offline, "
+                    f"unauthenticated, rate-limited, or gh is absent) — {evidence}",
                 )
             )
     return findings
@@ -2183,15 +5400,26 @@ def audit_repo(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     repo = git_root(path)
-    config_path, tier_data = load_tier(repo)
+    declarations = tier_declarations(repo)
+    tier_data = merge_tier_declarations([data for _, data in declarations])
     issues: list[str] = []
-    if config_path is None:
+    if not declarations:
         issues.append(
             "missing .agent-harness/tier.json (legacy .claude/tier.json also accepted)"
         )
         tier = 1
     else:
-        issues.extend(validate_tier(tier_data))
+        # Validation is PER FILE: the merged posture is deliberately allowed to
+        # combine a tier from one declaration with a name from another, so
+        # validating it would invent contradictions the repo never declared.
+        # The file is named only when there is more than one to blame.
+        for config_path, data in declarations:
+            label = (
+                f"{config_path.relative_to(repo).as_posix()}: "
+                if len(declarations) > 1
+                else ""
+            )
+            issues.extend(f"{label}{issue}" for issue in validate_tier(data))
         tier = tier_data.get("tier") if tier_data.get("tier") in TIER_NAMES else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
@@ -2211,7 +5439,11 @@ def audit_repo(
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
-        "tier_file": str(config_path) if config_path else None,
+        "tier_file": str(declarations[0][0]) if declarations else None,
+        # Every declaration that bound this posture, not just the first found:
+        # a consumer that sees one path cannot tell a single-file repo from one
+        # whose legacy file supplied the tier.
+        "tier_files": [str(config_path) for config_path, _ in declarations],
         "tier": tier,
         "git": status.stdout.strip(),
         "issues": issues,
@@ -4198,6 +7430,7 @@ def doctor(args: argparse.Namespace) -> int:
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
     harness_root = Path(__file__).resolve().parent
     checks = []
+    claude_findings: list[dict[str, Any]] = []
     codex_command = (
         ["powershell", "-NoProfile", "-Command", "codex --version"]
         if os.name == "nt"
@@ -4212,6 +7445,8 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (label, result.returncode == 0, (result.stdout or result.stderr).strip())
         )
+    git_fidelity_ok, git_fidelity_detail = git_command_fidelity_status()
+    checks.append(("Git command fidelity", git_fidelity_ok, git_fidelity_detail))
     try:
         global_floor_count, global_floor_detail = inspectable_global_codex_floor_status(
             codex_home
@@ -4293,6 +7528,8 @@ def doctor(args: argparse.Namespace) -> int:
         )
     )
     if args.repo:
+        mcp_ok = False
+        mcp_detail = "project config sources were not resolved"
         try:
             marker_ok, marker_detail = codex_project_root_marker_status(codex_home)
         except (HarnessError, OSError, UnicodeError) as exc:
@@ -4334,6 +7571,19 @@ def doctor(args: argparse.Namespace) -> int:
                     requested_path, requested_checkout
                 )
             ]
+            if marker_ok:
+                try:
+                    mcp_ok, mcp_detail = codex_mcp_topology_status(
+                        codex_home, project_config_paths
+                    )
+                except (HarnessError, OSError, UnicodeError) as exc:
+                    mcp_ok = False
+                    mcp_detail = str(exc)
+            else:
+                mcp_detail = (
+                    "static project MCP layer walk is unavailable because the Codex "
+                    f"project-root marker check failed: {marker_detail}"
+                )
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
                 requested_path, requested_checkout, authoritative_checkout
             )
@@ -4515,6 +7765,7 @@ def doctor(args: argparse.Namespace) -> int:
             adapter_detail = str(exc)
         checks.append(("Codex hook source", source_ok, source_detail))
         checks.append(("Codex adapter contract", adapter_ok, adapter_detail))
+        checks.append(("Codex MCP topology", mcp_ok, mcp_detail))
         checks.append(
             ("Codex project hook activation", activation_ok, activation_detail)
         )
@@ -4532,8 +7783,55 @@ def doctor(args: argparse.Namespace) -> int:
             )
         )
         try:
+            linked_worktree_source_ambiguous = (
+                requested_checkout != authoritative_checkout
+            )
+            claude_requested_repo = requested_checkout
+        except UnboundLocalError:
+            # The existing Codex root-resolution failure means we cannot prove
+            # which Claude project settings file the runtime would read either.
+            linked_worktree_source_ambiguous = True
+            claude_requested_repo = Path(args.repo)
+        claude_findings = claude_hook_topology(
+            claude_home,
+            claude_requested_repo,
+            linked_worktree_source_ambiguous=linked_worktree_source_ambiguous,
+        )
+        inventory_count = sum(
+            finding["kind"] == "inventory" for finding in claude_findings
+        )
+        exact_count = sum(
+            finding["kind"] == "exact_duplicate" for finding in claude_findings
+        )
+        overlap_count = sum(
+            finding["kind"] == "likely_overlap" for finding in claude_findings
+        )
+        claude_unproven = any(
+            finding["status"] == REALITY_UNPROVEN for finding in claude_findings
+        )
+        claude_overlap = exact_count + overlap_count > 0
+        claude_detail = (
+            f"{inventory_count} static handler registration(s); "
+            f"{exact_count} exact duplicate(s); {overlap_count} likely overlap(s); "
+            + claude_topology_summary(claude_findings)
+            + "; static registration does not prove execution, trust, organization, "
+            "managed, session, or plugin state; a handler shell does not establish "
+            "PowerShell target-tool coverage"
+        )
+        checks.append(
+            (
+                "Claude hook topology",
+                (
+                    False
+                    if claude_overlap
+                    else REALITY_UNPROVEN if claude_unproven else True
+                ),
+                claude_detail,
+            )
+        )
+        try:
             reality_repo = git_root(Path(args.repo))
-            _reality_config, reality_tier_data = load_tier(reality_repo)
+            _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
                 if reality_tier_data.get("tier") in TIER_NAMES
@@ -4573,12 +7871,24 @@ def doctor(args: argparse.Namespace) -> int:
     # UNPROVEN, never as `[ok]`. It is not a failure either — an unprovable
     # canonical reference is a property of where the operator is standing, not
     # a defect in the floor being audited.
+    check_records: list[dict[str, str]] = []
     for label, ok, detail in checks:
         if ok == REALITY_UNPROVEN:
             state = REALITY_UNPROVEN
         else:
             state = "ok" if ok else "FAIL"
-        print(f"[{state}] {label}: {detail}")
+        check_records.append({"status": state, "check": label, "detail": detail})
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"checks": check_records, "claude_hook_findings": claude_findings},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        for check in check_records:
+            print(f"[{check['status']}] {check['check']}: {check['detail']}")
     return 0 if all(ok == REALITY_UNPROVEN or ok for _, ok, _ in checks) else 1
 
 
@@ -4609,7 +7919,10 @@ def audit_command(
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
-        print(f"tier: T{result['tier']} ({result['tier_file'] or 'missing'})")
+        sources = ", ".join(result["tier_files"]) or "missing"
+        if len(result["tier_files"]) > 1:
+            sources += "; strictest binds"
+        print(f"tier: T{result['tier']} ({sources})")
         print(result["git"])
         for issue in result["issues"]:
             print(f"[FAIL] {issue}")
@@ -4674,6 +7987,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--codex-home")
     check.add_argument("--claude-home")
     check.add_argument("--skills-home")
+    check.add_argument("--json", action="store_true")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
     )
@@ -4684,6 +7998,52 @@ def parser() -> argparse.ArgumentParser:
         "unmeasured checks report UNPROVEN",
     )
     check.set_defaults(func=doctor)
+
+    worktrees = sub.add_parser(
+        "worktrees", help="audit or plainly remove proven-safe linked worktrees"
+    )
+    worktrees.add_argument(
+        "--repo", default=".", help="repository or linked worktree to inspect"
+    )
+    worktrees.add_argument(
+        "--refresh",
+        action="store_true",
+        help="fetch every configured remote before evaluating reachability",
+    )
+    worktrees.add_argument(
+        "--apply",
+        action="store_true",
+        help="remove revalidated safe candidates; requires --refresh and --claimant",
+    )
+    worktrees.add_argument(
+        "--claimant",
+        help="self-declared identity that must own each active cooperative lease",
+    )
+    worktrees.add_argument("--json", action="store_true")
+    worktrees.set_defaults(func=worktrees_command)
+
+    lease = sub.add_parser(
+        "worktree-lease", help="manage a cooperative linked-worktree ownership lease"
+    )
+    lease.add_argument(
+        "--repo", default=".", help="the exact linked worktree that owns the lease"
+    )
+    lease.add_argument(
+        "--action", choices=("status", "acquire", "renew", "release"), required=True
+    )
+    lease.add_argument("--claimant", help="stable identity of the cooperating owner")
+    lease.add_argument(
+        "--ttl-seconds",
+        type=float,
+        default=WORKTREE_OWNERSHIP_DEFAULT_SECONDS,
+    )
+    lease.add_argument(
+        "--replace-stale",
+        action="store_true",
+        help="allow acquire to replace only a structurally valid expired lease",
+    )
+    lease.add_argument("--json", action="store_true")
+    lease.set_defaults(func=worktree_lease_command)
     return root
 
 

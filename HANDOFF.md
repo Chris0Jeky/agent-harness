@@ -1,183 +1,140 @@
-# agent-harness session handoff - 2026-07-26
+# agent-harness — session handoff (2026-07-25 → 26)
 
-This is the single resume source for the unfinished PR #71 repair. The session was
-explicitly stopped before the branch was review-ready.
+Floor **1.6.5 → 1.6.12 on `main`**, seven PRs merged, one open *(that one — PR #71 — merged
+2026-07-26T23:53Z, taking the floor to 1.6.15; see its section)*. The theme: the floor was blocking
+real work at a measured 12% while a five-character prefix disarmed it. This session closed the
+bypass, cut false positives, and built the gate that makes both directions a CI property.
 
-## Resume here
+## Merged
 
-- Repository: `C:\Users\jekyt\source\agent-harness`
-- Writer worktree:
-  `C:\Users\jekyt\source\agent-harness\.worktrees\crossproduct-gate`
-- Branch: `test/crossproduct-gate`
-- Local base before the checkpoint commit: `61478e3f4ba5e93fd385983912ab79f96d2fb934`
-- Remote PR: [#71](https://github.com/Chris0Jeky/agent-harness/pull/71)
-- Remote PR head: `922cde3eb5d619558b71daba5af8dfa4c819a963`
-- Current `origin/main`: `4b7d81b811b6336d9ec44fba294b39e0eb96ff43`
+| PR | What | Closes |
+|---|---|---|
+| #53 | `#46`: a leading redirection or `--%` defeated head resolution, so a five-character prefix disarmed **every** charter deny at every tier. Floor 1.6.11. | #46 |
+| #70 | Three git-argv false positives (`update-index --refresh`, `hash-object` operands, a redirect after the refspec breaking `--force-with-lease`) + bash named descriptors `{log}>out`. Floor 1.6.12. | #44 #45 #55 |
+| #64 | Corpus replay bound `check()` to each floor's own signature — an old baseline is measurable again (before: every command raised `TypeError` and read as a block, so "1.2.0 blocks 100%" was a tool artifact). | — |
+| #57 | Hermetic floor fixtures + a guard that fails when any suite calls raw `check()`. | #54 |
+| #66 | Four doctor false-greens/false-reds; Codex adapter contract gaps now reported; the adapter marker settled as explicitly audit-only. | #30 #35 #18 |
+| #72 | `audit` verifies declarations against **reality** (a `sensitive_data` repo on a public remote now fails loudly); dropped the unread `model_routing` field. | #60 #47 |
+| #61 | Model-routing docs retargeted to the current standard; the runnable `--model haiku` removed. | #50 |
 
-The writer worktree is the only checkout that owns these edits. Do not reset, clean,
-restore, stash, or recreate it. Start with:
+## PR #71 — the cross-product gate (#63)
 
-```powershell
-Set-Location -LiteralPath 'C:\Users\jekyt\source\agent-harness\.worktrees\crossproduct-gate'
-git status --short --branch
-git log -3 --oneline --decorate
+**Update 2026-07-27: MERGED** 2026-07-26T23:53Z as `21485bc` (merge commit; the floor rode
+along to **1.6.15** — 1.6.13/1.6.14 were consumed on the branch). One debt survived the merge:
+no triage of the 13 connector threads is visible after the last review activity that day
+(00:54Z), so the single owed pass is now tracked as
+[#104](https://github.com/Chris0Jeky/agent-harness/issues/104) instead of being dropped. The
+section below is retained as written, for history.
+
+The structural fix behind every bypass this repo has had. It crosses the ~1,071-case deny corpus
+with 102 prefix/wrapper shapes and asserts **both** directions — charter denies survive every
+shape, and a benign corpus stays allowed under every shape. ~50s, runs on every PR.
+
+It has already paid for itself three times over:
+- Found **#67** (perl/python/node/awk execute an argv-visible payload never unwrapped), **#68**
+  (head-anchored rules stop firing under a launcher the floor otherwise covers, 187 verified
+  pairs), **#69** (`cmd /c` does not recurse a nested POSIX interpreter).
+- Confirmed **all eight** of #56's suspected-but-unverified container forms.
+- Caught a false positive that smoke, review and the corpus replay all missed, and **#81** — 34
+  over-blocks where #70's git-argv rules do not survive a child re-parse (reproduced on `main`,
+  not introduced by the branch).
+
+**State at `922cde3`:** merged with main (floor 1.6.12), three-OS CI **green**, and green locally
+— 661 tests, **2121/2121 smoke**, lint clean, both pins matching the post-bump dispatcher.
+
+**It is NOT ready to merge.** It carries **13 untriaged Codex connector threads** (1×P1, 12×P2)
+raised against its latest heads. Under the bounded pipeline (global law 2 / BLUEPRINT law 11,
+ratified in issue #92 after this handoff was first written), they get ONE severity-bar triage:
+findings confirmed CRITICAL/HIGH by their CONTENT earn fix commits — the connector's P1/P2
+label never decides; a P2 naming a confirmed correctness, security, or data-loss defect meets
+the bar (this repo has seen a HIGH charter regression arrive mid-review) — and everything
+else becomes a tracked issue or a one-line decline on the thread. **That single pass is the PR's next
+step.** The full thread text is saved at
+`.../scratchpad/pr71-open-threads.md`, or re-fetch with:
+
+```
+gh api graphql -f query='{repository(owner:"Chris0Jeky",name:"agent-harness"){pullRequest(number:71){reviewThreads(first:60){nodes{isResolved path line comments(first:3){nodes{body}}}}}}}'
 ```
 
-## Status
+Its recorded baselines are deliberate — a documented bypass that starts passing fails the gate as
+"UNEXPECTEDLY FIXED", so nothing silently improves or silently rots.
 
-PR #71 is open and non-draft. Its remote head `922cde3` has green historical
-three-OS CI, but that evidence applies only to the old remote bytes. The repair work
-below is local-only. It has not been pushed, connector-reviewed, or checked by hosted
-CI. Do not merge.
+**The review treadmill, and why it is over.** The connector re-reviews every pushed head, so
+each fix round draws a new round of comments; one branch this session went six rounds, every
+round finding genuine second-order defects in the previous round's fixes. That treadmill is
+exactly the loop law 11 now terminates: two rounds is the ceiling — re-request the review
+after the final fix round, triage what arrives once, then ship or park.
 
-The local branch merged current `origin/main` at `61478e3`, then accumulated the
-review repair across:
+**Superseded (2026-07-26, issue #92):** the zero-skip rule this section used to state is
+replaced by the bounded pipeline — one review round + one fix round; fix commits only for
+confirmed CRITICAL/HIGH defects; everything else a tracked issue or a one-line decline, never
+a silent drop. Global CLAUDE.md law 2 is the home (mirrored in SPECS §1).
 
-- `SPECS.md`
-- `templates/hooks/dispatch.py`
-- `templates/hooks/smoke_test.py`
-- `tests/test_command_prefixes.py`
-- `tests/test_prefix_wrapper_crossproduct.py`
-- this handoff
+## The redesign, ratified
 
-The session closes with a local WIP checkpoint commit. It is intentionally not pushed
-because the broad cross-product still has known failures.
+The RFC is at issue **#21**'s 2026-07-25 comment. One sentence: *a hard deny requires proof of
+irreversibility; everything the parser merely cannot prove safe is graduated (allow/log → ask →
+deny by tier), and every ask-class outcome carries a self-service unstick path on both runtimes.*
 
-## What the local repair contains
+What the architecture map changed about the plan:
+- The ask channel barely exists — ~168 `deny` literals against **five** real `ask` returns, all
+  Git work-loss guards, all reachable only at T3-without-relaxation. `respond()` rewrites every
+  ask to deny for Codex.
+- Rule identity is 3 of 168 sites. Every downstream mechanism (ledger, overrides, ACK) needs ids
+  first — that is why #26 leads.
+- Bounded `git` probes are an established pattern, not a new capability (the `sensitive_data`
+  resolver already spawns them under a 3.5s budget with an injected runner). That settles the
+  objection to conditional worktree logic. **Constraint:** any new probe must take
+  `command_runner` as a default argument, or `replay_corpus.py` spawns real git per command.
 
-The repair addresses the 13 unresolved Codex threads on the old PR head and the
-second-order findings exposed by adversarial Terra review:
+**Slice order:** #26 (rule ids + FLOOR_ACK both runtimes + opt-in ledger) → #41 (worktree
+graduation) → #62 (re-tier the opacity family; folds #32, #17) → #24 (literal variable
+resolution — the only lever that also helps T4) → #38/#58 (here-string/heredoc bodies are data)
+→ #48/#59 (sensitive_data target-aware).
 
-- Honest 99-shape prefix/wrapper composition with explicit deny and benign
-  applicability, exact reason ledgers, live/disjoint exception ledgers, and
-  bidirectional coverage.
-- Redirect-target provenance across quoting, descriptors, process substitution, and
-  nested interpreter dialects.
-- Literal redirect operators preserved as argv data through launcher, scriptblock,
-  direct-process, `eval`, `call`, `cmd /c`, and job boundaries.
-- `watch` default mode modeled as argv concatenation followed by `sh -c`; `watch
-  -x/--exec` remains direct argv.
-- A paired marker now keeps a cmd double-quoted redirect span from widening over an
-  adjacent suffix. Focused tests cover adjacent `$`, backtick, and literal-quote
-  characters.
-- Invalid stop-parsing shapes and several inaccurate wrapper templates were removed or
-  corrected.
+**#41** shipped: plain `git worktree remove` refuses a tree with tracked modifications or
+untracked files — git does the check the floor cannot — and the branch survives, so the plain
+form allows at T1–T3 and only `--force` needs the ask channel. It is **not** harmless, and the
+first draft of the slice wrongly said it was: git's clean check ignores gitignored content,
+which removal then deletes (`.env`, local databases, build trees). Two bugs fixed in the same
+slice: the match tested `token == "remove"` anywhere in argv, so option *values*
+(`add -b remove`, `lock --reason remove`) denied, and `prune` fell through unhandled.
 
-The hook floor version in the working dispatcher is 1.6.16. The checked-in Codex hook
-pin has not been refreshed because dispatcher bytes are not final.
+## Human gates (only you can do these) — reconciled 2026-07-26
+(`HUMAN_TODO.md` is authoritative; it also carries H-5 and H-6, which have no numbered gate in this list.)
 
-## Exact verification at stop
+1. **Deploy the floor** — **DONE and doctor-verified** (canonical 1.6.12 == deployed 1.6.12;
+   the owner-directed `sync-global --apply` also refreshed `~/.codex/AGENTS.md` — backup under
+   `~/.codex/backups/20260726T195246Z` — and three shared skills in `~/.agents/skills`, whose
+   backups live under `~/.agents/skills/.harness-backups/20260726T195246Z`). HUMAN_TODO H-1
+   carries the evidence; the tick is yours.
+2. **Re-trust and canary the deployed bytes** — STILL OPEN, Codex side (H-4 stays an ongoing
+   manual chore): fresh Codex session per repo in its exact CWD, `/hooks` shows the expected
+   adapter, then both canary legs on that runtime. The Claude side is now DONE: a deliberate
+   ALLOW+DENY canary pair ran 2026-07-27 against the deployed 1.6.12 bytes (benign `git status`
+   executed; a force-push probe at a non-repo directory denied with the `[floor 1.6.12]`
+   banner), on top of the two mid-session denies of 2026-07-26. Note canonical `main` is now
+   floor 1.6.15 (PR #71) — the redeploy and a re-canary ride the #90 fix.
+3. **`~/.claude` pushes** — **DONE**: `e42e211` and the follow-on memory commit are on pushed
+   `main`; `settings.json` stayed uncommitted by design. See HUMAN_TODO H-3 for the
+   branch-rule-bypass note that push surfaced.
+4. **Worktrees still accumulate** (#41). Pruning remains manual until that slice lands.
 
-Verified on the final checkpoint bytes:
+## What was NOT verified
 
-- `py -3 -m unittest tests.test_command_prefixes.LiteralRedirectionOperatorTests -v`
-  - 11/11 passed.
-- Black reported `dispatch.py` and `test_command_prefixes.py` already formatted.
+- Live hook execution: the Claude side now has a deliberate ALLOW+DENY canary pair
+  (2026-07-27, against deployed 1.6.12) plus the two mid-session denies of 2026-07-26. Still
+  NO Codex-side live execution at all; every other floor result is from calling `check()`
+  in-process or from CI.
+- The corpus replay for #53 showed **0 newly blocked / 1 newly allowed** across 91,300 unique
+  commands — but the corpus contains no command using the shapes #53 changed most, so that zero
+  is *unmeasured*, not *safe*. #70 and #71 had no replay at their final heads.
+- #39 (olb T4 rollout) was auto-closed by #64's merge and **reopened** — the replay fix unblocks
+  its measurement, not the rollout decision.
 
-Verified before the final paired-marker patch, so stale and mandatory to rerun:
+## Method note
 
-- `py -3 -m unittest tests.test_command_prefixes -v`
-  - 48/48 passed.
-- Black, Ruff, Python compile, and `git diff --check` were clean.
-
-Known failing broad run before the final paired-marker patch:
-
-- `py -3 -m unittest tests.test_prefix_wrapper_crossproduct -v`
-  - 39 tests run; 37 passed and 2 failed.
-  - The deny direction reported 32 `watch` failures plus 19 `watch` entries that
-    became unexpectedly fixed.
-  - The benign direction reported 50 failures. Some taskset/flock failures came from
-    the adjacent-suffix marker defect now covered by the 11/11 focused test; the suite
-    has not been rerun to prove which remain.
-
-Not verified on the final checkpoint bytes:
-
-- Full `tests.test_command_prefixes`
-- Full cross-product
-- Full unittest discovery
-- Canonical smoke suite
-- `harness.py doctor`
-- Current Ruff/compile/diff check
-- Hook hash pins
-- Luna read-only audit
-- Hosted CI or connector review
-- Live `/hooks` activation and allow/deny canaries
-
-## First technical decision next session
-
-Do not paper over the remaining `watch` failures with broad baselines. Default GNU
-`watch` concatenates argv and reparses it with `sh -c`, so it does not preserve all
-payload quoting:
-
-- A nested interpreter program that was one quoted argv word may be split into a
-  different command.
-- `watch echo ">" .env` becomes active redirection after argv concatenation; denying
-  that composition is correct even though the bare command allows.
-- Direct brace/glob/refspec payloads now reach more charter rules, so the 19 old
-  `watch` case-bypass entries may genuinely be removable.
-
-Tighten the `watch` shape's applicability to compositions that are semantically
-equivalent, or model default and `--exec` as distinct shapes. Then remove only
-exceptions the bidirectional tests prove obsolete.
-
-Terra's final review also established:
-
-- The Git inline-alias `shlex.join` path is unreachable because every literal
-  `alias.*` inline config is denied earlier. Leave that dead path out of this repair.
-- A nested PowerShell expandable-string/subexpression false deny is pre-existing on
-  `origin/main`; it belongs in a searched/deduplicated follow-up issue, not a claim
-  that PR #71 fixed it.
-
-## Counts and documentation
-
-Before the final marker test addition, the read-only count audit measured:
-
-- 25 prefix + 74 wrapper = 99 shapes
-- 1,077 deny cases; 461 benign cases (443 from smoke)
-- 71 enforced shapes; 90 transparent shapes
-- 68,227 applicable enforced/deny pairs
-- 38,992 applicable transparent/benign pairs
-
-`SPECS.md` still contains stale counts and ambiguous wording. Recompute after the
-`watch` predicates and smoke corpus are final. Also update the worst-shape comments:
-the pre-checkpoint measurement was 72.61% deny reach and 81.13% benign reach.
-
-## Resume sequence
-
-1. Reconcile this handoff with live Git/GitHub state and inspect the checkpoint diff.
-2. Run the full command-prefix and cross-product modules.
-3. Repair only the remaining semantic failures, beginning with `watch` applicability.
-4. Ask Terra for a fresh exact-tree adversarial review; run the unavailable Luna route
-   through a read-only ephemeral Codex invocation if it is still available.
-5. Freeze corpus counts and update `SPECS.md` and this handoff.
-6. Compute the normalized dispatcher hash and update both pins in
-   `.codex/hooks.json`.
-7. Run all required checks:
-
-   ```powershell
-   py -3 -m unittest discover -s tests -v
-   py -3 templates\hooks\smoke_test.py
-   py -3 harness.py doctor
-   ```
-
-   Also run Black, Ruff, Python compile, and `git diff --check`.
-8. Commit any final repair as a small present-tense commit, push normally, and update
-   PR #71 without changing its issue linkage (`Closes #63` only).
-9. Request `@codex review`, triage every existing and new thread, and require
-   independent review plus exact-head three-OS CI after the last head change.
-10. Stop at the human merge gate. Do not merge.
-
-Only after PR #71 is merge-ready should issue work resume. The latest suggested order
-is #75, #80, #79, #82, #77, then #26, #41, #62, #24, #38/#58, and #48/#59. Search for
-duplicates before creating the PowerShell nested-dialect follow-up.
-
-## Human-owned actions
-
-These remain open in `HUMAN_TODO.md`; only the human checks them off:
-
-1. H-1: deploy floor 1.6.12 to `~/.claude/hooks`.
-2. H-2: after deployment, open a fresh exact-CWD session, verify `/hooks`, and run
-   live allow/deny canaries.
-3. H-3: resolve dirty `~/.claude/settings.json`, then push pending commit
-   `e42e211`.
-4. H-4: prune accumulated worktrees manually until #41 lands.
+Every PR went through 2–4 rounds of independent adversarial review plus the Codex connector,
+which re-reviews each new head. That found real defects at every round, including a **HIGH
+charter regression inside the fix for #46** (a quoted `> '.env'` went deny→allow) that green
+smoke and a clean replay both missed.

@@ -8,10 +8,19 @@ Runtime copies are installed through explicit sync commands or repo-owned adapte
 Contract (BLUEPRINT §2, SPECS §5-6):
 - Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
   the project, pipe-to-shell installs, sudo, secret-file mutation, PowerShell pipe-deletes.
-- Work-loss guards (reset --hard, clean -f, checkout -- ., restore .) are tier-dependent:
+- Work-loss guards (reset --hard, clean -f, checkout -- ., restore .,
+  worktree remove --force) are tier-dependent:
   allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
   relaxed-git (tier.json flag `relaxed_work_loss_guards`) keeps them allow below T4/wave_mode;
   the flag is IGNORED at T4 and under wave_mode (other agents' work is in the blast radius).
+  Laundered force spellings ride the same ladder (an opaque spelling never scores better
+  than the literal form it might be): a runtime-computed worktree ACTION word (issue #117),
+  a dynamic option/separator-free operand token in a removal, and argv-visible config that
+  blinds git's clean check (`-c status.showUntrackedFiles=no`, issue #123).
+  Plain `worktree remove` allows at EVERY tier (owner ruling 2026-07-27): git itself refuses
+  a tree with tracked modifications or untracked files, and law 7's `git switch -c` mandate
+  keeps commits ref-held. Its clean check still IGNORES gitignored content, which removal
+  deletes (.env-class files, local databases, build trees) -- allowed, never harmless.
 - NEVER inspects commit-message / PR-body text: quoted strings are stripped before matching.
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
@@ -35,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.16 (2026-07-26)"
+FLOOR_VERSION = "1.6.24 (2026-08-01)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -61,8 +70,6 @@ _INVALID_INERT_QUOTED = "__HARNESS_INVALID_INERT_QUOTED__"
 # deleted, and deleting it in a recursed child restores the text as written.
 _QUOTED_GROUP_LITERAL_PREFIX = "__HARNESS_QUOTED_GROUP_LITERAL__"
 _QUOTED_SPAN_MARK = "__HARNESS_QUOTED_SPAN_5B4E__"
-_CMD_DOUBLE_QUOTED_REDIRECT_MARK = "__HARNESS_CMD_DOUBLE_QUOTED_REDIRECT__"
-_CMD_DOUBLE_QUOTED_REDIRECT_END = "__HARNESS_CMD_DOUBLE_QUOTED_REDIRECT_END__"
 _SEGMENT_SEPARATOR_PREFIX = "__HARNESS_SEGMENT_SEPARATOR_"
 _SEGMENT_SEPARATOR_SUFFIX = "__"
 
@@ -372,7 +379,7 @@ def cmd_nested_script(toks: list[str]) -> tuple[bool, str | None]:
             continue
         tail = match.group("tail")
         parts = ([tail] if tail else []) + toks[index + 1 :]
-        return True, join_cmd_child_argv(parts) or None
+        return True, " ".join(parts) or None
     return False, None
 
 
@@ -509,6 +516,36 @@ def has_dynamic_shell_token(token: str) -> bool:
     )
 
 
+def dynamic_token_could_be_an_option(token: str) -> bool:
+    """True when a runtime-computed token could expand to an OPTION word.
+
+    Two shapes qualify: a token that already starts with `-` and carries a
+    substitution (`-$X` may be `-f`), and a bare dynamic token with no path
+    separator (`$A`, `${A}f`, `%X%%Y%` may each be `--force` whole). A
+    dynamic-prefixed compound that contains a separator (`$WT_PROJECT_DIR/wt41`,
+    the spelling law 7 mandates) can only expand to a path-shaped word -- the
+    literal `/<tail>` pins it out of option space -- so it does NOT qualify and
+    keeps the literal form's score.
+
+    A NAMELESS sigil expands to nothing and is excluded. `has_dynamic_shell_token`
+    reads a lone `$` as dynamic, and a sanitized re-parse hands exactly that here:
+    `${WT_PROJECT_DIR}/wt41` survives the primary pass intact (separator present ->
+    False), then reaches the second pass as a bare `$`, which carries no separator
+    and so scored as a possible `--force`. Measured on 1.6.20: that gated law 7's
+    OWN braced spelling at T3/T4 while the unbraced one allowed. A substitution
+    needs a name, a brace or a paren after its sigil to reference anything -- `$`,
+    `%%` and `!` alone are literal text and cannot become an option word. `$(`
+    keeps qualifying, because command substitution really can print `--force`.
+    """
+    if not has_dynamic_shell_token(token):
+        return False
+    if not re.search(r"[0-9A-Za-z_{(]", token):
+        return False
+    if token.startswith("-"):
+        return True
+    return "/" not in token and "\\" not in token
+
+
 def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
     """Recover a bounded literal Start-Process child command."""
     parameters = {
@@ -623,7 +660,7 @@ def powershell_start_process_command(toks: list[str]) -> tuple[str | None, str]:
         index += 1
     if not executable:
         return None, "Start-Process has no literal executable path."
-    return join_direct_child_argv([executable, *child_args]), ""
+    return shlex.join([executable, *child_args]), ""
 
 
 def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]:
@@ -731,11 +768,7 @@ def powershell_job_scriptblocks(toks: list[str]) -> tuple[list[str] | None, str]
             index += 1
         if depth != 0:
             return None, index, "A background-job scriptblock is malformed."
-        # Reconstruct executable scriptblock text with the same argv round trip as
-        # foreground PowerShell blocks. A quoted redirect operator is DATA in the
-        # parent argv; emitting its minted marker verbatim lets the recursive scrub
-        # delete that word and shift every following argument.
-        literal = rejoin_argv_as_command(chunks)
+        literal = " ".join(chunks)
         body = unwrap_powershell_scriptblock(literal)
         if body == literal:
             return None, index, "A background-job scriptblock is malformed."
@@ -1392,37 +1425,6 @@ def powershell_pipeline_scriptblock_opacity(head: str, toks: list[str]) -> str |
     return None
 
 
-def restore_literal_redirect_markers(value: str) -> str:
-    """Restore minted quoted-operator markers to the argv text they represent."""
-    restored = restore_quoted_literal_markers(value)
-    restored = restored.replace(_CMD_DOUBLE_QUOTED_REDIRECT_MARK, "").replace(
-        _CMD_DOUBLE_QUOTED_REDIRECT_END, ""
-    )
-    for operator, marker in _LITERAL_REDIRECT_MARKERS.items():
-        restored = restored.replace(marker, operator)
-    return restored
-
-
-def requote_literal_redirect_marker(token: str) -> str | None:
-    """Re-quote a minted literal-redirect marker for a child inspection pass."""
-    for operator, marker in _LITERAL_REDIRECT_MARKERS.items():
-        if marker not in token:
-            continue
-        # The parent tokenizer minted this marker for an operator that reached argv
-        # as QUOTED DATA. Re-emitting the marker verbatim hands it across a trust
-        # boundary, where the child anti-forgery scrub deletes it and shifts every
-        # following argv position. Restore and quote the operator so the child derives
-        # fresh provenance of its own. A typed marker cannot reach here: the parent
-        # scrub removes it before minting any live marker.
-        # Generic child boundaries preserve ARGV, not the parent's quote dialect.
-        # Quoting the complete restored value with shlex is what keeps an adjacent
-        # single-quoted `$` / backtick / literal quote inert. cmd.exe is the one
-        # boundary where double-quote provenance changes semantics; its renderer
-        # consumes the paired span markers separately below.
-        return shlex.quote(restore_literal_redirect_markers(token))
-    return None
-
-
 def requote_argv_token(token: str) -> str:
     """Re-quote one argv token so re-tokenizing it yields the SAME token.
 
@@ -1439,9 +1441,6 @@ def requote_argv_token(token: str) -> str:
     verbatim, so ordinary argv and the synthesized `;`/`|` separators stay
     byte-identical and every head, path and flag match is unaffected.
     """
-    literal_redirect = requote_literal_redirect_marker(token)
-    if literal_redirect is not None:
-        return literal_redirect
     if not token:
         return "''"
     if token_is_argv_redirection(token):
@@ -1630,67 +1629,15 @@ def join_child_argv(tokens) -> str:
     rule and allowed, so every leading-redirect payload behind `wsl` / `taskset` /
     `flock` / `watch` / `chrt` / `coproc` was laundered by the rebuild itself.
 
-    The scriptblock recursion path and this launcher path deliberately keep their
-    existing general quoting rules: launcher argv needs `shlex.quote` to preserve
-    glob and brace arguments. They share only the literal-redirect round trip, which
-    keeps the exact operator as argv DATA. A literal `;` argument therefore stays a
-    quoted word here rather than turning into a separator.
-    """
-    rendered: list[str] = []
-    for token in tokens:
-        literal_redirect = requote_literal_redirect_marker(token)
-        if literal_redirect is not None:
-            rendered.append(literal_redirect)
-        elif token_is_argv_redirection(token):
-            rendered.append(token)
-        else:
-            rendered.append(shlex.quote(token))
-    return " ".join(rendered)
-
-
-def join_direct_child_argv(tokens) -> str:
-    """Rebuild direct process argv as child-inspection text.
-
-    Unlike a shell launcher, Start-Process hands every ArgumentList value directly to
-    the executable, so even redirection-looking words are argv DATA. Preserve its
-    existing `shlex.join` semantics and add only the minted literal-redirect round trip
-    that prevents the child anti-forgery scrub from deleting an argument.
+    `requote_argv_token` already keeps redirections bare for the recursion path;
+    the launcher path reached for `shlex.join` instead and lost it. Only that one
+    rule is shared: everything else still goes through `shlex.quote`, so a literal
+    `;` argument stays a quoted word here rather than becoming a separator.
     """
     return " ".join(
-        requote_literal_redirect_marker(token) or shlex.quote(token) for token in tokens
+        token if token_is_argv_redirection(token) else shlex.quote(token)
+        for token in tokens
     )
-
-
-def join_cmd_child_argv(tokens) -> str:
-    """Rebuild cmd.exe-reparsed argv while preserving double-quote semantics.
-
-    cmd treats `">"` as data but gives single quotes no special protection. The
-    tokenizer records that narrow distinction only for exact quoted redirect words;
-    all other cmd quoting remains under the broader #69 contract.
-    """
-    rendered: list[str] = []
-    for token in tokens:
-        if _CMD_DOUBLE_QUOTED_REDIRECT_MARK in token:
-            # Keep the double quotes around exactly the span that had them. Widening
-            # the quotes over an adjacent suffix changes other shell dialects (`$`
-            # and backticks become live) and can make a literal `"` malformed.
-            start = token.find(_CMD_DOUBLE_QUOTED_REDIRECT_MARK)
-            body_start = start + len(_CMD_DOUBLE_QUOTED_REDIRECT_MARK)
-            end = token.find(_CMD_DOUBLE_QUOTED_REDIRECT_END, body_start)
-            if end < 0:
-                rendered.append(restore_literal_redirect_markers(token))
-                continue
-            before = restore_literal_redirect_markers(token[:start])
-            quoted = restore_literal_redirect_markers(token[body_start:end])
-            after = restore_literal_redirect_markers(
-                token[end + len(_CMD_DOUBLE_QUOTED_REDIRECT_END) :]
-            )
-            rendered.append(f'{before}"{quoted}"{after}')
-        elif any(marker in token for marker in _LITERAL_REDIRECT_MARKERS.values()):
-            rendered.append(restore_literal_redirect_markers(token))
-        else:
-            rendered.append(restore_quoted_literal_markers(token))
-    return " ".join(rendered)
 
 
 def rejoin_argv_as_command(parts: list[str]) -> str:
@@ -3090,118 +3037,18 @@ def unparseable_recursive_delete(command: str) -> list[list[str]]:
     return recovered_deletes
 
 
-#: Output-redirection spellings whose NEXT shell word is a destination. The scan below
-#: keeps raw-text escape provenance that shlex cannot retain and distinguishes a numeric
-#: descriptor duplication (`2>&word`) from bare Bash `>&word`, which names a file.
+#: Every spelling of an OUTPUT redirection operator that binds the NEXT token as its
+#: destination file. The quote-aware token scan has to recognise the same grammar the
+#: text-mode fallback regex already matches (`(?:\d*|&)?>{1,2}(?:\||&)?`); when it only
+#: knew `>` and `>>`, `>| '.env'` and `&> '.env'` reached a secret file unblocked while
+#: their unquoted twins denied. Descriptor duplication (`2>&1`) still binds a descriptor
+#: number rather than a path, so it decides on the token that follows.
 #:
-#: The tokenizer's quote-provenance mask covers the same file-redirect spellings from
-#: the other direction: a quoted operator is data, while an unquoted operator binds a
-#: target. Tests pin both sides so widening one reader cannot silently outrun the other.
-_OUTPUT_REDIRECT_WITH_TARGET = re.compile(
-    r"(?P<operator>&>>?|>{1,2}[|&]?)\s*" r"(?P<target>[<>]?\(|[^\s;|&()<>]+)"
-)
-
-
-def posix_metacharacter_is_escaped(text: str, index: int) -> bool:
-    """Whether the metacharacter at `index` has an odd backslash prefix.
-
-    Backslash is the one provenance loss this repair addresses: POSIX shells consume it
-    before shlex exposes argv, while PowerShell retains the whole spelling as inert argv.
-    Caret and backtick are deliberately not accepted here because their meaning diverges
-    across shells. This is narrow redirect handling, not the tokenizer-wide #77 fix.
-    """
-    if index <= 0 or text[index - 1] != "\\":
-        return False
-    start = index - 1
-    while start > 0 and text[start - 1] == "\\":
-        start -= 1
-    return (index - start) % 2 == 1
-
-
-def posix_unescape_shell_word(value: str) -> str:
-    """Return the argv word a POSIX shell produces from bare backslash escapes."""
-    result: list[str] = []
-    index = 0
-    while index < len(value):
-        if value[index] == "\\" and index + 1 < len(value):
-            next_char = value[index + 1]
-            if (
-                next_char == "\r"
-                and index + 2 < len(value)
-                and value[index + 2] == "\n"
-            ):
-                index += 3
-                continue
-            if next_char == "\n":
-                index += 2
-                continue
-            result.append(next_char)
-            index += 2
-            continue
-        result.append(value[index])
-        index += 1
-    return "".join(result)
-
-
-def redirection_descriptor_before(
-    text: str, operator_index: int, *, named_descriptors: bool = False
-) -> bool:
-    """Whether a bounded descriptor spelling appears immediately before `>`."""
-    start = operator_index
-    while start > 0 and text[start - 1].isdigit():
-        start -= 1
-    if start != operator_index:
-        return start == 0 or text[start - 1].isspace() or text[start - 1] in ";|&(){}"
-    if not named_descriptors:
-        return False
-    named = re.search(r"\{[A-Za-z_][A-Za-z0-9_]*\}$", text[:operator_index])
-    if named is None:
-        return False
-    return (
-        named.start() == 0
-        or text[named.start() - 1].isspace()
-        or text[named.start() - 1] in ";|&(){}"
-    )
-
-
-def output_redirect_targets(
-    text: str,
-    *,
-    backslash_escapes: bool = True,
-    descriptor_words_are_files: bool = True,
-):
-    """Yield real output-file targets without laundering escapes or fd duplication.
-
-    The input has already had inert quoted spans replaced with placeholders. Searching
-    text rather than rebuilt argv keeps the one fact shlex discards: `\\>` is a literal
-    greater-than word, while `>` is syntax. When the first character of a multi-character
-    operator is escaped, resume at the next character so `\\>>file` still sees the
-    second, active `>` instead of turning an escape into a bypass.
-    """
-    cursor = 0
-    while True:
-        match = _OUTPUT_REDIRECT_WITH_TARGET.search(text, cursor)
-        if match is None:
-            return
-        operator = match.group("operator")
-        operator_start = match.start("operator")
-        redirect_index = text.find(">", operator_start, match.end("operator"))
-        if backslash_escapes and posix_metacharacter_is_escaped(text, redirect_index):
-            cursor = redirect_index + 1
-            continue
-        if (
-            operator.endswith("&")
-            and redirection_descriptor_before(
-                text,
-                redirect_index,
-                named_descriptors=not descriptor_words_are_files,
-            )
-            and not descriptor_words_are_files
-        ):
-            cursor = match.end()
-            continue
-        yield match.group("target")
-        cursor = match.end()
+#: The tokenizer's quote-provenance mask below reads the SAME pattern on purpose. The two
+#: are one decision seen from both sides — "is this token an operator?" — so recognising a
+#: spelling in the scan without masking it in the tokenizer turns a quoted operator
+#: LITERAL into a false deny, and masking without recognising re-opens the bypass.
+_OUTPUT_REDIRECT_OPERATOR = re.compile(r"\d*&?>{1,2}[|&]?")
 
 
 def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], str]]:
@@ -3220,7 +3067,6 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
     # ValueError fallback below, which re-reads `command`, is covered too.
     command = scrub_internal_markers(command)
     quoted: dict[str, str] = {}
-    cmd_double_quoted_redirects: set[str] = set()
 
     def protect(match: "re.Match[str]") -> str:
         placeholder = f"__HARNESS_QUOTED_{len(quoted)}__"
@@ -3243,8 +3089,6 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 value = shlex.split(token, posix=True)[0]
             except (IndexError, ValueError):
                 value = token[1:-1]
-        if token.startswith('"') and literal_redirect_replacement(value) is not None:
-            cmd_double_quoted_redirects.add(placeholder)
         if len(value) >= 2 and (value[0], value[-1]) in {("(", ")"), ("{", "}")}:
             # Read by command_head, which resolves an executable through a
             # leading `(`/`{` (`(git) push`). A group that came out of a QUOTED
@@ -3341,12 +3185,6 @@ def quote_aware_segments_with_operators(command: str) -> list[tuple[list[str], s
                 literal = literal_redirect_replacement(value)
                 if literal is not None:
                     replacement = literal
-                    if placeholder in cmd_double_quoted_redirects:
-                        replacement = (
-                            _CMD_DOUBLE_QUOTED_REDIRECT_MARK
-                            + replacement
-                            + _CMD_DOUBLE_QUOTED_REDIRECT_END
-                        )
             token = token.replace(placeholder, replacement)
         # Record quote provenance for exactly the tokens whose leading character
         # is ambiguous: a `#`/`<#` that came out of a quoted span is DATA, an
@@ -4153,41 +3991,8 @@ def _launcher_child_command(head: str, toks: list[str]) -> str | None:
     """Return a child command string for watch/flock/coproc/chrt/taskset, "" for
     none, or None when the child is opaque and the launcher must be denied."""
     if head == "watch":
-        index, _ = _scan_launcher_options(toks, {"n", "q"}, {"--interval", "--equexit"})
-        option_tokens = toks[1:index]
-        exec_mode = False
-        for option in option_tokens:
-            lowered = option.lower()
-            if (
-                lowered.startswith("--ex")
-                and "--exec".startswith(lowered)
-                and "=" not in lowered
-            ):
-                exec_mode = True
-                break
-            if option.startswith("-") and not option.startswith("--"):
-                for character in option[1:]:
-                    if character == "x":
-                        exec_mode = True
-                        break
-                    if character in {"n", "q"}:
-                        # The cluster tail is this value, not more switches.
-                        break
-                if exec_mode:
-                    break
+        index, _ = _scan_launcher_options(toks, {"n"}, {"--interval"})
         child = toks[index:]
-        if not child:
-            return ""
-        if exec_mode:
-            # watch -x passes argv straight to exec; a one-word command containing
-            # spaces remains one (usually nonexistent) executable name.
-            return join_direct_child_argv(
-                restore_quoted_literal_markers(token) for token in child
-            )
-        # Default GNU watch concatenates argv and hands the result to `sh -c`.
-        # Outer-shell quotes are already gone, so do not re-quote each word: a quoted
-        # one-word program and separate argv both become the same executable source.
-        return " ".join(restore_literal_redirect_markers(token) for token in child)
     elif head == "flock":
 
         def _flock_command(tok: str, follow: str | None) -> str | None:
@@ -4485,17 +4290,13 @@ def literal_redirect_replacement(token: str) -> str | None:
     spellings, and it mirrors how a glued suffix survives: ``'&>'out`` restores
     as marker + ``out``, the program name the shell would really look for.
 
-    Matching the mask to the SCAN is the whole point. `output_redirect_targets`
-    recognises descriptor-prefixed file redirects such as ``2>`` / ``1>>``; widening
-    that scan without widening this mask made ``echo "2>" .env`` a false deny while
-    the byte-identical ``echo ">" .env`` allowed -- one decision, "is this token an
-    operator?", answered two different ways depending on the descriptor.
+    Matching the mask to the SCAN is the whole point. ``_OUTPUT_REDIRECT_OPERATOR``
+    recognises ``\\d*&?>{1,2}[|&]?``, so widening it to ``2>`` / ``1>>`` without
+    widening this made ``echo "2>" .env`` a false deny while the byte-identical
+    ``echo ">" .env`` allowed -- one decision, "is this token an operator?",
+    answered two different ways depending on the descriptor.
     """
-    # `protect()` masks braces before this reader runs. Restore them only for the
-    # grammar decision so a quoted Bash named descriptor (`"{fd}>&"`) gets the same
-    # provenance as a numeric descriptor; keep the protected prefix in the returned
-    # token so structural brace readers still see quoted data rather than a block.
-    parsed = command_prefix_redirection_token(restore_quoted_literal_punctuation(token))
+    parsed = command_prefix_redirection_token(token)
     if parsed is None:
         return None
     operator, glued_target, _has_descriptor = parsed
@@ -4625,36 +4426,26 @@ def leading_redirection_end(toks: list[str], index: int) -> int | None:
 _WRITING_REDIRECTION_OPERATORS = frozenset({">", ">>", ">|", ">&", "&>", "&>>", "<>"})
 
 
-def descriptor_duplication_operand(
-    operator: str | None,
-    target: str,
-    *,
-    has_descriptor: bool = False,
-    descriptor_words_are_files: bool = True,
-) -> bool:
+def descriptor_duplication_operand(operator: str | None, target: str) -> bool:
     """Return True when ``operator target`` duplicates or closes a descriptor.
 
-    ``2>&1`` and ``>&-`` name no file. Bash also rejects an explicit descriptor
-    plus a non-numeric word (`2>&out.log`) as ambiguous, but zsh opens that word as
-    a file. Unknown/runtime-neutral syntax therefore keeps the word as a target;
-    only an explicitly selected Bash dialect may classify it as duplication.
+    ``2>&1`` and ``>&-`` name no file; only a non-numeric word after ``>&``
+    (``>&out.log``) is a path.  Reading the numeric form as a write target
+    would put ``1`` in front of every secret-path heuristic that ever ships.
     """
-    return operator in {">&", "<&"} and (
-        re.fullmatch(r"-|\d+-?", target) is not None
-        or (has_descriptor and not descriptor_words_are_files)
-    )
+    return operator in {">&", "<&"} and re.fullmatch(r"-|\d+-?", target) is not None
 
 
-def leading_redirection_write_targets(
-    toks: list[str], *, descriptor_words_are_files: bool = True
-) -> list[str]:
+def leading_redirection_write_targets(toks: list[str]) -> list[str]:
     """Return the write targets inside a command's leading redirection prefix.
 
     :func:`strip_leading_command_redirections` deletes that prefix so the real
-    executable resolves. Collect its targets first so the quote-aware argv pass
-    independently enforces the secret-path rule before that syntax is discarded.
-    The raw-text pass covers trailing redirects and keeps escape provenance; this
-    pass pins the same leading-prefix grammar after tokenization.
+    executable resolves.  The deletion also removes the only argv an
+    inert-QUOTED redirect target ever appears in: the whole-command text scan
+    reads :func:`strip_quotes` output, where ``'.env'`` has already collapsed to
+    a placeholder.  Collect the targets here so the caller can enforce the
+    secret-path rule BEFORE the prefix is dropped, the same way repository-config
+    redirect state is recorded from the original argv.
 
     Genuinely read-only operands (``<``, ``<&``, ``<<``, ``<<<``) are excluded:
     reading a file is not the irreversible act the floor blocks.  ``<>`` is NOT
@@ -4673,25 +4464,14 @@ def leading_redirection_write_targets(
             # the whole segment instead.
             break
         operator: str | None = None
-        first = command_prefix_redirection_token(token)
-        prefix_has_descriptor = bool(first and first[2]) or bool(
-            _REDIRECTION_DESCRIPTOR_TOKEN.fullmatch(token)
-            and index + 1 < len(toks)
-            and _ARGV_REDIRECTION_TOKEN.fullmatch(toks[index + 1])
-        )
         for consumed in toks[index:redirect_end]:
             combined = command_prefix_redirection_token(consumed)
             if combined is not None:
-                operator, glued_target, has_descriptor = combined
+                operator, glued_target, _has_descriptor = combined
                 if (
                     glued_target
                     and operator in _WRITING_REDIRECTION_OPERATORS
-                    and not descriptor_duplication_operand(
-                        operator,
-                        glued_target,
-                        has_descriptor=has_descriptor or prefix_has_descriptor,
-                        descriptor_words_are_files=descriptor_words_are_files,
-                    )
+                    and not descriptor_duplication_operand(operator, glued_target)
                 ):
                     targets.append(glued_target)
                 continue
@@ -4699,12 +4479,7 @@ def leading_redirection_write_targets(
                 # A bare file descriptor, never a path.
                 continue
             if operator in _WRITING_REDIRECTION_OPERATORS and not (
-                descriptor_duplication_operand(
-                    operator,
-                    consumed,
-                    has_descriptor=prefix_has_descriptor,
-                    descriptor_words_are_files=descriptor_words_are_files,
-                )
+                descriptor_duplication_operand(operator, consumed)
             ):
                 targets.append(consumed)
         index = redirect_end
@@ -4719,12 +4494,11 @@ def strip_leading_command_redirections(toks: list[str]) -> list[str]:
     ask for the head, so fixing head resolution alone still let the same prefix
     hide environment mutation, wrapper, and Windows-fallback cases.
 
-    Redirect targets are validated before this runs by two independent views:
-    :func:`output_redirect_targets` retains raw operator/escape provenance, while
-    :func:`leading_redirection_write_targets` pins the tokenized leading-prefix
-    grammar, including inert-quoted targets. Repository-config redirect state is
-    also recorded from the original argv. Removing the prefix here therefore
-    exposes the executable without discarding any of those policies.
+    Redirect targets are validated before this runs -- by the whole-command text
+    scan for bare targets and by :func:`leading_redirection_write_targets` for
+    inert-quoted ones -- and repository-config redirect state is recorded from
+    the original argv.  Removing the prefix here therefore exposes the
+    executable without discarding either of those two policies.
 
     It DOES discard a third: :func:`has_opaque_posix_shell_input` reads the
     input operands (``<``, ``<<<``, ``< <(...)``) that this strip removes, so a
@@ -5291,6 +5065,97 @@ def git_inline_alias(toks: list[str], subcommand: str) -> str | None:
         if key.lower() == f"alias.{subcommand}".lower():
             result = value
     return result
+
+
+_WORKTREE_CLEAN_CHECK_CONFIG = "status.showuntrackedfiles"
+_WORKTREE_CLEAN_CHECK_SAFE_VALUES = {"normal", "all"}
+#: Keys that blind the same clean check with NO safe value to allow-list.
+_WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG = {"core.excludesfile"}
+
+
+def worktree_removal_clean_check_weakened(
+    git_toks: list[str],
+    inline_configs: dict[str, list[str]],
+    config_env_keys: list[str] | None,
+) -> bool:
+    """True when argv-visible git config can blind removal's clean check.
+
+    Plain `git worktree remove` is graduated on the strength of git's own
+    refusal of a tree holding modified or untracked files, and that refusal
+    reads `status.showUntrackedFiles`: measured on git 2.45.1 (issue #123),
+    `-c status.showUntrackedFiles=no worktree remove` exits 0 on a tree whose
+    untracked file made the unprefixed spelling exit 128. A spelling that
+    weakens the check is therefore force-EQUIVALENT and rides the same
+    work-loss ladder, and an opaque key or value must never score better
+    than the literal weakening form it might be. Only argv is inspected:
+    repository/user configuration doing the same thing is outside the
+    parser's sight line (FLOOR_LIMITATIONS.md, issue #123's remainder).
+    """
+    for key, values in inline_configs.items():
+        if has_dynamic_shell_token(key):
+            return True
+        if key in _WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG:
+            # `core.excludesFile` has no safe VALUE the way showUntrackedFiles
+            # does: any file it names can be a catch-all (`*`), which makes git
+            # report every untracked file as ignored and turns the same refusal
+            # into exit 0. Measured on git 2.45.1. So the key gates whatever it
+            # is set to.
+            return True
+        if key == _WORKTREE_CLEAN_CHECK_CONFIG:
+            for value in values:
+                if (
+                    has_dynamic_shell_token(value)
+                    or value.lower() not in _WORKTREE_CLEAN_CHECK_SAFE_VALUES
+                ):
+                    return True
+    if config_env_keys is None:
+        # Malformed/opaque --config-env syntax anywhere in the command; the
+        # push guard treats this the same way (opaque is never safer).
+        return True
+    for key in config_env_keys:
+        if (
+            has_dynamic_shell_token(key)
+            or key.lower() == _WORKTREE_CLEAN_CHECK_CONFIG
+            or key.lower() in _WORKTREE_CLEAN_CHECK_EXCLUDES_CONFIG
+        ):
+            return True
+    # Any DYNAMIC `-c` argument, read from the raw tokens.
+    #
+    # Two reasons this cannot be narrowed to the watched key, both measured:
+    #
+    # 1. WORD SPLITTING. An unquoted dynamic value resplits after expansion, so
+    #    one `-c` token can deliver a second one: with
+    #    `X='a -c status.showUntrackedFiles=no'`, `git -c foo.bar=$X worktree
+    #    remove wt` runs the weakening assignment under a key this parser reads
+    #    as `foo.bar`. The key being unwatched proves nothing about what runs.
+    # 2. The parsed `inline_configs` view LOWERCASES keys, which destroys the
+    #    uppercase literal-backtick sentinel `has_dynamic_shell_token` looks
+    #    for -- so `git -c "`echo status.showUntrackedFiles`=no" worktree
+    #    remove wt` reads as an inert literal key up there. The raw tokens
+    #    still carry the sentinel, so scanning them here catches it.
+    #
+    # Reading the RAW token is what makes both cases visible, which is why this
+    # loop is not folded into the parsed pass above. A dynamic `-c` on a
+    # destructive removal is unprovable either way, and an opaque spelling must
+    # never score better than the literal weakening form it might be.
+    index = 1
+    while index < len(git_toks):
+        token = git_toks[index]
+        value = None
+        if token in ("-c", "--config-env") and index + 1 < len(git_toks):
+            value = git_toks[index + 1]
+            index += 2
+        elif token.startswith("--config-env="):
+            value = token[len("--config-env=") :]
+            index += 1
+        elif token.startswith("-c") and len(token) > 2:
+            value = token[2:]
+            index += 1
+        else:
+            index += 1
+        if value is not None and has_dynamic_shell_token(value):
+            return True
+    return False
 
 
 def git_inline_configs(toks: list[str]) -> dict[str, list[str]]:
@@ -7591,20 +7456,381 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def command_output(argv: list[str], cwd: str, timeout: float = 3) -> str:
+_PROBE_BINARY_CACHE: dict[str, str | None] = {}
+
+# Read-only probes must never prompt, block on an optional lock, or colour their
+# output. A credential helper that opens a dialog inside a 5s hook is a hang, and
+# a hang is the mute denial issue #90 is about.
+_PROBE_ENVIRONMENT = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GCM_INTERACTIVE": "never",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "NO_COLOR": "1",
+}
+
+
+# Windows `CreateProcess` runs a `.CMD`/`.BAT` target through `cmd.exe`, which
+# RE-PARSES the command line; a `.EXE`/`.COM` is an image and re-parses nothing.
+_NON_REPARSING_EXTENSIONS = frozenset({".exe", ".com"})
+
+# Two populations, two rules.
+#
+# argv[1:] can carry repository-controlled text — a remote name, a repository
+# slug — so it gets an ALLOWLIST: the floor cannot enumerate every character
+# `cmd.exe` treats specially across its quoting states, but it can enumerate the
+# ones a remote name and a repository slug legitimately hold, and every other
+# token is refused.
+#
+# argv[0] is the resolver's own output: an absolute PATH directory plus a fixed
+# probe name, chosen by whoever installed the machine and NOT by the repository.
+# An allowlist there refused ordinary Windows installs — `Program Files (x86)`,
+# an accented or CJK user name, a directory holding `[]` — and on such a box
+# every visibility probe is refused, so a sensitive_data push denies with
+# exactly the mute wall issue #90 is about, permanently. So argv[0] gets a
+# DENYLIST, in two parts, measured against a real `.cmd` spawn rather than
+# reasoned about:
+#
+#   * these survive quoting and must never appear at all;
+_SHIM_UNSAFE_IMAGE_CHARACTERS = re.compile('[&|<>^"%!\r\n]')
+#   * these are cmd.exe's own token delimiters and its grouping parentheses.
+#     They are literal inside quotes and split the command NAME outside them —
+#     `C:\dev\a,b\gh.cmd` runs `C:\dev\a`. subprocess quotes argv[0] only when
+#     it holds whitespace, which is why `C:\Program Files (x86)\gh.cmd` works
+#     while `C:\tools(x86)\gh.cmd` does not.
+_SHIM_UNQUOTED_IMAGE_DELIMITERS = re.compile(r"[,;=()]")
+_SHIM_SAFE_ARGUMENT = re.compile(r"[A-Za-z0-9._:/@~=+\\-]*")
+
+
+def probe_path_directories() -> list[str]:
+    """The PATH entries a probe may be resolved from: absolute ones only.
+
+    A relative entry (including the empty one Windows reads as ".") resolves
+    against the cwd, which is repository-controlled — the lane this resolver
+    exists to close.
+    """
+    return [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and os.path.isabs(entry)
+    ]
+
+
+def probe_path_extensions() -> list[str]:
+    """The extensions a bare probe name may acquire; empty off Windows."""
+    if os.name != "nt":
+        return []
+    return [
+        entry.strip()
+        for entry in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+        if entry.strip()
+    ]
+
+
+def probe_binary_search_order(
+    name: str, directories: list[str], extensions: list[str]
+) -> list[str]:
+    """Candidate paths in the order they may be tried — real images first.
+
+    Every directory is searched for a `.EXE`/`.COM` before ANY directory is
+    allowed to answer with a script shim, which inverts the shell's own
+    per-directory PATHEXT walk on purpose: a directory early on PATH must not be
+    able to turn a plain spawn into a `cmd.exe` one that re-reads argv. Within a
+    pass, PATH order is preserved. Off Windows there are no extensions, so the
+    order is simply PATH order.
+    """
+    if not extensions:
+        return [os.path.join(directory, name) for directory in directories]
+    images = [
+        extension
+        for extension in extensions
+        if extension.lower() in _NON_REPARSING_EXTENSIONS
+    ]
+    shims = [
+        extension
+        for extension in extensions
+        if extension.lower() not in _NON_REPARSING_EXTENSIONS
+    ]
+    declared = os.path.splitext(name)[1].lower()
+    if declared in {extension.lower() for extension in extensions}:
+        # `gh.cmd` names its own extension; try it verbatim, in its own pass.
+        if declared in _NON_REPARSING_EXTENSIONS:
+            images.insert(0, "")
+        else:
+            shims.insert(0, "")
+    order: list[str] = []
+    for pass_extensions in (images, shims):
+        for directory in directories:
+            base = os.path.join(directory, name)
+            order.extend(base + extension for extension in pass_extensions)
+    return order
+
+
+def probe_binary_is_runnable(path: str) -> bool:
+    """A candidate the operating system would actually execute."""
+    if not os.path.isfile(path):
+        return False
+    return os.name == "nt" or os.access(path, os.X_OK)
+
+
+def probe_image_reparses(path: str) -> bool:
+    """True when spawning `path` hands the command line to a re-parsing shell.
+
+    Windows runs a `.CMD`/`.BAT` target through `cmd.exe`, which re-reads the
+    whole command line, so `&`, `|` and `>` inside an argument become commands.
+    A POSIX `#!` script receives its argv as an array and re-parses nothing.
+    """
+    if os.name != "nt":
+        return False
+    return os.path.splitext(path)[1].lower() not in _NON_REPARSING_EXTENSIONS
+
+
+def probe_image_is_quoted(image: str) -> bool:
+    """True when the spawn wraps argv[0] in quotes, so cmd.exe sees one token.
+
+    Asked of `subprocess` itself rather than restated here: the quoting rule
+    belongs to the module that builds the command line, and a copy of it would
+    be a second source of truth that can drift.
+    """
+    return subprocess.list2cmdline([image]).startswith('"')
+
+
+def probe_argv_shim_hazard(argv: list[str]) -> str:
+    """Name why `argv` must not be re-read by `cmd.exe`, or "" when it is safe.
+
+    The causes are reported apart because they mean different things to whoever
+    reads the diagnostic: a refused argument is repository-controlled text the
+    floor declines to pass on, while a refused image path is the machine's own
+    installation layout and no repository can change it.
+    """
+    if not argv:
+        return "empty command"
+    image = argv[0]
+    if _SHIM_UNSAFE_IMAGE_CHARACTERS.search(image):
+        return "its resolved path holds a cmd.exe metacharacter"
+    if not probe_image_is_quoted(image) and _SHIM_UNQUOTED_IMAGE_DELIMITERS.search(
+        image
+    ):
+        return "its resolved path holds an unquoted cmd.exe delimiter"
+    if not all(_SHIM_SAFE_ARGUMENT.fullmatch(token) for token in argv[1:]):
+        return "unsafe arguments"
+    return ""
+
+
+def resolve_probe_binary(name: str) -> str | None:
+    """Resolve a probe binary against PATH only — never the cwd, images first.
+
+    Two hazards, two rules.
+
+    *The cwd.* subprocess's implicit Windows resolution (CreateProcess) searches
+    the current directory, so a repo could shadow `git`/`gh` with a planted
+    executable. Only absolute PATH entries are searched, which closes that lane
+    and makes a missing binary a NAMED diagnosis instead of a silent empty probe.
+
+    *Script shims.* Resolving through PATHEXT is what lets a box whose `gh` is
+    genuinely a `.cmd` be inspected at all (issue #90), but a `.cmd` runs under
+    `cmd.exe`, which re-parses a command line carrying repository-controlled
+    text. So a real image anywhere on PATH beats a shim everywhere on PATH
+    (`probe_binary_search_order`), and when a shim is the only answer
+    `command_output` refuses to spawn it with argv `cmd.exe` could re-read.
+    """
+    if name in _PROBE_BINARY_CACHE:
+        return _PROBE_BINARY_CACHE[name]
+    resolved = None
+    if os.path.dirname(name):
+        # An explicit path keeps its meaning; searching for it would change it.
+        resolved = name if os.path.isfile(name) else None
+    else:
+        for candidate in probe_binary_search_order(
+            name, probe_path_directories(), probe_path_extensions()
+        ):
+            if probe_binary_is_runnable(candidate):
+                resolved = candidate
+                break
+    _PROBE_BINARY_CACHE[name] = resolved
+    return resolved
+
+
+# git prints the whole remote URL when a lookup fails — credentials included —
+# and `gh` echoes tokens from a misconfigured credential helper. A diagnostic
+# line reaches `permissionDecisionReason`, which the runtime renders and the
+# transcript stores, so every known credential shape is masked before it is
+# recorded. The trailing pattern is deliberately shape-blind: it catches the
+# token format that has not been invented yet. It does NOT span `/`, because a
+# path separator turned `/home/runner/work/agent_harness_checkout/sub/.git` into
+# `***.git` — a wall that names nothing is the failure issue #90 is about, and
+# the three shapes above already mask the credentials git and `gh` actually
+# print.
+_PROBE_SECRET_PATTERNS = (
+    re.compile(r"(?<=//)[^/@\s]+(?=@)"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{4,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{4,}"),
+    re.compile(r"[A-Za-z0-9+_]{24,}={0,2}"),
+)
+
+# Ordered: a GitHub rate-limit refusal is also an HTTP 403, so it must be
+# recognised before the authentication pattern claims it.
+_PROBE_FAILURE_CAUSES = (
+    (re.compile(r"rate[\s_-]?limit", re.IGNORECASE), "rate limit"),
+    (
+        re.compile(
+            r"\b(401|403)\b|unauthorized|bad credentials|authentication"
+            r"|permission denied|gh auth login|not logged in",
+            re.IGNORECASE,
+        ),
+        "authentication",
+    ),
+    (
+        re.compile(
+            r"\b404\b|not found|could not resolve to a repository", re.IGNORECASE
+        ),
+        "not found",
+    ),
+    (
+        re.compile(
+            r"could not resolve host|connection (refused|reset)|no such host"
+            r"|network is unreachable|temporary failure in name resolution"
+            r"|i/o timeout|tls handshake",
+            re.IGNORECASE,
+        ),
+        "network",
+    ),
+)
+
+
+def redact_probe_text(text: str) -> str:
+    """Mask every credential shape a probe's output is known to carry."""
+    for pattern in _PROBE_SECRET_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
+def classify_probe_failure(text: str) -> str:
+    """Name a probe failure's cause when the text makes it recognisable."""
+    for pattern, cause in _PROBE_FAILURE_CAUSES:
+        if pattern.search(text):
+            return cause
+    return ""
+
+
+def probe_label(argv: list[str]) -> str:
+    """A short human label for a probe, for diagnosis lines humans read.
+
+    Redacted like every other emitted text: a probe's argv can carry a remote
+    URL, and a remote URL can carry credentials.
+    """
+    return redact_probe_text(" ".join(argv[:4])) if argv else "<empty command>"
+
+
+def note_probe_failure(diagnostics: list[str] | None, message: str) -> None:
+    """Record one probe failure; a caller that passed nothing sees no change."""
+    if isinstance(diagnostics, list):
+        diagnostics.append(message)
+
+
+def probe_stderr_head(stderr: str | None, limit: int = 160) -> str:
+    """The first non-empty stderr line: classified on the RAW text, then masked.
+
+    Classification reads the line BEFORE redaction because redaction is
+    deliberately shape-blind and ate the very words that name the cause:
+    `error: rate_limit_exceeded_for_installation` redacted to `error: ***` and
+    then classified as nothing at all. The cause labels are fixed literals, so
+    reading the raw line cannot carry a credential into the output.
+
+    Redaction still runs before the text is RECORDED anywhere, not before it is
+    displayed — a diagnostic that has already been appended to a deny reason has
+    already been emitted.
+    """
+    raw = ""
+    for line in (stderr or "").splitlines():
+        if line.strip():
+            raw = line.strip()
+            break
+    if not raw:
+        return "no stderr"
+    cause = classify_probe_failure(raw)
+    head = redact_probe_text(raw)
+    return (f"{cause}: {head}" if cause else head)[:limit]
+
+
+def command_output(
+    argv: list[str],
+    cwd: str,
+    timeout: float = 3,
+    diagnostics: list[str] | None = None,
+) -> str:
+    """Run a read-only probe, returning stdout and NAMING every failure mode.
+
+    Issue #90: every failure used to collapse into an indistinguishable "" — a
+    quota-exhausted `gh`, a process-spawn failure under machine resource
+    pressure and a genuinely empty answer were the same value, so the
+    sensitive_data push guard denied with a wall that could not say why. When a
+    list is passed as `diagnostics` each failure appends one line to it; the
+    return contract is unchanged (stdout on rc 0, else "").
+    """
+    label = probe_label(argv)
+    if not argv:
+        note_probe_failure(diagnostics, "empty probe command")
+        return ""
+    executable = resolve_probe_binary(argv[0])
+    if executable is None:
+        note_probe_failure(diagnostics, f"{argv[0]}: not found on PATH")
+        return ""
+    spawn_argv = [executable, *argv[1:]]
+    hazard = (
+        probe_argv_shim_hazard(spawn_argv) if probe_image_reparses(executable) else ""
+    )
+    if hazard:
+        # A `.cmd` re-parses argv under `cmd.exe`, and probe argv carries text a
+        # repository controls (a remote name, a repository slug). Refusing NAMES
+        # the cause; spawning would run whatever the metacharacters spell.
+        note_probe_failure(
+            diagnostics,
+            f"{argv[0]}: only a script shim on PATH; refusing to spawn: {hazard}",
+        )
+        return ""
     try:
         proc = subprocess.run(
-            argv,
+            spawn_argv,
             cwd=cwd or None,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, **_PROBE_ENVIRONMENT},
+            stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError as exc:
+        note_probe_failure(diagnostics, f"{label}: spawn failed: {exc}")
         return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        note_probe_failure(diagnostics, f"{label}: timed out after {timeout:g}s")
+        return ""
+    except subprocess.SubprocessError as exc:
+        note_probe_failure(
+            diagnostics, f"{label}: probe failed: {exc.__class__.__name__}"
+        )
+        return ""
+    if proc.returncode != 0:
+        note_probe_failure(
+            diagnostics,
+            f"{label}: exit {proc.returncode}: {probe_stderr_head(proc.stderr)}",
+        )
+        return ""
+    output = proc.stdout.strip()
+    if not output:
+        note_probe_failure(diagnostics, f"{label}: exit 0 with empty output")
+    return output
 
+
+# The identity `command_output_before_deadline` tests a runner against. It must
+# NOT be the module global: `scripts/replay_corpus.py:make_module_offline`
+# rebinds `dispatch.command_output` to its own two-argument stub, so a check
+# against the global answers True for that stub and hands it a `diagnostics=`
+# keyword it never declared. The floor contracts an exception to DENY, so the
+# result was a fail-closed floor whose own measurement instrument could not run.
+_NATIVE_COMMAND_OUTPUT = command_output
 
 _REMOTE_RESOLUTION_BUDGET_SECONDS = 3.5
 
@@ -7614,18 +7840,35 @@ def command_output_before_deadline(
     argv: list[str],
     cwd: str,
     deadline: float | None,
+    diagnostics: list[str] | None = None,
 ) -> str:
-    """Run a resolver command without overrunning the hook's aggregate budget."""
+    """Run a resolver command without overrunning the hook's aggregate budget.
+
+    `diagnostics` reaches the runner ONLY when it is this module's own
+    `command_output`, compared against the private alias rather than the module
+    global — an injected runner (tests, `scripts/replay_corpus.py`, which
+    rebinds the global) keeps its two-argument contract and must never be handed
+    a keyword it does not declare. Budget outcomes are recorded either way.
+    """
+    label = probe_label(argv)
     if deadline is None:
+        if command_runner is _NATIVE_COMMAND_OUTPUT:
+            return command_runner(argv, cwd, diagnostics=diagnostics)
         return command_runner(argv, cwd)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
+        note_probe_failure(diagnostics, f"probe budget exhausted before {label}")
         return ""
-    if command_runner is command_output:
-        output = command_runner(argv, cwd, timeout=min(3, remaining))
+    if command_runner is _NATIVE_COMMAND_OUTPUT:
+        output = command_runner(
+            argv, cwd, timeout=min(3, remaining), diagnostics=diagnostics
+        )
     else:
         output = command_runner(argv, cwd)
-    return output if time.monotonic() <= deadline else ""
+    if time.monotonic() > deadline:
+        note_probe_failure(diagnostics, f"{label}: exceeded probe budget")
+        return ""
+    return output
 
 
 def push_remotes(
@@ -7634,6 +7877,7 @@ def push_remotes(
     git_globals: list[str] | None = None,
     command_runner=command_output,
     deadline: float | None = None,
+    diagnostics: list[str] | None = None,
 ) -> list[str]:
     """Resolve every effective destination URL for a git push."""
     remote = ""
@@ -7690,6 +7934,7 @@ def push_remotes(
         ],
         project_dir,
         deadline,
+        diagnostics,
     )
     return [line.strip() for line in output.splitlines() if line.strip()]
 
@@ -8083,6 +8328,57 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+_REST_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def github_rest_repo_path(slug: str) -> str:
+    """Map a repository slug onto the REST route's `<owner>/<repo>` pair.
+
+    `github_repo_slug` returns the bare pair today; the host prefixes are
+    stripped so that a caller which ever pins the host in the slug still asks
+    `repos/owner/repo` rather than `repos/github.com/owner/repo`. The REST call
+    itself is pinned at the call site with `--hostname github.com`, not here —
+    the GraphQL lane pins the same question as `github.com/<owner>/<repo>`,
+    because `gh repo view` accepts `[HOST/]OWNER/REPO` and resolves a bare pair
+    against GH_HOST (`harness.py:github_visibility` records the same hazard).
+
+    The result is interpolated into argv, so validation is an ALLOWLIST and
+    every rejection returns "" — the REST lane is then skipped and GraphQL
+    answers. Exactly two segments, each of the characters GitHub actually allows
+    in an owner or repository name and never all dots: `../x` must not become
+    `repos/../x`, and `a&b/c` must never reach a command line at all.
+    """
+    path = slug.strip().strip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if path.lower().startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    segments = path.split("/")
+    if len(segments) != 2:
+        return ""
+    for segment in segments:
+        if not _REST_PATH_SEGMENT.fullmatch(segment) or not segment.strip("."):
+            return ""
+    return path
+
+
+def detail_with_diagnostics(base: str, diagnostics: list[str], limit: int = 300) -> str:
+    """Suffix the probe failures that caused an unverifiable remote onto `base`.
+
+    The caller interpolates this into "could not verify push remote privacy
+    (...)", so the wall names its own cause instead of being mute (issue #90).
+    """
+    if not diagnostics:
+        return base
+    detail = f"{base} — {'; '.join(diagnostics[-3:])}"
+    return detail if len(detail) <= limit else detail[: limit - 3] + "..."
+
+
+# The only three answers either transport may give. Anything else — a literal
+# `null`, an error page, a future spelling — is not a verdict.
+_KNOWN_VISIBILITIES = frozenset({"PUBLIC", "PRIVATE", "INTERNAL"})
+
+
 def public_remote_status(
     args: list[str],
     project_dir: str,
@@ -8093,6 +8389,7 @@ def public_remote_status(
     """Classify every push destination; unknown is fail-closed to the caller."""
     if deadline is None:
         deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    diagnostics: list[str] = []
     recurse_mode = git_push_recurse_mode(args)
     if recurse_mode is None:
         recurse_mode = command_output_before_deadline(
@@ -8108,18 +8405,29 @@ def public_remote_status(
             ],
             project_dir,
             deadline,
+            diagnostics,
         ).lower()
     if recurse_mode not in {"no", "check"}:
-        return None, "unverified recursive-submodule push destinations"
+        return None, detail_with_diagnostics(
+            "unverified recursive-submodule push destinations", diagnostics
+        )
     remotes = push_remotes(
         args,
         project_dir,
         git_globals,
         command_runner,
         deadline,
+        diagnostics,
     )
     if not remotes:
-        return None, "unresolved push remote"
+        return None, detail_with_diagnostics("unresolved push remote", diagnostics)
+    # Both transports draw on ONE aggregate budget, so a mute lane asked once
+    # per remote spends the budget that would have bought the answer. With three
+    # private pushurls and an exhausted REST quota that flipped a verified-private
+    # verdict into an unverified one — a NEW spurious denial in exactly the
+    # scenario this change exists to remove. A lane that came back mute once in
+    # this call is mute for the rest of it.
+    mute_transports: set[str] = set()
     for remote in dict.fromkeys(remotes):
         normalized = remote.lower()
         if normalized.startswith("file://") or re.match(
@@ -8128,27 +8436,581 @@ def public_remote_status(
             continue
         slug = github_repo_slug(remote)
         if not slug:
-            return None, "unverified non-GitHub destination"
-        visibility = command_output_before_deadline(
-            command_runner,
-            [
-                "gh",
-                "repo",
-                "view",
-                slug,
-                "--json",
-                "visibility",
-                "--jq",
-                ".visibility",
-            ],
-            project_dir,
-            deadline,
-        ).upper()
+            return None, detail_with_diagnostics(
+                "unverified non-GitHub destination", diagnostics
+            )
+        # REST first: `gh repo view` is a GraphQL call, and an agent fleet
+        # exhausts the GraphQL quota hourly while the REST core quota is barely
+        # touched (issue #90). A quota-denied probe returned "" and fail-closed
+        # a push to a repository the floor could have proved private.
+        #
+        # BOTH transports pin the host. `gh` resolves an unqualified question
+        # against GH_HOST, so on a machine pointed at a GitHub Enterprise
+        # instance an unpinned probe can answer PRIVATE about a different
+        # repository that happens to share the slug — while the github.com
+        # remote is public. REST pins with `--hostname github.com`; `gh repo
+        # view` takes `[HOST/]OWNER/REPO`, so GraphQL pins in the slug itself.
+        visibility = ""
+        rest_path = github_rest_repo_path(slug)
+        if rest_path and "rest" not in mute_transports:
+            visibility = command_output_before_deadline(
+                command_runner,
+                [
+                    "gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    f"repos/{rest_path}",
+                    "--jq",
+                    ".visibility",
+                ],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).upper()
+            if not visibility:
+                mute_transports.add("rest")
+            elif visibility not in _KNOWN_VISIBILITIES:
+                note_probe_failure(
+                    diagnostics,
+                    f"gh api repos/{rest_path}: unrecognized visibility "
+                    f"{redact_probe_text(visibility[:24])!r}",
+                )
+        if visibility not in _KNOWN_VISIBILITIES and "graphql" not in mute_transports:
+            # `gh api --jq .visibility` prints a literal `null` (exit 0) when the
+            # field is absent, and "NULL" is truthy — gating the fallback on
+            # emptiness rebuilt issue #90's mute wall on the new lane. Anything
+            # that is not a verdict falls through to the other transport.
+            visibility = command_output_before_deadline(
+                command_runner,
+                [
+                    "gh",
+                    "repo",
+                    "view",
+                    f"github.com/{slug}",
+                    "--json",
+                    "visibility",
+                    "--jq",
+                    ".visibility",
+                ],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).upper()
+            if not visibility:
+                mute_transports.add("graphql")
         if visibility == "PUBLIC":
             return True, slug
         if visibility not in {"PRIVATE", "INTERNAL"}:
-            return None, slug
+            return None, detail_with_diagnostics(slug, diagnostics)
     return False, "approved private destinations"
+
+
+_GIT_PUSH_URLISH_DESTINATION = re.compile(
+    r"^(https?://|ssh://|git@|file://|[a-zA-Z]:[\\/]|[./~])"
+)
+
+# Push options that publish refs the branch-attribution check never inspects,
+# or that delete them. `--follow-tags` is here for the same reason as `--tags`.
+_GIT_PUSH_SELECTOR_LONG_OPTIONS = (
+    "--all",
+    "--branches",
+    "--tags",
+    "--follow-tags",
+    "--mirror",
+    "--delete",
+)
+
+
+def git_globals_preserve_attribution(git_globals: list[str] | None) -> bool:
+    """Whether the git globals leave `--show-toplevel` naming the pushed repo.
+
+    `sensitive_push_narrowing_status` attributes a push by asking git for the
+    working tree's toplevel. `--work-tree` decouples that answer from the
+    repository whose refs, remote configuration and OBJECTS a push actually
+    uploads: with `--work-tree=<decoy>`, `--show-toplevel` names the decoy while
+    the git dir still comes from the cwd, so a directory holding nothing but a
+    `sensitive_data: false` tier declaration attributes a SENSITIVE repository's
+    push to itself. `--git-dir`, `--namespace`, `--bare`, `--super-prefix` and
+    any `-c`/`--config-env` setting (`core.worktree`, `core.gitdir`, …) split it
+    the same way.
+
+    This is an ALLOWLIST, not a blocklist: git accepts unambiguous prefixes of
+    every one of those options, so an enumeration of dangerous spellings cannot
+    be complete. Only `-C <path>` is tolerated — it moves the cwd, and every
+    probe in the narrowing inherits the identical globals, so the attributed
+    repository stays the pushed one. Everything else costs the exemption, which
+    is the pre-#132 status quo rather than a new denial.
+    """
+    tokens = list(git_globals or [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-C":
+            if index + 1 >= len(tokens):
+                return False
+            index += 2
+            continue
+        if token.startswith("-C") and len(token) > 2:
+            index += 1
+            continue
+        return False
+    return True
+
+
+def git_push_positional_operands(
+    args: list[str],
+) -> tuple[list[str], str, bool, bool] | None:
+    """Positional operands of a git push, its --repo value, and selector facts.
+
+    Returns (positionals, option_remote, selector, no_follow_tags) where
+    `selector` is True for any multi-ref or deletion selector
+    (--all/--branches/--tags/--mirror/--delete/-d/--follow-tags), and
+    `no_follow_tags` records an exact CLI negation in option position. Returns
+    None when an abbreviated value option
+    makes the argv unattributable — the same shape push_remotes() answers with
+    [].
+
+    Selectors are matched through `git_option_abbreviates`, not by literal
+    token: git accepts unambiguous long-option prefixes, so `--al` IS `--all`
+    and `--tag` IS `--tags`. Matching literals let those spellings publish every
+    branch or tag under an allow while the canonical spellings denied (PR #132
+    review). `--follow-tags` joins the set because it publishes annotated tags
+    alongside the branch, and a tag is a ref the branch-attribution check never
+    validates. `-d` is also matched inside a short cluster (`-vd`).
+    """
+    positionals: list[str] = []
+    option_remote = ""
+    selector = False
+    no_follow_tags = False
+    value_options = (_GIT_PUSH_VALUE_LONG_OPTIONS - {"--repo"}) | {"-o"}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if abbreviated_git_push_value_option(arg):
+            return None
+        if arg == "--repo":
+            option_remote = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
+            continue
+        if arg.startswith("--repo="):
+            option_remote = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        short_flags, short_consumes_next = git_push_short_option_shape(arg)
+        if "d" in short_flags:
+            selector = True
+        if short_consumes_next:
+            i += 2
+            continue
+        if arg in value_options:
+            i += 2
+            continue
+        if arg == "--no-follow-tags":
+            no_follow_tags = True
+            i += 1
+            continue
+        if any(
+            git_option_abbreviates(arg, selector_option, min_prefix=1)
+            for selector_option in _GIT_PUSH_SELECTOR_LONG_OPTIONS
+        ):
+            selector = True
+            i += 1
+            continue
+        if arg.startswith(("--exec=", "--receive-pack=", "--push-option=")) or (
+            arg.startswith("-o") and len(arg) > 2
+        ):
+            i += 1
+            continue
+        if not arg.startswith("-") or arg == "-":
+            positionals.append(arg)
+            i += 1
+            continue
+        i += 1
+    return positionals, option_remote, selector, no_follow_tags
+
+
+def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
+    """Source side of each explicit refspec; None for any non-plain shape.
+
+    Plain means a named source with no force prefix, no deletion (empty
+    source), and no wildcard, writing to a destination inside refs/heads.
+    The caller decides what a plain source must resolve to.
+
+    The DESTINATION side matters even though this function is named for the
+    source: `main:refs/tags/v1` has a perfectly valid branch source and still
+    creates a remote TAG, a ref class the ratified #48 condition set excludes
+    (PR #132 review). An unqualified destination is not safe either: Git can
+    resolve `main:feature/x` to an existing remote `refs/tags/feature/x`, so an
+    explicit destination must prove the `refs/heads/` namespace itself.
+    """
+    sources: list[str] = []
+    for refspec in refspecs:
+        if refspec.startswith("+"):
+            return None
+        src, colon, dst = refspec.partition(":")
+        if colon and not src:
+            return None
+        if not src or "*" in src:
+            return None
+        if colon and not dst.startswith("refs/heads/"):
+            return None
+        if "*" in dst:
+            return None
+        sources.append(src)
+    return sources
+
+
+def sensitive_push_narrowing_status(
+    args: list[str],
+    project_dir: str,
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+    deadline: float | None = None,
+) -> tuple[bool, str]:
+    """Issue #48's ratified narrowing: attribute a push to a non-sensitive repo.
+
+    The sensitive_data overlay is a CONTEXT property — `load_tier` unions the
+    cwd and CLAUDE_PROJECT_DIR chains, so a session rooted in a sensitive repo
+    carries the overlay into every push, including a different, non-sensitive
+    repository's own branches going to that repository's own remote. The owner
+    ratified (issue #48, reaffirmed 2026-07-27) allowing exactly that
+    attributable shape. Allow only when ALL hold:
+
+      0. the command's git globals cannot redirect which repository git
+         operates on, so the toplevel this function reads is the repository
+         whose objects the push uploads (`git_globals_preserve_attribution`);
+      1. the destination resolves to a configured remote of the pushed
+         repository (never a URL or path), or the push is refspec-less and the
+         repository inherits no configured push refspec — and no multi-ref,
+         tag-publishing or deletion selector is present;
+      2. every explicit refspec source is a named local branch (refs/heads/*)
+         or HEAD — no raw SHAs, tags, wildcards, or remote-tracking refs;
+      3. the pushed repository's toplevel carries its OWN tier declaration
+         EXPLICITLY setting sensitive_data false, and no ancestor of either
+         that toplevel or the primary checkout behind it (a linked worktree
+         can sit outside) declares sensitive_data — the sensitivity being set
+         aside must be purely contextual, never physical containment.
+
+    Any other shape, and any unresolvable probe, returns False and keeps the
+    context deny. Residual accepted by the ratification (FLOOR_LIMITATIONS.md):
+    a local branch can be created from fetched foreign objects — the floor is
+    a tripwire, not a provenance auditor.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    if not git_globals_preserve_attribution(git_globals):
+        return False, "git globals redirect the repository; push is unattributable"
+    parsed = git_push_positional_operands(args)
+    if parsed is None:
+        return False, "unattributable push argv"
+    positionals, option_remote, selector, no_follow_tags = parsed
+    if selector:
+        return False, "multi-ref or deletion selector"
+    # Positional wins over --repo, mirroring push_remotes and git itself
+    # ("if both are specified, the command-line argument takes precedence").
+    if positionals:
+        destination = positionals[0]
+        refspecs = positionals[1:]
+    else:
+        destination = option_remote
+        refspecs = []
+    if destination and _GIT_PUSH_URLISH_DESTINATION.match(destination):
+        return False, "destination is a URL, not a configured remote name"
+    sources = git_push_refspec_sources(refspecs)
+    if sources is None:
+        return False, "refspec is not a plain named source"
+    diagnostics: list[str] = []
+    # Attribute FIRST: every probe below asks a question about the pushed
+    # repository, so the repository has to be established before they can mean
+    # anything (and an unresolvable cwd keeps its own named deny).
+    toplevel = command_output_before_deadline(
+        command_runner,
+        ["git", *(git_globals or []), "rev-parse", "--show-toplevel"],
+        project_dir,
+        deadline,
+        diagnostics,
+    ).strip()
+    if not toplevel:
+        return False, detail_with_diagnostics(
+            "unresolved pushed repository", diagnostics
+        )
+    # The regex above is a cheap pre-filter, not the contract. Git accepts URL
+    # spellings it does not model (git://, rsync://, the scp-like host:path,
+    # ext::), so the documented "configured remote NAME" condition is proven by
+    # ASKING the repository, not by pattern-matching the token (PR #132 review).
+    if destination:
+        configured_remote = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "remote",
+                "get-url",
+                "--push",
+                "--all",
+                destination,
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not configured_remote:
+            return False, detail_with_diagnostics(
+                "destination is not a configured remote of the pushed repository",
+                diagnostics,
+            )
+    configured_push_state = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "config",
+            "--null",
+            "--list",
+        ],
+        project_dir,
+        deadline,
+        diagnostics,
+    )
+    if not configured_push_state:
+        return False, detail_with_diagnostics(
+            "unresolved push configuration", diagnostics
+        )
+    config_values: dict[str, list[str]] = {}
+    for entry in configured_push_state.split("\0"):
+        if not entry:
+            continue
+        key, separator, value = entry.partition("\n")
+        if not separator:
+            return False, "push configuration listing is malformed"
+        config_values.setdefault(key.lower(), []).append(value)
+    # The all-config probe exits zero even when a specific key is absent, so a
+    # resolver failure cannot collapse to the same answer as "not configured".
+    # Git treats an explicitly empty boolean value as false, but a VALUELESS
+    # key as true. The all-config format preserves that distinction: the empty
+    # value has the key/value newline parsed above, while a valueless entry has
+    # no separator and already failed closed as malformed. Unknown boolean
+    # text remains a deny even under --no-follow-tags; only a valid configured
+    # true is safely overridden by that exact CLI negation.
+    configured_follow_tags = [
+        value.strip().lower() for value in config_values.get("push.followtags", [])
+    ]
+    false_booleans = {"", "false", "no", "off", "0"}
+    true_booleans = {"true", "yes", "on", "1"}
+    if any(
+        value not in false_booleans | true_booleans for value in configured_follow_tags
+    ) or (
+        not no_follow_tags
+        and any(value in true_booleans for value in configured_follow_tags)
+    ):
+        return False, "configured push.followTags may publish annotated tags"
+    # Independent of the destination check: `git push origin` names a remote and
+    # is STILL refspec-less. Keying this off `else` skipped the very shape the
+    # review reported.
+    if not refspecs:
+        # A refspec-less push ships whatever `remote.<name>.push` names, which
+        # no argv token reveals and condition 2 therefore cannot check: a
+        # configured `refs/*:refs/*` exports every ref, and `refs/tags/x` a tag.
+        # The pre-existing bare-push guard only rejects FORCE/delete/mirror/
+        # receive-pack shapes, so a plain multi-ref export reached the exemption
+        # unexamined. Over-approximate across every remote, as that guard does.
+        configured_push_refspecs = command_output_before_deadline(
+            command_runner,
+            [
+                "git",
+                *(git_globals or []),
+                "config",
+                "--get-regexp",
+                r"^remote\..*\.push$",
+            ],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if configured_push_refspecs:
+            return False, "a refspec-less push inherits a configured push refspec"
+        configured_push_defaults = config_values.get("push.default", [])
+        push_default = (
+            configured_push_defaults[-1].strip().lower()
+            if configured_push_defaults
+            else "simple"
+        )
+        if push_default == "tracking":
+            # Git retains `tracking` as a deprecated synonym for `upstream`.
+            push_default = "upstream"
+        if push_default == "upstream":
+            current_branch_ref = command_output_before_deadline(
+                command_runner,
+                [
+                    "git",
+                    *(git_globals or []),
+                    "symbolic-ref",
+                    "--quiet",
+                    "HEAD",
+                ],
+                project_dir,
+                deadline,
+                diagnostics,
+            ).strip()
+            current_branch = (
+                current_branch_ref.removeprefix("refs/heads/")
+                if current_branch_ref.startswith("refs/heads/")
+                else ""
+            )
+            upstream_merge = (
+                command_output_before_deadline(
+                    command_runner,
+                    [
+                        "git",
+                        *(git_globals or []),
+                        "config",
+                        "--get-all",
+                        f"branch.{current_branch}.merge",
+                    ],
+                    project_dir,
+                    deadline,
+                    diagnostics,
+                ).splitlines()
+                if current_branch
+                else []
+            )
+            if not upstream_merge or any(
+                not merge_ref.strip().startswith("refs/heads/")
+                for merge_ref in upstream_merge
+            ):
+                return False, "push.default upstream does not target refs/heads"
+        elif push_default not in {"simple", "current"}:
+            return False, f"push.default {push_default or 'unknown'} is not branch-only"
+    declaration_present = False
+    for authority_dir in (".agent-harness", ".claude"):
+        try:
+            os.lstat(os.path.join(toplevel, authority_dir, "tier.json"))
+        except OSError:
+            continue
+        declaration_present = True
+    if not declaration_present:
+        return False, "the pushed repository declares no tier"
+    try:
+        pushed_tier = load_tier(toplevel)
+    except Exception:
+        return False, "the pushed repository's tier declaration is unreadable"
+    pushed_flags = pushed_tier.get("flags", {})
+    # The ratification says the repository must DECLARE sensitive_data false.
+    # An omitted key is silence, not a declaration, and silence must not unlock
+    # a security exemption by defaulting to falsy (PR #132 review).
+    if "sensitive_data" not in pushed_flags:
+        return False, "the pushed repository does not declare sensitive_data"
+    if pushed_flags.get("sensitive_data") is not False:
+        return False, "the pushed repository itself declares sensitive_data"
+
+    def same_repository_path(left: str, right: str) -> bool:
+        """Compare live Git paths by identity, with a fail-closed fallback.
+
+        Hosted Windows can report an 8.3 alias while Python holds the long
+        spelling, and macOS can report /var for Python's /private/var. Both
+        paths exist at this point, so samefile proves identity across aliases.
+        """
+        try:
+            return os.path.samefile(left, right)
+        except OSError:
+            return False
+
+    # A LINKED WORKTREE can live outside the repository it belongs to, so the
+    # toplevel alone does not prove where the repository sits: the same repo was
+    # denied from its primary checkout inside a sensitive root and exempted from
+    # a worktree placed outside it. Walk the primary checkout behind the common
+    # directory as well (PR #132 review).
+    containment_roots = [toplevel]
+    common_dir = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        project_dir,
+        deadline,
+        diagnostics,
+    ).strip()
+    if not common_dir:
+        return False, detail_with_diagnostics(
+            "unresolved repository common directory", diagnostics
+        )
+    if not os.path.isabs(common_dir):
+        return False, "repository common directory is not absolute"
+    common_dir = os.path.abspath(common_dir)
+    worktree_metadata = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ],
+        project_dir,
+        deadline,
+        diagnostics,
+    )
+    primary_record = worktree_metadata.split("\0", 1)[0]
+    if not primary_record.startswith("worktree "):
+        return False, detail_with_diagnostics(
+            "unresolved primary checkout", diagnostics
+        )
+    primary_checkout = os.path.abspath(primary_record[len("worktree ") :])
+    common_parent = os.path.dirname(common_dir)
+    if not same_repository_path(primary_checkout, common_parent):
+        # Ordinary submodules and separate-Git-dir repositories can expose the
+        # same forward metadata while another checkout points at the same Git
+        # directory from an unenumerable sensitive location. No forward-only
+        # probe can prove that hidden reference absent, so neither topology can
+        # earn the public-push exemption (PR #200 late review).
+        return False, "a separate Git directory hides the primary checkout"
+    containment_roots.append(primary_checkout)
+    # Skip ONLY the toplevel, whose declaration condition 3 just validated.
+    # Skipping the primary too — which an earlier revision did, by building the
+    # skip set from BOTH roots — silences the primary's OWN declaration whenever
+    # the worktree is nested inside it (`<primary>/.worktrees/<n>`, this estate's
+    # standard layout). A sensitive repository's worktree then published its
+    # branch to a public remote while the same push from the primary checkout
+    # denied. The primary is a DIFFERENT working tree: its tier.json is a
+    # different file from the worktree's checkout of it, so it must be read, not
+    # assumed (PR #132 fix-diff verification).
+    for root in containment_roots:
+        for declared in declared_project_dirs(root):
+            if same_repository_path(declared, toplevel):
+                continue
+            try:
+                declared_tier = load_tier(declared)
+            except Exception:
+                return False, "a containing tier declaration is unreadable"
+            if declared_tier.get("flags", {}).get("sensitive_data"):
+                return False, "the pushed repository sits inside a sensitive_data root"
+    for src in sources:
+        if src == "HEAD":
+            continue
+        if src.startswith("refs/") and not src.startswith("refs/heads/"):
+            return False, "refspec source is outside refs/heads"
+        ref_name = src if src.startswith("refs/heads/") else f"refs/heads/{src}"
+        verified = command_output_before_deadline(
+            command_runner,
+            ["git", *(git_globals or []), "show-ref", "--verify", ref_name],
+            project_dir,
+            deadline,
+            diagnostics,
+        ).strip()
+        if not verified:
+            return False, detail_with_diagnostics(
+                f"refspec source {src!r} is not a local branch", diagnostics
+            )
+    return True, toplevel
 
 
 def read_tier_file(path: str) -> dict:
@@ -8256,20 +9118,6 @@ def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
         "tier": max(cfg.get("tier", 1) for cfg in configs),
         "flags": flags,
     }
-
-
-def normalize_named_descriptors_for_segmentation(sanitized: str) -> str:
-    """Keep Bash ``{name}>`` descriptors intact through the brace splitter.
-
-    The sanitized fallback splits on braces to expose executable block bodies. A named
-    redirection descriptor is not a block, so represent it with an equivalent numeric
-    descriptor before that structural pass; quote-aware/raw passes retain the original.
-    """
-    return re.sub(
-        r"(?<![A-Za-z0-9_])\{[A-Za-z_][A-Za-z0-9_]*\}(?=>)",
-        "9",
-        sanitized,
-    )
 
 
 def segments(sanitized: str):
@@ -8548,10 +9396,10 @@ def check(
     _cwd_uncertain: bool = False,
     _cwd_changed: bool = False,
     remote_resolver=public_remote_status,
+    push_narrowing=sensitive_push_narrowing_status,
     _remote_cache: dict | None = None,
     _remote_deadline: float | None = None,
     _git_repository_environment: frozenset[str] | None = None,
-    _shell_dialect: str | None = None,
 ):
     """Return (decision, reason). decision in {'allow', 'ask', 'deny'}."""
     if _remote_cache is None:
@@ -8598,10 +9446,10 @@ def check(
             _cwd_uncertain,
             _cwd_changed,
             remote_resolver,
+            push_narrowing,
             _remote_cache,
             _remote_deadline,
             frozenset(repository_environment_seed),
-            _shell_dialect="powershell",
         )
     call_normalized = normalize_literal_call_operators(command)
     # `@` belongs in the alternation: `& @{x={...}}.x` is as dynamic a call
@@ -8621,12 +9469,8 @@ def check(
     ):
         return "deny", "A dynamic scriptblock invocation cannot be inspected safely."
     sanitized, inert_placeholders = strip_quotes(command)
-    for redirect_target in output_redirect_targets(
-        sanitized,
-        backslash_escapes=_shell_dialect != "cmd",
-        descriptor_words_are_files=_shell_dialect != "bash",
-    ):
-        redirect_target = redirect_target.strip("'\"")
+    for full_redirect in re.finditer(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", sanitized):
+        redirect_target = full_redirect.group(1).strip("'\"")
         if has_dynamic_shell_token(redirect_target) or re.match(
             r"^[<>]?\(", redirect_target
         ):
@@ -8642,20 +9486,12 @@ def check(
         # all, so this loop never sees it). The dynamic-target test above keeps
         # reading the UNRESOLVED token on purpose: `> "%TARGET%"` is deliberately
         # left quoted by strip_quotes and is decided by the per-segment rules.
-        target_candidates = [redirect_target]
-        if _shell_dialect not in {"cmd", "powershell"}:
-            posix_target = posix_unescape_shell_word(redirect_target)
-            if posix_target != redirect_target:
-                target_candidates.append(posix_target)
-        for target_candidate in target_candidates:
-            resolved_candidate = decode_inert_git_token(
-                target_candidate, inert_placeholders
+        resolved_target = decode_inert_git_token(redirect_target, inert_placeholders)
+        if token_mentions_secret_path(resolved_target):
+            return (
+                "deny",
+                f"Redirecting output into a secret-looking file ({resolved_target}) is floor-blocked.",
             )
-            if token_mentions_secret_path(resolved_candidate):
-                return (
-                    "deny",
-                    f"Redirecting output into a secret-looking file ({resolved_candidate}) is floor-blocked.",
-                )
 
     # Pipe rules run on the full sanitized text (the pipe IS the signal).
     if has_download_pipe_to_shell(command):
@@ -8692,9 +9528,7 @@ def check(
         pass_id += 1
     execution_segments.extend(
         (tokens(segment), False, segment, "", pass_id, index)
-        for index, segment in enumerate(
-            segments(normalize_named_descriptors_for_segmentation(sanitized))
-        )
+        for index, segment in enumerate(segments(sanitized))
     )
     # A literal scriptblock split across segments continues in the segments that
     # follow it within the same pass; complete_scriptblock_argv walks these so a
@@ -8719,7 +9553,7 @@ def check(
     command_aliases: dict[str, str] = {}
     previous_pass = None
 
-    def _recurse_child(child_command: str, *, shell_dialect: str | None = None):
+    def _recurse_child(child_command: str):
         """Inspect a wrapper/launcher's child command with the live segment cwd
         and Git-env context. Closes over the loop locals, read at call time."""
         return check(
@@ -8731,10 +9565,10 @@ def check(
             cwd_uncertain,
             cwd_changed,
             remote_resolver,
+            push_narrowing,
             _remote_cache,
             _remote_deadline,
             frozenset(effective_git_repository_environment),
-            _shell_dialect=shell_dialect or _shell_dialect,
         )
 
     def _inspect_literal_scriptblock_bodies(argv: list[str]):
@@ -8828,7 +9662,7 @@ def check(
             ):
                 if not subexpression_invokes_a_command(body):
                     continue
-                decision = _recurse_child(body, shell_dialect="powershell")
+                decision = _recurse_child(body)
                 if decision[0] != "allow":
                     return decision
         return "allow", ""
@@ -8881,10 +9715,7 @@ def check(
                         rejoin_argv_as_command(assigned)
                     ) and _statement_invokes_a_command(assigned):
                         invokes_a_command = True
-                        rhs_decision = _recurse_child(
-                            rejoin_argv_as_command(assigned),
-                            shell_dialect="powershell",
-                        )
+                        rhs_decision = _recurse_child(rejoin_argv_as_command(assigned))
                         if rhs_decision[0] != "allow":
                             return rhs_decision
                     else:
@@ -8920,7 +9751,7 @@ def check(
             text if index == len(program) - 1 else f"{text} {separator or ';'}"
             for index, (text, separator) in enumerate(program)
         )
-        return _recurse_child(body_program, shell_dialect="powershell")
+        return _recurse_child(body_program)
 
     for (
         raw,
@@ -8950,9 +9781,7 @@ def check(
             repository_config_may_have_changed
             or segment_may_mutate_repository_config(raw)
         )
-        for redirect_target in leading_redirection_write_targets(
-            raw, descriptor_words_are_files=_shell_dialect != "bash"
-        ):
+        for redirect_target in leading_redirection_write_targets(raw):
             if token_mentions_secret_path(redirect_target):
                 return (
                     "deny",
@@ -9037,10 +9866,10 @@ def check(
                         cwd_uncertain,
                         cwd_changed,
                         remote_resolver,
+                        push_narrowing,
                         _remote_cache,
                         _remote_deadline,
                         frozenset(effective_git_repository_environment),
-                        _shell_dialect="powershell",
                     )
                     if assignment_decision[0] != "allow":
                         return assignment_decision
@@ -9139,12 +9968,7 @@ def check(
             ):
                 evaluated_args.pop(0)
             if evaluated_args:
-                evaluated_text = " ".join(evaluated_args)
-                evaluated = (
-                    restore_literal_redirect_markers(evaluated_text)
-                    if head == "eval"
-                    else restore_quoted_literal_markers(evaluated_text)
-                )
+                evaluated = restore_quoted_literal_markers(" ".join(evaluated_args))
                 if is_dynamic_value(evaluated):
                     return (
                         "deny",
@@ -9166,14 +9990,10 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
-                    _shell_dialect=(
-                        "powershell"
-                        if head in {"iex", "invoke-expression"}
-                        else _shell_dialect or "posix"
-                    ),
                 )
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
@@ -9196,13 +10016,6 @@ def check(
                 "an uninspected child command. If elevation is truly needed, the human runs it.",
             )
         if head in {"start-process", "saps"}:
-            if not quote_aware:
-                # The sanitized pass replaces each literal ArgumentList element with
-                # an inert placeholder. Reconstructing a direct child from those
-                # placeholders loses option arity (`-q` disappears from curl) and can
-                # manufacture a false deny. The quote-aware pass above carries the
-                # complete literal argv and is the authoritative view for this API.
-                continue
             child_command, error = powershell_start_process_command(toks)
             if child_command is None:
                 return "deny", error
@@ -9215,6 +10028,7 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
@@ -9238,10 +10052,10 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
-                    _shell_dialect="powershell",
                 )
                 if child_decision[0] != "allow":
                     return child_decision
@@ -9317,7 +10131,7 @@ def check(
                 child = restore_quoted_literal_markers(value)
                 if is_dynamic_value(child):
                     return "deny", "A dynamic script -c command cannot be inspected."
-                child_decision = _recurse_child(child, shell_dialect="sh")
+                child_decision = _recurse_child(child)
                 if child_decision[0] != "allow":
                     return child_decision
                 break
@@ -9335,7 +10149,7 @@ def check(
                         "deny",
                         f"A dynamic {head} child command cannot be inspected safely.",
                     )
-                child_decision = _recurse_child(child_command, shell_dialect="posix")
+                child_decision = _recurse_child(child_command)
                 if child_decision[0] != "allow":
                     return child_decision
             continue
@@ -9397,10 +10211,10 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
-                    _shell_dialect="posix",
                 )
                 if wsl_decision[0] != "allow":
                     return wsl_decision
@@ -9408,11 +10222,8 @@ def check(
         if head == "call":
             if len(toks) < 2 or is_dynamic_value(" ".join(toks[1:])):
                 return "deny", "A dynamic cmd call target cannot be inspected safely."
-            call_child = join_cmd_child_argv(
-                restore_quoted_literal_markers(token) for token in toks[1:]
-            )
             nested_decision = check(
-                call_child,
+                restore_quoted_literal_markers(" ".join(toks[1:])),
                 tier_cfg,
                 project_dir,
                 current_cwd,
@@ -9420,10 +10231,10 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
-                _shell_dialect="cmd",
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -9663,14 +10474,10 @@ def check(
                 cwd_uncertain,
                 cwd_changed,
                 remote_resolver,
+                push_narrowing,
                 _remote_cache,
                 _remote_deadline,
                 frozenset(effective_git_repository_environment),
-                _shell_dialect=(
-                    "cmd"
-                    if head == "cmd"
-                    else "powershell" if head in {"pwsh", "powershell"} else head
-                ),
             )
             if nested_decision[0] != "allow":
                 return nested_decision
@@ -9983,30 +10790,219 @@ def check(
                         "Git stash of an opaque or secret-looking path is floor-blocked.",
                     )
             if sub == "worktree":
-                if any(token.lower() == "remove" for token in args):
-                    return "deny", "Git worktree removal is floor-blocked."
-                worktree_action = next(
-                    (token.lower() for token in args if not token.startswith("-")),
-                    "",
-                )
-                if worktree_action in {"add", "move"}:
-                    worktree_positionals = []
-                    seen_action = False
-                    index = 0
-                    while index < len(args):
-                        token = args[index]
-                        if token in _GIT_WORKTREE_VALUE_OPTIONS:
-                            index += 2
-                            continue
-                        if token.startswith("-"):
-                            index += 1
-                            continue
-                        if not seen_action:
-                            seen_action = True  # the action word itself
-                            index += 1
-                            continue
-                        worktree_positionals.append(token)
+                # The action word is resolved BY POSITION, the way
+                # git_subcommand_index resolves the git subcommand itself: skip
+                # options and the values they consume, then take the first bare
+                # token. The old rule tested `token.lower() == "remove"` against
+                # every argv token, so only an EXACT `remove` matched -- a path
+                # merely CONTAINING the word never did. The real casualties were
+                # option VALUES: `git worktree add -b remove ../wt` and
+                # `git worktree lock --reason remove ../wt` were denied as
+                # removals (issue #41). Measured on 1.6.16, `git worktree add
+                # ../remove` and `git worktree add /tmp/remove-me` were ALLOWED.
+                worktree_action = ""
+                # The action word BEFORE case folding. `_LITERAL_BACKTICK` is
+                # an UPPERCASE sentinel standing in for a quote-masked
+                # backtick, so `token.lower()` destroys it and a double-quoted
+                # `git worktree "`echo remove`" --force wt` read as an inert
+                # literal action -- allowing at T4 and wave_mode, which
+                # bypasses the [worktree-remove-force] charter deny, not just
+                # the opacity gate. The unquoted and single-quoted spellings
+                # never lost the sentinel and always denied. Opacity is tested
+                # against this raw form; the folded one still does the literal
+                # `remove`/`add`/`move` matching, which is genuinely
+                # case-insensitive.
+                worktree_action_raw = ""
+                worktree_positionals = []
+                seen_action = False
+                index = 0
+                while index < len(args):
+                    token = args[index]
+                    if token in _GIT_WORKTREE_VALUE_OPTIONS:
+                        index += 2
+                        continue
+                    if token.startswith("-"):
                         index += 1
+                        continue
+                    if not seen_action:
+                        seen_action = True  # the action word itself
+                        worktree_action_raw = token
+                        worktree_action = token.lower()
+                        index += 1
+                        continue
+                    worktree_positionals.append(token)
+                    index += 1
+                # A runtime-computed ACTION word may expand to `remove --force`
+                # -- `git worktree $ACT wt` resplits after expansion, so one
+                # token can deliver both words (issue #117; the 1.6.16 rule
+                # caught the backtick spelling by accident and #113's correct
+                # positional resolver dropped that coverage). An opaque
+                # spelling must never score better than the literal form it
+                # might be, so the dynamic action word rides the same
+                # work-loss ladder as `remove --force` itself.
+                if worktree_action_raw and has_dynamic_shell_token(worktree_action_raw):
+                    if strict:
+                        return (
+                            "deny",
+                            "[worktree-action-opaque] T4/wave: this worktree "
+                            "action word is computed at run time and may expand "
+                            "to `remove --force`, which is denied here. Spell "
+                            "the action literally.",
+                        )
+                    if tier >= 3 and not relaxed:
+                        return (
+                            "ask",
+                            "[worktree-action-opaque] T3: this worktree action "
+                            "word is computed at run time and may expand to "
+                            "`remove --force`, whose T3 rung is this same "
+                            "confirmation. Spell the action literally to get "
+                            "the literal form's score.",
+                        )
+                # `git worktree remove` REFUSES a worktree holding tracked
+                # modifications or untracked (non-ignored) files -- git runs a
+                # check the floor cannot -- and removal leaves the BRANCH
+                # behind, so work committed on a branch stays reachable. That
+                # is why the plain form is not an unconditional deny. A
+                # DETACHED worktree earns no such guarantee: its commits are
+                # held only by its own HEAD, git's pre-removal check passes on
+                # a clean detached tree, and the commit leaves `git log --all`
+                # with the removal (measured, and pinned by the detached leg
+                # of `ignored_worktree_removal_is_destructive`) -- which is
+                # why law 7 mandates `git switch -c` before committing in a
+                # worktree.
+                #
+                # It is NOT non-destructive, and an earlier draft of this rule
+                # claimed it was ("the plain form cannot destroy uncommitted
+                # work"). Measured on git 2.45.1, and pinned with real git by
+                # `ignored_worktree_removal_is_destructive` in smoke_test.py:
+                # the !force path runs `git status --porcelain
+                # --ignore-submodules=none`, which reports a worktree holding
+                # `.env`, `local.db`, `vendor.cfg` and `node_modules/pkg.js` as
+                # CLEAN, and removal then calls the ignore-UNAWARE
+                # `remove_dir_recursively()` and deletes all four. Git's clean
+                # check does not consider gitignored content, so a `.env`
+                # written only in that worktree, local databases and build
+                # trees are destroyed with no git copy to restore them from.
+                #
+                # The plain form allows at EVERY tier, wave_mode included
+                # (owner ruling, 2026-07-27, delegated to this slice): git
+                # itself refuses a tree with tracked modifications or
+                # untracked files, so "the work is committed" is
+                # tool-enforced; law 7 mandates `git switch -c` before
+                # committing, so commits have a surviving ref; the wave-time
+                # failure mode is therefore another agent's SESSION breaking
+                # -- recoverable -- not its work being lost, and a hard deny
+                # is reserved for the irreversible. The known residual losses
+                # are deliberate, bounded, and documented rather than gated:
+                # gitignored content (pinned below), a DETACHED worktree's
+                # commits (issue #122 -- law 7's `switch -c` is the guard;
+                # argv cannot see detached-ness), and a repo/user config that
+                # blinds git's clean check (issue #123's remainder; the
+                # argv-visible spellings of that weakening ARE gated, below).
+                #
+                # `--force` overrides git's refusal on a DIRTY tree, which
+                # is where uncommitted TRACKED work is lost; a LOCKED tree
+                # needs the doubled flag, and git says so itself -- measured on
+                # 2.45.1, a single `--force` on a locked tree exits 128 with
+                # "cannot remove a locked working tree ... use 'remove -f -f'
+                # to override or unlock first", while `-f -f` exits 0. The
+                # force test below scores `-ff`, `-f -f` and `--force --force`
+                # exactly as `-f`, so every overriding spelling carries the
+                # full work-loss ladder (allow T1-T2, ask T3, deny T4/wave,
+                # honouring the declared relaxed-git posture exactly as
+                # `reset --hard` and `clean -f` do). Three LAUNDERED force
+                # spellings ride that same ladder, because an opaque spelling
+                # must never score better than the literal form it might be:
+                # a dynamic option token (`-$X` may be `-f`), a dynamic
+                # operand with no path separator (`$A` may be `--force`
+                # whole; law 7's `$WT_PROJECT_DIR/<name>` compounds keep the
+                # plain score), and argv-visible config that blinds git's
+                # clean check (`-c status.showUntrackedFiles=no`, issue #123
+                # -- measured: it turns the refusal on an untracked file into
+                # exit 0).
+                # The old unconditional deny protected nothing: `rm -rf` and
+                # `Remove-Item -Recurse` are not git commands and never reached
+                # this rule, so a floor-respecting agent could only ever ACCUMULATE
+                # worktrees (29 in this repo when issue #41 was filed).
+                #
+                # `prune` is deliberately unguarded: it deletes only the
+                # administrative `.git/worktrees/<id>` metadata of entries whose
+                # working-tree directory is ALREADY gone, and skips any entry whose
+                # directory still exists or that carries a `locked` file. `--expire
+                # <time>` only narrows which of those ALREADY-missing entries are
+                # old enough to drop, so it cannot reach a live worktree either.
+                # Working-tree FILES always survive a prune. What it destroys is
+                # that administrative directory -- index (staged changes), HEAD,
+                # ORIG_HEAD, reflogs, per-worktree refs, in-progress
+                # rebase/merge state -- and that is NOT reversible: measured on
+                # git 2.45.1, `git worktree repair` on a worktree pruned while
+                # it was renamed away exits 1 with "unable to locate
+                # repository", because re-registration needs the
+                # `.git/worktrees/<id>` directory prune has just deleted.
+                # `list`/`lock`/`unlock`/`repair` are likewise metadata-only.
+                if worktree_action == "remove":
+                    # `--` ends option parsing, so a worktree literally named `-f`
+                    # is an operand, not the force flag (mirrors the checkout guard).
+                    remove_options = args[: args.index("--")] if "--" in args else args
+                    force_class = None
+                    if any(
+                        token == "-f"
+                        or token == "--force"
+                        or git_option_abbreviates(token, "--force", min_prefix=1)
+                        or bool(re.match(r"^-[a-zA-Z]*f", token))  # -f, -ff clusters
+                        for token in remove_options
+                    ):
+                        force_class = "force"
+                    elif worktree_removal_clean_check_weakened(
+                        git_toks, inline_configs, config_env_keys
+                    ):
+                        force_class = "config"
+                    elif any(
+                        dynamic_token_could_be_an_option(token)
+                        for token in remove_options
+                    ):
+                        force_class = "opaque"
+                    if force_class is not None:
+                        if strict:
+                            reasons = {
+                                "force": "[worktree-remove-force] T4/wave: git worktree remove "
+                                "--force deletes a worktree git would otherwise refuse to "
+                                "touch, including another agent's uncommitted work. Drop "
+                                "--force and git will at least refuse a dirty or locked tree.",
+                                "config": "[worktree-remove-config] T4/wave: this inline git "
+                                "config can blind the clean check that makes plain removal "
+                                "safe (status.showUntrackedFiles=no makes git delete a tree "
+                                "it would otherwise refuse), which is --force by another "
+                                "spelling. Drop the -c/--config-env, or spell the literal "
+                                "value normal or all.",
+                                "opaque": "[worktree-remove-opaque] T4/wave: a runtime-"
+                                "computed token in this removal may expand to --force, which "
+                                "is denied here. Spell every option and operand literally "
+                                "(a $VAR/<name> path compound keeps the plain "
+                                "score; a Windows backslash path does not -- "
+                                "issue #128).",
+                            }
+                            return ("deny", reasons[force_class])
+                        if tier >= 3 and not relaxed:
+                            reasons = {
+                                "force": "[worktree-remove-force] T3: git worktree remove "
+                                "--force discards uncommitted work in that worktree. Confirm, "
+                                "or drop --force so git refuses a dirty or locked tree itself "
+                                "-- but a removal git does allow still deletes gitignored "
+                                "files.",
+                                "config": "[worktree-remove-config] T3: this inline git "
+                                "config can blind the clean check that makes plain removal "
+                                "safe (status.showUntrackedFiles=no makes git delete a tree "
+                                "it would otherwise refuse). Confirm, or drop the "
+                                "-c/--config-env, or spell the literal value normal or all.",
+                                "opaque": "[worktree-remove-opaque] T3: a runtime-computed "
+                                "token in this removal may expand to --force, whose T3 rung "
+                                "is this same confirmation. Spell every option and operand "
+                                "literally (a $VAR/<name> path compound keeps the plain "
+                                "score; a Windows backslash path does not -- issue #128).",
+                            }
+                            return ("ask", reasons[force_class])
+                elif worktree_action in {"add", "move"}:
                     # add writes its first operand; move writes its second.
                     destination_targets = (
                         worktree_positionals
@@ -10142,10 +11138,10 @@ def check(
                     cwd_uncertain,
                     cwd_changed,
                     remote_resolver,
+                    push_narrowing,
                     _remote_cache,
                     _remote_deadline,
                     frozenset(effective_git_repository_environment),
-                    _shell_dialect=_shell_dialect,
                 )
                 if alias_decision[0] != "allow":
                     return alias_decision
@@ -10555,10 +11551,31 @@ def check(
                             )
                     is_public, remote = _remote_cache[resolver_key]
                     if is_public is True:
-                        return (
-                            "deny",
-                            f"sensitive_data repo: refusing a push to public remote {remote}.",
+                        # Issue #48 (ratified; owner reaffirmed 2026-07-27): a
+                        # push attributable to a non-sensitive repository — its
+                        # own named branches to its own configured remote — is
+                        # exempt from the CONTEXT overlay. Everything else
+                        # keeps the deny, with the failed condition named.
+                        narrowing_key = (
+                            "issue48-narrowing",
+                            tuple(args),
+                            current_cwd,
+                            tuple(git_toks[1:subcommand_index]),
                         )
+                        if narrowing_key not in _remote_cache:
+                            _remote_cache[narrowing_key] = push_narrowing(
+                                args,
+                                current_cwd,
+                                git_toks[1:subcommand_index],
+                                deadline=_remote_deadline,
+                            )
+                        narrowed, narrowing_detail = _remote_cache[narrowing_key]
+                        if not narrowed:
+                            return (
+                                "deny",
+                                f"sensitive_data repo: refusing a push to public remote {remote} "
+                                f"(issue #48 narrowing: {narrowing_detail}).",
+                            )
                     if is_public is None:
                         return (
                             "deny",
@@ -11567,6 +12584,23 @@ def check(
                 "deny",
                 "A file API write to a secret-looking or dynamic path is floor-blocked.",
             )
+        if quote_aware:
+            for index, token in enumerate(raw[:-1]):
+                if _OUTPUT_REDIRECT_OPERATOR.fullmatch(
+                    token
+                ) and token_mentions_secret_path(raw[index + 1]):
+                    return (
+                        "deny",
+                        f"Redirecting output into a secret-looking file ({raw[index + 1]}) is floor-blocked.",
+                    )
+        else:
+            redir = re.search(r"(?:\d*|&)?>{1,2}(?:\||&)?\s*(\S+)", segment_text)
+            if redir and token_mentions_secret_path(redir.group(1)):
+                return (
+                    "deny",
+                    f"Redirecting output into a secret-looking file ({redir.group(1)}) is floor-blocked.",
+                )
+
         # ---- sensitive_data overlay ----
         if sensitive and head == "gh":
             if len(toks) >= 3 and toks[1] in ("repo", "gist") and toks[2] == "create":
