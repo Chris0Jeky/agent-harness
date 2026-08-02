@@ -10,7 +10,10 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -379,6 +382,68 @@ class SmokeNeutralFixtureRootTests(unittest.TestCase):
             self.smoke._FIXTURE_ROOT = None
             if os.path.isdir(parent) and not os.listdir(parent):
                 os.rmdir(parent)
+
+    def test_progress_and_case_output_are_flushed_through_a_pipe(self) -> None:
+        script = f"""
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("pipe_progress_smoke", {str(SMOKE_PATH)!r})
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+smoke.report_progress("start", mode="producer-exhaustive")
+smoke.report_progress("section", name="static-command-matrix")
+smoke.emit("  [ok] representative case output")
+smoke.report_progress("complete", passed=1, status="pass", total=1)
+sys.stdin.readline()
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        lines: list[str] = []
+
+        def read_lines() -> None:
+            assert proc.stdout is not None
+            lines.extend(proc.stdout.readline().rstrip("\n") for _ in range(4))
+
+        reader = threading.Thread(target=read_lines, daemon=True)
+        try:
+            reader.start()
+            reader.join(timeout=5)
+            self.assertFalse(
+                reader.is_alive(),
+                "smoke progress remained buffered while the child was alive",
+            )
+            self.assertIsNone(
+                proc.poll(),
+                "the child must still be alive when pipe output is observed",
+            )
+            self.assertEqual(
+                lines,
+                [
+                    "smoke-progress event=start mode=producer-exhaustive",
+                    "smoke-progress event=section name=static-command-matrix",
+                    "  [ok] representative case output",
+                    "smoke-progress event=complete passed=1 status=pass total=1",
+                ],
+            )
+        finally:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            reader.join(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
 
 
 if __name__ == "__main__":
