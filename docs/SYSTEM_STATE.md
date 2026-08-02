@@ -3,6 +3,10 @@
 Snapshot: 2026-08-02, implementation state through `main@c81f8911a6c186dc98e22c62289a07fcc24166c7`.
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
+## Runtime override: 2026-08-02
+
+The owner requested an estate-wide pause of the PreTool deny floor while keeping non-blocking hooks active. At the recorded configuration state, global Claude has no `PreToolUse` registration and retains one `SessionStart` and one `PostToolUseFailure` hook. Codex hook support remains enabled with every recorded `PreToolUse` handler explicitly disabled; lifecycle handlers remain configured. This is configuration evidence, not fresh-session trust or canary proof. The capability ledger below predates this runtime override wherever it describes floor activation or H-2.
+
 ## Evidence vocabulary
 
 - **implemented**: executable code or an authoritative operating contract exists on `main`.

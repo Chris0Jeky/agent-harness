@@ -3,6 +3,8 @@
 Snapshot: 2026-08-02. Published implementation base: `c81f8911a6c186dc98e22c62289a07fcc24166c7`.
 No implementation workstream is active; both slots are free.
 
+Current runtime override: the owner paused the estate-wide PreTool deny floor on 2026-08-02. Configuration retains non-blocking lifecycle hooks. Do not run deny canaries, re-enable the floor, or mutate its runtime settings unless the owner explicitly directs it.
+
 ## No active implementation
 
 - PR #200 merged the six-case bounded #196 public-push narrowing repair and closed #196. A confirmed
@@ -74,5 +76,6 @@ No implementation workstream is active; both slots are free.
   worktree is occupied; `tooling/corpus-replay` remains at preserved `afb1c0a`, one local commit
   ahead, and is ineligible until that checkpoint receives tests, review, and an explicit publish
   decision.
-- H-2 is the sole open human item and owner-parked. Do not run estate-wide canaries or disable the
-  harness. AH-10 extraction and a public replay repository remain deferred.
+- H-2 is the sole open human item and owner-paused. Do not run estate-wide canaries, re-enable the
+  deny floor, or mutate hook state without explicit owner direction. AH-10 extraction and a public
+  replay repository remain deferred.
