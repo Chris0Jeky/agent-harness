@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-08-02. Published implementation base: `ac3266a8726c04a97fdc70d0c459fcfaf3b0ff85`.
+Snapshot: 2026-08-02. Published implementation base: `c81f8911a6c186dc98e22c62289a07fcc24166c7`.
 No implementation workstream is active; both slots are free.
 
 ## No active implementation

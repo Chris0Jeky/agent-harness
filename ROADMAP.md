@@ -1,6 +1,6 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-02, implementation state through `main@c48b21e89020a65a3a51caa1ffb071c77d608d23`.
+Snapshot: 2026-08-02, implementation state through `main@c81f8911a6c186dc98e22c62289a07fcc24166c7`.
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 
@@ -19,7 +19,7 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seam #101 remains; #160 is closed and retains historical AH-9 lineage. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 57 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
+All 56 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
