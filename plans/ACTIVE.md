@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-08-02. Published implementation base: `e6d0558200d006de0b86630a1d31bb4ce8f06244`.
+Snapshot: 2026-08-02. Published implementation base: `ac3266a8726c04a97fdc70d0c459fcfaf3b0ff85`.
 No implementation workstream is active; both slots are free.
 
 ## No active implementation
@@ -47,6 +47,16 @@ No implementation workstream is active; both slots are free.
   #209 closed #84 (base `02e3ba6`, head `0e5845e`, merge `aee3ea6`): all nine jobs in run
   `30722999868` passed with zero unresolved threads. It documents linked-worktree candidate
   validation only; no Doctor behavior, trust/canary/deployment, or consumer rollout changed.
+- Documentation-only PR #210 published the preceding state ledger (merge `4203e7c`). PR #211
+  closed #109 by making cross-product shapes executable (merge `b483709`). PR #213 closed #119
+  by isolating the non-temporary prefix fixture (head `0134bb81`, base `b483709`, merge
+  `446e14f`); all nine hosted checks passed before merge.
+- PR #212 closed #98 by making `doctor --config-root` compare source guidance only after proving
+  a clean, current `main` checkout of the harness origin's `claude-config` sibling. Final head
+  `62a59a8`, base `446e14f`, merge `ac3266a`, and all nine jobs in run `30731418878` passed. The
+  cross-platform fixture P1 and macOS physical-root error were fixed before that run; three P2
+  robustness notes were triaged without reopening the bounded fix round. No global deploy, trust
+  mutation, or live canary ran.
 - PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
   review evidence remain preserved.
 
@@ -60,6 +70,8 @@ No implementation workstream is active; both slots are free.
 - #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not this runtime.
   #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call
   site. #185/#191/#192 remain mapped follow-ups. Replay slices remain held while the replay-tool
-  and replay-v0-freeze worktrees are occupied.
+  worktree is occupied; `tooling/corpus-replay` remains at preserved `afb1c0a`, one local commit
+  ahead, and is ineligible until that checkpoint receives tests, review, and an explicit publish
+  decision.
 - H-2 is the sole open human item and owner-parked. Do not run estate-wide canaries or disable the
   harness. AH-10 extraction and a public replay repository remain deferred.
