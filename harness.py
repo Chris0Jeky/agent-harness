@@ -2942,7 +2942,11 @@ def layered_mcp_server_states(config_paths: list[Path]) -> dict[str, dict[str, A
                 state["args"] = patch["args"]
                 state["args_source"] = source
     for name, state in states.items():
-        if state["command"] is not None and state["url"] is not None:
+        if (
+            state["enabled"]
+            and state["command"] is not None
+            and state["url"] is not None
+        ):
             raise HarnessError(
                 f"effective mcp_servers.{display_mcp_server_name(name)} mixes "
                 f"command from {state['command_source']} and url from "

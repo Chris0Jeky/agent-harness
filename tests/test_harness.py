@@ -5422,6 +5422,53 @@ allow_local_binding = true
         self.assertNotIn("secret-command", str(caught.exception))
         self.assertNotIn("private.invalid", str(caught.exception))
 
+    def test_mcp_disabled_layer_suppresses_mixed_transport_until_reenabled(
+        self,
+    ) -> None:
+        root = Path(self.temp.name)
+        user = root / "user.toml"
+        disabled_project = root / "disabled-project.toml"
+        reenabled_project = root / "reenabled-project.toml"
+        user.write_text(
+            '[mcp_servers.one]\ncommand = "secret-command"\n', encoding="utf-8"
+        )
+        disabled_project.write_text(
+            '[mcp_servers.one]\nurl = "https://private.invalid/token"\n'
+            "enabled = false\n",
+            encoding="utf-8",
+        )
+        reenabled_project.write_text(
+            "[mcp_servers.one]\nenabled = true\n", encoding="utf-8"
+        )
+
+        states = harness.layered_mcp_server_states([user, disabled_project])
+
+        self.assertFalse(states["one"]["enabled"])
+        self.assertEqual(states["one"]["command_source"], user.resolve())
+        self.assertEqual(states["one"]["url_source"], disabled_project.resolve())
+        with self.assertRaisesRegex(harness.HarnessError, "mixes command") as caught:
+            harness.layered_mcp_server_states(
+                [user, disabled_project, reenabled_project]
+            )
+        self.assertNotIn("secret-command", str(caught.exception))
+        self.assertNotIn("private.invalid", str(caught.exception))
+
+    def test_mcp_disabled_same_table_mixed_transport_remains_invalid(self) -> None:
+        config = Path(self.temp.name) / "config.toml"
+        config.write_text(
+            '[mcp_servers.one]\ncommand = "secret-command"\n'
+            'url = "https://private.invalid/token"\n'
+            "enabled = false\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            harness.HarnessError, "must not declare both command and url"
+        ) as caught:
+            harness.layered_mcp_server_states([config])
+        self.assertNotIn("secret-command", str(caught.exception))
+        self.assertNotIn("private.invalid", str(caught.exception))
+
     def test_mcp_malformed_name_is_escaped_in_diagnostics(self) -> None:
         config = Path(self.temp.name) / "config.toml"
         config.write_text(
