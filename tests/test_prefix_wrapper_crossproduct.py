@@ -393,6 +393,7 @@ _WINDOWS_SHELL_PAYLOAD = re.compile(r"""(?x)
     | \[(?:IO|Environment|System|string|Console)[.\]]
     | \bMicrosoft\.PowerShell
     | (?:^|[|&;\n]\s*)(?:rd|rmdir|del|erase|move|copy|xcopy|robocopy|setx|reg|attrib)\b
+    | (?:^|[|&;\n]\s*)runas(?:\.exe)?\s+/
     | (?:^|\s)(?:rd|rmdir|del|erase)/
     | \.ps1\b
     | \bcmd(?:\.exe)?\s*/[a-zA-Z]
@@ -511,8 +512,6 @@ PREFIX_SHAPES = [
     Shape("redirect-quoted-double", PREFIX, '> "out file.txt" <CMD>'),
     Shape("redirect-quoted-glued", PREFIX, ">'out file.txt' <CMD>"),
     Shape("redirect-pair", PREFIX, "> 'out file.txt' 2> err.txt <CMD>"),
-    Shape("stop-parsing", PREFIX, "--% <CMD>"),
-    Shape("stop-parsing-glued", PREFIX, "--%<CMD>"),
     Shape("assignment", PREFIX, "FLOOR_PROBE=1 <CMD>", scope=POSIX_SCOPE),
     Shape(
         "assignment-multi", PREFIX, "FLOOR_PROBE=1 SECOND=two <CMD>", scope=POSIX_SCOPE
@@ -530,13 +529,7 @@ PREFIX_SHAPES = [
         "> out.txt FLOOR_PROBE=1 <CMD>",
         scope=POSIX_SCOPE,
     ),
-    Shape(
-        "assignment-then-stop-parsing",
-        PREFIX,
-        "FLOOR_PROBE=1 --% <CMD>",
-        scope=POSIX_SCOPE,
-    ),
-    Shape("leading-separator", PREFIX, "; <CMD>"),
+    Shape("preceding-command-separator", PREFIX, ":; <CMD>", scope=POSIX_SCOPE),
     Shape("leading-whitespace", PREFIX, "\t  <CMD>"),
     Shape("leading-newline", PREFIX, "\n<CMD>"),
 ]
@@ -571,12 +564,16 @@ WRAPPER_SHAPES = [
     Shape("at", WRAPPER, "echo <QCMD> | at now", _POSIX, POSIX_SCOPE),
     Shape("parallel", WRAPPER, "parallel <CMD> ::: 1", scope=POSIX_SCOPE),
     Shape("xargs", WRAPPER, "echo x | xargs -I{} <CMD>", scope=POSIX_SCOPE),
-    # `-exec COMMAND ;` needs the semicolon to REACH find. Bare, the shell eats it as a
-    # command separator, find sees an unterminated `-exec` and errors out without ever
-    # running the payload — and the composed line stops being one command at all, which
-    # is the same defect `_composable_deny_case` excludes payloads for. `\;` is the
-    # spelling the smoke matrix already uses (`find . -exec rm -rf / \;`).
-    Shape("find-exec", WRAPPER, "find . -name x -exec <CMD> \\;", scope=POSIX_SCOPE),
+    # `-exec COMMAND ;` needs the semicolon to REACH find. `-prune` evaluates true on the
+    # starting point, so the child runs exactly once without depending on a fixture named
+    # `x`; bare `\;` keeps the terminator out of the outer shell's command grammar.
+    Shape(
+        "find-exec",
+        WRAPPER,
+        "find . -prune -exec sh -c <QCMD> \\;",
+        _POSIX,
+        POSIX_SCOPE,
+    ),
     Shape(
         "script-utility", WRAPPER, "script -qc <QCMD> /dev/null", _POSIX, POSIX_SCOPE
     ),
@@ -667,7 +664,7 @@ WRAPPER_SHAPES = [
     Shape("call-operator-block", WRAPPER, "& { <CMD> }"),
     Shape("dot-source-block", WRAPPER, ". { <CMD> }"),
     Shape("subshell", WRAPPER, "( <CMD> )", scope=POSIX_SCOPE),
-    Shape("brace-group", WRAPPER, "{ <CMD>; }"),
+    Shape("brace-group", WRAPPER, "{ <CMD>; }", scope=POSIX_SCOPE),
     Shape("foreach-block", WRAPPER, "1 | % { <CMD> }"),
     Shape("foreach-iex", WRAPPER, "1 | ForEach-Object { iex <QCMD> }", _POWERSHELL),
     Shape(
@@ -677,7 +674,12 @@ WRAPPER_SHAPES = [
         _POWERSHELL,
     ),
     Shape("if-block-iex", WRAPPER, "if ($true) { iex <QCMD> }", _POWERSHELL),
-    Shape("while-block-iex", WRAPPER, "while ($false) { iex <QCMD> }", _POWERSHELL),
+    Shape(
+        "while-block-iex",
+        WRAPPER,
+        "while ($true) { iex <QCMD>; break }",
+        _POWERSHELL,
+    ),
     Shape(
         "for-block-iex",
         WRAPPER,
@@ -687,7 +689,12 @@ WRAPPER_SHAPES = [
     Shape("switch-block-iex", WRAPPER, "switch (1) { 1 { iex <QCMD> } }", _POWERSHELL),
     Shape("try-block-iex", WRAPPER, "try { iex <QCMD> } catch { }", _POWERSHELL),
     Shape("do-block-iex", WRAPPER, "do { iex <QCMD> } while ($false)", _POWERSHELL),
-    Shape("trap-block-iex", WRAPPER, "trap { iex <QCMD> }", _POWERSHELL),
+    Shape(
+        "trap-block-iex",
+        WRAPPER,
+        "trap { iex <QCMD> }; throw 'floor-crossproduct-trigger'",
+        _POWERSHELL,
+    ),
     Shape("function-body-iex", WRAPPER, "function f { iex <QCMD> }; f", _POWERSHELL),
     Shape(
         "where-object-iex",
@@ -1058,16 +1065,6 @@ _ALL_BUT_SECRET_REDIRECTS = [
 # out of the baseline and into ENFORCED_SHAPES, where the whole deny corpus is swept
 # against them rather than five probes.
 #
-# `stop-parsing-glued` is the one that is still open, so it is the only entry left. Do
-# not fold it back in with the others: a shape-level entry deletes every corpus check for
-# that shape, and the twenty-one promotions are the coverage this branch is buying.
-_bypass(
-    ["stop-parsing-glued"],
-    "#46",
-    "a GLUED PowerShell stop-parsing token still defeats head resolution",
-    _ALL_BUT_SECRET_REDIRECTS,
-)
-
 # --- issue #56: container and remote detours are not unwrapped ----------------------
 # `docker exec` and its family (and `ssh`) are absent from the wrapper set, so the head
 # resolves to the container tool and the payload is never judged. #56 lists `docker run`,
@@ -2405,6 +2402,15 @@ class ShapeRosterTests(CrossProductBase):
                     f"words instead of riding in one program argument:\n"
                     f"  composed={composed!r}\n  argv={words!r}",
                 )
+
+    def test_find_exec_runs_one_child_for_the_starting_point(self):
+        payload = "printf floor-crossproduct-marker"
+        composed = SHAPES_BY_NAME["find-exec"].apply(payload)
+        self.assertIsNotNone(composed)
+        self.assertEqual(
+            shlex.split(composed),
+            ["find", ".", "-prune", "-exec", "sh", "-c", payload, ";"],
+        )
 
     def test_baseline_probe_ids_are_known(self):
         for name, entry in DOCUMENTED_BYPASSES.items():
