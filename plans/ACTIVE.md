@@ -70,8 +70,8 @@ No implementation workstream is active; both slots are free.
 - #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not this runtime.
   #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call
   site. #185/#191/#192 remain mapped follow-ups. Replay slices remain held while the replay-tool
-  and replay-v0-freeze worktrees are occupied; `tooling/corpus-replay` remains at preserved
-  `afb1c0a`, one local commit ahead, and is ineligible until that checkpoint receives tests,
-  review, and an explicit publish decision.
+  worktree is occupied; `tooling/corpus-replay` remains at preserved `afb1c0a`, one local commit
+  ahead, and is ineligible until that checkpoint receives tests, review, and an explicit publish
+  decision.
 - H-2 is the sole open human item and owner-parked. Do not run estate-wide canaries or disable the
   harness. AH-10 extraction and a public replay repository remain deferred.
