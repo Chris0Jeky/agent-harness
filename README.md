@@ -178,8 +178,11 @@ and recorded as a cwd-dependency note in the audits where it does resolve.
 The same read-only layer walk checks the base user and active project MCP declarations. An exact
 server name that is active and command-backed at both scopes fails as a duplicate spawning
 topology, as does an active `docker mcp gateway run` declaration with neither `--servers` nor
-`--profile` (including Windows `docker.cmd` and `docker.bat` shims). Layered `enabled = false`
-suppresses a server; mixed layered command/URL transports fail closed. The check prints only
+`--profile` (including Windows `docker.cmd` and `docker.bat` shims). An effective layered
+`enabled = false` state suppresses only a cross-layer mixed command/URL topology conflict; a
+single table declaring both transports remains malformed, and a later re-enable exposes the
+retained conflict. Active mixed layered transports fail closed. This topology check does not prove
+that Codex's full configuration loader accepts every inactive definition. The check prints only
 canonical source paths and escaped server names, never command arguments, and does not inspect
 stored profiles, system/managed policy, CLI overrides, or runtime processes.
 That floor must be the canonical root

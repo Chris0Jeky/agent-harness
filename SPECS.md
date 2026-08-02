@@ -625,8 +625,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition plus the static base-user and
   active-project MCP topology. It rejects active command-backed names duplicated across those
-  scopes, layered mixed command/URL transports, and Docker MCP gateways with neither `--servers`
-  nor `--profile`; it never renders arguments, mutates configuration, or probes runtime processes.
+  scopes, active layered mixed command/URL transports, and Docker MCP gateways with neither
+  `--servers` nor `--profile`; an effective disabled state suppresses only a cross-layer transport
+  conflict, while a same-table conflict remains malformed and a later re-enable fails closed. This
+  is topology validation, not proof that Codex's full configuration loader accepts every inactive
+  definition; it never renders arguments, mutates configuration, or probes runtime processes.
 - `harness.py worktree-lease --repo <linked-worktree> --action
   <status|acquire|renew|release> [--claimant <id>]` — manages the cooperative owner record stored
   in the linked worktree's Git administrative directory. Acquire requires absence, or
