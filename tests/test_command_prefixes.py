@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+POLICY_PROJECT = "C:/srv/repo" if os.name == "nt" else "/srv/repo"
 
 
 def load_module(name: str, path: Path):
@@ -46,8 +48,8 @@ def decide(command: str, tier: int = 1, flags: dict | None = None):
         dispatch,
         command,
         {"tier": tier, "flags": flags or {}},
-        str(ROOT),
-        str(ROOT),
+        POLICY_PROJECT,
+        POLICY_PROJECT,
         remote_resolver=private_remote,
     )
 
