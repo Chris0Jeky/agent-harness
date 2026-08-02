@@ -11,9 +11,12 @@ claude-config wins and this copy is the bug — refresh the mirror, never fork i
 models inside the mirror belong to claude-config's file; this repo's own routing text (§8)
 still names no routing-tier assignments (its one model mention is the declared family-wide
 Haiku ban). The per-repo memory duplicates the law set graduated are deleted — the last two in
-this repo's own memory were folded 2026-07-26. NO shipped check yet measures which guidance
-text `~/.claude` actually serves (#98 tracks that gap): this mirror asserts nothing about
-deployment.
+this repo's own memory were folded 2026-07-26. `doctor --config-root <claude-config>` measures
+the source `CLAUDE.md` against deployed `~/.claude/CLAUDE.md` and source `codex/AGENTS.md`
+against deployed `~/.codex/AGENTS.md` as separate exact-byte checks. The supplied directory must
+be the clean, published `main` checkout of the harness origin's `claude-config` sibling, with
+both guidance paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable
+byte mismatch fails. This mirror itself still asserts nothing about deployment.
 
 ```markdown
 # Global laws — all repos, all tiers

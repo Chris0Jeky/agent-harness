@@ -417,9 +417,12 @@ from gone.
   fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
   tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
-  the law set shipped (the last two folded 2026-07-26). NO shipped check yet measures which
-  guidance text `~/.claude` serves — #98 tracks that gap; this document asserts nothing about
-  deployment.
+  the law set shipped (the last two folded 2026-07-26). `doctor --config-root <claude-config>`
+  separately exact-byte checks the supplied source `CLAUDE.md` and `codex/AGENTS.md` against
+  their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
+  the clean, published `main` of the harness origin's `claude-config` sibling. A missing,
+  unreadable, or noncanonical source is `UNPROVEN`; a readable mismatch fails. This document
+  itself asserts nothing about deployment.
 - **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
   global `defaultMode` returns to prompt/acceptEdits; remove global
   `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.

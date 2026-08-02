@@ -179,6 +179,8 @@ class HarnessTests(unittest.TestCase):
         managed_config: str | None = None,
         offline: bool = False,
         as_json: bool = False,
+        config_root: Path | None = None,
+        guidance_reference: tuple[bool, str] | None = None,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -215,6 +217,7 @@ class HarnessTests(unittest.TestCase):
             skills_home=str(skills_home),
             repo=str(repo),
             offline=offline,
+            config_root=str(config_root) if config_root is not None else None,
         )
         if as_json:
             args.json = True
@@ -232,6 +235,10 @@ class HarnessTests(unittest.TestCase):
             return original_run(command, cwd)
 
         output = io.StringIO()
+        fixture_guidance_reference = guidance_reference or (
+            True,
+            "fixture guidance source is canonical",
+        )
         with mock.patch.object(harness, "run", side_effect=fixture_run):
             with mock.patch.object(
                 harness,
@@ -243,8 +250,13 @@ class HarnessTests(unittest.TestCase):
                     "codex_managed_config_path",
                     return_value=root / "managed-config.toml",
                 ):
-                    with redirect_stdout(output):
-                        result = harness.doctor(args)
+                    with mock.patch.object(
+                        harness,
+                        "guidance_reference_status",
+                        return_value=fixture_guidance_reference,
+                    ):
+                        with redirect_stdout(output):
+                            result = harness.doctor(args)
         return result, output.getvalue()
 
     def run_doctor_with_denied_static_source(
@@ -686,7 +698,13 @@ class HarnessTests(unittest.TestCase):
 
     def test_doctor_json_matches_human_check_order_and_hides_commands(self) -> None:
         repo = self.make_repo().resolve()
+        config_root = Path(self.temp.name) / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
         claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        claude_home.mkdir(parents=True)
+        (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
         dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
@@ -726,9 +744,11 @@ class HarnessTests(unittest.TestCase):
         subdir = repo / "nested"
         subdir.mkdir()
 
-        human_code, human = self.run_doctor_with_fixture_globals(subdir, offline=True)
+        human_code, human = self.run_doctor_with_fixture_globals(
+            subdir, offline=True, config_root=config_root
+        )
         json_code, rendered_json = self.run_doctor_with_fixture_globals(
-            subdir, offline=True, as_json=True
+            subdir, offline=True, as_json=True, config_root=config_root
         )
         payload = json.loads(rendered_json)
         human_checks = [
@@ -737,6 +757,10 @@ class HarnessTests(unittest.TestCase):
             if line.startswith(("[ok] ", "[FAIL] ", "[UNPROVEN] "))
         ]
         self.assertEqual(human_checks, [check["check"] for check in payload["checks"]])
+        self.assertLess(
+            human_checks.index("global Claude guidance"),
+            human_checks.index("global Codex guidance"),
+        )
         self.assertEqual(human_code, 1)
         self.assertEqual(json_code, 1)
         self.assertEqual(
@@ -773,6 +797,180 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotIn("synthetic-secret", human + rendered_json)
         self.assertNotIn("--token", human + rendered_json)
+
+    def test_doctor_guidance_identity_checks_each_runtime_target(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_bytes(b"claude source\r\n")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_codex = root / "codex-home" / "AGENTS.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_codex.parent.mkdir(parents=True)
+        deployed_claude.write_bytes(b"claude source\r\n")
+        deployed_codex.write_text("# Codex\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+        source_claude.write_bytes(b"claude mismatch\r\n")
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertEqual(result, 1, output)
+        self.assertIn("[FAIL] global Claude guidance:", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+        source_claude.write_bytes(b"claude source\r\n")
+        source_codex.write_bytes(b"codex mismatch\r\n")
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertEqual(result, 1, output)
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[FAIL] global Codex guidance:", output)
+
+    def test_doctor_guidance_identity_is_unproven_without_a_source_root(self) -> None:
+        repo = self.make_repo()
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(
+            "[UNPROVEN] global Claude guidance: no --config-root supplied", output
+        )
+        self.assertIn(
+            "[UNPROVEN] global Codex guidance: no --config-root supplied", output
+        )
+
+    def test_doctor_guidance_identity_is_unproven_when_source_is_absent(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_text("# Claude\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(
+            "[UNPROVEN] global Claude guidance: source guidance is absent", output
+        )
+        self.assertIn("[ok] global Codex guidance:", output)
+
+    def test_doctor_guidance_identity_is_unproven_for_a_noncanonical_source(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_text("# Claude\n", encoding="utf-8")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_text("# Claude\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            config_root=config_root,
+            guidance_reference=(False, "fixture source root has the wrong origin"),
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(
+            "[UNPROVEN] global Claude guidance: source guidance reference is not canonical",
+            output,
+        )
+        self.assertIn(
+            "[UNPROVEN] global Codex guidance: source guidance reference is not canonical",
+            output,
+        )
+        self.assertNotIn("[ok] global Claude guidance:", output)
+        self.assertNotIn("[ok] global Codex guidance:", output)
+
+    def test_doctor_guidance_identity_fails_for_an_absent_deployed_target(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_text("# Claude\n", encoding="utf-8")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo,
+            config_root=config_root,
+            guidance_reference=(False, "fixture source root has the wrong origin"),
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(
+            "[FAIL] global Claude guidance: deployed guidance is absent",
+            output,
+        )
+        self.assertIn(
+            "[UNPROVEN] global Codex guidance: source guidance reference is not canonical",
+            output,
+        )
+
+    def test_doctor_guidance_identity_is_unproven_when_source_cannot_be_read(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_text("# Claude\n", encoding="utf-8")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_text("# Claude\n", encoding="utf-8")
+        original_read_bytes = Path.read_bytes
+
+        def fixture_read_bytes(path: Path) -> bytes:
+            if path.resolve() == source_claude.resolve():
+                raise PermissionError("fixture denied")
+            return original_read_bytes(path)
+
+        with mock.patch.object(
+            Path, "read_bytes", autospec=True, side_effect=fixture_read_bytes
+        ):
+            result, output = self.run_doctor_with_fixture_globals(
+                repo, config_root=config_root
+            )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(
+            "[UNPROVEN] global Claude guidance: cannot read source guidance", output
+        )
+        self.assertIn("[ok] global Codex guidance:", output)
+
+    def test_doctor_accepts_an_optional_guidance_source_root(self) -> None:
+        args = harness.parser().parse_args(
+            ["doctor", "--config-root", "C:/fixture/claude-config"]
+        )
+
+        self.assertEqual(args.config_root, "C:/fixture/claude-config")
 
     def test_seed_creates_runtime_neutral_tier(self) -> None:
         repo = self.make_repo()
@@ -6394,6 +6592,42 @@ class RealityCheckTests(unittest.TestCase):
         responses.update(overrides)
         return FakeCommandRunner(responses)
 
+    def canonical_guidance_reference_runner(
+        self,
+        source_root: Path,
+        *,
+        source_origin: str = "git@github.com:Chris0Jeky/claude-config.git",
+        **overrides: tuple[bool, str],
+    ):
+        """A config checkout that proves canonical guidance-source identity."""
+        source_root = source_root.resolve()
+        responses: dict[str, tuple[bool, str]] = {
+            "rev-parse --show-toplevel": (True, str(source_root)),
+            "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
+            "rev-parse": (True, "main"),
+            "status --porcelain": (True, ""),
+            "ls-files": (True, "H CLAUDE.md\nH codex/AGENTS.md"),
+            "rev-list": (True, "0\t0"),
+            "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
+        }
+        responses.update(overrides)
+        fallback = FakeCommandRunner(responses)
+        harness_root = self.harness_root.resolve()
+
+        def runner(
+            argv: list[str], cwd: Path | None = None, **kwargs: object
+        ) -> tuple[bool, str]:
+            if argv == ["git", "remote", "get-url", "origin"] and cwd is not None:
+                resolved_cwd = cwd.resolve()
+                if resolved_cwd == harness_root:
+                    return True, "https://github.com/Chris0Jeky/agent-harness.git"
+                if resolved_cwd == source_root:
+                    return True, source_origin
+                return False, ""
+            return fallback(argv, cwd, **kwargs)
+
+        return runner
+
     def write_floor(self, path: Path, version: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -7559,6 +7793,113 @@ class RealityCheckTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("level with origin/main", detail)
         self.assertIn(PUBLISHED_MAIN_TIP[:12], detail)
+
+    def test_guidance_reference_requires_a_proven_canonical_checkout(self) -> None:
+        source_root = self.root / "claude-config"
+        runner = self.canonical_guidance_reference_runner(source_root)
+        ok, detail = harness.guidance_reference_status(
+            source_root, self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok, detail)
+        self.assertIn("level with origin/main", detail)
+
+        aliased_source_root = self.root / "alias" / ".." / "claude-config"
+        runner = self.canonical_guidance_reference_runner(aliased_source_root)
+        ok, detail = harness.guidance_reference_status(
+            aliased_source_root, self.harness_root, runner, deadline=None
+        )
+        self.assertTrue(ok, detail)
+
+        cases = (
+            (
+                "wrong root",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    **{"rev-parse --show-toplevel": (True, str(self.root))},
+                ),
+                "not the checkout root",
+            ),
+            (
+                "wrong origin",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    source_origin="https://github.com/Chris0Jeky/agent-harness.git",
+                ),
+                "not expected sibling",
+            ),
+            (
+                "dirty guidance",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    **{"status --porcelain": (True, " M CLAUDE.md")},
+                ),
+                "uncommitted CLAUDE.md and codex/AGENTS.md changes",
+            ),
+            (
+                "hidden guidance",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    **{"ls-files": (True, "S CLAUDE.md\nH codex/AGENTS.md")},
+                ),
+                "skip-worktree/assume-unchanged",
+            ),
+            (
+                "untracked guidance",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    **{"ls-files": (True, "H CLAUDE.md")},
+                ),
+                "does not track codex/AGENTS.md",
+            ),
+            (
+                "unreadable index",
+                self.canonical_guidance_reference_runner(
+                    source_root, **{"ls-files": (False, "")}
+                ),
+                "index flags",
+            ),
+            (
+                "non-main",
+                self.canonical_guidance_reference_runner(
+                    source_root, **{"rev-parse": (True, "topic")}
+                ),
+                "not main",
+            ),
+            (
+                "diverged",
+                self.canonical_guidance_reference_runner(
+                    source_root, **{"rev-list": (True, "0\t1")}
+                ),
+                "1 ahead of and 0 behind origin/main",
+            ),
+            (
+                "stale origin",
+                self.canonical_guidance_reference_runner(
+                    source_root,
+                    **{
+                        "ls-remote": (
+                            True,
+                            "f" * 40 + "\trefs/heads/main",
+                        )
+                    },
+                ),
+                "local origin/main is stale",
+            ),
+            (
+                "offline origin",
+                self.canonical_guidance_reference_runner(
+                    source_root, **{"ls-remote": (False, "")}
+                ),
+                "published main tip could not be read",
+            ),
+        )
+        for name, candidate, expected in cases:
+            with self.subTest(name=name):
+                ok, detail = harness.guidance_reference_status(
+                    source_root, self.harness_root, candidate, deadline=None
+                )
+                self.assertFalse(ok)
+                self.assertIn(expected, detail)
 
     def test_an_offline_run_never_asks_the_remote_for_the_published_tip(self) -> None:
         # `git` is not by itself a local resolver: `ls-remote` contacts the
