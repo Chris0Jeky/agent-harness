@@ -26,6 +26,7 @@ share one repository while keeping their contracts explicit.
 # Inspect first; installation is never implicit.
 py -3 .\harness.py doctor
 py -3 .\harness.py doctor --json
+py -3 .\harness.py doctor --config-root C:\path\to\claude-config
 py -3 .\harness.py doctor --repo C:\path\to\repo
 py -3 .\harness.py audit C:\path\to\repo
 py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
@@ -124,6 +125,10 @@ leg is permanently `UNPROVEN` there and live only on a checkout sitting on a cle
 that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
 `--repo`, plus a global `floor version` check; when the reference is refused that check prints
 `[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
+
+Supply `doctor --config-root C:\path\to\claude-config` to compare the source checkout's
+`CLAUDE.md` and `codex/AGENTS.md` bytes with their respective deployed global runtime files.
+An omitted, absent, or unreadable source is `UNPROVEN`; a readable byte mismatch fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, and managed skill folders before

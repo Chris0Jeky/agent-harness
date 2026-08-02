@@ -179,6 +179,7 @@ class HarnessTests(unittest.TestCase):
         managed_config: str | None = None,
         offline: bool = False,
         as_json: bool = False,
+        config_root: Path | None = None,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -215,6 +216,7 @@ class HarnessTests(unittest.TestCase):
             skills_home=str(skills_home),
             repo=str(repo),
             offline=offline,
+            config_root=str(config_root) if config_root is not None else None,
         )
         if as_json:
             args.json = True
@@ -686,7 +688,15 @@ class HarnessTests(unittest.TestCase):
 
     def test_doctor_json_matches_human_check_order_and_hides_commands(self) -> None:
         repo = self.make_repo().resolve()
+        config_root = Path(self.temp.name) / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (config_root / "codex" / "AGENTS.md").write_text(
+            "# Codex\n", encoding="utf-8"
+        )
         claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        claude_home.mkdir(parents=True)
+        (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
         dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
@@ -726,9 +736,11 @@ class HarnessTests(unittest.TestCase):
         subdir = repo / "nested"
         subdir.mkdir()
 
-        human_code, human = self.run_doctor_with_fixture_globals(subdir, offline=True)
+        human_code, human = self.run_doctor_with_fixture_globals(
+            subdir, offline=True, config_root=config_root
+        )
         json_code, rendered_json = self.run_doctor_with_fixture_globals(
-            subdir, offline=True, as_json=True
+            subdir, offline=True, as_json=True, config_root=config_root
         )
         payload = json.loads(rendered_json)
         human_checks = [
@@ -737,6 +749,10 @@ class HarnessTests(unittest.TestCase):
             if line.startswith(("[ok] ", "[FAIL] ", "[UNPROVEN] "))
         ]
         self.assertEqual(human_checks, [check["check"] for check in payload["checks"]])
+        self.assertLess(
+            human_checks.index("global Claude guidance"),
+            human_checks.index("global Codex guidance"),
+        )
         self.assertEqual(human_code, 1)
         self.assertEqual(json_code, 1)
         self.assertEqual(
@@ -773,6 +789,108 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotIn("synthetic-secret", human + rendered_json)
         self.assertNotIn("--token", human + rendered_json)
+
+    def test_doctor_guidance_identity_checks_each_runtime_target(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_bytes(b"claude source\r\n")
+        source_codex.write_bytes(b"# Codex\r\n")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_bytes(b"claude source\r\n")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+        source_claude.write_bytes(b"claude mismatch\r\n")
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertEqual(result, 1, output)
+        self.assertIn("[FAIL] global Claude guidance:", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+        source_claude.write_bytes(b"claude source\r\n")
+        source_codex.write_bytes(b"codex mismatch\r\n")
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertEqual(result, 1, output)
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[FAIL] global Codex guidance:", output)
+
+    def test_doctor_guidance_identity_is_unproven_without_a_source_root(self) -> None:
+        repo = self.make_repo()
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("[UNPROVEN] global Claude guidance: no --config-root supplied", output)
+        self.assertIn("[UNPROVEN] global Codex guidance: no --config-root supplied", output)
+
+    def test_doctor_guidance_identity_is_unproven_when_source_is_absent(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_text("# Claude\n", encoding="utf-8")
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("[UNPROVEN] global Claude guidance: source guidance is absent", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+    def test_doctor_guidance_identity_is_unproven_when_source_cannot_be_read(self) -> None:
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        source_claude = config_root / "CLAUDE.md"
+        source_codex = config_root / "codex" / "AGENTS.md"
+        source_codex.parent.mkdir(parents=True)
+        source_claude.write_text("# Claude\n", encoding="utf-8")
+        source_codex.write_text("# Codex\n", encoding="utf-8")
+        deployed_claude = root / "claude-home" / "CLAUDE.md"
+        deployed_claude.parent.mkdir(parents=True)
+        deployed_claude.write_text("# Claude\n", encoding="utf-8")
+        original_read_bytes = Path.read_bytes
+
+        def fixture_read_bytes(path: Path) -> bytes:
+            if path == source_claude:
+                raise PermissionError("fixture denied")
+            return original_read_bytes(path)
+
+        with mock.patch.object(
+            Path, "read_bytes", autospec=True, side_effect=fixture_read_bytes
+        ):
+            result, output = self.run_doctor_with_fixture_globals(
+                repo, config_root=config_root
+            )
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("[UNPROVEN] global Claude guidance: cannot read source guidance", output)
+        self.assertIn("[ok] global Codex guidance:", output)
+
+    def test_doctor_accepts_an_optional_guidance_source_root(self) -> None:
+        args = harness.parser().parse_args(
+            ["doctor", "--config-root", "C:/fixture/claude-config"]
+        )
+
+        self.assertEqual(args.config_root, "C:/fixture/claude-config")
 
     def test_seed_creates_runtime_neutral_tier(self) -> None:
         repo = self.make_repo()

@@ -5496,6 +5496,23 @@ def same_file(left: Path, right: Path) -> bool:
     )
 
 
+def guidance_identity_status(source: Path, deployed: Path) -> tuple[bool | str, str]:
+    """Compare explicitly supplied guidance source bytes with one live target."""
+    try:
+        source_bytes = source.read_bytes()
+    except FileNotFoundError:
+        return REALITY_UNPROVEN, f"source guidance is absent: {source}"
+    except (OSError, UnicodeError) as exc:
+        return REALITY_UNPROVEN, f"cannot read source guidance {source}: {exc}"
+    try:
+        deployed_bytes = deployed.read_bytes()
+    except FileNotFoundError:
+        return False, f"deployed guidance is absent: {deployed}; source: {source}"
+    except (OSError, UnicodeError) as exc:
+        return REALITY_UNPROVEN, f"cannot read deployed guidance {deployed}: {exc}"
+    return source_bytes == deployed_bytes, f"source: {source}; deployed: {deployed}"
+
+
 def tree_digest(root: Path) -> str | None:
     """Digest an ordinary tree, reject unsafe entries, or return None if absent."""
     digest = hashlib.sha256()
@@ -7428,6 +7445,8 @@ def doctor(args: argparse.Namespace) -> int:
     ).resolve()
     claude_home = Path(args.claude_home or Path.home() / ".claude").resolve()
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+    config_root_arg = getattr(args, "config_root", None)
+    config_root = Path(config_root_arg).resolve() if config_root_arg else None
     harness_root = Path(__file__).resolve().parent
     checks = []
     claude_findings: list[dict[str, Any]] = []
@@ -7454,6 +7473,18 @@ def doctor(args: argparse.Namespace) -> int:
     except (HarnessError, OSError, UnicodeError) as exc:
         global_floor_count = -1
         global_floor_detail = str(exc)
+    if config_root is None:
+        claude_guidance_ok: bool | str = REALITY_UNPROVEN
+        codex_guidance_ok: bool | str = REALITY_UNPROVEN
+        claude_guidance_detail = "no --config-root supplied"
+        codex_guidance_detail = "no --config-root supplied"
+    else:
+        claude_guidance_ok, claude_guidance_detail = guidance_identity_status(
+            config_root / "CLAUDE.md", claude_home / "CLAUDE.md"
+        )
+        codex_guidance_ok, codex_guidance_detail = guidance_identity_status(
+            config_root / "codex" / "AGENTS.md", codex_home / "AGENTS.md"
+        )
     checks.extend(
         [
             (
@@ -7461,6 +7492,16 @@ def doctor(args: argparse.Namespace) -> int:
                 (codex_home / "AGENTS.md").is_file()
                 and (codex_home / "AGENTS.md").stat().st_size > 0,
                 str(codex_home / "AGENTS.md"),
+            ),
+            (
+                "global Claude guidance",
+                claude_guidance_ok,
+                claude_guidance_detail,
+            ),
+            (
+                "global Codex guidance",
+                codex_guidance_ok,
+                codex_guidance_detail,
             ),
             (
                 "no inspectable global Codex floor",
@@ -7987,6 +8028,10 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--codex-home")
     check.add_argument("--claude-home")
     check.add_argument("--skills-home")
+    check.add_argument(
+        "--config-root",
+        help="path to the claude-config checkout used for global guidance identity",
+    )
     check.add_argument("--json", action="store_true")
     check.add_argument(
         "--repo", help="also verify one repo-local Codex floor definition"
