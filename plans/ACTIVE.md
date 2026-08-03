@@ -1,23 +1,25 @@
 # Active workstreams
 
-Snapshot: 2026-08-03. Published implementation base: `7d96762024a32cbd170cd0f23990413b4889db0e`.
-One bounded implementation workstream is active; one slot is free.
+Snapshot: 2026-08-03. Published implementation base: `731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
+One bounded rollout workstream is active; both implementation slots are free.
 
-Current runtime state: candidate canonical source 1.6.27; deployed 1.6.26 remains the last directly
-proved runtime. The producer, the global Claude hook, and all three
-registry-backed current Codex consumers are directly proved. Future, moved, or changed adapters do
-not inherit this snapshot.
+Current runtime state: canonical source and the producer marker are 1.6.27; deployed global bytes
+and all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer
+marker and every later consumer-marker change require their own exact-root proof.
 
-## Active implementation
+## Active rollout
 
-- #227 is the only active floor slice. It accepts Git's valueless `push.followTags` record as true,
-  keeps every other separator-free record malformed, and preserves the exact `--no-follow-tags`
-  override. Source/tests/producer marker move to 1.6.27; no deployment or runtime proof is implied.
-- Do not start a second dispatcher slice before #227 is reviewed, proved, and either shipped or
-  parked. Any later rollout is a separate exact-consumer operation.
+- Roll out 1.6.27 through the claude-config consumer, reviewed clean-main `sync-global --apply`,
+  global Claude proof, and separate marker/review/trust/enable/allow-deny proof for agent-harness,
+  EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab. No deployment or runtime proof is
+  inherited from the source merge.
 
 ## Completed current snapshot
 
+- PR #230 merged as `731624106fc38a9f46e21553c61b3cb0ee56dfeb` and closed #227. Canonical
+  source 1.6.27 parses Git's valueless `push.followTags` record as true, preserves the exact
+  `--no-follow-tags` override, and fails closed on every other separator-free or unterminated
+  configuration listing. All nine hosted jobs and two distinct T3 review lenses passed.
 - PR #200 merged the six-case bounded #196 public-push narrowing repair and closed #196. A confirmed
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
   PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
