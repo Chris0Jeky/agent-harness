@@ -1,7 +1,7 @@
 # Active workstreams
 
 Snapshot: 2026-08-03. Published implementation base: `731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
-One bounded rollout workstream is active; both implementation slots are free.
+One bounded rollout workstream is active; one implementation slot remains free.
 
 Current runtime state: canonical source, the producer marker, and deployed global bytes are 1.6.27;
 all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer marker
