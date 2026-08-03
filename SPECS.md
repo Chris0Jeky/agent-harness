@@ -500,8 +500,10 @@ selector (`--all`, `--tags`, `--follow-tags`, `--mirror`, `--delete`, `-d`, and 
 abbreviations). A self-sensitive repository additionally stays MUST BLOCK unless every co-located
 declaration grants the same valid `public_synthetic_publication`, the command explicitly names its
 declared remote plus one local branch/`HEAD`, that remote has exactly one push URL matching the
-declared GitHub repository, and no force-with-lease is requested. The declaration never relaxes
-public repo/gist creation, visibility changes, or arbitrary `gh api` mutation.
+declared GitHub repository, no configured `core.gitProxy`/`core.sshCommand` or declared-remote
+`receivepack`/`vcs` overrides its transport/receiver, and no command-line `--receive-pack`/`--exec`
+or force-with-lease is requested. The declaration never relaxes public repo/gist creation,
+visibility changes, or arbitrary `gh api` mutation.
 
 MUST BLOCK only at T4 / `wave_mode` (warn at T3, allow T1–T2): `git reset --hard`,
 `git clean -fd`, `git checkout -- .`, `git worktree remove --force` — and the LAUNDERED

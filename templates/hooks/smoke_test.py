@@ -6482,6 +6482,83 @@ def run_smoke():
                 True,
             )
         )
+        remote_resolution_cases.append(
+            (
+                "public synthetic route rejects multiple explicit refspecs",
+                dispatch_module.sensitive_push_narrowing_status(
+                    ["origin", "HEAD", "HEAD"], publication_project
+                )[0],
+                False,
+            )
+        )
+        for label, override_args in (
+            (
+                "public synthetic route rejects command-line receive-pack",
+                ["--receive-pack=synthetic-helper", "origin", "HEAD"],
+            ),
+            (
+                "public synthetic route rejects command-line exec",
+                ["--exec", "synthetic-helper", "origin", "HEAD"],
+            ),
+        ):
+            remote_resolution_cases.append(
+                (
+                    label,
+                    dispatch_module.sensitive_push_narrowing_status(
+                        override_args, publication_project
+                    )[0],
+                    False,
+                )
+            )
+        for config_key in (
+            "core.gitProxy",
+            "core.sshCommand",
+            "remote.origin.receivepack",
+            "remote.origin.vcs",
+        ):
+            subprocess.run(
+                ["git", "config", config_key, "synthetic-helper"],
+                cwd=publication_project,
+                check=True,
+                capture_output=True,
+            )
+            remote_resolution_cases.append(
+                (
+                    f"public synthetic route rejects configured {config_key}",
+                    dispatch_module.sensitive_push_narrowing_status(
+                        ["origin", "HEAD"], publication_project
+                    )[0],
+                    False,
+                )
+            )
+            subprocess.run(
+                ["git", "config", "--unset-all", config_key],
+                cwd=publication_project,
+                check=True,
+                capture_output=True,
+            )
+        for config_key in ("remote.backup.receivepack", "remote.backup.vcs"):
+            subprocess.run(
+                ["git", "config", config_key, "synthetic-helper"],
+                cwd=publication_project,
+                check=True,
+                capture_output=True,
+            )
+            remote_resolution_cases.append(
+                (
+                    f"other remote {config_key} does not widen publication denial",
+                    dispatch_module.sensitive_push_narrowing_status(
+                        ["origin", "HEAD"], publication_project
+                    )[0],
+                    True,
+                )
+            )
+            subprocess.run(
+                ["git", "config", "--unset-all", config_key],
+                cwd=publication_project,
+                check=True,
+                capture_output=True,
+            )
         write_tier(publication_project, 2, {"sensitive_data": True})
         remote_resolution_cases.append(
             (

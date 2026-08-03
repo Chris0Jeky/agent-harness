@@ -213,11 +213,14 @@ common Git directory has no checkout (for example, a bare repository). Configure
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Current state (2026-08-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.25 after the owner-authorized exact-route Developer Lens publication exception; it
-retains the 1.6.24 #184 security-preservation and #196 bounded-usability repairs. A late #200
-review proved that the ordinary-submodule case cannot exclude an unobservable separate checkout,
-so that one case remains fail-closed. The deployed Claude hook remains measured at 1.6.21, and no
-install, consumer rollout, trust change, or lifting of the owner-paused PreTool state is implied.
+source is 1.6.26 after the owner-authorized exact-route Developer Lens publication exception and
+its bounded post-merge security follow-up: that route now requires exactly one refspec and rejects
+configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`vcs`, plus
+command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
+security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
+ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
+fail-closed. The deployed Claude hook remains measured at 1.6.21, and no install, consumer rollout,
+trust change, or lifting of the owner-paused PreTool state is implied.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
