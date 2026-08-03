@@ -194,18 +194,34 @@ def run_case_with_argv(command: str, argv_tail: list[str], tier: int = 3):
         return parse_decision(proc)
 
 
-def write_tier(project: str, tier: int, flags: dict | None = None):
+def write_tier(
+    project: str,
+    tier: int,
+    flags: dict | None = None,
+    public_synthetic_publication: dict | None = None,
+):
     cfg_dir = os.path.join(project, ".claude")
     os.makedirs(cfg_dir, exist_ok=True)
+    declaration = {"tier": tier, "flags": flags or {}}
+    if public_synthetic_publication is not None:
+        declaration["public_synthetic_publication"] = public_synthetic_publication
     with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
-        json.dump({"tier": tier, "flags": flags or {}}, fh)
+        json.dump(declaration, fh)
 
 
-def write_agent_tier(project: str, tier: int, flags: dict | None = None):
+def write_agent_tier(
+    project: str,
+    tier: int,
+    flags: dict | None = None,
+    public_synthetic_publication: dict | None = None,
+):
     cfg_dir = os.path.join(project, ".agent-harness")
     os.makedirs(cfg_dir, exist_ok=True)
+    declaration = {"tier": tier, "flags": flags or {}}
+    if public_synthetic_publication is not None:
+        declaration["public_synthetic_publication"] = public_synthetic_publication
     with open(os.path.join(cfg_dir, "tier.json"), "w", encoding="utf-8") as fh:
-        json.dump({"tier": tier, "flags": flags or {}}, fh)
+        json.dump(declaration, fh)
 
 
 def write_raw_tier(project: str, content: str):
@@ -4991,6 +5007,30 @@ def run_smoke():
                 "duplicate overlay key",
                 '{"tier":1,"flags":{"sensitive_data":true,"sensitive_data":false}}',
             ),
+            (
+                "malformed public synthetic publication",
+                json.dumps(
+                    {
+                        "tier": 2,
+                        "flags": {"sensitive_data": True},
+                        "public_synthetic_publication": True,
+                    }
+                ),
+            ),
+            (
+                "public synthetic publication extra key",
+                json.dumps(
+                    {
+                        "tier": 2,
+                        "flags": {"sensitive_data": True},
+                        "public_synthetic_publication": {
+                            "remote": "origin",
+                            "repository": "example/thing",
+                            "extra": True,
+                        },
+                    }
+                ),
+            ),
         ]
         for label, content in invalid_authorities:
             write_raw_tier(project, content)
@@ -6279,7 +6319,8 @@ def run_smoke():
             ),
             (
                 "issue-48 deny names the failed condition",
-                "issue #48 narrowing: condition failed" in narrowing_deny_reason,
+                "issue #48 / declared-publication narrowing: condition failed"
+                in narrowing_deny_reason,
                 True,
             ),
             (
@@ -6400,6 +6441,55 @@ def run_smoke():
                     "git@github.com:example/push.git",
                     "https://github.com/example/public-second.git",
                 ],
+            )
+        )
+        publication_project = os.path.join(remote_project, "publication")
+        os.makedirs(publication_project)
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main"],
+            cwd=publication_project,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/publication.git",
+            ],
+            cwd=publication_project,
+            check=True,
+            capture_output=True,
+        )
+        publication = {
+            "remote": "origin",
+            "repository": "example/publication",
+        }
+        write_agent_tier(
+            publication_project,
+            2,
+            {"sensitive_data": True},
+            publication,
+        )
+        remote_resolution_cases.append(
+            (
+                "self-sensitive exact public synthetic route narrows",
+                dispatch_module.sensitive_push_narrowing_status(
+                    ["origin", "HEAD"], publication_project
+                )[0],
+                True,
+            )
+        )
+        write_tier(publication_project, 2, {"sensitive_data": True})
+        remote_resolution_cases.append(
+            (
+                "silent co-declaration keeps public synthetic route denied",
+                dispatch_module.sensitive_push_narrowing_status(
+                    ["origin", "HEAD"], publication_project
+                )[0],
+                False,
             )
         )
         child = os.path.join(remote_project, "child repo")

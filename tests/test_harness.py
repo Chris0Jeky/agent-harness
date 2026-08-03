@@ -6481,6 +6481,51 @@ class TierResolutionTests(unittest.TestCase):
         self.declare(".claude", flags={"relaxed_work_loss_guards": True})
         self.assertTrue(self.posture()["flags"]["relaxed_work_loss_guards"])
 
+    def test_public_synthetic_publication_needs_exact_unanimous_agreement(self) -> None:
+        publication = {"remote": "origin", "repository": "acme/widgets"}
+        self.declare(".agent-harness", public_synthetic_publication=publication)
+        self.declare(".claude", public_synthetic_publication=publication)
+        self.assertEqual(self.posture()["public_synthetic_publication"], publication)
+
+        self.declare(".claude")
+        self.assertNotIn("public_synthetic_publication", self.posture())
+
+        self.declare(
+            ".claude",
+            public_synthetic_publication={
+                "remote": "origin",
+                "repository": "acme/other",
+            },
+        )
+        self.assertNotIn("public_synthetic_publication", self.posture())
+
+    def test_public_synthetic_publication_validation_is_fail_closed(self) -> None:
+        for publication in (
+            True,
+            {},
+            {"remote": "../origin", "repository": "acme/widgets"},
+            {"remote": "origin", "repository": "../acme/widgets"},
+            {
+                "remote": "origin",
+                "repository": "acme/widgets",
+                "extra": True,
+            },
+        ):
+            with self.subTest(publication=publication):
+                declaration = {
+                    "tier": 2,
+                    "name": harness.TIER_NAMES[2],
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {"sensitive_data": True},
+                    "public_synthetic_publication": publication,
+                }
+                self.assertTrue(
+                    any(
+                        "public_synthetic_publication" in issue
+                        for issue in harness.validate_tier(declaration)
+                    )
+                )
+
     def test_a_lone_declaration_binds_on_its_own_from_either_home(self) -> None:
         for index, directory in enumerate((".agent-harness", ".claude")):
             with self.subTest(directory=directory):
@@ -6577,6 +6622,7 @@ class RealityCheckTests(unittest.TestCase):
         *,
         tier: int = 2,
         sensitive_data: bool = False,
+        public_synthetic_publication: dict[str, str] | None = None,
         human_todo: object = "unset",
         agents_text: str = "# Agent guidance\n",
     ) -> Path:
@@ -6592,6 +6638,8 @@ class RealityCheckTests(unittest.TestCase):
         }
         if human_todo != "unset":
             declaration["human_todo"] = human_todo
+        if public_synthetic_publication is not None:
+            declaration["public_synthetic_publication"] = public_synthetic_publication
         (repo / ".agent-harness").mkdir()
         (repo / ".agent-harness" / "tier.json").write_text(
             json.dumps(declaration), encoding="utf-8"
@@ -6698,6 +6746,60 @@ class RealityCheckTests(unittest.TestCase):
         self.assertIn("acme/widgets", detail)
         self.assertIn("https://github.com/acme/widgets.git", detail)
         self.assertIn("PUBLIC", detail)
+
+    def test_exact_public_synthetic_publication_remote_passes(self) -> None:
+        repo = self.make_repo(
+            sensitive_data=True,
+            public_synthetic_publication={
+                "remote": "origin",
+                "repository": "acme/widgets",
+            },
+        )
+        runner = FakeCommandRunner(
+            {
+                "remote --verbose": (True, GITHUB_REMOTE_OUTPUT),
+                "gh repo view": (True, "PUBLIC"),
+            }
+        )
+        result = self.audit(repo, runner)
+        self.assertEqual(self.statuses(result, "remote visibility"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertIn("explicitly declared", self.details(result))
+
+    def test_publication_route_mismatch_and_multiple_pushurls_fail(self) -> None:
+        for declaration, remote_output in (
+            (
+                {"remote": "origin", "repository": "acme/other"},
+                GITHUB_REMOTE_OUTPUT,
+            ),
+            (
+                {"remote": "other", "repository": "acme/widgets"},
+                GITHUB_REMOTE_OUTPUT,
+            ),
+            (
+                {"remote": "origin", "repository": "acme/widgets"},
+                GITHUB_REMOTE_OUTPUT
+                + "\norigin\thttps://github.com/acme/widgets-private.git (push)",
+            ),
+        ):
+            with self.subTest(declaration=declaration, remote_output=remote_output):
+                repo = self.make_repo(
+                    sensitive_data=True,
+                    public_synthetic_publication=declaration,
+                )
+                runner = FakeCommandRunner(
+                    {
+                        "remote --verbose": (True, remote_output),
+                        "gh repo view github.com/acme/widgets-private": (
+                            True,
+                            "PRIVATE",
+                        ),
+                        "gh repo view": (True, "PUBLIC"),
+                    }
+                )
+                result = self.audit(repo, runner)
+                self.assertIn("MISMATCH", self.statuses(result, "remote visibility"))
+                self.assertFalse(result["ok"])
 
     def test_a_stale_legacy_declaration_still_binds_the_audit(self) -> None:
         # End-to-end shape of issue #99: the repo declares T1 without the

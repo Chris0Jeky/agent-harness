@@ -3909,6 +3909,36 @@ def read_tier_file(path: Path) -> dict[str, Any]:
 # merge gate cannot be masked by a newer `free` one.
 AUTHORITY_STRICTNESS = ("free", "gated", "human-only")
 
+_PUBLIC_SYNTHETIC_REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_PUBLIC_SYNTHETIC_REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+
+
+def public_synthetic_publication_issues(value: Any) -> list[str]:
+    """Validate the exact remote-bound relaxation for public source history."""
+    if not isinstance(value, dict):
+        return ["public_synthetic_publication must be an object"]
+    if set(value) != {"remote", "repository"}:
+        return [
+            "public_synthetic_publication must contain exactly remote and repository"
+        ]
+    remote = value.get("remote")
+    repository = value.get("repository")
+    issues: list[str] = []
+    if not isinstance(remote, str) or not _PUBLIC_SYNTHETIC_REMOTE.fullmatch(remote):
+        issues.append(
+            "public_synthetic_publication.remote must be a literal remote name"
+        )
+    valid_repository = (
+        isinstance(repository, str)
+        and bool(_PUBLIC_SYNTHETIC_REPOSITORY.fullmatch(repository))
+        and all(segment.strip(".") for segment in repository.split("/"))
+    )
+    if not valid_repository:
+        issues.append(
+            "public_synthetic_publication.repository must be an OWNER/REPOSITORY pair"
+        )
+    return issues
+
 
 def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any]:
     """The one posture co-located declarations bind to: the strictest.
@@ -3952,7 +3982,29 @@ def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any
     authority = merge_tier_authority(declarations)
     if authority is not None:
         merged["authority"] = authority
+    publication = merge_public_synthetic_publication(declarations)
+    if publication is not None:
+        merged["public_synthetic_publication"] = publication
+    else:
+        merged.pop("public_synthetic_publication", None)
     return merged
+
+
+def merge_public_synthetic_publication(
+    declarations: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """Apply the relaxation only when every declaration grants the exact same route."""
+    publications = [
+        declaration.get("public_synthetic_publication") for declaration in declarations
+    ]
+    if not publications or any(
+        public_synthetic_publication_issues(publication) for publication in publications
+    ):
+        return None
+    first = publications[0]
+    if any(publication != first for publication in publications[1:]):
+        return None
+    return dict(first)
 
 
 def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
@@ -4039,6 +4091,12 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
         issues.append("flags must be an object")
     elif any(not isinstance(value, bool) for value in flags.values()):
         issues.append("all flag values must be booleans")
+    if "public_synthetic_publication" in data:
+        issues.extend(
+            public_synthetic_publication_issues(
+                data.get("public_synthetic_publication")
+            )
+        )
     return issues
 
 
@@ -4891,6 +4949,8 @@ def sensitive_data_findings(
     declared = bool(flags.get("sensitive_data")) if isinstance(flags, dict) else False
     if not declared:
         return privacy_claim_findings(repo)
+    publication = tier_data.get("public_synthetic_publication")
+    publication_valid = not public_synthetic_publication_issues(publication)
     check = "sensitive_data vs actual remote visibility"
     resolved, remotes = configured_remote_urls(repo, command_runner, deadline)
     if not resolved:
@@ -4923,9 +4983,17 @@ def sensitive_data_findings(
                 "an advisory",
             )
         ]
-    for name, url, publishes, note in publishing_remote_endpoints(
-        remotes, publishing_remote
-    ):
+    endpoints = publishing_remote_endpoints(remotes, publishing_remote)
+    publication_endpoint_count = (
+        sum(
+            1
+            for name, _url, publishes, _note in endpoints
+            if publishes and publication_valid and name == publication["remote"]
+        )
+        if publication_valid
+        else 0
+    )
+    for name, url, publishes, note in endpoints:
         shown = redact_remote_url(url)
         if remote_names_a_network_share(url):
             findings.append(
@@ -4963,15 +5031,33 @@ def sensitive_data_findings(
             # pushurl — is a normal topology, and hard-failing it with no
             # allowlist and no escape hatch made the only remedy deleting the
             # remote.
-            findings.append(
-                reality_finding(
-                    check,
-                    REALITY_MISMATCH if publishes else REALITY_ADVISORY,
-                    f"flags.sensitive_data is declared true but remote {name} "
-                    f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
-                    f"{evidence}" + (f"; {note}" if note else ""),
-                )
+            publication_matches = (
+                publishes
+                and publication_valid
+                and publication_endpoint_count == 1
+                and name == publication["remote"]
+                and slug.casefold() == publication["repository"].casefold()
             )
+            if publication_matches:
+                findings.append(
+                    reality_finding(
+                        check,
+                        REALITY_OK,
+                        f"remote {name} {shown} resolves to the explicitly declared "
+                        f"public synthetic publication repository {slug} — evidence: "
+                        f"{evidence}" + (f"; {note}" if note else ""),
+                    )
+                )
+            else:
+                findings.append(
+                    reality_finding(
+                        check,
+                        REALITY_MISMATCH if publishes else REALITY_ADVISORY,
+                        f"flags.sensitive_data is declared true but remote {name} "
+                        f"{shown} resolves to the PUBLIC repository {slug} — evidence: "
+                        f"{evidence}" + (f"; {note}" if note else ""),
+                    )
+                )
         elif visibility in KNOWN_VISIBILITIES:
             findings.append(
                 reality_finding(check, REALITY_OK, f"{name} {slug} is {visibility}")

@@ -154,6 +154,9 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   "authority": { "push": "free", "merge": "gated" },
   "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
              "relaxed_work_loss_guards": false },
+  "public_synthetic_publication": {
+    "remote": "origin", "repository": "OWNER/REPOSITORY"
+  },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
   "last_reviewed": "2026-07-06"
@@ -166,6 +169,11 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
+- `public_synthetic_publication` is an optional, remote-bound relaxation for the owner-ratified
+  public-source/private-runtime split. It contains exactly a literal Git remote name and GitHub
+  `OWNER/REPOSITORY`. It authorizes only an explicit named-branch/`HEAD` push to that remote's
+  single matching push URL; it does not authorize a refspec-less or forced push and does not
+  disable any other `sensitive_data` rule.
 - `model_routing` is NOT part of the schema: `seed` no longer emits it. The model ladder lives
   in ONE place (BLUEPRINT §5 / SPECS §8); a per-repo copy is a third place for it to go stale.
   Repos seeded before 2026-07-25 still carry a `model_routing` block — it is inert, read by
@@ -176,7 +184,9 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 - Two co-located declarations bind to the STRICTEST union, never to the first one found
   (law 9; `dispatch.load_tier`; `harness.merge_tier_declarations`): highest `tier` wins,
   tightening flags and the strictest `authority` dial are unioned, and the one relaxation
-  (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. Non-posture fields
+  (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. The publication
+  relaxation likewise applies only when EVERY declaration contains the exact same valid object.
+  Non-posture fields
   (`name`, `human_todo`, `budgets`, `last_reviewed`) come from `.agent-harness/tier.json` when
   it declares them; each file is still validated on its own.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
@@ -266,7 +276,11 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   an enclosing environment project intentionally defines the boundary for an undeclared nested
   `cwd`.
 - A present `tier.json` must be a readable JSON object with integer `tier` 0-4 and boolean flag
-  values. Invalid authority fails closed on PRE; only an absent declaration receives T1 defaults.
+  values. A present `public_synthetic_publication` must contain exactly a literal remote name and
+  GitHub `OWNER/REPOSITORY`; co-located declarations must agree exactly. Invalid authority fails
+  closed on PRE; only an absent declaration receives T1 defaults. The publication object is
+  repository-specific and is re-read from the pushed repository during attribution rather than
+  inherited as a contextual relaxation.
 - Recursive-delete operands are quote-aware, environment-expanded, and resolved from payload
   `cwd` before canonical containment. Unresolved dynamic/provider paths and relative deletes after
   a location change fail closed; only strict descendants of the native OS temp root are scratch.
@@ -472,9 +486,10 @@ producer PR nor a standalone scratch audit performs them.
 MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +main`,
 `rm -rf /`, `rm -rf ~`, `rm -rf` outside repo/scratch, `... | Remove-Item`, `... | del`,
 `curl … | sh`, `wget … | sh`, `sudo …`, write to `.env`/`*credentials*`/`*secret*` files;
-with `sensitive_data`: `git push <public-remote>`, `gh repo create --public` — with the single
-ratified issue-#48 exception (BLUEPRINT §1) for a public push ATTRIBUTABLE to a non-sensitive
-repository. That exception is narrow and every condition is enforced, so these stay MUST BLOCK
+with `sensitive_data`: `git push <public-remote>`, `gh repo create --public` — with the two
+ratified BLUEPRINT §1 exceptions: issue #48 for a push ATTRIBUTABLE to a non-sensitive repository,
+and the 2026-08-03 exact-route public-synthetic declaration. Both are narrow and every condition
+is enforced, so these stay MUST BLOCK
 under `sensitive_data` even though the destination is that repository's own remote: any
 repository-redirecting git global (`--work-tree`, `--git-dir`, `-c core.worktree`, in any spelling
 git accepts), a repository that does not EXPLICITLY declare `sensitive_data: false`, a repository
@@ -482,7 +497,11 @@ whose checkout or primary checkout sits inside a directory declaring `sensitive_
 destination that does not resolve to one of the repository's configured remotes, a refspec-less
 push inheriting a configured `remote.*.push`, and any multi-ref, tag-publishing or deletion
 selector (`--all`, `--tags`, `--follow-tags`, `--mirror`, `--delete`, `-d`, and their
-abbreviations).
+abbreviations). A self-sensitive repository additionally stays MUST BLOCK unless every co-located
+declaration grants the same valid `public_synthetic_publication`, the command explicitly names its
+declared remote plus one local branch/`HEAD`, that remote has exactly one push URL matching the
+declared GitHub repository, and no force-with-lease is requested. The declaration never relaxes
+public repo/gist creation, visibility changes, or arbitrary `gh api` mutation.
 
 MUST BLOCK only at T4 / `wave_mode` (warn at T3, allow T1–T2): `git reset --hard`,
 `git clean -fd`, `git checkout -- .`, `git worktree remove --force` — and the LAUNDERED

@@ -73,6 +73,19 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         cls._make_repo(
             cls.self_sensitive, {"tier": 2, "flags": {"sensitive_data": True}}
         )
+        cls.public_sensitive = os.path.join(cls.root, "public-sensitive")
+        cls._make_repo(
+            cls.public_sensitive,
+            {
+                "tier": 2,
+                "flags": {"sensitive_data": True},
+                "public_synthetic_publication": {
+                    "remote": "origin",
+                    "repository": "example/thing",
+                },
+            },
+        )
+        cls._git(cls.public_sensitive, "branch", "feature/demo", "main")
         cls.sensitive_root = os.path.join(cls.root, "sensroot")
         os.makedirs(os.path.join(cls.sensitive_root, ".agent-harness"))
         with open(
@@ -170,6 +183,202 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             remote_resolver=_public_resolver,
         )
         self.assertEqual(decision, "allow", reason)
+
+    def test_self_sensitive_exact_publication_route_allows(self):
+        allowed, detail = self.narrowing(["origin", "main"], self.public_sensitive)
+        self.assertTrue(allowed, detail)
+        decision, reason = checked(
+            f'git -C "{self.public_sensitive}" push origin main',
+            self.public_sensitive,
+            remote_resolver=_public_resolver,
+        )
+        self.assertEqual(decision, "allow", reason)
+
+    def test_self_sensitive_route_is_explicit_remote_only(self):
+        for args in (
+            [],
+            ["origin"],
+            ["--repo=origin"],
+            ["main"],
+            ["--repo=other", "main"],
+        ):
+            with self.subTest(args=args):
+                allowed, detail = self.narrowing(args, self.public_sensitive)
+                self.assertFalse(allowed, detail)
+
+    def test_self_sensitive_route_forbids_force_with_lease(self):
+        for option in (
+            "--force-with-lease",
+            "--force-with-lease=feature/demo",
+        ):
+            with self.subTest(option=option):
+                decision, reason = checked(
+                    f'git -C "{self.public_sensitive}" push {option} origin feature/demo',
+                    self.public_sensitive,
+                    remote_resolver=_public_resolver,
+                )
+                self.assertEqual(decision, "deny")
+                self.assertIn("forbids force-with-lease", reason)
+
+    def test_self_sensitive_route_requires_the_declared_repository(self):
+        mismatched = os.path.join(self.root, "public-sensitive-mismatch")
+        self._make_repo(
+            mismatched,
+            {
+                "tier": 2,
+                "flags": {"sensitive_data": True},
+                "public_synthetic_publication": {
+                    "remote": "origin",
+                    "repository": "example/other",
+                },
+            },
+        )
+        allowed, detail = self.narrowing(["origin", "main"], mismatched)
+        self.assertFalse(allowed)
+        self.assertIn("repository does not match", detail)
+
+    def test_self_sensitive_route_rejects_another_configured_remote(self):
+        self._git(
+            self.public_sensitive,
+            "remote",
+            "add",
+            "backup",
+            "https://github.com/example/thing.git",
+        )
+        try:
+            allowed, detail = self.narrowing(["backup", "main"], self.public_sensitive)
+        finally:
+            self._git(self.public_sensitive, "remote", "remove", "backup")
+        self.assertFalse(allowed)
+        self.assertIn("remote does not match", detail)
+
+    def test_self_sensitive_route_validates_pushurl_not_fetch_url(self):
+        pushurl = os.path.join(self.root, "public-sensitive-pushurl")
+        self._make_repo(
+            pushurl,
+            {
+                "tier": 2,
+                "flags": {"sensitive_data": True},
+                "public_synthetic_publication": {
+                    "remote": "origin",
+                    "repository": "example/thing",
+                },
+            },
+        )
+        self._git(
+            pushurl,
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "https://github.com/example/other.git",
+        )
+        allowed, detail = self.narrowing(["origin", "main"], pushurl)
+        self.assertFalse(allowed)
+        self.assertIn("repository does not match", detail)
+
+    def test_self_sensitive_route_rejects_multiple_push_urls(self):
+        multiple = os.path.join(self.root, "public-sensitive-pushurls")
+        self._make_repo(
+            multiple,
+            {
+                "tier": 2,
+                "flags": {"sensitive_data": True},
+                "public_synthetic_publication": {
+                    "remote": "origin",
+                    "repository": "example/thing",
+                },
+            },
+        )
+        self._git(
+            multiple,
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+        self._git(
+            multiple,
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://github.com/example/thing.git",
+        )
+        allowed, detail = self.narrowing(["origin", "main"], multiple)
+        self.assertFalse(allowed)
+        self.assertIn("multiple push URLs", detail)
+
+    def test_self_sensitive_route_needs_unanimous_co_declarations(self):
+        legacy = os.path.join(self.public_sensitive, ".claude")
+        os.makedirs(legacy)
+        with open(os.path.join(legacy, "tier.json"), "w", encoding="utf-8") as handle:
+            json.dump({"tier": 2, "flags": {"sensitive_data": True}}, handle)
+        try:
+            allowed, detail = self.narrowing(["origin", "main"], self.public_sensitive)
+        finally:
+            shutil.rmtree(legacy)
+        self.assertFalse(allowed)
+        self.assertIn("itself declares sensitive_data", detail)
+
+    def test_self_sensitive_route_accepts_identical_co_declarations_only(self):
+        agreeing = os.path.join(self.root, "public-sensitive-agreeing")
+        publication = {"remote": "origin", "repository": "example/thing"}
+        declaration = {
+            "tier": 2,
+            "flags": {"sensitive_data": True},
+            "public_synthetic_publication": publication,
+        }
+        self._make_repo(agreeing, declaration)
+        legacy = os.path.join(agreeing, ".claude")
+        os.makedirs(legacy)
+        with open(os.path.join(legacy, "tier.json"), "w", encoding="utf-8") as handle:
+            json.dump(declaration, handle)
+        allowed, detail = self.narrowing(["origin", "main"], agreeing)
+        self.assertTrue(allowed, detail)
+
+        declaration["public_synthetic_publication"] = {
+            "remote": "origin",
+            "repository": "example/other",
+        }
+        with open(os.path.join(legacy, "tier.json"), "w", encoding="utf-8") as handle:
+            json.dump(declaration, handle)
+        allowed, detail = self.narrowing(["origin", "main"], agreeing)
+        self.assertFalse(allowed)
+        self.assertIn("itself declares sensitive_data", detail)
+
+    def test_self_sensitive_unknown_visibility_stays_denied(self):
+        decision, reason = checked(
+            f'git -C "{self.public_sensitive}" push origin main',
+            self.public_sensitive,
+            remote_resolver=lambda *_args, **_kwargs: (None, "unknown"),
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("could not verify push remote privacy", reason)
+
+    def test_publication_route_does_not_relax_other_sensitive_commands(self):
+        tier = {
+            "tier": 2,
+            "flags": {"sensitive_data": True},
+            "public_synthetic_publication": {
+                "remote": "origin",
+                "repository": "example/thing",
+            },
+        }
+        for command in (
+            "gh repo create leak --public",
+            "gh gist create notes.md --public",
+            "gh repo edit --visibility public",
+            "gh api -XPOST /user/repos",
+        ):
+            with self.subTest(command=command):
+                decision, _reason = floor_environment.hermetic_check(
+                    dispatch, command, tier, self.public_sensitive
+                )
+                self.assertEqual(decision, "deny")
 
     def test_documented_residual_local_branch_of_any_provenance_allows(self):
         # FLOOR_LIMITATIONS.md pins this: attribution checks names, not object
@@ -1064,7 +1273,7 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         )
         self.assertEqual(decision, "deny")
         self.assertIn("refusing a push to public remote", reason)
-        self.assertIn("issue #48 narrowing", reason)
+        self.assertIn("issue #48 / declared-publication narrowing", reason)
 
     def test_private_and_unverified_destinations_are_untouched(self):
         decision, _reason = checked(
