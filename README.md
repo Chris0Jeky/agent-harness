@@ -200,9 +200,9 @@ inactive legacy profile map do not affect activation; malformed hook feature val
 typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
 runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,
 so a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory whenever
-the PreTool floor is enabled. The owner paused that floor on 2026-08-02: do not perform that
-trust/canary sequence, re-enable the floor, or alter its runtime settings unless the owner
-explicitly directs it.
+the PreTool floor is enabled. The owner's 2026-08-02 pause was explicitly lifted on 2026-08-03.
+That authorization permits a bounded per-repository rollout; it does not let one repository's
+trust or canaries stand in for another's.
 
 For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
 in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped
@@ -219,8 +219,11 @@ configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. The deployed Claude hook remains measured at 1.6.21, and no install, consumer rollout,
-trust change, or lifting of the owner-paused PreTool state is implied.
+fail-closed. Claude-config PR #123 merged the canonical consumer bytes, and reviewed clean-main
+`sync-global --apply` deployed 1.6.26. In a fresh Codex client, the agent-harness project adapter was
+reviewed, trusted, enabled, and proved with deliberate allow/deny canaries. Separately, a fresh
+Claude client proved the global Claude hook with its own allow/deny canaries. This is producer-root
+evidence only; no other consumer repository is inferred active or trusted.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
@@ -231,9 +234,9 @@ roadmap work. Public replay or blueprint-plugin extraction is deferred under AH-
 
 The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
 Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
-boundaries stay in `docs/SYSTEM_STATE.md`. The only open human action is H-2's owner-paused,
-fresh-session Codex trust/canary evidence. It must not be performed while the owner's PreTool-floor
-pause is in force. Do not infer that static byte equality proves live runtime activation.
+boundaries stay in `docs/SYSTEM_STATE.md`. H-2 remains the only open human-action record, narrowed
+to the bounded active-consumer marker/trust/canary rollout. The producer-root proof is complete;
+static byte equality still does not prove any untested consumer's live runtime activation.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own

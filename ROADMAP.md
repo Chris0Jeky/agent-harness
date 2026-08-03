@@ -1,6 +1,6 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-02, implementation state through `main@c81f8911a6c186dc98e22c62289a07fcc24166c7`.
+Snapshot: 2026-08-03, implementation state through `main@21807dc4802389d89564aee231a21a2bce0785ef`.
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 
@@ -10,16 +10,17 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 |---|---|---|---|
 | AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #138, #185 |
 | AH-2 — internal Policy Lab | AH-1 truth and corpus provenance | **Implemented core; bounded follow-ups queued.** PR #140 merged deterministic replay evidence; PRs #159/#163 repaired report/manifest contracts; PRs #174/#176/#187 closed #152/#156/#177 with reproduction and schema/runtime proof. Replay remains internal and experimental. | #141, #142, #143, #145, #146, #147, #150, #157, #158 |
-| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. #201 owns the remaining numeric-boolean edge. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201 |
+| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. #201 owns the remaining numeric-boolean edge; #225 owns parser/audit parity for the public-synthetic route; #227 owns the valid valueless Git-config record false-deny reported after the 1.6.26 consumer merge. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201, #225, #227 |
 | AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting; PR #212 closed #98 with canonical guidance-source identity before byte comparison. PR #208 closed documentation-only trust-bootstrap issue #85 without a runtime claim. PR #219 closed #160 with the selected disabled mixed-transport topology precedence. | #19, #107 |
 | AH-5 — runtime/external adapters | AH-2 stable source and report contracts | **Partial.** Recorded and generic process sources exist; runtime surface parity remains bounded. | #86, #88 |
 | AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows mode deltas and closed #170; PR #206 published the tailored new-repo contract and closed #131. PR #209 closed linked-worktree validation documentation #84 without changing runtime behavior. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #91, #101, #122, #139, #186, #188, #190, #191, #192 |
-| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Owner-paused.** Issue #39 is measured rollout evidence. H-2 remains the only open human item; do not restart estate-wide canaries. #222 records the separately owner-gated canonical-guidance reconciliation. | #39, #222 |
+| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Owner-authorized; bounded rollout active.** The 2026-08-03 producer deployment/trust/canary proof is complete. H-2 remains open only for current consumer adapters, one reviewed exact-CWD wave at a time. This change satisfies #222 and closes it on merge. | #39, #222 |
 | AH-8 — integrated measurement | evidence from all executable capabilities | **Historical measurements exist; integrated current baseline unverified.** PR #211 made cross-product shapes executable and closed #109. Keep warning, approval, and denial metrics separate. | #21, #110, #118, #120 |
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seam #101 remains; #160 is closed and retains historical AH-9 lineage. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 57 issues open at this snapshot have one primary epic above. Cross-cutting ownership is explicit:
+At the pre-publication refresh, all 59 open issues (including #222, which this change closes on
+merge) have one primary epic above. Cross-cutting ownership is explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
   closed #144. #145–#147 remain bounded replay/adapter follow-ups.
@@ -99,5 +100,5 @@ Every base or head change re-proves affected evidence.
 3. Use AH-8 evidence to choose bounded AH-3 families and measure them in shadow before enforcement.
 4. Advance AH-4/AH-6 only from reproduced configuration and estate failures; keep diagnosis and
    mutation separate.
-5. Leave AH-7 owner-paused until the owner explicitly re-enables the PreTool floor; leave AH-10
-   deferred until its explicit evidence gates change.
+5. Advance AH-7 only as bounded current-consumer marker/trust/canary waves; leave AH-10 deferred
+   until its explicit evidence gates change.
