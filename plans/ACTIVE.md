@@ -1,9 +1,12 @@
 # Active workstreams
 
-Snapshot: 2026-08-02. Published implementation base: `c81f8911a6c186dc98e22c62289a07fcc24166c7`.
+Snapshot: 2026-08-03. Published implementation base: `21807dc4802389d89564aee231a21a2bce0785ef`.
 No implementation workstream is active; both slots are free.
 
-Current runtime override: the owner paused the estate-wide PreTool deny floor on 2026-08-02. Configuration retains non-blocking lifecycle hooks. Do not run deny canaries, re-enable the floor, or mutate its runtime settings unless the owner explicitly directs it.
+Current runtime state: the owner explicitly lifted the 2026-08-02 PreTool pause on 2026-08-03 and
+authorized the rollout. Canonical/deployed 1.6.26 and the agent-harness exact-CWD trust/canary seam
+are proved. Treat every other repo-owned adapter as a separate reviewed consumer; do not infer it
+enabled or trusted from the producer proof.
 
 ## No active implementation
 
@@ -11,8 +14,8 @@ Current runtime override: the owner paused the estate-wide PreTool deny floor on
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
   PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
   passed all nine hosted checks; #202 also passed its required independent read-only review.
-- No live closeout apply, estate cleanup, branch deletion, floor deployment, trust mutation,
-  live canary, or consumer rollout occurred.
+- No repo-owned adapter beyond agent-harness was trusted, enabled, or canaried in this checkpoint; H-2's
+  remaining current-consumer rollout stays bounded and open.
 - Select the next slice only after refreshing GitHub, worktrees, tier authority, and this map. Do
   not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
 
@@ -76,6 +79,6 @@ Current runtime override: the owner paused the estate-wide PreTool deny floor on
   worktree is occupied; `tooling/corpus-replay` remains at preserved `afb1c0a`, one local commit
   ahead, and is ineligible until that checkpoint receives tests, review, and an explicit publish
   decision.
-- H-2 is the sole open human item and owner-paused. Do not run estate-wide canaries, re-enable the
-  deny floor, or mutate hook state without explicit owner direction. AH-10 extraction and a public
-  replay repository remain deferred.
+- H-2 is the sole open human-action record and is no longer owner-paused. Its producer leg is done;
+  the remaining work is a bounded inventory/refresh/re-trust/canary wave for current consumer
+  adapters. AH-10 extraction and a public replay repository remain deferred.

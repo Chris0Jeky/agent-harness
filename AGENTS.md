@@ -18,6 +18,9 @@ bootstrap/audit tooling used across Codex and Claude repositories.
 - Do not hard-code a user profile. Discover `$HOME`, `$CODEX_HOME`, and Git roots at runtime.
 - `seed` must be write-once. `sync-global` must show a dry-run and back up overwritten files.
 - Codex and Claude may share policy and parsing, but runtime-specific hook output stays explicit.
+- When a repo's PreTool floor is enabled, a new-session exact-CWD `/hooks` review, individual
+  trust/re-trust, enabled-state confirmation, and then live allow/deny canaries are mandatory; a
+  disabled floor has no runtime claim and is not canaried until it is re-enabled.
 - Add a test with every new enforcement or migration behavior.
 
 ## Verify
