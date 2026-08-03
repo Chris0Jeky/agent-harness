@@ -3,16 +3,18 @@
 Snapshot: 2026-08-03. Published implementation base: `731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
 One bounded rollout workstream is active; both implementation slots are free.
 
-Current runtime state: canonical source and the producer marker are 1.6.27; deployed global bytes
-and all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer
-marker and every later consumer-marker change require their own exact-root proof.
+Current runtime state: canonical source, the producer marker, and deployed global bytes are 1.6.27;
+all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer marker
+and every later consumer-marker change require their own exact-root proof.
 
 ## Active rollout
 
-- Roll out 1.6.27 through the claude-config consumer, reviewed clean-main `sync-global --apply`,
-  global Claude proof, and separate marker/review/trust/enable/allow-deny proof for agent-harness,
-  EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab. No deployment or runtime proof is
-  inherited from the source merge.
+- Claude-config PR #127 merged as `6aac87507c5afbb35da39f38628b880feb38921a`; both authoring
+  and deployed checkouts are clean at that merge. The explicit `sync-global` dry run and apply were
+  identity-only, and Doctor proves canonical == deployed 1.6.27 from clean published mains.
+- Complete fresh global Claude proof and separate marker/review/trust/enable/allow-deny proof for
+  agent-harness, EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab. No runtime proof is
+  inherited from deployment or from the 1.6.26 wave.
 
 ## Completed current snapshot
 
