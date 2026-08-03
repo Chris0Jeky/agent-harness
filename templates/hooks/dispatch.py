@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.25 (2026-08-03)"
+FLOOR_VERSION = "1.6.26 (2026-08-03)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -6619,6 +6619,15 @@ def abbreviated_git_push_value_option(token: str) -> bool:
     return len(matches) == 1
 
 
+def git_push_receiver_override_requested(args: list[str]) -> bool:
+    """Return whether push argv selects a non-default receive-pack program."""
+    return any(
+        token in {"--exec", "--receive-pack"}
+        or token.startswith(("--exec=", "--receive-pack="))
+        for token in args
+    )
+
+
 def git_push_short_option_shape(token: str) -> tuple[str, bool]:
     """Return (flag prefix, consumes-next) for a push short-option token.
 
@@ -8699,7 +8708,8 @@ def sensitive_push_narrowing_status(
     A second, owner-ratified route (2026-08-03) permits a self-sensitive public
     source repository only when every co-located declaration grants the same
     exact ``public_synthetic_publication`` remote and GitHub repository. That
-    route must name its remote explicitly and is primary-checkout-only; every
+    route must name its remote plus exactly one refspec explicitly, retain the
+    default Git transport and receiver, and be primary-checkout-only; every
     other sensitive-data guard remains active.
 
     Any other shape, and any unresolvable probe, returns False and keeps the
@@ -8920,8 +8930,10 @@ def sensitive_push_narrowing_status(
     if pushed_flags.get("sensitive_data") is not False:
         if not pushed_sensitive or not isinstance(publication, dict):
             return False, "the pushed repository itself declares sensitive_data"
-        if not refspecs:
-            return False, "the public synthetic publication needs an explicit source"
+        if len(refspecs) != 1:
+            return False, (
+                "the public synthetic publication needs exactly one explicit source"
+            )
         if any(
             token == "--force-with-lease" or token.startswith("--force-with-lease=")
             for token in args
@@ -8929,6 +8941,18 @@ def sensitive_push_narrowing_status(
             return False, "the public synthetic publication forbids force-with-lease"
         if not destination or destination != publication["remote"]:
             return False, "the public synthetic publication remote does not match"
+        configured_transport_overrides = {
+            "core.gitproxy",
+            "core.sshcommand",
+            f"remote.{publication['remote'].lower()}.receivepack",
+            f"remote.{publication['remote'].lower()}.vcs",
+        }
+        if git_push_receiver_override_requested(args) or any(
+            key in config_values for key in configured_transport_overrides
+        ):
+            return False, (
+                "the public synthetic publication has a Git transport/receiver override"
+            )
         if len(configured_push_urls) != 1:
             return False, "the public synthetic publication has multiple push URLs"
         configured_slug = github_repo_slug(configured_push_urls[0])
@@ -11321,11 +11345,7 @@ def check(
                 )
 
             if sub == "push":
-                if any(
-                    token in {"--exec", "--receive-pack"}
-                    or token.startswith(("--exec=", "--receive-pack="))
-                    for token in args
-                ):
+                if git_push_receiver_override_requested(args):
                     return (
                         "deny",
                         "A custom git receive-pack program can execute commands outside floor inspection.",

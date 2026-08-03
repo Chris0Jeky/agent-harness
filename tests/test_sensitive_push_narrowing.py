@@ -194,6 +194,103 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         )
         self.assertEqual(decision, "allow", reason)
 
+    def test_self_sensitive_route_requires_exactly_one_refspec(self):
+        allowed, detail = self.narrowing(
+            ["origin", "main", "feature/demo"], self.public_sensitive
+        )
+        self.assertFalse(allowed, detail)
+        self.assertIn("exactly one", detail)
+
+        decision, reason = checked(
+            f'git -C "{self.public_sensitive}" push origin main feature/demo',
+            self.public_sensitive,
+            remote_resolver=_public_resolver,
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("exactly one", reason)
+
+    def test_self_sensitive_route_rejects_configured_transport_overrides(self):
+        original_url = self._git(self.public_sensitive, "remote", "get-url", "origin")
+        try:
+            for key, remote_url in (
+                ("core.sshCommand", "git@github.com:example/thing.git"),
+                ("core.gitProxy", "git://github.com/example/thing.git"),
+                ("remote.origin.receivepack", "git@github.com:example/thing.git"),
+                ("remote.origin.vcs", "https://github.com/example/thing.git"),
+            ):
+                with self.subTest(key=key, remote_url=remote_url):
+                    self._git(
+                        self.public_sensitive,
+                        "remote",
+                        "set-url",
+                        "origin",
+                        remote_url,
+                    )
+                    self._git(self.public_sensitive, "config", key, "synthetic-helper")
+                    try:
+                        allowed, detail = self.narrowing(
+                            ["origin", "main"], self.public_sensitive
+                        )
+                        self.assertFalse(allowed, detail)
+                        self.assertIn("transport/receiver override", detail)
+
+                        decision, reason = checked(
+                            f'git -C "{self.public_sensitive}" push origin main',
+                            self.public_sensitive,
+                            remote_resolver=_public_resolver,
+                        )
+                        self.assertEqual(decision, "deny", reason)
+                        self.assertIn("transport/receiver override", reason)
+                    finally:
+                        self._git(self.public_sensitive, "config", "--unset-all", key)
+
+            self._git(
+                self.public_sensitive,
+                "remote",
+                "set-url",
+                "origin",
+                original_url,
+            )
+            for key in ("remote.backup.receivepack", "remote.backup.vcs"):
+                self._git(
+                    self.public_sensitive,
+                    "config",
+                    key,
+                    "synthetic-helper",
+                )
+                try:
+                    allowed, detail = self.narrowing(
+                        ["origin", "main"], self.public_sensitive
+                    )
+                    self.assertTrue(allowed, detail)
+                finally:
+                    self._git(
+                        self.public_sensitive,
+                        "config",
+                        "--unset-all",
+                        key,
+                    )
+        finally:
+            self._git(
+                self.public_sensitive,
+                "remote",
+                "set-url",
+                "origin",
+                original_url,
+            )
+
+    def test_self_sensitive_route_rejects_command_line_receiver_overrides(self):
+        for args in (
+            ["--receive-pack", "synthetic-helper", "origin", "main"],
+            ["--receive-pack=synthetic-helper", "origin", "main"],
+            ["--exec", "synthetic-helper", "origin", "main"],
+            ["--exec=synthetic-helper", "origin", "main"],
+        ):
+            with self.subTest(args=args):
+                allowed, detail = self.narrowing(args, self.public_sensitive)
+                self.assertFalse(allowed, detail)
+                self.assertIn("transport/receiver override", detail)
+
     def test_self_sensitive_route_is_explicit_remote_only(self):
         for args in (
             [],

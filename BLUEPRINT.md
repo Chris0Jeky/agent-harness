@@ -115,9 +115,11 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
   as `public_synthetic_publication: {remote, repository}` because it is a relaxation: every
   co-located tier declaration must grant the identical literal remote name and GitHub
   `OWNER/REPOSITORY`, silence or disagreement denies, and the command must explicitly push one
-  named local branch or `HEAD` to that remote's single matching push URL. Refspec-less pushes,
-  force-with-lease, force/tag/delete/multi-ref selectors, URL destinations, remote or slug
-  mismatches, linked worktrees with a sensitive primary, and unresolved probes retain the deny.
+  named local branch or `HEAD` to that remote's single matching push URL. Configured
+  `core.gitProxy`/`core.sshCommand` or declared-remote `receivepack`/`vcs`, command-line
+  `--receive-pack`/`--exec`, refspec-less pushes, force-with-lease,
+  force/tag/delete/multi-ref selectors, URL destinations, remote or slug mismatches, linked
+  worktrees with a sensitive primary, and unresolved probes retain the deny.
   This declaration does not inspect Git objects or prove a diff synthetic; the repository's
   exact-diff and synthetic-artifact gates remain required before publication. All other
   `sensitive_data` denies, including public repo/gist creation, visibility changes, and arbitrary
