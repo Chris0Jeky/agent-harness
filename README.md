@@ -102,7 +102,10 @@ repo pass in CI and fail on a developer box; `doctor` owns that axis. Each repor
 Only a PUBLIC endpoint work is actually PUSHED to is a `MISMATCH`: the push URL of `origin`,
 or of any remote when no `origin` is configured. A public `upstream` or mirror on a private
 fork, and a public fetch URL behind a private `pushurl`, are reported as an `advisory` naming
-the remote and the reason. Any credential embedded in a remote URL is redacted before it
+the remote and the reason. The owner-ratified `public_synthetic_publication` object makes one
+exact remote/repository pair an `ok` while retaining `sensitive_data`; disagreement, a second
+push URL, or any other public publishing endpoint remains a mismatch. Any credential embedded
+in a remote URL is redacted before it
 reaches a finding.
 Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
 skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
@@ -209,11 +212,12 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-01): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.24 after the owner-authorized #184 security-preservation repair and #196's bounded
-usability correction. A late #200 review proved that the ordinary-submodule case cannot exclude an
-unobservable separate checkout, so that one case remains fail-closed. The deployed Claude hook
-remains measured at 1.6.21, and no install, consumer rollout, or trust change is implied.
+Current state (2026-08-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+source is 1.6.25 after the owner-authorized exact-route Developer Lens publication exception; it
+retains the 1.6.24 #184 security-preservation and #196 bounded-usability repairs. A late #200
+review proved that the ordinary-submodule case cannot exclude an unobservable separate checkout,
+so that one case remains fail-closed. The deployed Claude hook remains measured at 1.6.21, and no
+install, consumer rollout, trust change, or lifting of the owner-paused PreTool state is implied.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology

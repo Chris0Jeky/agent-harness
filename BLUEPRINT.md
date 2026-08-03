@@ -110,6 +110,18 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
   configured remotes, with no multi-ref, tag-publishing or deletion selector in any spelling git
   accepts. Each condition is enforced, not asserted: the PR #132 review found four of them
   bypassable and one of those was an exfiltration path the pre-#48 floor had closed.
+  A second, separately ratified exception (owner decision 2026-08-03) covers a public-source
+  repository whose ignored local runtime data remains sensitive. It is declared outside `flags`
+  as `public_synthetic_publication: {remote, repository}` because it is a relaxation: every
+  co-located tier declaration must grant the identical literal remote name and GitHub
+  `OWNER/REPOSITORY`, silence or disagreement denies, and the command must explicitly push one
+  named local branch or `HEAD` to that remote's single matching push URL. Refspec-less pushes,
+  force-with-lease, force/tag/delete/multi-ref selectors, URL destinations, remote or slug
+  mismatches, linked worktrees with a sensitive primary, and unresolved probes retain the deny.
+  This declaration does not inspect Git objects or prove a diff synthetic; the repository's
+  exact-diff and synthetic-artifact gates remain required before publication. All other
+  `sensitive_data` denies, including public repo/gist creation, visibility changes, and arbitrary
+  `gh api` mutation, remain active.
 - `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
   guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
   clean main after every wave.
@@ -276,6 +288,10 @@ is re-trusted and canaried (HUMAN_TODO H-2) — a permitted fix still merges to 
 bumps `FLOOR_VERSION`; what waits on H-2 is `sync-global --apply` and the consumer marker
 refresh. Shrinking the FP rate toward the ~0.1% it once measured is the only hardening
 direction left open.
+
+The owner-authorized 2026-08-03 Developer Lens exact-route publication exception is one explicit,
+bounded exception to that freeze; it does not reopen general parser or bypass-family work. The
+feature freeze resumes immediately after that contract lands.
 
 ---
 
