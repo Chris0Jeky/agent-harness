@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.24 (2026-08-01)"
+FLOOR_VERSION = "1.6.25 (2026-08-03)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8671,7 +8671,7 @@ def sensitive_push_narrowing_status(
     command_runner=command_output,
     deadline: float | None = None,
 ) -> tuple[bool, str]:
-    """Issue #48's ratified narrowing: attribute a push to a non-sensitive repo.
+    """Narrow a sensitive-context public push to one attributable repository.
 
     The sensitive_data overlay is a CONTEXT property — `load_tier` unions the
     cwd and CLAUDE_PROJECT_DIR chains, so a session rooted in a sensitive repo
@@ -8689,11 +8689,18 @@ def sensitive_push_narrowing_status(
          tag-publishing or deletion selector is present;
       2. every explicit refspec source is a named local branch (refs/heads/*)
          or HEAD — no raw SHAs, tags, wildcards, or remote-tracking refs;
-      3. the pushed repository's toplevel carries its OWN tier declaration
-         EXPLICITLY setting sensitive_data false, and no ancestor of either
-         that toplevel or the primary checkout behind it (a linked worktree
-         can sit outside) declares sensitive_data — the sensitivity being set
-         aside must be purely contextual, never physical containment.
+      3. the pushed repository's toplevel carries its OWN tier declaration and
+         either EXPLICITLY sets sensitive_data false, or unanimously grants the
+         exact public_synthetic_publication route named by the command; and
+      4. no ancestor of either that toplevel or the primary checkout behind it
+         (a linked worktree can sit outside) adds a different sensitive-data
+         context. A sensitive primary still blocks its linked worktree.
+
+    A second, owner-ratified route (2026-08-03) permits a self-sensitive public
+    source repository only when every co-located declaration grants the same
+    exact ``public_synthetic_publication`` remote and GitHub repository. That
+    route must name its remote explicitly and is primary-checkout-only; every
+    other sensitive-data guard remains active.
 
     Any other shape, and any unresolvable probe, returns False and keeps the
     context deny. Residual accepted by the ratification (FLOOR_LIMITATIONS.md):
@@ -8742,6 +8749,7 @@ def sensitive_push_narrowing_status(
     # spellings it does not model (git://, rsync://, the scp-like host:path,
     # ext::), so the documented "configured remote NAME" condition is proven by
     # ASKING the repository, not by pattern-matching the token (PR #132 review).
+    configured_push_urls: list[str] = []
     if destination:
         configured_remote = command_output_before_deadline(
             command_runner,
@@ -8763,6 +8771,9 @@ def sensitive_push_narrowing_status(
                 "destination is not a configured remote of the pushed repository",
                 diagnostics,
             )
+        configured_push_urls = [
+            line.strip() for line in configured_remote.splitlines() if line.strip()
+        ]
     configured_push_state = command_output_before_deadline(
         command_runner,
         [
@@ -8899,13 +8910,33 @@ def sensitive_push_narrowing_status(
     except Exception:
         return False, "the pushed repository's tier declaration is unreadable"
     pushed_flags = pushed_tier.get("flags", {})
-    # The ratification says the repository must DECLARE sensitive_data false.
-    # An omitted key is silence, not a declaration, and silence must not unlock
-    # a security exemption by defaulting to falsy (PR #132 review).
+    # Silence must not unlock a security exemption by defaulting to falsy (PR
+    # #132 review). A self-sensitive repository gets only the separately
+    # ratified exact-route declaration; it retains all other overlay behavior.
     if "sensitive_data" not in pushed_flags:
         return False, "the pushed repository does not declare sensitive_data"
+    pushed_sensitive = pushed_flags.get("sensitive_data") is True
+    publication = pushed_tier.get("public_synthetic_publication")
     if pushed_flags.get("sensitive_data") is not False:
-        return False, "the pushed repository itself declares sensitive_data"
+        if not pushed_sensitive or not isinstance(publication, dict):
+            return False, "the pushed repository itself declares sensitive_data"
+        if not refspecs:
+            return False, "the public synthetic publication needs an explicit source"
+        if any(
+            token == "--force-with-lease" or token.startswith("--force-with-lease=")
+            for token in args
+        ):
+            return False, "the public synthetic publication forbids force-with-lease"
+        if not destination or destination != publication["remote"]:
+            return False, "the public synthetic publication remote does not match"
+        if len(configured_push_urls) != 1:
+            return False, "the public synthetic publication has multiple push URLs"
+        configured_slug = github_repo_slug(configured_push_urls[0])
+        if (
+            not configured_slug
+            or configured_slug.casefold() != publication["repository"].casefold()
+        ):
+            return False, "the public synthetic publication repository does not match"
 
     def same_repository_path(left: str, right: str) -> bool:
         """Compare live Git paths by identity, with a fail-closed fallback.
@@ -9030,7 +9061,37 @@ def read_tier_file(path: str) -> dict:
         for key, value in flags.items()
     ):
         raise ValueError("tier.json flags must map string names to booleans")
-    return {"tier": tier, "flags": flags}
+    publication = data.get("public_synthetic_publication")
+    if publication is not None:
+        if not isinstance(publication, dict) or set(publication) != {
+            "remote",
+            "repository",
+        }:
+            raise ValueError(
+                "tier.json public_synthetic_publication must contain exactly "
+                "remote and repository"
+            )
+        remote = publication.get("remote")
+        repository = publication.get("repository")
+        if not isinstance(remote, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", remote
+        ):
+            raise ValueError(
+                "tier.json public_synthetic_publication.remote must be a literal "
+                "remote name"
+            )
+        if (
+            not isinstance(repository, str)
+            or github_rest_repo_path(repository) != repository
+        ):
+            raise ValueError(
+                "tier.json public_synthetic_publication.repository must be an "
+                "OWNER/REPOSITORY pair"
+            )
+    result = {"tier": tier, "flags": flags}
+    if publication is not None:
+        result["public_synthetic_publication"] = dict(publication)
+    return result
 
 
 def load_tier(project_dir: str) -> dict:
@@ -9062,7 +9123,14 @@ def load_tier(project_dir: str) -> dict:
     flags["relaxed_work_loss_guards"] = all(
         bool(cfg["flags"].get("relaxed_work_loss_guards")) for cfg in configs
     )
-    return {"tier": max(cfg["tier"] for cfg in configs), "flags": flags}
+    result = {"tier": max(cfg["tier"] for cfg in configs), "flags": flags}
+    publications = [cfg.get("public_synthetic_publication") for cfg in configs]
+    if publications and all(
+        publication is not None and publication == publications[0]
+        for publication in publications
+    ):
+        result["public_synthetic_publication"] = dict(publications[0])
+    return result
 
 
 def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
@@ -11551,11 +11619,10 @@ def check(
                             )
                     is_public, remote = _remote_cache[resolver_key]
                     if is_public is True:
-                        # Issue #48 (ratified; owner reaffirmed 2026-07-27): a
-                        # push attributable to a non-sensitive repository — its
-                        # own named branches to its own configured remote — is
-                        # exempt from the CONTEXT overlay. Everything else
-                        # keeps the deny, with the failed condition named.
+                        # Two ratified routes share one attribution proof: issue
+                        # #48's non-sensitive repository route, and the
+                        # 2026-08-03 exact-remote public-synthetic declaration
+                        # for a self-sensitive public source repository.
                         narrowing_key = (
                             "issue48-narrowing",
                             tuple(args),
@@ -11574,7 +11641,8 @@ def check(
                             return (
                                 "deny",
                                 f"sensitive_data repo: refusing a push to public remote {remote} "
-                                f"(issue #48 narrowing: {narrowing_detail}).",
+                                f"(issue #48 / declared-publication narrowing: "
+                                f"{narrowing_detail}).",
                             )
                     if is_public is None:
                         return (
