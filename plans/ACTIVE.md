@@ -1,12 +1,11 @@
 # Active workstreams
 
-Snapshot: 2026-08-03. Published implementation base: `21807dc4802389d89564aee231a21a2bce0785ef`.
+Snapshot: 2026-08-03. Published implementation base: `75ae6f1f0fde36d36ffc58d579ac30c007028488`.
 No implementation workstream is active; both slots are free.
 
-Current runtime state: the owner explicitly lifted the 2026-08-02 PreTool pause on 2026-08-03 and
-authorized the rollout. Canonical/deployed 1.6.26 and the agent-harness exact-CWD trust/canary seam
-are proved. Treat every other repo-owned adapter as a separate reviewed consumer; do not infer it
-enabled or trusted from the producer proof.
+Current runtime state: canonical/deployed 1.6.26, the producer, the global Claude hook, and all three
+registry-backed current Codex consumers are directly proved. Future, moved, or changed adapters do
+not inherit this snapshot.
 
 ## No active implementation
 
@@ -14,8 +13,8 @@ enabled or trusted from the producer proof.
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
   PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
   passed all nine hosted checks; #202 also passed its required independent read-only review.
-- No repo-owned adapter beyond agent-harness was trusted, enabled, or canaried in this checkpoint; H-2's
-  remaining current-consumer rollout stays bounded and open.
+- EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab completed the bounded consumer rollout;
+  no other registered default checkout owns a tracked adapter.
 - Select the next slice only after refreshing GitHub, worktrees, tier authority, and this map. Do
   not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
 
@@ -79,6 +78,5 @@ enabled or trusted from the producer proof.
   worktree is occupied; `tooling/corpus-replay` remains at preserved `afb1c0a`, one local commit
   ahead, and is ineligible until that checkpoint receives tests, review, and an explicit publish
   decision.
-- H-2 is the sole open human-action record and is no longer owner-paused. Its producer leg is done;
-  the remaining work is a bounded inventory/refresh/re-trust/canary wave for current consumer
-  adapters. AH-10 extraction and a public replay repository remain deferred.
+- H-2 is closed after the exact current-consumer marker/review/trust/canary wave. AH-10 extraction
+  and a public replay repository remain deferred.

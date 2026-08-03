@@ -220,10 +220,11 @@ command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
 fail-closed. Claude-config PR #123 merged the canonical consumer bytes, and reviewed clean-main
-`sync-global --apply` deployed 1.6.26. In a fresh Codex client, the agent-harness project adapter was
-reviewed, trusted, enabled, and proved with deliberate allow/deny canaries. Separately, a fresh
-Claude client proved the global Claude hook with its own allow/deny canaries. This is producer-root
-evidence only; no other consumer repository is inferred active or trusted.
+`sync-global --apply` deployed 1.6.26. Fresh clients proved the agent-harness project adapter and the
+global Claude hook separately. The registry inventory then found exactly three current Codex
+consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4 merged their
+current adapters. Each merged exact root was individually reviewed, trusted, enabled, Doctor-green,
+and proved by deliberate allow/deny canaries. No sibling or future adapter inherits that evidence.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
@@ -234,9 +235,8 @@ roadmap work. Public replay or blueprint-plugin extraction is deferred under AH-
 
 The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
 Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
-boundaries stay in `docs/SYSTEM_STATE.md`. H-2 remains the only open human-action record, narrowed
-to the bounded active-consumer marker/trust/canary rollout. The producer-root proof is complete;
-static byte equality still does not prove any untested consumer's live runtime activation.
+boundaries stay in `docs/SYSTEM_STATE.md`. H-2 is closed at the 2026-08-03 current-consumer snapshot;
+static byte equality still does not prove a future, moved, or changed adapter's runtime activation.
 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
