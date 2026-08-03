@@ -1,13 +1,22 @@
 # Active workstreams
 
-Snapshot: 2026-08-03. Published implementation base: `75ae6f1f0fde36d36ffc58d579ac30c007028488`.
-No implementation workstream is active; both slots are free.
+Snapshot: 2026-08-03. Published implementation base: `7d96762024a32cbd170cd0f23990413b4889db0e`.
+One bounded implementation workstream is active; one slot is free.
 
-Current runtime state: canonical/deployed 1.6.26, the producer, the global Claude hook, and all three
+Current runtime state: candidate canonical source 1.6.27; deployed 1.6.26 remains the last directly
+proved runtime. The producer, the global Claude hook, and all three
 registry-backed current Codex consumers are directly proved. Future, moved, or changed adapters do
 not inherit this snapshot.
 
-## No active implementation
+## Active implementation
+
+- #227 is the only active floor slice. It accepts Git's valueless `push.followTags` record as true,
+  keeps every other separator-free record malformed, and preserves the exact `--no-follow-tags`
+  override. Source/tests/producer marker move to 1.6.27; no deployment or runtime proof is implied.
+- Do not start a second dispatcher slice before #227 is reviewed, proved, and either shipped or
+  parked. Any later rollout is a separate exact-consumer operation.
+
+## Completed current snapshot
 
 - PR #200 merged the six-case bounded #196 public-push narrowing repair and closed #196. A confirmed
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
@@ -15,8 +24,7 @@ not inherit this snapshot.
   passed all nine hosted checks; #202 also passed its required independent read-only review.
 - EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab completed the bounded consumer rollout;
   no other registered default checkout owns a tracked adapter.
-- Select the next slice only after refreshing GitHub, worktrees, tier authority, and this map. Do
-  not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
+- Do not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
 
 ## Completed in this wave
 

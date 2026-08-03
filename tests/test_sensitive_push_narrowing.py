@@ -725,9 +725,39 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             )
             allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
             self.assertFalse(allowed, detail)
-            self.assertIn("configuration", detail)
+            self.assertIn("followTags", detail)
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"], self.nonsensitive
+            )
+            self.assertTrue(allowed, detail)
         finally:
             self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+
+        def add_malformed_record(record, *, terminated=True):
+            def runner(argv, project_dir):
+                output = dispatch.command_output(argv, project_dir)
+                if argv[-3:] == ["config", "--null", "--list"]:
+                    return output + record + ("\0" if terminated else "")
+                return output
+
+            return runner
+
+        for record in ("unknown.truncated", "push.followTags-truncated"):
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"],
+                self.nonsensitive,
+                add_malformed_record(record),
+            )
+            self.assertFalse(allowed, record)
+            self.assertIn("malformed", detail)
+
+        allowed, detail = self.narrowing(
+            ["--no-follow-tags", "origin", "main"],
+            self.nonsensitive,
+            add_malformed_record("push.followTags", terminated=False),
+        )
+        self.assertFalse(allowed, detail)
+        self.assertIn("malformed", detail)
 
     def test_no_follow_tags_overrides_configured_true_only_in_option_position(self):
         remote_name = "issue196-no-follow"
