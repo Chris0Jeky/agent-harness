@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.26 (2026-08-03)"
+FLOOR_VERSION = "1.6.27 (2026-08-03)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8801,22 +8801,34 @@ def sensitive_push_narrowing_status(
         return False, detail_with_diagnostics(
             "unresolved push configuration", diagnostics
         )
+    # Every record emitted by `git config --null --list` is NUL-terminated. Without the final
+    # delimiter, an exact `push.followTags` tail is indistinguishable from a legitimate valueless
+    # boolean record, so require the framing before interpreting that one separator-free key.
+    if not configured_push_state.endswith("\0"):
+        return False, "push configuration listing is malformed"
     config_values: dict[str, list[str]] = {}
     for entry in configured_push_state.split("\0"):
         if not entry:
             continue
         key, separator, value = entry.partition("\n")
         if not separator:
-            return False, "push configuration listing is malformed"
+            # Git's --null --list output represents a valueless boolean key as
+            # just the key name.  Only push.followTags has a safe, ratified
+            # interpretation here; every other truncated record remains
+            # malformed so the guard continues to fail closed.
+            if key.lower() != "push.followtags":
+                return False, "push configuration listing is malformed"
+            config_values.setdefault(key.lower(), []).append("true")
+            continue
         config_values.setdefault(key.lower(), []).append(value)
     # The all-config probe exits zero even when a specific key is absent, so a
     # resolver failure cannot collapse to the same answer as "not configured".
     # Git treats an explicitly empty boolean value as false, but a VALUELESS
     # key as true. The all-config format preserves that distinction: the empty
-    # value has the key/value newline parsed above, while a valueless entry has
-    # no separator and already failed closed as malformed. Unknown boolean
-    # text remains a deny even under --no-follow-tags; only a valid configured
-    # true is safely overridden by that exact CLI negation.
+    # value has the key/value newline parsed above, while the one safe valueless
+    # entry is normalized to true above. Unknown boolean text remains a deny
+    # even under --no-follow-tags; only a valid configured true is safely
+    # overridden by that exact CLI negation.
     configured_follow_tags = [
         value.strip().lower() for value in config_values.get("push.followtags", [])
     ]
