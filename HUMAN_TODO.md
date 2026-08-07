@@ -89,9 +89,16 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   freeze-candidate baseline, and the replay-only 35-file extraction allowlist. This approves the
   manifest as internal reproducibility/privacy evidence. Clean-repository creation, name, licence,
   and release are deferred to AH-10 and are not the next owner question.
-- [ ] **H-14** — **Prove floor 1.6.27 at runtime. This is the one genuinely open item, and no agent
-  can do any part of it** — every step requires a new normal interactive session in an exact CWD,
-  which an agent session cannot launch for itself. Tracked durably as issue #232.
+- [ ] **H-14** — **Prove floor 1.6.27 at runtime.** This item holds ONLY the human-only actions:
+  every step below requires a new normal interactive session launched in an exact CWD, which an
+  agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
+  toggles that only a human can perform. Tracked durably as issue #232.
+
+  The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
+  item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can
+  safely complete, and SPECS §5 treats marker refresh as separate reviewed rollout work. It lives in
+  `plans/ACTIVE.md` (phases P4/P5) and issue #232, blocked until steps 1 and 2 below both pass. What
+  this item owes you is steps 1 and 2, and then the per-root trust/canary half of step 3.
 
   **Why this exists even though H-2 is closed.** H-2 closed on a complete, directly-evidenced
   **1.6.26** inventory: producer, global Claude, and all three registered Codex consumers. Since
@@ -120,15 +127,31 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
        mutated even if the floor were to fail open)
   2. **Fresh global Claude proof**, separately, against the deployed 1.6.27 bytes — the same
      allow/deny pair. Claude and Codex are distinct runtimes; neither proves the other.
-  3. **Only after 1 and 2 both pass**, the three consumer marker PRs may be reopened one at a time,
-     each for its own exact-root proof: EvidenceDeck #21, collaborative-hill-lab #5,
-     SwarmingLilMen #52. All three were closed unmerged at this gate with branches and review
-     history preserved. SwarmingLilMen carries a separate owner gate under its own issue #91.
+  3. **Only after BOTH 1 and 2 pass**, the three consumer roots are proved one at a time:
+     EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52. All three marker PRs were
+     closed unmerged at this gate with branches and review history preserved. SwarmingLilMen carries
+     a separate owner gate under its own issue #91.
 
-  **Do not** reorder these, refresh a consumer marker before step 1 passes, or infer any step from
-  static deployment, from Doctor, or from the 1.6.26 evidence. Check the live version with
-  `py -3 harness.py doctor` rather than trusting a version number written here — the H-2 line went
-  stale four times by naming one.
+     For each root, in this order — **the merge must come first, and this is not optional**:
+     1. reopen and **merge** that root's marker PR (agent work);
+     2. update that root's default checkout to clean `main` and confirm
+        `py -3 harness.py doctor --repo .` reports the *current* marker there (agent work);
+     3. only then, the human-only leg: new normal TUI in that exact root, `/hooks` review,
+        individual trust, enable, and both canary legs.
+
+     **Why the order matters, and why a passing canary can lie here.** The adapter marker and the
+     shared dispatcher bytes are separate things. If you canary a root whose marker PR has not
+     merged, its trusted adapter definition is still the **1.6.26** one, while the dispatcher it
+     invokes is already the deployed **1.6.27**. The deny canary will therefore print a `1.6.27`
+     banner — sourced from the shared dispatcher, not from that root's adapter — and look exactly
+     like valid consumer proof while proving nothing about the stale definition actually in force.
+     A green banner is not evidence that the root you are standing in is current.
+
+  **Do not** reorder these, refresh or canary a consumer marker before BOTH steps 1 and 2 have
+  passed, canary any root whose marker PR has not merged, or infer any step from static deployment,
+  from Doctor, or from the 1.6.26 evidence. Check the live version with
+  `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
+  line went stale four times by naming one.
 
 ## Changelog
 

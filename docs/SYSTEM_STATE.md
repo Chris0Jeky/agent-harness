@@ -2,9 +2,10 @@
 
 Snapshot: 2026-08-07, published `main@3ade22b1e494c2d303fcd73fd8669b899b42559b`. Implementation
 content is unchanged since 2026-08-03: `3ade22b` adds only `/.claude/worktrees` to `.gitignore` on
-top of PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb`. That commit reached `main` as a
-direct push rather than through the PR lane — see #236. Refresh Git, GitHub, deployed bytes, and
-live runtime evidence before relying on this snapshot.
+top of PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb`. **`3ade22b` — the `.gitignore`
+commit, not PR #230's merge —** is the one that reached `main` as a direct push rather than through
+the PR lane; that direct push is what #236 tracks. `7316241` merged normally through PR #230.
+Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
 ## Runtime state: 2026-08-07
 
