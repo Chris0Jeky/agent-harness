@@ -505,6 +505,13 @@ declared GitHub repository, no configured `core.gitProxy`/`core.sshCommand` or d
 or force-with-lease is requested. The declaration never relaxes public repo/gist creation,
 visibility changes, or arbitrary `gh api` mutation.
 
+Secret-file scope, measured not asserted: `` `.env`/`*credentials*`/`*secret*` `` above is
+implemented as a NAME test — `.env*`/`.envrc`, any `credential`, a `secret.`/`secrets.` prefix,
+the `id_rsa|dsa|ecdsa|ed25519` names, and one extension, `*.pem`. Conventional secret EXTENSIONS
+(`.key`, `.secret`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.crt`) allow at every tier; whether
+`*secret*` was ever meant as a suffix glob is an open owner reading, so this records the divergence
+without changing it (issue #130, evidence in `FLOOR_LIMITATIONS.md`).
+
 MUST BLOCK only at T4 / `wave_mode` (warn at T3, allow T1–T2): `git reset --hard`,
 `git clean -fd`, `git checkout -- .`, `git worktree remove --force` — and the LAUNDERED
 force spellings of a worktree removal, which ride the identical ladder because an opaque
