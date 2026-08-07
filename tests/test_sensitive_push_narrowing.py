@@ -932,9 +932,17 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         # value dies on git's own "bad boolean config value" instead.
         self._git(self.nonsensitive, "config", "push.followTags", "1 ")
         try:
-            self.assertEqual(
-                self._git(self.nonsensitive, "config", "push.followTags"), "1"
-            )
+            # Read the raw framed value, not the stripped one, so this really
+            # proves the trailing space survived into what the floor reads.
+            raw = subprocess.run(
+                [GIT, "config", "--null", "--get", "push.followTags"],
+                cwd=self.nonsensitive,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            ).stdout
+            self.assertEqual(raw, "1 \0")
             self.assertIsNone(self._git_boolean(self.nonsensitive, "push.followTags"))
             allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
             self.assertFalse(allowed, detail)
