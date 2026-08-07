@@ -193,6 +193,43 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
   the budget script fails if they disagree.
 
+### §2.1 Logical repo root selection (issue #139)
+
+A declaration binds to a LOGICAL repo, which is usually — but not always — the Git checkout
+root. One checkout can carry several products, each declaring its own posture, while the
+checkout root itself deliberately declares none. `harness audit <path>` and
+`harness doctor --repo <path>` resolve the logical root of the requested path with this rule,
+in order (`harness.logical_repo_root`):
+
+1. **Nearest declared ancestor wins.** Walking from the requested directory up to the Git
+   checkout root inclusive, the first directory that carries BOTH `AGENTS.md` AND a tier
+   declaration (`.agent-harness/tier.json` or legacy `.claude/tier.json`) is the logical root.
+   Containment breaks the tie, so a product's own declaration binds for a path inside it even
+   when an outer umbrella also declares one.
+2. **A fully undeclared directory may resolve downward.** If the requested directory carries
+   NEITHER half, declared roots below it are searched (breadth-first, max depth 4, skipping
+   dot-directories, vendor directories, and anything reached through a symlink or junction; a
+   declared root ends the descent on its branch). Exactly one match is selected. **Two or more
+   competing roots are ambiguous and raise** — the operator re-runs against one of them — and
+   the tool never picks a product silently.
+3. **Otherwise the Git checkout root is the repo**, exactly as before. A HALF-declared
+   directory (one of the two files) is a repo missing the other half, never an umbrella: it
+   takes this branch so the missing declaration is still reported.
+
+Consequences, all of which the tests pin:
+
+- An ordinary repository whose logical and Git roots are identical takes rule 1 at the root
+  itself. Nothing about it changes, whatever its subdirectories declare.
+- The tier, `AGENTS.md`, doc budgets, stale-path scan and every reality check are scoped to
+  the LOGICAL root, so a sibling product's artifacts are not reported against this one.
+- Git facts stay the checkout's: `git status`, remotes and remote visibility are read by
+  running Git from inside the logical root, which answers for the checkout that owns it.
+  `audit --json` reports both, as `repo` (logical) and `checkout` (Git).
+- `doctor --repo` walks every active `.codex` layer from the checkout root to the requested
+  path as before, but the CANONICAL adapter is the logical root's `.codex/hooks.json`. In a
+  linked worktree the authoritative source is that same logical relative subpath in the root
+  checkout, not the Git root's `.codex`.
+
 ## §3 Budget table (enforced by `check-budgets.mjs`, ~80 lines)
 
 | Artifact | Cap | On overflow |

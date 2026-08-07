@@ -52,10 +52,12 @@ py_compile) or they are silently unlinted.
 Two Python artifacts, both deliberately dependency-free (stdlib only):
 
 **`harness.py`** — single-file CLI with six subcommands:
-- `audit` — validates every tier declaration a repo carries (`.agent-harness/tier.json` and a
+- `audit` — resolves the LOGICAL repo root first (SPECS §2.1: a declared subdirectory of a
+  larger checkout is audited as its own repo; competing nested roots raise), then validates
+  every tier declaration that root carries (`.agent-harness/tier.json` and a
   legacy `.claude/tier.json` bind to the STRICTEST union, exactly as the dispatcher resolves
   them), doc line budgets (CLAUDE.md is capped per tier: T3 = 150 lines), and scans
-  `SCAN_PATHS` files for stale hard-coded user-profile paths.
+  `SCAN_PATHS` files for stale hard-coded user-profile paths. Git facts stay the checkout's.
   It also runs the **reality checks** (`reality_findings`): declared `sensitive_data` vs each
   remote's real host visibility, vendored floor bytes (`hooks/` or `.claude/hooks/`) vs the
   canonical template, and declared `human_todo` vs a file that exists. `MISMATCH` fails;
@@ -69,8 +71,10 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
 - `doctor` — checks inspectable global hook sources; `--repo` conditionally walks every active
   project `.codex` layer, including JSON and inline TOML hooks and linked-worktree root mappings.
   It validates each complete hook subtree and the hook-specific metadata it interprets before
-  requiring the canonical root adapter's POSIX and Windows commands to match a conservative
-  direct/wrapper execution shape and declare the current dispatcher marker. A repo-relative
+  requiring the canonical adapter's POSIX and Windows commands to match a conservative
+  direct/wrapper execution shape and declare the current dispatcher marker. The canonical
+  adapter is the LOGICAL root's `.codex/hooks.json` (SPECS §2.1), mapped across a linked
+  worktree at the same logical relative subpath. A repo-relative
   wrapper path is rejected when the session cwd is not the hook source root. Non-default persisted
   project-root markers, unsupported stored legacy profile selectors, and inspectable activation
   blockers fail closed. It does not fully validate unrelated config fields, prove runtime/cloud
