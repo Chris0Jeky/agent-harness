@@ -3256,6 +3256,48 @@ class ComposabilityFilterTests(CrossProductBase):
                 _composable(command), f"{command!r} is dialect-independent text"
             )
 
+    def test_a_second_tokenizer_agrees_no_admitted_case_carries_real_structure(self):
+        """Cross-check the whole admitted corpus against an INDEPENDENT tokenizer.
+
+        Every test above this one asserts `_structure_outside_inert_quotes` against
+        examples its own author thought of, which is the failure mode this repository
+        keeps rediscovering: a hand-written matcher tested only on the shapes its author
+        had in mind. `shlex` in non-POSIX mode with `punctuation_chars` is a separate
+        implementation of the same question, written by somebody else — it keeps the
+        quote characters in the token, so a token made ENTIRELY of operator characters
+        is one the shell would execute, and a token like `'>'` or `">"` is data.
+
+        The two must agree over all 477 admitted payloads: if the scanner ever starts
+        admitting a payload with a live `;` or `|` in it, the corpus stops being a
+        benign corpus and every deny it reports afterwards is noise. Comment handling is
+        switched off deliberately — left on, a `#` would truncate the token stream and
+        could hide the very operator this is looking for.
+        """
+        operators = set("();<>|&")
+        offenders = []
+        for command, _tier, _flags in BENIGN_CORPUS:
+            lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                tokens = list(lexer)
+            except ValueError as error:
+                offenders.append((command, f"shlex cannot parse it: {error}"))
+                continue
+            live = [
+                token
+                for token in tokens
+                if token and all(char in operators for char in token)
+            ]
+            if live:
+                offenders.append((command, live))
+        self.assertEqual(
+            offenders,
+            [],
+            "an admitted benign payload carries a shell operator a second tokenizer "
+            "reads as executable structure (payload, offending tokens)",
+        )
+
     def test_inert_quoted_operators_are_admitted_in_both_quote_styles(self):
         for command in (
             "git commit -m 'redirect &> .env is blocked'",
