@@ -19,24 +19,35 @@ Static deployment is complete and is NOT runtime proof:
   and deployed checkouts are clean at that merge. The explicit `sync-global` dry run and apply were
   identity-only, and Doctor proves canonical == deployed 1.6.27 from clean published mains.
 
-The remaining rollout is STRICTLY ORDERED. SPECS §5 fixes the order as **producer merge → reviewed
-clean-main install → producer exact-CWD re-trust and canaries → consumer marker refresh → each
-consumer's exact-CWD re-trust and canaries**. Steps 1 and 2 are done. Perform the rest in this
-sequence and never out of it:
+The remaining rollout is STRICTLY ORDERED. SPECS §5 fixes a five-phase order, and this file uses
+that numbering and no other:
 
-1. **Producer first.** In a new normal Codex TUI launched from the agent-harness exact repository
-   root, complete `/hooks` review and re-trust of the sole project handler, confirm its enabled
-   state, run `harness.py doctor`, then collect BOTH 1.6.27 canary legs — the harmless allow
-   (`git status --short --branch`) and the inert local deny probe
-   (`git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`).
-2. **Fresh global Claude proof**, independently, against the deployed 1.6.27 bytes.
-3. **Only after 1 and 2 both succeed** may the consumer marker refresh begin. The three consumer
-   marker PRs — EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52 — were closed
-   unmerged at the producer-first gate; their reviewed branches and heads are preserved. Reopen
-   them one at a time, each for its own exact-root proof. SwarmingLilMen additionally carries a
-   separate owner gate under its own issue #91.
+| Phase | SPECS §5 step | State |
+|---|---|---|
+| P1 | producer merge | **done** — PR #230 |
+| P2 | reviewed clean-main install | **done** — claude-config PR #127, sync-global identity-only |
+| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** |
+| P4 | consumer marker refresh | **NOT DONE — blocked by P3** |
+| P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — blocked by P4** |
 
-Refreshing or validating any consumer marker before step 1 completes is out of order and is not
+Only P1 and P2 are complete. Everything below is outstanding. Perform it in this sequence and never
+out of it:
+
+- **P3 — producer, first and alone.** In a new normal Codex TUI launched from the agent-harness
+  exact repository root, complete `/hooks` review and re-trust of the sole project handler, confirm
+  its enabled state, run `py -3 harness.py doctor --repo .` (bare `doctor` runs only the global
+  checks and skips the producer adapter, activation, and project-floor checks), then collect BOTH
+  1.6.27 canary legs — the harmless allow (`git status --short --branch`) and the inert local deny
+  probe (`git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`).
+- **P3b — fresh global Claude proof**, independently, against the deployed 1.6.27 bytes. Claude and
+  Codex are distinct runtimes; neither proves the other.
+- **P4/P5 — only after P3 and P3b both succeed.** The three consumer marker PRs — EvidenceDeck #21,
+  collaborative-hill-lab #5, SwarmingLilMen #52 — were closed unmerged at the producer-first gate;
+  their reviewed branches and heads are preserved. Reopen them one at a time, each for its own
+  exact-root proof. SwarmingLilMen additionally carries a separate owner gate under its own issue
+  #91.
+
+Refreshing or validating any consumer marker before P3 and P3b both pass is out of order and is not
 authorized by this file. No runtime proof is inherited from deployment, from Doctor, or from the
 completed 1.6.26 wave.
 

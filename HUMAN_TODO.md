@@ -105,8 +105,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   consumer's exact-CWD re-trust and canaries. The first two are done. What is yours:
 
   1. **Producer, first and alone.** Launch a new normal Codex TUI from the agent-harness repository
-     root (`C:\Users\jekyt\source\agent-harness`) — not a worktree, not a reused session, not a
-     differently-rooted one. Run `/hooks`, review the sole project `PreToolUse` handler, confirm
+     root — not a worktree, not a reused session, not a differently-rooted one. Discover that root
+     at runtime rather than pasting a path from here: `git -C <your checkout> rev-parse --show-toplevel`,
+     and confirm the session's own cwd matches it before proceeding (a linked worktree resolves to a
+     different root and does not satisfy this step). Run `/hooks`, review the sole project
+     `PreToolUse` handler, confirm
      matcher `^Bash$`, the current marker, `--event pre --runtime codex`, and the five-second
      timeout, then trust that handler individually and enable it. Confirm `/hooks` shows `[x]` and
      `Trust: Trusted`. Run `py -3 harness.py doctor --repo .`. Then run BOTH canary legs and check

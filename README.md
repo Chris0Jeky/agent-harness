@@ -212,7 +212,7 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+Current state (2026-08-07): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
 source is 1.6.27 after the bounded #227 repair: a valueless `push.followTags` is parsed with Git's
 true semantics, while every other separator-free configuration record remains malformed and
 fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
