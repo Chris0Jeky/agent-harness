@@ -3050,7 +3050,6 @@ class DenyReasonTests(CrossProductBase):
             )
         if messages:
             messages.append(self._corrected_record(losses, gains))
-        if messages:
             self.fail("\n\n".join(messages))
 
     def _corrected_record(self, losses, gains) -> str:
