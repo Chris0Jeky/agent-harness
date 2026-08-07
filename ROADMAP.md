@@ -1,6 +1,8 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-07, implementation state through `main@731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
+Snapshot: 2026-08-07, implementation state through `main@3ade22b1e494c2d303fcd73fd8669b899b42559b`
+(a `.gitignore`-only commit on top of PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb`,
+which remains the last commit to change implementation content).
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 

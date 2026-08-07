@@ -1,6 +1,9 @@
 # Active workstreams
 
-Snapshot: 2026-08-07. Published implementation base: `731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
+Snapshot: 2026-08-07. Published `main` head: `3ade22b1e494c2d303fcd73fd8669b899b42559b`. The four
+lanes below were cut from its parent `731624106fc38a9f46e21553c61b3cb0ee56dfeb` (PR #230's merge)
+minutes before `3ade22b` — a `.gitignore`-only commit — landed on `main`; each lane rebases onto the
+current head before merge, so their proving evidence is re-proved against it rather than inherited.
 One bounded rollout workstream is blocked on human-only runtime proof; implementation lanes are
 listed under "Active implementation" below.
 
@@ -130,9 +133,10 @@ decided, the declared count in `README.md` stands as written and this note recor
 - #160 closed through PR #219: effective disablement suppresses only a cross-layer mixed-transport
   conflict; same-table conflict remains invalid and a later re-enable fails closed. Doctor reports
   static topology only, not complete Codex parser acceptance for inactive definitions.
-- #201 is the bounded AH-3 follow-up for Git numeric booleans in exact no-follow-tags narrowing; it
-  remains held while dispatcher/smoke ownership is occupied and is not permission to reopen
-  #193/#196 or broaden the parser.
+- #201 is no longer held. The hold read "while dispatcher/smoke ownership is occupied", and #227
+  released that ownership when PR #230 shipped, so #201 is dispatched as the sole dispatcher lane
+  under "Active implementation" above. It remains bounded exactly as before: it is not permission to
+  reopen #193/#196 or to broaden the parser beyond `push.followTags`.
 - #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not this runtime.
   #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call
   site. #185/#191/#192 remain mapped follow-ups. Replay slices remain held while the replay-tool
