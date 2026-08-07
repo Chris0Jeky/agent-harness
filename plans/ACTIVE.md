@@ -1,23 +1,76 @@
 # Active workstreams
 
-Snapshot: 2026-08-03. Published implementation base: `7d96762024a32cbd170cd0f23990413b4889db0e`.
-One bounded implementation workstream is active; one slot is free.
+Snapshot: 2026-08-07. Published implementation base: `731624106fc38a9f46e21553c61b3cb0ee56dfeb`.
+One bounded rollout workstream is blocked on human-only runtime proof; implementation lanes are
+listed under "Active implementation" below.
 
-Current runtime state: candidate canonical source 1.6.27; deployed 1.6.26 remains the last directly
-proved runtime. The producer, the global Claude hook, and all three
-registry-backed current Codex consumers are directly proved. Future, moved, or changed adapters do
-not inherit this snapshot.
+Current runtime state: canonical source, the producer marker, and deployed global bytes are 1.6.27;
+all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer marker
+and every later consumer-marker change require their own exact-root proof.
+
+## Active rollout — issue #232, blocked on human-only runtime proof
+
+Static deployment is complete and is NOT runtime proof:
+
+- Claude-config PR #127 merged as `6aac87507c5afbb35da39f38628b880feb38921a`; both authoring
+  and deployed checkouts are clean at that merge. The explicit `sync-global` dry run and apply were
+  identity-only, and Doctor proves canonical == deployed 1.6.27 from clean published mains.
+
+The remaining rollout is STRICTLY ORDERED. SPECS §5 fixes the order as **producer merge → reviewed
+clean-main install → producer exact-CWD re-trust and canaries → consumer marker refresh → each
+consumer's exact-CWD re-trust and canaries**. Steps 1 and 2 are done. Perform the rest in this
+sequence and never out of it:
+
+1. **Producer first.** In a new normal Codex TUI launched from the agent-harness exact repository
+   root, complete `/hooks` review and re-trust of the sole project handler, confirm its enabled
+   state, run `harness.py doctor`, then collect BOTH 1.6.27 canary legs — the harmless allow
+   (`git status --short --branch`) and the inert local deny probe
+   (`git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`).
+2. **Fresh global Claude proof**, independently, against the deployed 1.6.27 bytes.
+3. **Only after 1 and 2 both succeed** may the consumer marker refresh begin. The three consumer
+   marker PRs — EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52 — were closed
+   unmerged at the producer-first gate; their reviewed branches and heads are preserved. Reopen
+   them one at a time, each for its own exact-root proof. SwarmingLilMen additionally carries a
+   separate owner gate under its own issue #91.
+
+Refreshing or validating any consumer marker before step 1 completes is out of order and is not
+authorized by this file. No runtime proof is inherited from deployment, from Doctor, or from the
+completed 1.6.26 wave.
 
 ## Active implementation
 
-- #227 is the only active floor slice. It accepts Git's valueless `push.followTags` record as true,
-  keeps every other separator-free record malformed, and preserves the exact `--no-follow-tags`
-  override. Source/tests/producer marker move to 1.6.27; no deployment or runtime proof is implied.
-- Do not start a second dispatcher slice before #227 is reviewed, proved, and either shipped or
-  parked. Any later rollout is a separate exact-consumer operation.
+Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
+region boundary. Exactly one touches `templates/hooks/dispatch.py`; the other three are forbidden
+from it, so no two lanes can collide on `FLOOR_VERSION`, the adapter marker, or the charter digests.
+
+| Lane | Region — exclusive to that lane | Boundary |
+|---|---|---|
+| #201 numeric-boolean `push.followTags` | `templates/hooks/dispatch.py`, `templates/hooks/smoke_test.py`, `FLOOR_VERSION`, `.codex/hooks.json` marker | The one dispatcher slice. False-deny repair on the already-ratified bounded parser; no universal Git option parser. |
+| #110 cross-product gate measurement | `tests/test_prefix_wrapper_crossproduct.py` | Tests only. Must not edit `dispatch.py`. A floor false positive it surfaces is recorded and tracked, never fixed here. |
+| #139 nested logical repo root | `harness.py`, `tests/test_harness.py` | Audit/Doctor only. Must not edit `dispatch.py`. May land as an honest subset of the seven acceptance criteria. |
+| #130 secret-file extension reading | `FLOOR_LIMITATIONS.md`, `SPECS.md` | Measurement and documentation only. Explicitly forbidden from editing `dispatch.py`. |
+
+PR numbers, exact heads, proving-check results, and review verdicts are recorded here as each lane
+lands. A lane that parks is recorded as parked with its tracked issue, not silently dropped.
+
+**Declared-cap tension, recorded rather than resolved.** `README.md` declares this file as allowing
+"at most two active, executable workstreams", and four implementation lanes plus one blocked rollout
+exceed that count. The count was not silently rewritten to fit. The reading applied here is that the
+cap's purpose is collision avoidance on shared T4-class infrastructure — the hazard the previous
+snapshot named explicitly was a *second dispatcher slice* — and that disjoint-region lanes do not
+create it. That reading is an assumption, not a ratified change: **Assumption: a region-disjoint lane
+does not consume a workstream slot. Reason: the cap protects against colliding edits to
+`dispatch.py`/`FLOOR_VERSION`/the adapter marker, and exactly one lane can touch those. Reversible
+by: closing the three non-dispatcher lanes' PRs, whose branches are preserved.** Issue #233 tracks
+re-expressing the cap as a region/collision rule or reaffirming it as a hard count; until that is
+decided, the declared count in `README.md` stands as written and this note records the divergence.
 
 ## Completed current snapshot
 
+- PR #230 merged as `731624106fc38a9f46e21553c61b3cb0ee56dfeb` and closed #227. Canonical
+  source 1.6.27 parses Git's valueless `push.followTags` record as true, preserves the exact
+  `--no-follow-tags` override, and fails closed on every other separator-free or unterminated
+  configuration listing. All nine hosted jobs and two distinct T3 review lenses passed.
 - PR #200 merged the six-case bounded #196 public-push narrowing repair and closed #196. A confirmed
   late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
   PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
