@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.27 (2026-08-03)"
+FLOOR_VERSION = "1.6.28 (2026-08-07)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -8673,6 +8673,102 @@ def git_push_refspec_sources(refspecs: list[str]) -> list[str] | None:
     return sources
 
 
+# Git's C boolean parser, measured on git 2.45.1 and pinned by the issue #201
+# tests. `git_parse_maybe_bool` first tries the text names, then falls through
+# to `git_parse_int`, i.e. `strtoimax(value, &end, 0)` plus an optional k/m/g
+# unit factor, with the product bound to a signed 32-bit int.
+#
+# These two sets are the floor's PRE-EXISTING normalized literals, kept
+# byte-for-byte so that no configuration this floor already classified changes
+# answer. "0"/"1" are not text names in git — git reaches the same verdict for
+# them through the numeric branch — but they were already matched here after
+# strip().lower(), so they stay and issue #201 is left strictly additive.
+_GIT_CONFIG_NORMALIZED_TRUE = frozenset({"true", "yes", "on", "1"})
+_GIT_CONFIG_NORMALIZED_FALSE = frozenset({"", "false", "no", "off", "0"})
+# strtoimax skips only C-locale whitespace; str.strip() would also eat U+00A0,
+# which git rejects.
+_GIT_CONFIG_NUMERIC_LEADING_SPACE = " \t\n\v\f\r"
+_GIT_CONFIG_BASE_DIGITS = {
+    8: frozenset("01234567"),
+    10: frozenset("0123456789"),
+    16: frozenset("0123456789abcdefABCDEF"),
+}
+_GIT_CONFIG_UNIT_FACTORS = {
+    "": 1,
+    "k": 1024,
+    "m": 1024**2,
+    "g": 1024**3,
+}
+_GIT_CONFIG_INT_MAX = 2**31 - 1
+
+
+def git_config_numeric_boolean(value: str) -> bool | None:
+    """Git's numeric boolean branch: True/False, or None when git rejects it.
+
+    Measured against real git (2.45.1) rather than assumed, because the grammar
+    is C's `strtoimax(value, &end, 0)` and not Python's `int()`:
+
+      * leading C whitespace and one leading `+`/`-` are accepted; TRAILING
+        whitespace is not (`" 1"` is true, `"1 "` is invalid);
+      * the base is auto-detected — `0x`/`0X` is hex, a bare leading `0` is
+        octal (`"010"` is 8 and true, `"08"` is invalid, `"0x"` alone is
+        invalid), everything else decimal. Python spellings git does NOT take
+        (`"0b1"`, `"1_000"`, `"1.0"`, `"1e3"`) stay invalid;
+      * a trailing `k`/`m`/`g` unit (case-insensitive) multiplies by 1024,
+        1024**2, 1024**3 — `"1k"` is true, `"0k"` is FALSE, `"1kk"` invalid;
+      * the product must fit a signed 32-bit int using git's own
+        divide-before-multiply test, so `"2147483647"` is true while
+        `"2147483648"`, `"-2147483648"`, `"0x80000000"`, `"2097152k"` and
+        `"2G"` are all invalid;
+      * zero is false at every base and unit; every other magnitude, including
+        a negative one, is true.
+
+    Returning None for everything else keeps the single caller fail-closed. This
+    models ONE boolean config value for `push.followTags`; it is deliberately
+    not a general Git option or config-type parser.
+    """
+    text = value.lstrip(_GIT_CONFIG_NUMERIC_LEADING_SPACE)
+    if text[:1] in ("+", "-"):
+        text = text[1:]
+    base = 10
+    if text[:1] == "0":
+        if text[1:2] in ("x", "X") and text[2:3] in _GIT_CONFIG_BASE_DIGITS[16]:
+            base = 16
+            text = text[2:]
+        else:
+            base = 8
+    digits = _GIT_CONFIG_BASE_DIGITS[base]
+    span = 0
+    while span < len(text) and text[span] in digits:
+        span += 1
+    if not span:
+        return None
+    factor = _GIT_CONFIG_UNIT_FACTORS.get(text[span:].lower())
+    if factor is None:
+        return None
+    magnitude = int(text[:span], base)
+    if magnitude > _GIT_CONFIG_INT_MAX // factor:
+        return None
+    return bool(magnitude)
+
+
+def git_config_maybe_bool(value: str) -> bool | None:
+    """`git_parse_maybe_bool` for the one config value the floor reads.
+
+    The literal sets keep their pre-existing `strip().lower()` normalization,
+    so every value this floor already answered keeps that answer and issue #201
+    only ADDS previously-unknown numerics. The fall-through sees the RAW value,
+    because git's numeric branch accepts leading whitespace and rejects
+    trailing whitespace, and None still means "git rejects this too".
+    """
+    text = value.strip().lower()
+    if text in _GIT_CONFIG_NORMALIZED_TRUE:
+        return True
+    if text in _GIT_CONFIG_NORMALIZED_FALSE:
+        return False
+    return git_config_numeric_boolean(value)
+
+
 def sensitive_push_narrowing_status(
     args: list[str],
     project_dir: str,
@@ -8826,19 +8922,18 @@ def sensitive_push_narrowing_status(
     # Git treats an explicitly empty boolean value as false, but a VALUELESS
     # key as true. The all-config format preserves that distinction: the empty
     # value has the key/value newline parsed above, while the one safe valueless
-    # entry is normalized to true above. Unknown boolean text remains a deny
-    # even under --no-follow-tags; only a valid configured true is safely
-    # overridden by that exact CLI negation.
+    # entry is normalized to true above. Git also accepts NUMERIC booleans here
+    # (issue #201) — zero is false, any other valid magnitude is true — so
+    # `git_config_maybe_bool` answers for the whole grammar git actually takes.
+    # A value git itself rejects stays None and remains a deny even under
+    # --no-follow-tags; only a valid configured true is safely overridden by
+    # that exact CLI negation.
     configured_follow_tags = [
-        value.strip().lower() for value in config_values.get("push.followtags", [])
+        git_config_maybe_bool(value)
+        for value in config_values.get("push.followtags", [])
     ]
-    false_booleans = {"", "false", "no", "off", "0"}
-    true_booleans = {"true", "yes", "on", "1"}
-    if any(
-        value not in false_booleans | true_booleans for value in configured_follow_tags
-    ) or (
-        not no_follow_tags
-        and any(value in true_booleans for value in configured_follow_tags)
+    if any(state is None for state in configured_follow_tags) or (
+        not no_follow_tags and any(configured_follow_tags)
     ):
         return False, "configured push.followTags may publish annotated tags"
     # Independent of the destination check: `git push origin` names a remote and
