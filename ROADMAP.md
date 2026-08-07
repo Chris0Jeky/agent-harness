@@ -1,6 +1,8 @@
 # Agent Harness roadmap
 
-Snapshot: 2026-08-03, implementation state through `main@75ae6f1f0fde36d36ffc58d579ac30c007028488`.
+Snapshot: 2026-08-07, implementation state through `main@3ade22b1e494c2d303fcd73fd8669b899b42559b`
+(a `.gitignore`-only commit on top of PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb`,
+which remains the last commit to change implementation content).
 The mission and epic outcomes are authoritative in `AGENT_HARNESS_AGENT_BRIEF.md`; this file owns
 live dependency, evidence, issue, and PR mapping. Refresh GitHub before selecting work.
 
@@ -8,18 +10,21 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 
 | Epic | Dependency | Evidence and outcome state | Primary open issues |
 |---|---|---|---|
-| AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. | #4, #95, #138, #185 |
+| AH-1 — authority and baseline | none | **Active.** The workbench brief, immutable floor tag, and state homes exist; PR #182 closed the measured CI-budget defect #179. Bounded consumer-smoke proving issue #185 is queued. #233 asks whether the declared two-workstream cap is a hard count or a region/collision rule, after a 2026-08-07 four-lane dispatch diverged from it on a named assumption. | #4, #95, #138, #185, #233 |
 | AH-2 — internal Policy Lab | AH-1 truth and corpus provenance | **Implemented core; bounded follow-ups queued.** PR #140 merged deterministic replay evidence; PRs #159/#163 repaired report/manifest contracts; PRs #174/#176/#187 closed #152/#156/#177 with reproduction and schema/runtime proof. Replay remains internal and experimental. | #141, #142, #143, #145, #146, #147, #150, #157, #158 |
-| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. #201 owns the remaining numeric-boolean edge; #225 owns parser/audit parity for the public-synthetic route; #227 owns the valid valueless Git-config record false-deny reported after the 1.6.26 consumer merge. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201, #225, #227 |
+| AH-3 — Pattern Guard v2 | AH-1 baseline + AH-2 replay + AH-8 measurements | **Bounded security-preservation exception implemented.** PR #193 closed #184 after repairing its four public-push gaps; PR #200 closed #196 with five retained fail-closed usability narrowings, and PR #202 withdrew the unprovable sixth case after late review. PR #230 closed #227 with the valid valueless Git-config record repair in source 1.6.27; its runtime rollout is tracked under AH-7. #201 owns the remaining numeric-boolean edge and #225 owns parser/audit parity for the public-synthetic route. Beyond those bounded cases, use #21 evidence for small catastrophic families; universal-parser expansion is out. | #3, #12, #17, #24, #26, #32, #38, #58, #59, #62, #65, #77, #78, #81, #125, #128, #129, #130, #133, #134, #135, #136, #137, #201, #225 |
 | AH-4 — Doctor v2 | existing Doctor foundation + reproduced configuration failures | **Partial.** PR #161 implemented static MCP topology diagnosis and closed #87; PRs #175/#178 closed shared-source identity and Docker command-position defects #164/#165; PR #204 closed #89 with static Windows Git command-fidelity diagnosis; PR #205 closed #189 with diagnosis-only static Claude-hook topology reporting; PR #212 closed #98 with canonical guidance-source identity before byte comparison. PR #208 closed documentation-only trust-bootstrap issue #85 without a runtime claim. PR #219 closed #160 with the selected disabled mixed-transport topology precedence. | #19, #107 |
 | AH-5 — runtime/external adapters | AH-2 stable source and report contracts | **Partial.** Recorded and generic process sources exist; runtime surface parity remains bounded. | #86, #88 |
 | AH-6 — estate operations | AH-1 authority + AH-4 findings | **Partial; executable closeout implemented.** PRs #162/#169/#180 established guarded fail-closed closeout; PR #183 bounded reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows mode deltas and closed #170; PR #206 published the tailored new-repo contract and closed #131. PR #209 closed linked-worktree validation documentation #84 without changing runtime behavior. Merge-gate completeness, creation, retirement, portability, and branch teardown remain queued. | #76, #91, #101, #122, #139, #186, #188, #190, #191, #192 |
-| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Current rollout complete.** PR #228 closed #222 after the producer deployment/trust/canary proof. EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4 then merged the only three registry-backed current consumer adapters; each exact merged root passed individual review/trust/enable, Doctor, and live allow/deny proof. H-2 is closed for this inventory. | #39 |
+| AH-7 — shadow/canary/enforcement evidence | AH-3/AH-4/AH-5 candidates + explicit owner scope | **Prior 1.6.26 rollout complete; 1.6.27 proof blocked on human-only runtime steps.** PR #230 changed the producer marker; claude-config PR #127 and supported clean-main sync then established static global 1.6.27 deployment. The remainder is strictly ordered per SPECS §5 — agent-harness **producer** exact-CWD re-trust and canaries first, then fresh global Claude proof, and only then consumer marker refresh. The three consumer marker PRs (EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52) were closed unmerged at that gate with branches preserved. Nothing is inherited from the completed 1.6.26 wave; H-2 stays closed for that dated inventory only. #232 is the durable tracker. | #39, #232 |
 | AH-8 — integrated measurement | evidence from all executable capabilities | **Historical measurements exist; integrated current baseline unverified.** PR #211 made cross-product shapes executable and closed #109. Keep warning, approval, and denial metrics separate. | #21, #110, #118, #120 |
 | AH-9 — claude-config integration | AH-4 diagnosis + AH-6 operations + private boundary | **Queued.** Define data/command interfaces without importing private internals. Secondary seam #101 remains; #160 is closed and retains historical AH-9 lineage. | none |
 | AH-10 — public extraction/compatibility | demonstrated internal stability and demand | **Deferred/frozen.** No public replay repository or blueprint-plugin extraction is authorized. | none |
 
-All 58 open issues at this snapshot have one primary epic above. Cross-cutting ownership is
+All 59 open issues at this snapshot have one primary epic above, measured with an explicit
+`gh issue list --state open --limit 300` count. (The 2026-08-03 draft recorded 57; the true count was
+58, and `gh issue list`'s silent default page size of 30 is the standing trap here — always pass an
+explicit `--limit`.) Cross-cutting ownership is
 explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163
@@ -55,7 +60,12 @@ explicit:
 
 ## Open PR ownership
 
-No implementation PR is open at this snapshot. PR #204 closed #89 from exact head
+Four bounded implementation lanes were dispatched 2026-08-07 against issues #201, #110, #139 and
+#130, each in an isolated worktree with an exclusive region; `plans/ACTIVE.md` carries the region
+table and the boundary each lane may not cross. Their PR numbers, exact heads, and review verdicts
+are recorded there as they land. PR #231 was closed unmerged and superseded after a confirmed late
+P1 on its rollout ordering; its branch `codex/close-issue227-rollout-state` and review history are
+preserved. PR #204 closed #89 from exact head
 `2150b420f05d8244ec922643bc0ca33b64f66885` against base
 `6b49a67ef7642683341d8e894faafe47a5d19c58`; run `30714604384` passed before merge
 `77a9759c356f3a2add0ecada157cd95c4e14e6a5`. PR #206 closed #131 from exact head

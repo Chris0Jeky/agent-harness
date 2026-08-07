@@ -89,8 +89,82 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   freeze-candidate baseline, and the replay-only 35-file extraction allowlist. This approves the
   manifest as internal reproducibility/privacy evidence. Clean-repository creation, name, licence,
   and release are deferred to AH-10 and are not the next owner question.
+- [ ] **H-14** — **Prove floor 1.6.27 at runtime.** This item holds ONLY the human-only actions:
+  every step below requires a new normal interactive session launched in an exact CWD, which an
+  agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
+  toggles that only a human can perform. Tracked durably as issue #232.
+
+  The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
+  item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can
+  safely complete, and SPECS §5 treats marker refresh as separate reviewed rollout work. It lives in
+  `plans/ACTIVE.md` (phases P4/P5) and issue #232, blocked until steps 1 and 2 below both pass. What
+  this item owes you is steps 1 and 2, and then the per-root trust/canary half of step 3.
+
+  **Why this exists even though H-2 is closed.** H-2 closed on a complete, directly-evidenced
+  **1.6.26** inventory: producer, global Claude, and all three registered Codex consumers. Since
+  then PR #230 merged canonical source 1.6.27 and **changed the producer marker**, and claude-config
+  PR #127 deployed the matching bytes. A changed marker inherits nothing from the prior wave, so the
+  runtime evidence is owed again at the new version. Static deployment is done and Doctor reports
+  canonical == deployed 1.6.27 — neither is runtime proof, and neither may be recorded as one.
+
+  **The order is fixed by [SPECS §5](SPECS.md) and must not be varied:** producer merge → reviewed
+  clean-main install → producer exact-CWD re-trust and canaries → consumer marker refresh → each
+  consumer's exact-CWD re-trust and canaries. The first two are done. What is yours:
+
+  1. **Producer, first and alone.** Launch a new normal Codex TUI from the agent-harness repository
+     root — not a worktree, not a reused session, not a differently-rooted one. Discover that root
+     at runtime rather than pasting a path from here: `git -C <your checkout> rev-parse --show-toplevel`,
+     and confirm the session's own cwd matches it before proceeding (a linked worktree resolves to a
+     different root and does not satisfy this step). Run `/hooks`, review the sole project
+     `PreToolUse` handler, confirm
+     matcher `^Bash$`, the current marker, `--event pre --runtime codex`, and the five-second
+     timeout, then trust that handler individually and enable it. Confirm `/hooks` shows `[x]` and
+     `Trust: Trusted`. Run `py -3 harness.py doctor --repo .`. Then run BOTH canary legs and check
+     the banner reads 1.6.27:
+     - allow: `git status --short --branch` (must execute)
+     - deny: `git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`
+       (must be blocked *before* Git runs; the local `.` destination and `--dry-run` mean nothing is
+       mutated even if the floor were to fail open)
+  2. **Fresh global Claude proof**, separately, against the deployed 1.6.27 bytes — the same
+     allow/deny pair. Claude and Codex are distinct runtimes; neither proves the other.
+  3. **Only after BOTH 1 and 2 pass**, the three consumer roots are proved one at a time:
+     EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52. All three marker PRs were
+     closed unmerged at this gate with branches and review history preserved. SwarmingLilMen carries
+     a separate owner gate under its own issue #91.
+
+     For each root, in this order — **the merge must come first, and this is not optional**:
+     1. reopen and **merge** that root's marker PR (agent work);
+     2. update that root's default checkout to clean `main`, then run Doctor **from the
+        agent-harness checkout, pointed at the consumer root** — `harness.py` does not exist inside
+        a consumer repo, so a bare `py -3 harness.py …` executed there just fails:
+        `py -3 <agent-harness checkout>/harness.py doctor --repo <that consumer root>`. Confirm it
+        reports the *current* marker for that root (agent work);
+     3. only then, the human-only leg: new normal TUI in that exact root, `/hooks` review,
+        individual trust, enable, and both canary legs.
+
+     **Why the order matters, and why a passing canary can lie here.** The adapter marker and the
+     shared dispatcher bytes are separate things. If you canary a root whose marker PR has not
+     merged, its trusted adapter definition is still the **1.6.26** one, while the dispatcher it
+     invokes is already the deployed **1.6.27**. The deny canary will therefore print a `1.6.27`
+     banner — sourced from the shared dispatcher, not from that root's adapter — and look exactly
+     like valid consumer proof while proving nothing about the stale definition actually in force.
+     A green banner is not evidence that the root you are standing in is current.
+
+  **Do not** reorder these, refresh or canary a consumer marker before BOTH steps 1 and 2 have
+  passed, canary any root whose marker PR has not merged, or infer any step from static deployment,
+  from Doctor, or from the 1.6.26 evidence. Check the live version with
+  `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
+  line went stale four times by naming one.
 
 ## Changelog
+
+- 2026-08-07 — **H-14 added.** Between 2026-08-03 and today this file had zero open items while a
+  human-only, strictly-ordered runtime proof was in fact outstanding: PR #230 changed the producer
+  marker to 1.6.27 and PR #127 deployed it, so the runtime evidence H-2 closed at 1.6.26 no longer
+  covers the live marker. The gap was structural, not clerical — H-2 was correctly closed for its
+  dated inventory, and nothing created the successor item, so law 5's session-summary surfacing had
+  nothing to surface. Recorded here so the next version bump adds its item at the same time as the
+  marker change rather than after someone notices.
 
 - 2026-08-02 — Owner requested an estate-wide PreTool deny-floor pause while retaining non-blocking lifecycle hooks. H-2's fresh trust/deny-canary work is intentionally paused; do not run a new deny canary unless the owner explicitly re-enables the floor.
 

@@ -212,7 +212,7 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+Current state (2026-08-07): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
 source is 1.6.27 after the bounded #227 repair: a valueless `push.followTags` is parsed with Git's
 true semantics, while every other separator-free configuration record remains malformed and
 fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
@@ -221,12 +221,14 @@ configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. Claude-config PR #123 merged the canonical consumer bytes, and reviewed clean-main
-`sync-global --apply` deployed 1.6.26. Fresh clients proved the agent-harness project adapter and the
-global Claude hook separately. The registry inventory then found exactly three current Codex
-consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4 merged their
-current adapters. Each merged exact root was individually reviewed, trusted, enabled, Doctor-green,
-and proved by deliberate allow/deny canaries. No sibling or future adapter inherits that evidence.
+fail-closed. Claude-config PR #127 merged the canonical 1.6.27 consumer bytes, and reviewed
+clean-main `sync-global` dry-run/apply established the matching static global deployment. Runtime
+proof remains at 1.6.26: fresh clients last proved the agent-harness project adapter and the global
+Claude hook separately at that version. The registry inventory then found exactly three current
+Codex consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4
+merged their 1.6.26 adapters. Each merged exact root was individually reviewed, trusted, enabled,
+Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof remains pending; no
+sibling, future, or changed adapter inherits the prior evidence.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
