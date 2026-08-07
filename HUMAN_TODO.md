@@ -134,8 +134,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
      For each root, in this order — **the merge must come first, and this is not optional**:
      1. reopen and **merge** that root's marker PR (agent work);
-     2. update that root's default checkout to clean `main` and confirm
-        `py -3 harness.py doctor --repo .` reports the *current* marker there (agent work);
+     2. update that root's default checkout to clean `main`, then run Doctor **from the
+        agent-harness checkout, pointed at the consumer root** — `harness.py` does not exist inside
+        a consumer repo, so a bare `py -3 harness.py …` executed there just fails:
+        `py -3 <agent-harness checkout>/harness.py doctor --repo <that consumer root>`. Confirm it
+        reports the *current* marker for that root (agent work);
      3. only then, the human-only leg: new normal TUI in that exact root, `/hooks` review,
         individual trust, enable, and both canary legs.
 

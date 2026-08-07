@@ -27,7 +27,7 @@ that numbering and no other:
 | P1 | producer merge | **done** — PR #230 |
 | P2 | reviewed clean-main install | **done** — claude-config PR #127, sync-global identity-only |
 | P3 | producer exact-CWD re-trust and canaries | **NOT DONE** |
-| P4 | consumer marker refresh | **NOT DONE — blocked by P3** |
+| P4 | consumer marker refresh | **NOT DONE — blocked by BOTH P3 and P3b** |
 | P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — blocked by P4** |
 
 Only P1 and P2 are complete. Everything below is outstanding. Perform it in this sequence and never
