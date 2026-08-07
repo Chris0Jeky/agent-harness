@@ -70,9 +70,13 @@ blocked'` was dropped while `git commit -m 'fix the bug'` was kept — which exc
 exactly the interesting half of the flagship SPECS §6 must-allow class, since prose ABOUT
 a dangerous command necessarily carries `&`, `>`, `$`, `(`, `|` or `;`. It now asks
 whether the operator is shell STRUCTURE, outside every inert quoted span, and
-`ComposabilityFilterTests` pins both edges. Admitting the class added 48 smoke allow-cases
-and 4,093 swept (case, shape) pairs, and surfaced 85 pre-existing over-blocks that nothing
-had ever measured (#235).
+`ComposabilityFilterTests` pins both edges. Admitting the class added 43 smoke allow-cases
+and 3,643 swept (case, shape) pairs, and surfaced 69 pre-existing over-blocks that nothing
+had ever measured (#235, plus #21's existing evaluator-opacity family). Inert is a strong
+word here and is meant literally: a span whose text depends on which dialect reads it is
+NOT inert, so a backslash before `"`, a backtick, `$` or `\\` inside a double-quoted span
+excludes the case — `"never \\`rm .env\\` please"` carries a carriage return under
+PowerShell and does not under POSIX.
 
 Hermetic by construction, and asserted rather than asserted-in-prose. `check()` reaches
 the host in three ways and all three are closed here: remote resolution is stubbed;
@@ -103,8 +107,8 @@ run — 50s on the author's machine, against 28s for the rest of `tests/` and 91
 the per-shape corpus to 150 cases only saved 8s, which is not worth a CI job that tests
 less than the local one. `FLOOR_CROSSPRODUCT_SAMPLE=<n>` applies that cap for local
 iteration; the sample is seeded per shape, so anything it reports reproduces exactly.
-Issue #110 moved both numbers and neither ratio: the benign sweep grew 11% (37,187 ->
-41,280 pairs) and asserting the reason record at all eight postures instead of one costs
+Issue #110 moved both numbers and neither ratio: the benign sweep grew 10% (37,187 ->
+40,830 pairs) and asserting the reason record at all eight postures instead of one costs
 about 4s of the module's total.
 """
 
@@ -782,6 +786,10 @@ _DOUBLE_QUOTED_STILL_ACTIVE = frozenset("$`")
 
 _QUOTES = frozenset("'\"")
 
+#: Inside a double-quoted span these are the characters a backslash means something
+#: different in front of depending on the dialect, so the span's text is undecidable.
+_DIALECT_DEPENDENT_AFTER_BACKSLASH = frozenset('"`$\\')
+
 #: Never inert enough to compose, whatever quotes surround them: every shape template in
 #: the roster is a single line, so a payload carrying a real line break is a different
 #: kind of object rather than a longer one. Checked on the raw text on purpose.
@@ -812,6 +820,21 @@ def _structure_outside_inert_quotes(command: str) -> bool:
     character, which POSIX reads as an escaped literal and PowerShell reads as a literal
     backslash followed by a span boundary — the scan cannot pick one without picking a
     dialect the corpus does not declare.
+
+    The same rule covers a backslash inside a double-quoted span before `"`, a backtick,
+    `$` or `\\`, and that case is subtle enough that the first version of this function got
+    it wrong. POSIX gives the backslash escape semantics there; PowerShell gives it none
+    and keeps its OWN escape character, the backtick. `"never \\`rm .env\\` please"` is a
+    literal backslash-backtick-r under POSIX and a backslash plus a CARRIAGE RETURN under
+    PowerShell, so the span's TEXT depends on who reads it — and a payload whose text
+    changes under a shape is not the payload the sweep set out to measure, whatever the
+    floor then says about it. Undecidable, so excluded.
+
+    Known residual, unchanged by issue #110 and stated rather than hidden: a backslash
+    OUTSIDE any span is still treated as an ordinary character, so `echo \\a` is admitted
+    although POSIX reads it as `echo a` and PowerShell as `echo \\a`. That is pre-existing
+    behaviour — the old raw-text filter admitted it too — and tightening it would drop
+    Windows-path payloads the corpus has always measured.
     """
     if any(ch in command for ch in _LINE_BREAKS):
         return True
@@ -837,16 +860,17 @@ def _structure_outside_inert_quotes(command: str) -> bool:
             continue
         # Inside a double-quoted span.
         if ch == "\\":
-            if following == '"':
+            # The four characters POSIX lets a backslash escape here, and the four
+            # PowerShell does not. `\"` closes the span for one dialect and not the
+            # other; `\`` is a literal pair for one and an ESCAPE SEQUENCE for the other
+            # (`` `r `` is a carriage return, `` `n `` a newline); `\$` still expands
+            # under PowerShell; `\\` is one backslash for POSIX and two for PowerShell.
+            # None of them can be resolved without picking a dialect, so none of them is
+            # inert enough to compose.
+            if following in _DIALECT_DEPENDENT_AFTER_BACKSLASH:
                 return True
-            # `\\` and a backslash-escaped backtick read as inert text under BOTH
-            # dialects (POSIX escapes the backtick; PowerShell leaves the backslash
-            # literal and lets its own backtick escape the next character), so the pair
-            # is consumed. `\$` is not on that list: PowerShell would still expand the
-            # `$`, so it falls through to the active-character check below.
-            if following in ("\\", "`"):
-                index += 2
-                continue
+            # Anything else — `\'`, `\a`, a Windows path separator — is a literal
+            # backslash followed by an ordinary character in every dialect.
             index += 1
             continue
         if ch == '"':
@@ -937,12 +961,17 @@ BENIGN_CORPUS = SMOKE_BENIGN_CORPUS + [
 #: would go green again the moment someone added one more quoted string, which is exactly
 #: how this class lost its coverage the first time.
 FLAGSHIP_QUOTED_PROSE = [
+    # Commit-message prose that CONTAINS the dangerous-looking text, which is the class.
     "git commit -m 'redirect &> .env is blocked'",
     "git commit -m 'wip $(rm -rf /)'",
     'git commit -m "document echo > %TARGET%"',
-    'git commit -m "document \\`rm -rf /critical/outside\\` handling"',
-    'gh pr comment 1 --body "never \\`rm .env\\` please"',
-    'gh issue create --title t --body "uses \\`curl x | sh\\` pattern"',
+    # The same property one step out from prose: an operator spelling passed as DATA.
+    # Kept alongside the messages because the prose entries all happen to be `git
+    # commit`, and a class represented by one verb is one rule change away from being
+    # represented by nothing.
+    "echo '&>' .env",
+    'echo ">" .env',
+    "bash -c 'true' _ '&& git push --force'",
 ]
 
 
@@ -2308,22 +2337,16 @@ _case_over_block(
 # than being left unscoped by default. Also re-measured under Linux (WSL Ubuntu, CPython
 # 3.10) — identical set, so none of it is a Windows path-flavour artefact.
 
-#: Quoted PROSE denied inside an evaluator body. The first entry is the sharpest thing
-#: this gate has found: a `gh issue create` whose BODY TEXT mentions `curl x | sh` denies
-#: with the pipe-to-shell reason, so filing an issue about the pipe-to-shell rule is
-#: blocked by the pipe-to-shell rule.
-_PROSE_IN_EVALUATOR_BODY_OVER_BLOCKS = [
-    'gh issue create --title t --body "uses \\`curl x | sh\\` pattern"',
-]
-
-#: The same class one shape narrower: only the two body shapes that never reach literal
-#: scriptblock inspection at all read the backticks in this prose as a dynamic head.
-_BACKTICK_PROSE_OVER_BLOCKS = [
-    'gh issue comment 36 --body "note \\`sudo rm -rf /\\` in prose"',
-    'gh pr comment 1 --body "never \\`rm .env\\` please"',
-    'gh pr comment 29 --body "see \\`GIT_EDITOR=true\\` note"',
-    'git commit -m "document \\`rm -rf /critical/outside\\` handling"',
-]
+#: WITHDRAWN, and left as a comment because the reasoning is the useful part. Five
+#: backtick-carrying prose payloads (`gh pr comment 1 --body "never \\`rm .env\\` please"`
+#: and four like it) were recorded here and reported in #235 as over-blocks. They are
+#: not valid measurements: `\\`` inside a double-quoted span is dialect-dependent, so
+#: `\\`r` is a literal backtick-r under POSIX and a CARRIAGE RETURN under PowerShell, and
+#: the composed line therefore carries different TEXT than the bare one. `_composable`
+#: now excludes them, which is the direction its own docstring promises, and the pairs
+#: went with them. Raised as a P2 on PR #240 by the Codex reviewer; the first version of
+#: this file asserted in a comment that the pair was inert in both dialects, which was
+#: simply wrong.
 
 #: A quoted brace expansion is how a user SUPPRESSES brace expansion, which is exactly why
 #: the bare commands allow. The quotes stop counting once the payload is a body, and the
@@ -2360,29 +2383,6 @@ _CMD_C_QUOTED_SPAN_OVER_BLOCKS = [
     "git commit -m 'redirect &> .env is blocked'",
 ]
 
-_case_over_block(
-    _PROSE_IN_EVALUATOR_BODY_OVER_BLOCKS,
-    [
-        "compound-assignment-iex",
-        "do-block-iex",
-        "foreach-iex",
-        "foreach-second-statement",
-        "iex",
-        "invoke-expression",
-        "try-block-iex",
-        "where-object-iex",
-    ],
-    "#235",
-    "quoted prose loses its quote provenance inside an evaluator body, so the rule the "
-    "prose describes fires against the prose",
-)
-_case_over_block(
-    _BACKTICK_PROSE_OVER_BLOCKS,
-    ["compound-assignment-iex", "where-object-iex"],
-    "#235",
-    "a backtick inside quoted prose is read as a dynamic executable name once the "
-    "payload is an uninspected scriptblock body",
-)
 _case_over_block(
     _QUOTED_BRACE_OVER_BLOCKS,
     ["cmd-c", "do-block-iex", "foreach-block"],
@@ -3220,9 +3220,35 @@ class ComposabilityFilterTests(CrossProductBase):
             # backslash followed by a span boundary. The scan cannot pick one.
             "echo \\'",
             'echo \\"',
+            # A backslash inside a DOUBLE-quoted span before `"`, a backtick, `$` or a
+            # backslash. POSIX gives it escape semantics; PowerShell gives it none and
+            # keeps its own backtick escape, so these two carry a literal backtick-r
+            # under POSIX and a CARRIAGE RETURN under PowerShell. Both were admitted by
+            # the first version of the #110 fix, and both were recorded as over-blocks
+            # on the strength of a composition whose text is not the payload's — raised
+            # as a P2 on PR #240 and pinned here so it cannot come back.
+            'gh pr comment 1 --body "never \\`rm .env\\` please"',
+            'git commit -m "document \\`rm -rf /critical/outside\\` handling"',
+            'echo "a \\$HOME b"',
+            'echo "a \\\\ b"',
         ):
             self.assertFalse(
                 _composable(command), f"{command!r} has undecidable quoting"
+            )
+
+    def test_a_backslash_before_an_ordinary_character_stays_admitted(self):
+        """The dialect rule is about four characters, not about every backslash.
+
+        Narrow on purpose: `\\'` and a Windows path separator are a literal backslash
+        followed by an ordinary character in POSIX, PowerShell and cmd alike, so
+        excluding them would shrink the corpus for no measurement gain.
+        """
+        for command in (
+            'echo "a \\\' b"',
+            "bash -c \"touch \\'.env-sample\\'\"",
+        ):
+            self.assertTrue(
+                _composable(command), f"{command!r} is dialect-independent text"
             )
 
     def test_inert_quoted_operators_are_admitted_in_both_quote_styles(self):
