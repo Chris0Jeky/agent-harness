@@ -169,6 +169,41 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             kwargs = {"command_runner": command_runner} if command_runner else {}
             return dispatch.sensitive_push_narrowing_status(args, cwd, **kwargs)
 
+    def _follow_tags_probe(self, value):
+        """Configure `push.followTags=value`, then measure git AND the floor.
+
+        Returns `(git_state, floor_state, plain_allowed, negated_allowed)` and
+        enforces the one combination that is never acceptable anywhere in this
+        grammar (issue #201): git reading the value as TRUE while the floor
+        reads it as FALSE, or allows the plain push. Every OTHER disagreement
+        is fail-closed, so a libc or git-version difference surfaces as a
+        conservative deny rather than an unsafe allow.
+        """
+        self._git(self.nonsensitive, "config", "push.followTags", value)
+        try:
+            git_state = self._git_boolean(self.nonsensitive, "push.followTags")
+            floor_state = dispatch.git_config_maybe_bool(value)
+            self.assertFalse(
+                git_state is True and floor_state is False,
+                f"{value!r}: git reads it true, the floor reads it false",
+            )
+            plain, plain_detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            negated, negated_detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"], self.nonsensitive
+            )
+            self.assertFalse(
+                git_state is True and plain,
+                f"{value!r}: git reads it true but the plain push allowed: "
+                f"{plain_detail}",
+            )
+            if not plain:
+                self.assertIn("followTags", plain_detail)
+            if not negated:
+                self.assertIn("followTags", negated_detail)
+            return git_state, floor_state, plain, negated
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+
     def narrowing_with_failed_config_probe(self, args, cwd):
         failed = False
 
@@ -835,20 +870,18 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "0" * 40,
         )
         # Shapes git itself REJECTS. Python's int() would take several of them
-        # ("0b1", "1_000", and — via a different rule — "08"); git does not, so
-        # they must stay denied even under the exact CLI negation.
+        # ("1_000", and — via a different rule — "08"); git does not, so they
+        # must stay denied even under the exact CLI negation.
         rejected_values = (
             "08",
             "0x",
             "0xg",
-            "0b1",
             "1_000",
             "1.0",
             "1e3",
             "1abc",
             "1kk",
             "2147483648",
-            "-2147483648",
             "0x80000000",
             "2097152k",
             "2G",
@@ -862,68 +895,51 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "9" * 4400,
         )
 
+        # git's numeric branch is C's `strtoimax` plus git's own range check,
+        # and BOTH have moved. Measured directly: git 2.45.1.windows.1 rejects
+        # `"0b1"` and `"-2147483648"`; git 2.55.0 accepts `"-2147483648"` as
+        # true everywhere, and accepts `"0b1"` as true when it is linked against
+        # a glibc new enough to take the C23 binary prefix in base 0 (the
+        # ubuntu runner does; the macOS and Windows runners do not). The floor
+        # implements the portable core and fails CLOSED on those edges, which is
+        # the safe direction, so their verdict is derived rather than tabled.
+        version_dependent_values = ("0b1", "0b0", "-2147483648")
+
         for value in true_values:
             with self.subTest(value=value, expected="true"):
-                self._git(self.nonsensitive, "config", "push.followTags", value)
-                try:
-                    self.assertIs(
-                        self._git_boolean(self.nonsensitive, "push.followTags"),
-                        True,
-                        f"git does not read {value!r} as true",
-                    )
-                    allowed, detail = self.narrowing(
-                        ["origin", "main"], self.nonsensitive
-                    )
-                    self.assertFalse(allowed, detail)
-                    self.assertIn("followTags", detail)
-                    allowed, detail = self.narrowing(
-                        ["--no-follow-tags", "origin", "main"], self.nonsensitive
-                    )
-                    self.assertTrue(allowed, detail)
-                finally:
-                    self._git(
-                        self.nonsensitive, "config", "--unset-all", "push.followTags"
-                    )
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIs(git_state, True, f"git does not read {value!r} as true")
+                self.assertFalse(plain, value)
+                self.assertTrue(negated, value)
 
         for value in false_values:
             with self.subTest(value=value, expected="false"):
-                self._git(self.nonsensitive, "config", "push.followTags", value)
-                try:
-                    self.assertIs(
-                        self._git_boolean(self.nonsensitive, "push.followTags"),
-                        False,
-                        f"git does not read {value!r} as false",
-                    )
-                    for args in (
-                        ["origin", "main"],
-                        ["--no-follow-tags", "origin", "main"],
-                    ):
-                        allowed, detail = self.narrowing(args, self.nonsensitive)
-                        self.assertTrue(allowed, detail)
-                finally:
-                    self._git(
-                        self.nonsensitive, "config", "--unset-all", "push.followTags"
-                    )
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIs(git_state, False, f"git does not read {value!r} as false")
+                self.assertTrue(plain, value)
+                self.assertTrue(negated, value)
 
         for value in rejected_values:
             with self.subTest(value=value, expected="rejected"):
-                self._git(self.nonsensitive, "config", "push.followTags", value)
-                try:
-                    self.assertIsNone(
-                        self._git_boolean(self.nonsensitive, "push.followTags"),
-                        f"git unexpectedly accepted {value!r}",
-                    )
-                    for args in (
-                        ["origin", "main"],
-                        ["--no-follow-tags", "origin", "main"],
-                    ):
-                        allowed, detail = self.narrowing(args, self.nonsensitive)
-                        self.assertFalse(allowed, (args, detail))
-                        self.assertIn("followTags", detail)
-                finally:
-                    self._git(
-                        self.nonsensitive, "config", "--unset-all", "push.followTags"
-                    )
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIsNone(git_state, f"git unexpectedly accepted {value!r}")
+                self.assertFalse(plain, value)
+                self.assertFalse(negated, value)
+
+        for value in version_dependent_values:
+            with self.subTest(value=value, expected="version-dependent"):
+                git_state, floor_state, plain, negated = self._follow_tags_probe(value)
+                if floor_state is None:
+                    # The documented conservative residual: whatever this git
+                    # says, the floor fails closed in BOTH directions. Pinning
+                    # it here means a future relaxation cannot become a silent
+                    # allow.
+                    self.assertFalse(plain, (value, git_state))
+                    self.assertFalse(negated, (value, git_state))
+                else:
+                    # If the floor ever learns these edges it must agree with
+                    # the git it is actually running beside.
+                    self.assertIs(floor_state, git_state, value)
 
         # Pre-existing, deliberately unchanged: the floor normalizes with
         # strip().lower() before matching its literal set, so a TRAILING-space
