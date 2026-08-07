@@ -102,6 +102,18 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
 
     @classmethod
+    def _git_env(cls):
+        return {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "floor",
+            "GIT_AUTHOR_EMAIL": "floor@test",
+            "GIT_COMMITTER_NAME": "floor",
+            "GIT_COMMITTER_EMAIL": "floor@test",
+        }
+
+    @classmethod
     def _git(cls, cwd, *argv):
         completed = subprocess.run(
             [GIT, *argv],
@@ -109,17 +121,28 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
-            env={
-                **os.environ,
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_SYSTEM": os.devnull,
-                "GIT_AUTHOR_NAME": "floor",
-                "GIT_AUTHOR_EMAIL": "floor@test",
-                "GIT_COMMITTER_NAME": "floor",
-                "GIT_COMMITTER_EMAIL": "floor@test",
-            },
+            env=cls._git_env(),
         )
         return completed.stdout.strip()
+
+    @classmethod
+    def _git_boolean(cls, cwd, key):
+        """Real git's own verdict for `key`: True, False, or None if rejected.
+
+        Every issue #201 expectation is measured through this probe first, so
+        the tables below cannot drift away from git's C boolean parser.
+        """
+        completed = subprocess.run(
+            [GIT, "config", "--bool", "--get", key],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=cls._git_env(),
+        )
+        if completed.returncode != 0:
+            return None
+        return {"true": True, "false": False}[completed.stdout.strip()]
 
     @classmethod
     def _make_repo(cls, path, tier):
@@ -145,6 +168,41 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         with floor_environment.hermetic_environment(dispatch, None):
             kwargs = {"command_runner": command_runner} if command_runner else {}
             return dispatch.sensitive_push_narrowing_status(args, cwd, **kwargs)
+
+    def _follow_tags_probe(self, value):
+        """Configure `push.followTags=value`, then measure git AND the floor.
+
+        Returns `(git_state, floor_state, plain_allowed, negated_allowed)` and
+        enforces the one combination that is never acceptable anywhere in this
+        grammar (issue #201): git reading the value as TRUE while the floor
+        reads it as FALSE, or allows the plain push. Every OTHER disagreement
+        is fail-closed, so a libc or git-version difference surfaces as a
+        conservative deny rather than an unsafe allow.
+        """
+        self._git(self.nonsensitive, "config", "push.followTags", value)
+        try:
+            git_state = self._git_boolean(self.nonsensitive, "push.followTags")
+            floor_state = dispatch.git_config_maybe_bool(value)
+            self.assertFalse(
+                git_state is True and floor_state is False,
+                f"{value!r}: git reads it true, the floor reads it false",
+            )
+            plain, plain_detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            negated, negated_detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"], self.nonsensitive
+            )
+            self.assertFalse(
+                git_state is True and plain,
+                f"{value!r}: git reads it true but the plain push allowed: "
+                f"{plain_detail}",
+            )
+            if not plain:
+                self.assertIn("followTags", plain_detail)
+            if not negated:
+                self.assertIn("followTags", negated_detail)
+            return git_state, floor_state, plain, negated
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
 
     def narrowing_with_failed_config_probe(self, args, cwd):
         failed = False
@@ -758,6 +816,252 @@ class SensitivePushNarrowingTests(unittest.TestCase):
         )
         self.assertFalse(allowed, detail)
         self.assertIn("malformed", detail)
+
+    def test_numeric_follow_tags_matches_git_boolean_semantics(self):
+        """Issue #201: git's boolean parser also accepts NUMBERS.
+
+        `git_parse_maybe_bool` falls through to `git_parse_int`, i.e. C's
+        `strtoimax(value, &end, 0)` plus an optional k/m/g unit factor with the
+        product bound to a signed 32-bit int. Zero is false at every base and
+        unit; every other valid magnitude, including a negative one, is true.
+        The narrowing treated all of them as unknown and denied even under the
+        exact `--no-follow-tags`.
+
+        Nothing here is asserted from the table alone: every value is first
+        measured through the real git binary in this repository, so a table
+        that drifts from git's C parser fails on the git assertion rather than
+        silently pinning the wrong contract.
+        """
+        # Measured on git 2.45.1: leading C whitespace and one leading sign are
+        # accepted, 0x/0X is hex, a bare leading 0 is octal, k/m/g multiply by
+        # 1024/1024**2/1024**3, and the product must fit a signed 32-bit int.
+        true_values = (
+            "1",
+            "2",
+            "-1",
+            "+1",
+            "010",
+            "017",
+            "0x1",
+            "0xff",
+            "0x7fffffff",
+            "2147483647",
+            "-2147483647",
+            "1k",
+            "1M",
+            "1G",
+            "2097151k",
+            " 1",
+            # Leading zeros are unbounded in git, and a bare leading 0 makes
+            # the rest octal: "0" * 40 + "1" is octal 1.
+            "0" * 40 + "1",
+            "0x" + "0" * 40 + "1",
+            "017777777777",
+        )
+        false_values = (
+            "0",
+            "00",
+            "-0",
+            "+0",
+            "0x0",
+            "0k",
+            "0x0k",
+            " 0",
+            "0" * 40,
+        )
+        # Shapes git itself REJECTS. Python's int() would take several of them
+        # ("1_000", and — via a different rule — "08"); git does not, so they
+        # must stay denied even under the exact CLI negation.
+        rejected_values = (
+            "08",
+            "0x",
+            "0xg",
+            "1_000",
+            "1.0",
+            "1e3",
+            "1abc",
+            "1kk",
+            "2147483648",
+            "0x80000000",
+            "2097152k",
+            "2G",
+            "++1",
+            # A leading 0 makes this OCTAL, so the 8 ends the digit run and
+            # "3647" is not a unit suffix — git rejects it, unlike "2147483647".
+            "0002147483647",
+            "077777777777",
+            # Past CPython's 4300-digit int() limit. The significant-digit cap
+            # must reject this before int() is ever called.
+            "9" * 4400,
+        )
+
+        # git's numeric branch is C's `strtoimax` plus git's own range check,
+        # and BOTH have moved. Measured directly: git 2.45.1.windows.1 rejects
+        # `"0b1"` and `"-2147483648"`; git 2.55.0 accepts `"-2147483648"` as
+        # true everywhere, and accepts `"0b1"` as true when it is linked against
+        # a glibc new enough to take the C23 binary prefix in base 0 (the
+        # ubuntu runner does; the macOS and Windows runners do not). The floor
+        # implements the portable core and fails CLOSED on those edges, which is
+        # the safe direction, so their verdict is derived rather than tabled.
+        version_dependent_values = ("0b1", "0b0", "-2147483648")
+
+        for value in true_values:
+            with self.subTest(value=value, expected="true"):
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIs(git_state, True, f"git does not read {value!r} as true")
+                self.assertFalse(plain, value)
+                self.assertTrue(negated, value)
+
+        for value in false_values:
+            with self.subTest(value=value, expected="false"):
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIs(git_state, False, f"git does not read {value!r} as false")
+                self.assertTrue(plain, value)
+                self.assertTrue(negated, value)
+
+        for value in rejected_values:
+            with self.subTest(value=value, expected="rejected"):
+                git_state, _floor_state, plain, negated = self._follow_tags_probe(value)
+                self.assertIsNone(git_state, f"git unexpectedly accepted {value!r}")
+                self.assertFalse(plain, value)
+                self.assertFalse(negated, value)
+
+        for value in version_dependent_values:
+            with self.subTest(value=value, expected="version-dependent"):
+                git_state, floor_state, plain, negated = self._follow_tags_probe(value)
+                if floor_state is None:
+                    # The documented conservative residual: whatever this git
+                    # says, the floor fails closed in BOTH directions. Pinning
+                    # it here means a future relaxation cannot become a silent
+                    # allow.
+                    self.assertFalse(plain, (value, git_state))
+                    self.assertFalse(negated, (value, git_state))
+                else:
+                    # If the floor ever learns these edges it must agree with
+                    # the git it is actually running beside.
+                    self.assertIs(floor_state, git_state, value)
+
+        # Pre-existing, deliberately unchanged: the floor normalizes with
+        # strip().lower() before matching its literal set, so a TRAILING-space
+        # "1 " still reads as true here even though git rejects it. Issue #201
+        # is strictly additive and did not tighten that; a push carrying such a
+        # value dies on git's own "bad boolean config value" instead.
+        self._git(self.nonsensitive, "config", "push.followTags", "1 ")
+        try:
+            # Read the raw framed value, not the stripped one, so this really
+            # proves the trailing space survived into what the floor reads.
+            raw = subprocess.run(
+                [GIT, "config", "--null", "--get", "push.followTags"],
+                cwd=self.nonsensitive,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            ).stdout
+            self.assertEqual(raw, "1 \0")
+            self.assertIsNone(self._git_boolean(self.nonsensitive, "push.followTags"))
+            allowed, detail = self.narrowing(["origin", "main"], self.nonsensitive)
+            self.assertFalse(allowed, detail)
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", "origin", "main"], self.nonsensitive
+            )
+            self.assertTrue(allowed, detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+
+    def test_numeric_follow_tags_keeps_every_hostile_neighbour_denied(self):
+        """Issue #201 widened only the CONFIG grammar, never the argv rules.
+
+        A configured numeric true is proved against real git — including a real
+        `git push --dry-run` that plans the annotated tag — and then every
+        neighbouring argv shape that is NOT an exact option-position
+        `--no-follow-tags` must still deny.
+        """
+        remote_name = "issue201-numeric"
+        remote_path = os.path.join(self.root, remote_name + ".git")
+        self._git(self.root, "init", "--bare", remote_path)
+        self._git(self.nonsensitive, "remote", "add", remote_name, remote_path)
+        self._git(
+            self.nonsensitive,
+            "tag",
+            "-a",
+            "issue201-annotated",
+            "-m",
+            "annotated numeric follow-tags control",
+        )
+        # 0x2 exercises the hex branch AND the nonzero-is-true rule at once.
+        self._git(self.nonsensitive, "config", "push.followTags", "0x2")
+        try:
+            self.assertIs(self._git_boolean(self.nonsensitive, "push.followTags"), True)
+            # Real git: the numeric true really does plan the annotated tag...
+            planned = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                remote_name,
+                "main",
+            )
+            self.assertIn(
+                "refs/tags/issue201-annotated:refs/tags/issue201-annotated",
+                planned,
+            )
+            # ...and the exact option-position negation really does suppress it.
+            suppressed = self._git(
+                self.nonsensitive,
+                "push",
+                "--dry-run",
+                "--porcelain",
+                "--no-follow-tags",
+                remote_name,
+                "main",
+            )
+            self.assertIn("refs/heads/main:refs/heads/main", suppressed)
+            self.assertNotIn("refs/tags/issue201-annotated", suppressed)
+
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", remote_name, "main"], self.nonsensitive
+            )
+            self.assertTrue(allowed, detail)
+
+            for args in (
+                ["origin", "main"],
+                ["--no-follow-tags", "--follow-tags", "origin", "main"],
+                ["--no-follow-tags", "--tags", "origin"],
+                ["--no-follow-tags", "--delete", "origin", "main"],
+                ["--no-follow-tags", "origin", "+main:refs/heads/main"],
+                ["--no-follow-tags", "origin", "main:refs/tags/v1"],
+                ["--push-option", "--no-follow-tags", "origin", "main"],
+                ["-o", "--no-follow-tags", "origin", "main"],
+                ["--repo", "--no-follow-tags", "origin", "main"],
+                ["origin", "--", "--no-follow-tags"],
+            ):
+                with self.subTest(args=args):
+                    allowed, _detail = self.narrowing(args, self.nonsensitive)
+                    self.assertFalse(allowed, args)
+
+            # The malformed-record neighbours stay malformed with a numeric
+            # value configured: only push.followTags may be separator-free.
+            def add_malformed_record(record):
+                def runner(argv, project_dir):
+                    output = dispatch.command_output(argv, project_dir)
+                    if argv[-3:] == ["config", "--null", "--list"]:
+                        return output + record + "\0"
+                    return output
+
+                return runner
+
+            allowed, detail = self.narrowing(
+                ["--no-follow-tags", remote_name, "main"],
+                self.nonsensitive,
+                add_malformed_record("push.followTags-truncated"),
+            )
+            self.assertFalse(allowed, detail)
+            self.assertIn("malformed", detail)
+        finally:
+            self._git(self.nonsensitive, "config", "--unset-all", "push.followTags")
+            self._git(self.nonsensitive, "tag", "-d", "issue201-annotated")
+            self._git(self.nonsensitive, "remote", "remove", remote_name)
 
     def test_no_follow_tags_overrides_configured_true_only_in_option_position(self):
         remote_name = "issue196-no-follow"
