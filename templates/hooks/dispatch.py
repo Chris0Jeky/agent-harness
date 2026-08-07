@@ -8700,6 +8700,11 @@ _GIT_CONFIG_UNIT_FACTORS = {
     "g": 1024**3,
 }
 _GIT_CONFIG_INT_MAX = 2**31 - 1
+# Significant digits of INT_MAX per base: 0o17777777777, 2147483647, 0x7fffffff.
+# Git accepts unbounded leading zeros ("0" * 5000 + "1" is true), so the cap is
+# applied AFTER stripping them — and it keeps int() off an attacker-sized digit
+# run, which past 4300 decimal digits raises ValueError in CPython.
+_GIT_CONFIG_MAX_SIGNIFICANT_DIGITS = {8: 11, 10: 10, 16: 8}
 
 
 def git_config_numeric_boolean(value: str) -> bool | None:
@@ -8721,7 +8726,8 @@ def git_config_numeric_boolean(value: str) -> bool | None:
         `"2147483648"`, `"-2147483648"`, `"0x80000000"`, `"2097152k"` and
         `"2G"` are all invalid;
       * zero is false at every base and unit; every other magnitude, including
-        a negative one, is true.
+        a negative one, is true; and leading zeros are unbounded, so `"0" *
+        5000 + "1"` is a true git accepts.
 
     Returning None for everything else keeps the single caller fail-closed. This
     models ONE boolean config value for `push.followTags`; it is deliberately
@@ -8746,7 +8752,12 @@ def git_config_numeric_boolean(value: str) -> bool | None:
     factor = _GIT_CONFIG_UNIT_FACTORS.get(text[span:].lower())
     if factor is None:
         return None
-    magnitude = int(text[:span], base)
+    significant = text[:span].lstrip("0")
+    if len(significant) > _GIT_CONFIG_MAX_SIGNIFICANT_DIGITS[base]:
+        return None
+    if not significant:
+        return False
+    magnitude = int(significant, base)
     if magnitude > _GIT_CONFIG_INT_MAX // factor:
         return None
     return bool(magnitude)

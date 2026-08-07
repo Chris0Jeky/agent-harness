@@ -817,8 +817,23 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "1G",
             "2097151k",
             " 1",
+            # Leading zeros are unbounded in git, and a bare leading 0 makes
+            # the rest octal: "0" * 40 + "1" is octal 1.
+            "0" * 40 + "1",
+            "0x" + "0" * 40 + "1",
+            "017777777777",
         )
-        false_values = ("0", "00", "-0", "+0", "0x0", "0k", "0x0k", " 0")
+        false_values = (
+            "0",
+            "00",
+            "-0",
+            "+0",
+            "0x0",
+            "0k",
+            "0x0k",
+            " 0",
+            "0" * 40,
+        )
         # Shapes git itself REJECTS. Python's int() would take several of them
         # ("0b1", "1_000", and — via a different rule — "08"); git does not, so
         # they must stay denied even under the exact CLI negation.
@@ -838,6 +853,13 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             "2097152k",
             "2G",
             "++1",
+            # A leading 0 makes this OCTAL, so the 8 ends the digit run and
+            # "3647" is not a unit suffix — git rejects it, unlike "2147483647".
+            "0002147483647",
+            "077777777777",
+            # Past CPython's 4300-digit int() limit. The significant-digit cap
+            # must reject this before int() is ever called.
+            "9" * 4400,
         )
 
         for value in true_values:
