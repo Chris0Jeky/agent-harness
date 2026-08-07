@@ -2338,15 +2338,20 @@ _case_over_block(
 # 3.10) — identical set, so none of it is a Windows path-flavour artefact.
 
 #: WITHDRAWN, and left as a comment because the reasoning is the useful part. Five
-#: backtick-carrying prose payloads (`gh pr comment 1 --body "never \\`rm .env\\` please"`
-#: and four like it) were recorded here and reported in #235 as over-blocks. They are
-#: not valid measurements: `\\`` inside a double-quoted span is dialect-dependent, so
-#: `\\`r` is a literal backtick-r under POSIX and a CARRIAGE RETURN under PowerShell, and
-#: the composed line therefore carries different TEXT than the bare one. `_composable`
-#: now excludes them, which is the direction its own docstring promises, and the pairs
-#: went with them. Raised as a P2 on PR #240 by the Codex reviewer; the first version of
-#: this file asserted in a comment that the pair was inert in both dialects, which was
-#: simply wrong.
+#: backtick-carrying prose payloads — `gh pr comment 1 --body "never \`rm .env\` please"`
+#: and four like it — were recorded here and reported in #235 as over-blocks. They are
+#: not valid measurements. A backslash before a backtick inside a DOUBLE-quoted span is
+#: dialect-dependent: POSIX escapes the backtick, PowerShell leaves the backslash literal
+#: and lets its own backtick escape the next character, so that payload carries a literal
+#: backtick-r under one dialect and a CARRIAGE RETURN under the other. The composed line
+#: therefore holds different TEXT than the bare command, and a payload whose text a shape
+#: changes is not a false-positive measurement whatever the floor then says about it.
+#: `_composable` now excludes the whole dialect-dependent set — the direction its own
+#: docstring promises — and these pairs went with it.
+#:
+#: Raised as a P2 on PR #240 by the Codex reviewer. The first version of this file
+#: asserted in a comment that the pair was inert in both dialects, which was simply
+#: wrong, and the recorded evidence rested on that assertion.
 
 #: A quoted brace expansion is how a user SUPPRESSES brace expansion, which is exactly why
 #: the bare commands allow. The quotes stop counting once the payload is a body, and the
