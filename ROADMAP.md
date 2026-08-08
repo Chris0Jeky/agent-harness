@@ -25,9 +25,10 @@ live dependency, evidence, issue, and PR mapping. Refresh GitHub before selectin
 All 63 open issues at this snapshot have one primary epic above, measured with an explicit
 `gh issue list --state open --limit 300` count. (The 2026-08-03 draft recorded 57; the true count was
 58, and `gh issue list`'s silent default page size of 30 is the standing trap here — always pass an
-explicit `--limit`.) The 2026-08-07/08 wave opened six and closed one: #233 and #236 → AH-1,
-#235 and #243 → AH-3, #244 → AH-3, #242 → AH-1; #241 was closed as a duplicate of #243. This
-mapping discharges item 1 of #242. Cross-cutting ownership is
+explicit `--limit`.) The 2026-08-07/08 wave opened six and closed one: #233, #236 and #242 → AH-1;
+#243 and #244 → AH-3; **#235 → AH-8**, alongside #21 whose surface it measures — it appears in the
+AH-8 row above and nowhere else, so the one-primary-epic rule holds. #241 was closed as a duplicate
+of #243. This mapping discharges item 1 of #242. Cross-cutting ownership is
 explicit:
 
 - #140–#144 are Policy Lab history: PR #140 merged the core, #141–#143 remain open, and PR #163

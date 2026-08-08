@@ -2,9 +2,9 @@
 
 Snapshot: 2026-08-08. Published `main` head: `a8ed1d481b8903e71b0d0443a67887274d692d92` (PR #240's
 merge). The four lanes below were cut from `731624106fc38a9f46e21553c61b3cb0ee56dfeb` (PR #230's
-merge); `main` then moved twice under them — `3ade22b` (a `.gitignore`-only direct push, #236) and
-the lane merges themselves — so each remaining lane rebases onto the current head and re-proves
-against it rather than inheriting. One bounded rollout workstream is blocked on human-only runtime
+merge); `main` then moved **four times** under them — `3ade22b` (a `.gitignore`-only direct push,
+#236), then PR #234's merge `8a1a685`, PR #237's `8134cf4` and PR #240's `a8ed1d4` — so each
+remaining lane rebases onto the current head and re-proves against it rather than inheriting. One bounded rollout workstream is blocked on human-only runtime
 proof; implementation lanes are listed under "Active implementation" below.
 
 Current runtime state, unchanged by this wave: canonical source, the producer marker, and deployed
@@ -58,8 +58,25 @@ completed 1.6.26 wave.
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
 region boundary. Exactly one touched `templates/hooks/dispatch.py`; the other three were forbidden
 from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, or the charter
-digests. **Two landed, two remain open with confirmed blockers.** Every region boundary held: no
-lane wrote outside its declared region.
+digests. **Two landed, two remain open with confirmed blockers.**
+
+**Did the region boundaries hold? For code, yes; for documentation, no — and that distinction is
+the useful result.** Measured with `git diff --name-only` against each lane's actual diff:
+
+- **Code regions held exactly.** No two lanes touched the same code file, and
+  `templates/hooks/dispatch.py`, `FLOOR_VERSION`, the adapter marker and the charter digests were
+  touched by exactly one lane, as designed. The collision the cap exists to prevent did not occur.
+- **Documentation regions did not hold.** PR #239 also wrote `README.md`, `docs/SYSTEM_STATE.md`
+  and `plans/ACTIVE.md`; PR #238 also wrote `CLAUDE.md` and `SPECS.md`. Neither was in its declared
+  region. Both did it for the same defensible reason — a lane documents its own change — but the
+  effect is that **shared documentation behaves as a de-facto global region every lane writes to**,
+  and that is precisely where the damage landed: #239's `plans/ACTIVE.md` edit is what conflicts
+  with PR #234, and #237 and #238 both wrote `SPECS.md`.
+
+The lesson for #233 is therefore not "regions work" or "regions fail" but that a region declaration
+covering only code is incomplete. Either name the shared docs in each lane's region and serialize
+edits to them, or forbid lanes from touching shared ledgers at all and have the coordinator record
+every lane's outcome in one pass — which is what this file now does.
 
 | Lane | PR | Outcome |
 |---|---|---|
@@ -102,20 +119,34 @@ does not consume a workstream slot. Reason: the cap protects against colliding e
 tracks re-expressing the cap as a region/collision rule or reaffirming it as a hard count; until that
 is decided, the declared count in `README.md` stands as written and this note records the divergence.
 
-**Reversal path, updated now that two lanes have landed.** The original note said the divergence was
-reversible by closing the three non-dispatcher PRs. That is no longer accurate: #237 and #240 are
-merged, so reversing them means reverting two merge commits (`8134cf4`, `a8ed1d4`), not closing
-PRs. Only #238 and #239 remain closable. Recorded rather than quietly dropped, because a stated
-reversal path that has silently expired is worse than none.
+**Reversal path, corrected now that two lanes have landed.** The original note said the divergence
+was reversible by closing the three non-dispatcher PRs. That is no longer accurate, and the obvious
+repair — "revert the two merges" — is also wrong: #237 and #240 are **completed**, so reverting
+`8134cf4` and `a8ed1d4` would discard finished work without reducing the number of *active*
+workstreams by one, which is what a hard-count reading of the cap would require.
+
+The correct reversal is forward-looking: as of this snapshot there are three active streams — the
+blocked #232 rollout plus open PRs #238 and #239 — so if #233 resolves the cap as a hard count,
+compliance means **parking or closing one of those three current streams**, not undoing merges.
+Recorded explicitly because a stated reversal path that has silently expired is worse than none,
+and because the intuitive correction to it is also wrong.
 
 **What the experiment measured, for whoever rules on #233.** Four region-disjoint lanes produced no
-region collision and no merge conflict *between lanes* — the boundaries held exactly as predicted.
-The costs that did appear were elsewhere and are the real input to the decision: `main` moved twice
-under in-flight branches (once from a merged lane, once from a `.gitignore` push, see #236), which
-forced a rebase and invalidated one branch's documentation evidence; and review attention, not
-region overlap, became the binding constraint — #234 alone consumed four review rounds. That is
-evidence for reading B (reviewer bandwidth) as the cap's real content even though reading A
-(collision avoidance) is what the prose describes.
+*code* collision — the declared code boundaries held exactly as predicted. Three costs appeared
+elsewhere, and they are the real input to the decision:
+
+1. **`main` moved four times under the in-flight branches**, not twice: `3ade22b` (the `.gitignore`
+   direct push, #236), then PR #234's merge `8a1a685`, then PR #237's `8134cf4`, then PR #240's
+   `a8ed1d4`. Every merged lane moves the base for every unmerged one, so a four-lane wave
+   re-bases the stragglers repeatedly and invalidates their documentation evidence each time.
+2. **Documentation is an undeclared shared region** (see above) — that, not code overlap, is what
+   actually conflicted.
+3. **Review attention, not region overlap, was the binding constraint.** PR #234 alone consumed
+   four review rounds.
+
+That is evidence for reading B (reviewer bandwidth) as the cap's real content even though reading A
+(collision avoidance) is what the prose describes — with the refinement that a hybrid rule should
+declare shared-document ownership explicitly rather than only code regions.
 
 ## Completed current snapshot
 
