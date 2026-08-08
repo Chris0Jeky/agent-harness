@@ -84,13 +84,18 @@ The shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`, `plans
 `CLAUDE.md`, `SPECS.md` — are in NEITHER region. The coordinator records every lane's outcome in one
 pass, so a lane that edits them creates exactly the conflict this wave hit.
 
-**#239's blockers, precisely.** (1) Rebase onto current `main`, taking `main`'s structure — it
-carries the P1–P5 rollout phase table — and adding the 1.6.28 facts to it rather than restoring the
-branch's older shape. (2) The correct state is **deployed 1.6.27, runtime-proved 1.6.26**; "never
-deployed" and "deployed, not yet runtime-proved" are materially different and the second is true.
-(3) A base change counts as a head change, so CI and review are owed again on the rebased head.
-`dispatch.py` itself does not conflict, so the parser evidence carries; the documentation evidence
-does not. Residual toolchain-dependent over-block tracked as #243.
+**#239's blockers, precisely.** (1) **Drop the branch's ledger edits entirely** — `README.md`,
+`docs/SYSTEM_STATE.md` and `plans/ACTIVE.md` are outside its permitted region (see the table above)
+and are exactly what conflicts with `main`. Resolve the rebase by taking `main` for all three; do
+not port the branch's versions forward and do not add the 1.6.28 facts here. **The coordinator
+records the 1.6.28 state after the lane merges**, in one pass, which is the whole point of the
+ownership rule. The lane keeps only its in-region files. (2) The branch's ledger text asserted
+"1.6.27 was never deployed", which is false — the correct state is **deployed 1.6.27, runtime-proved
+1.6.26**, and those are materially different. Dropping the ledger edits under (1) disposes of this
+automatically; it is recorded so the claim is not reintroduced from the branch's history. (3) A base
+change counts as a head change, so CI and review are owed again on the rebased head. `dispatch.py`
+itself does not conflict, so the parser evidence carries; the documentation evidence does not.
+Residual toolchain-dependent over-block tracked as #243.
 
 **#238's blockers, precisely.** (1) `harness.py:3988` — Windows junctions are followed by the
 nested-root search although SPECS §2.1 and the new docstring both promise they are skipped;
