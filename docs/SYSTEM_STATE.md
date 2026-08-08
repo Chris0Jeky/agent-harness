@@ -1,11 +1,19 @@
 # System state
 
-Snapshot: 2026-08-07, published `main@3ade22b1e494c2d303fcd73fd8669b899b42559b`. Implementation
-content is unchanged since 2026-08-03: `3ade22b` adds only `/.claude/worktrees` to `.gitignore` on
-top of PR #230's merge `731624106fc38a9f46e21553c61b3cb0ee56dfeb`. **`3ade22b` — the `.gitignore`
-commit, not PR #230's merge —** is the one that reached `main` as a direct push rather than through
-the PR lane; that direct push is what #236 tracks. `7316241` merged normally through PR #230.
+Snapshot: 2026-08-08, published `main@a8ed1d481b8903e71b0d0443a67887274d692d92` (PR #240's merge).
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
+
+**`templates/hooks/dispatch.py` is unchanged since PR #230's merge
+`731624106fc38a9f46e21553c61b3cb0ee56dfeb`.** The 2026-08-07/08 wave merged PR #234 (`8a1a685`,
+this ledger), PR #237 (`8134cf4`, a `FLOOR_LIMITATIONS.md` scope line plus a SPECS §6 note) and
+PR #240 (`a8ed1d4`, cross-product gate tests) — documentation and tests only. `FLOOR_VERSION` is
+still 1.6.27 and no adapter marker moved. The one lane that would change the dispatcher (#201,
+PR #239) is still open.
+
+One commit on `main` from this period did NOT arrive through the PR lane: `3ade22b`, which adds only
+`/.claude/worktrees` to `.gitignore`, was pushed directly by the worktree-isolation machinery. That
+direct push is what #236 tracks. PR #230's merge `7316241` and every merge above went through the
+normal lane.
 
 ## Runtime state: 2026-08-07
 
@@ -46,7 +54,7 @@ No agent may reorder those steps or infer any of them from static deployment or 
 | Codex trust and linked-worktree guidance | implemented; 1.6.26 inventory proven | PRs #208/#209 establish the exact-CWD/root-checkout contracts. Agent-harness plus EvidenceDeck (`5be9d1d`), SwarmingLilMen (`56cff63`), and collaborative-hill-lab (`7565572`) each received an individual normal-TUI review/trust/enable sequence and fresh 1.6.26 allow/deny canaries. | H-2 remains closed for that dated inventory. The changed 1.6.27 producer marker and later consumer-marker changes inherit none of its proof and require the active exact-root rollout. |
 | Estate seed/sync/closeout operations | implemented, benchmarked, experimental | `seed`, `audit`, `doctor`, and backed-up `sync-global` are on `main`; PRs #162/#169/#180 established fail-closed closeout; PR #183 batched recovery reachability and closed #171; PR #194 made fingerprint expiry suspend-aware and closed #167; PR #197 retained direct non-commit `ORIG_HEAD` identity and closed #172; PR #198 skipped synthetic native-Windows executable-mode deltas while retaining POSIX mode-only drift and closed #170; PR #206 published the tailored new-repo contract and closed #131; runs `30655263274`, `30665083220`, `30670171402`, `30704657392`, and `30717285862` passed | The lease is cooperative, not process authentication. #188 awaits an owner-reviewed consumer manifest; #190 awaits a real generated launcher call site; #191/#192 remain queued. The bounded H-2 consumer rollout is complete; no unrelated estate cleanup ran. |
 | Pattern Guard v2 | implemented, unverified | PR #193 is a bounded AH-3 security-preservation exception; PR #200 closed #196 with five retained narrowing cases, and PR #202 restored fail-closed behavior for the unprovable sixth case; measured design inputs remain #21/#118/#120 | No general Pattern Guard v2 or shadow result exists. #201 is bounded fail-closed usability follow-up evidence, not authorization for universal-parser expansion. |
-| Integrated measurement | benchmarked, unverified | Historical and bounded correctness/CI measurements B-001 through B-014 in `docs/BENCHMARKS.md` | No current 1.6.27 estate baseline, continuous benchmark store, Doctor precision series, or task-completion metric is verified. |
+| Integrated measurement | benchmarked, unverified; gate coverage now pinned | Historical and bounded correctness/CI measurements B-001 through B-014 in `docs/BENCHMARKS.md`. PR #240 closed #110: `_composable()` detects executable separators outside inert quoted spans instead of by raw substring, so the SPECS §6 flagship must-allow class is measured rather than dropped (`SMOKE_BENIGN_CORPUS` 416 → 459; swept `(case, shape)` pairs 107,699 → 111,342), and `CHARTER_RULE_DENY_PAIRS` pins 569 exact `(probe, shape)` pairs across 8 postures in place of nine aggregate integer floors | No current 1.6.27 estate baseline, continuous benchmark store, Doctor precision series, or task-completion metric is verified. The gate now measures 69 pre-existing over-blocks it previously could not see (#235); those are recorded, not fixed, and their `cmd-c` subset needs per-row dialect adjudication before it can support any #21 relaxation. |
 | Claude-config integration | experimental, unverified | `CLAUDE_CONFIG_OPERATIONS.md`; AH-9 boundary | Private evidence stays private. Only the bounded 1.6.27 consumer/deployment rollout is active. |
 | Public extraction and plugin products | frozen | `REPLAY_TOOL_PRODUCT.md` and `BLUEPRINT_PLUGIN_PRODUCT.md` are explicitly deferred under AH-10 | Do not create a public replay repository or extract a plugin until internal stability and demand are demonstrated and approved. |
 
