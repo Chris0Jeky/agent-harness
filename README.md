@@ -212,7 +212,7 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-07): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+Current state (2026-08-08): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
 source is 1.6.27 after the bounded #227 repair: a valueless `push.followTags` is parsed with Git's
 true semantics, while every other separator-free configuration record remains malformed and
 fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
@@ -228,7 +228,15 @@ Claude hook separately at that version. The registry inventory then found exactl
 Codex consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4
 merged their 1.6.26 adapters. Each merged exact root was individually reviewed, trusted, enabled,
 Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof remains pending; no
-sibling, future, or changed adapter inherits the prior evidence.
+sibling, future, or changed adapter inherits the prior evidence. That pending proof is human-only
+and strictly ordered — see **H-14** in `HUMAN_TODO.md` and issue #232.
+
+The 2026-08-07/08 wave changed tests and documentation only, so this shipped state is unmoved:
+`FLOOR_VERSION` is still 1.6.27 and no adapter marker changed. It merged the cross-product gate
+repair (PR #240, #110), the secret-file scope ledger line (PR #237, #130) and this state record
+(PR #234). The two lanes that would move implementation — #201's dispatcher slice (PR #239) and
+#139's nested logical repo root (PR #238) — are open with confirmed blockers recorded on their
+threads, so neither has changed shipped behaviour.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology

@@ -1,15 +1,17 @@
 # Active workstreams
 
-Snapshot: 2026-08-07. Published `main` head: `3ade22b1e494c2d303fcd73fd8669b899b42559b`. The four
-lanes below were cut from its parent `731624106fc38a9f46e21553c61b3cb0ee56dfeb` (PR #230's merge)
-minutes before `3ade22b` — a `.gitignore`-only commit — landed on `main`; each lane rebases onto the
-current head before merge, so their proving evidence is re-proved against it rather than inherited.
-One bounded rollout workstream is blocked on human-only runtime proof; implementation lanes are
-listed under "Active implementation" below.
+Snapshot: 2026-08-08. Published `main` head: `a8ed1d481b8903e71b0d0443a67887274d692d92` (PR #240's
+merge). The four lanes below were cut from `731624106fc38a9f46e21553c61b3cb0ee56dfeb` (PR #230's
+merge); `main` then moved twice under them — `3ade22b` (a `.gitignore`-only direct push, #236) and
+the lane merges themselves — so each remaining lane rebases onto the current head and re-proves
+against it rather than inheriting. One bounded rollout workstream is blocked on human-only runtime
+proof; implementation lanes are listed under "Active implementation" below.
 
-Current runtime state: canonical source, the producer marker, and deployed global bytes are 1.6.27;
-all runtime canaries remain at 1.6.26, the last directly proved version. The changed producer marker
-and every later consumer-marker change require their own exact-root proof.
+Current runtime state, unchanged by this wave: canonical source, the producer marker, and deployed
+global bytes are **1.6.27**; all runtime canaries remain at **1.6.26**, the last directly proved
+version. Nothing merged on 2026-08-07/08 touched `templates/hooks/dispatch.py` — the one lane that
+does (#201/PR #239) is still open — so `FLOOR_VERSION` is still 1.6.27 and no marker moved. The
+changed producer marker and every later consumer-marker change require their own exact-root proof.
 
 ## Active rollout — issue #232, blocked on human-only runtime proof
 
@@ -54,18 +56,40 @@ completed 1.6.26 wave.
 ## Active implementation
 
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
-region boundary. Exactly one touches `templates/hooks/dispatch.py`; the other three are forbidden
-from it, so no two lanes can collide on `FLOOR_VERSION`, the adapter marker, or the charter digests.
+region boundary. Exactly one touched `templates/hooks/dispatch.py`; the other three were forbidden
+from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, or the charter
+digests. **Two landed, two remain open with confirmed blockers.** Every region boundary held: no
+lane wrote outside its declared region.
 
-| Lane | Region — exclusive to that lane | Boundary |
+| Lane | PR | Outcome |
 |---|---|---|
-| #201 numeric-boolean `push.followTags` | `templates/hooks/dispatch.py`, `templates/hooks/smoke_test.py`, `FLOOR_VERSION`, `.codex/hooks.json` marker | The one dispatcher slice. False-deny repair on the already-ratified bounded parser; no universal Git option parser. |
-| #110 cross-product gate measurement | `tests/test_prefix_wrapper_crossproduct.py` | Tests only. Must not edit `dispatch.py`. A floor false positive it surfaces is recorded and tracked, never fixed here. |
-| #139 nested logical repo root | `harness.py`, `tests/test_harness.py` | Audit/Doctor only. Must not edit `dispatch.py`. May land as an honest subset of the seven acceptance criteria. |
-| #130 secret-file extension reading | `FLOOR_LIMITATIONS.md`, `SPECS.md` | Measurement and documentation only. Explicitly forbidden from editing `dispatch.py`. |
+| #110 cross-product gate | **#240** | **MERGED `a8ed1d4`** at head `f06b304`. Nine green, adversarial review MERGE with zero blocking findings and every claim reproduced. |
+| #130 secret-file reading | **#237** | **MERGED `8134cf4`** at head `c1da78a`. Nine green, adversarial review MERGE with zero blocking findings. `Refs #130`, not `Closes` — the charter ruling is the owner's. |
+| #201 numeric `push.followTags` | **#239** | **OPEN, blocked.** Nine green at `6b93c9a`, but review verdict FIX with two blocking findings: it conflicts with `main` after #234, and its `plans/ACTIVE.md` asserted "1.6.27 was never deployed", which is false. |
+| #139 nested logical root | **#238** | **OPEN, blocked.** Nine green at `5e7aa28` and all seven acceptance criteria met, but two independent reviewers converged on three P1 correctness defects in `harness.py`. |
 
-PR numbers, exact heads, proving-check results, and review verdicts are recorded here as each lane
-lands. A lane that parks is recorded as parked with its tracked issue, not silently dropped.
+Neither open PR is parked: each has one fix round remaining within law 2's budget, and the exact
+blockers are recorded on the PR thread. Do not restart either lane from scratch — the evidence
+already gathered is sound and was independently reproduced.
+
+**#239's blockers, precisely.** (1) Rebase onto current `main`, taking `main`'s structure — it
+carries the P1–P5 rollout phase table — and adding the 1.6.28 facts to it rather than restoring the
+branch's older shape. (2) The correct state is **deployed 1.6.27, runtime-proved 1.6.26**; "never
+deployed" and "deployed, not yet runtime-proved" are materially different and the second is true.
+(3) A base change counts as a head change, so CI and review are owed again on the rebased head.
+`dispatch.py` itself does not conflict, so the parser evidence carries; the documentation evidence
+does not. Residual toolchain-dependent over-block tracked as #243.
+
+**#238's blockers, precisely.** (1) `harness.py:3988` — Windows junctions are followed by the
+nested-root search although SPECS §2.1 and the new docstring both promise they are skipped;
+`entry.is_dir(follow_symlinks=False)` classifies a junction as an ordinary directory, and the repo
+already owns the correct predicate in `path_is_alias()` at `harness.py:471`. (2) `harness.py:3999`
+— the downward search can select a nested independent Git repository or submodule, so `git status`
+and `git remote` answer for the wrong repository, contradicting SPECS §2.1's "Git facts stay the
+checkout's" which this PR wrote. (3) `harness.py:8018` — Doctor's canonical adapter is retargeted to
+a downward-resolved root while the layer walk still runs to the requested path, so
+`canonical_root_floor_count` is structurally 0 for exactly the new case and a previously-certified
+configuration regresses. Plus a non-blocking P2 (`frontier.pop(0)` is quadratic).
 
 **Declared-cap tension, recorded rather than resolved.** `README.md` declares this file as allowing
 "at most two active, executable workstreams", and four implementation lanes plus one blocked rollout
@@ -74,13 +98,48 @@ cap's purpose is collision avoidance on shared T4-class infrastructure — the h
 snapshot named explicitly was a *second dispatcher slice* — and that disjoint-region lanes do not
 create it. That reading is an assumption, not a ratified change: **Assumption: a region-disjoint lane
 does not consume a workstream slot. Reason: the cap protects against colliding edits to
-`dispatch.py`/`FLOOR_VERSION`/the adapter marker, and exactly one lane can touch those. Reversible
-by: closing the three non-dispatcher lanes' PRs, whose branches are preserved.** Issue #233 tracks
-re-expressing the cap as a region/collision rule or reaffirming it as a hard count; until that is
-decided, the declared count in `README.md` stands as written and this note records the divergence.
+`dispatch.py`/`FLOOR_VERSION`/the adapter marker, and exactly one lane can touch those.** Issue #233
+tracks re-expressing the cap as a region/collision rule or reaffirming it as a hard count; until that
+is decided, the declared count in `README.md` stands as written and this note records the divergence.
+
+**Reversal path, updated now that two lanes have landed.** The original note said the divergence was
+reversible by closing the three non-dispatcher PRs. That is no longer accurate: #237 and #240 are
+merged, so reversing them means reverting two merge commits (`8134cf4`, `a8ed1d4`), not closing
+PRs. Only #238 and #239 remain closable. Recorded rather than quietly dropped, because a stated
+reversal path that has silently expired is worse than none.
+
+**What the experiment measured, for whoever rules on #233.** Four region-disjoint lanes produced no
+region collision and no merge conflict *between lanes* — the boundaries held exactly as predicted.
+The costs that did appear were elsewhere and are the real input to the decision: `main` moved twice
+under in-flight branches (once from a merged lane, once from a `.gitignore` push, see #236), which
+forced a rebase and invalidated one branch's documentation evidence; and review attention, not
+region overlap, became the binding constraint — #234 alone consumed four review rounds. That is
+evidence for reading B (reviewer bandwidth) as the cap's real content even though reading A
+(collision avoidance) is what the prose describes.
 
 ## Completed current snapshot
 
+- PR #234 merged as `8a1a685` and published this ledger, superseding parked PR #231 after a
+  confirmed late P1 on its rollout ordering; #231 closed unmerged with its branch preserved. It
+  fixed the producer-first ordering, added **H-14** for the human-only 1.6.27 proof, and recorded
+  the four-lane dispatch. It took **four** review rounds, each producing an ordering or gating P1
+  on a *different* surface; #242 records that as a document-structure problem — the rollout order is
+  restated in three places, so any edit can desynchronize them — and proposes stating it once.
+- PR #240 merged as `a8ed1d4` and closed #110. `_composable()` now detects executable separators
+  outside inert quoted spans instead of by raw substring, so the flagship SPECS §6 must-allow class
+  (prose *containing* dangerous-looking text) is measured rather than silently dropped:
+  `SMOKE_BENIGN_CORPUS` 416 → 459, swept `(case, shape)` pairs 107,699 → 111,342. The aggregate
+  `CHARTER_RULE_DENY_FLOOR` is replaced by `CHARTER_RULE_DENY_PAIRS`, 569 exact `(probe, shape)`
+  pairs asserted as set membership across 8 postures, so added coverage can no longer compensate for
+  lost coverage. It surfaced 69 pre-existing over-blocks, recorded in `DOCUMENTED_CASE_OVER_BLOCKS`
+  and reported as #235 — without touching `dispatch.py`.
+- PR #237 merged as `8134cf4` and advanced #130 (`Refs`, not `Closes`). It measured the secret
+  matcher rather than asserting it, and disproved half the issue's premise: `.pem` **is** protected
+  by `\.pem$`, present since the repo's first commit. Because the `secrets?\.` and `\.pem$`
+  fragments and SPECS §6's wording have coexisted unchanged since `c87e906`, BLUEPRINT §2 class (c)
+  ("a listed must-block form NEWLY allowed") is not met, so the freeze's default governs and it
+  landed as a `FLOOR_LIMITATIONS.md` ledger line plus a SPECS §6 scope note. #130 stays open for the
+  owner's charter ruling; #244 tracks the remaining description-precision defects.
 - PR #230 merged as `731624106fc38a9f46e21553c61b3cb0ee56dfeb` and closed #227. Canonical
   source 1.6.27 parses Git's valueless `push.followTags` record as true, preserves the exact
   `--no-follow-tags` override, and fails closed on every other separator-free or unterminated
