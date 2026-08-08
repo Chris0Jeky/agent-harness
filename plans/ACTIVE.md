@@ -60,23 +60,6 @@ region boundary. Exactly one touched `templates/hooks/dispatch.py`; the other th
 from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, or the charter
 digests. **Two landed, two remain open with confirmed blockers.**
 
-**Did the region boundaries hold? For code, yes; for documentation, no — and that distinction is
-the useful result.** Measured with `git diff --name-only` against each lane's actual diff:
-
-- **Code regions held exactly.** No two lanes touched the same code file, and
-  `templates/hooks/dispatch.py`, `FLOOR_VERSION`, the adapter marker and the charter digests were
-  touched by exactly one lane, as designed. The collision the cap exists to prevent did not occur.
-- **Documentation regions did not hold.** PR #239 also wrote `README.md`, `docs/SYSTEM_STATE.md`
-  and `plans/ACTIVE.md`; PR #238 also wrote `CLAUDE.md` and `SPECS.md`. Neither was in its declared
-  region. Both did it for the same defensible reason — a lane documents its own change — but the
-  effect is that **shared documentation behaves as a de-facto global region every lane writes to**,
-  and that is precisely where the damage landed: #239's `plans/ACTIVE.md` edit is what conflicts
-  with PR #234, and #237 and #238 both wrote `SPECS.md`.
-
-The lesson for #233 is therefore not "regions work" or "regions fail" but that a region declaration
-covering only code is incomplete. Either name the shared docs in each lane's region and serialize
-edits to them, or forbid lanes from touching shared ledgers at all and have the coordinator record
-every lane's outcome in one pass — which is what this file now does.
 
 | Lane | PR | Outcome |
 |---|---|---|
@@ -88,6 +71,18 @@ every lane's outcome in one pass — which is what this file now does.
 Neither open PR is parked: each has one fix round remaining within law 2's budget, and the exact
 blockers are recorded on the PR thread. Do not restart either lane from scratch — the evidence
 already gathered is sound and was independently reproduced.
+
+**Permitted regions for the two OPEN lanes.** A resuming worker must not exceed these. Both open
+lanes exceeded theirs once already, and that — not code overlap — is what conflicted:
+
+| Lane | Permitted files |
+|---|---|
+| #201 / PR #239 | `templates/hooks/dispatch.py`, `templates/hooks/smoke_test.py`, `tests/test_sensitive_push_narrowing.py`, `FLOOR_VERSION`, the `.codex/hooks.json` marker |
+| #139 / PR #238 | `harness.py`, `tests/test_harness.py` |
+
+The shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`, `plans/ACTIVE.md`,
+`CLAUDE.md`, `SPECS.md` — are in NEITHER region. The coordinator records every lane's outcome in one
+pass, so a lane that edits them creates exactly the conflict this wave hit.
 
 **#239's blockers, precisely.** (1) Rebase onto current `main`, taking `main`'s structure — it
 carries the P1–P5 rollout phase table — and adding the 1.6.28 facts to it rather than restoring the
@@ -108,126 +103,21 @@ a downward-resolved root while the layer walk still runs to the requested path, 
 `canonical_root_floor_count` is structurally 0 for exactly the new case and a previously-certified
 configuration regresses. Plus a non-blocking P2 (`frontier.pop(0)` is quadratic).
 
-**Declared-cap tension, recorded rather than resolved.** `README.md` declares this file as allowing
-"at most two active, executable workstreams", and four implementation lanes plus one blocked rollout
-exceed that count. The count was not silently rewritten to fit. The reading applied here is that the
-cap's purpose is collision avoidance on shared T4-class infrastructure — the hazard the previous
-snapshot named explicitly was a *second dispatcher slice* — and that disjoint-region lanes do not
-create it. That reading is an assumption, not a ratified change: **Assumption: a region-disjoint lane
-does not consume a workstream slot. Reason: the cap protects against colliding edits to
-`dispatch.py`/`FLOOR_VERSION`/the adapter marker, and exactly one lane can touch those.** Issue #233
-tracks re-expressing the cap as a region/collision rule or reaffirming it as a hard count; until that
-is decided, the declared count in `README.md` stands as written and this note records the divergence.
+**Declared-cap divergence, tracked as #233.** `README.md` declares this file as allowing "at most
+two active, executable workstreams"; this wave ran four lanes plus the blocked rollout. The count was
+not rewritten to fit. **Assumption: a region-disjoint lane does not consume a workstream slot.
+Reason: the cap protects against colliding edits to `dispatch.py`/`FLOOR_VERSION`/the adapter marker,
+and exactly one lane could touch those.** The full measurement — which boundaries held, the four
+`main` movements, and the corrected reversal path — is in
+[`docs/archive/status-2026-08.md`](../docs/archive/status-2026-08.md). Until #233 rules, the declared
+count in `README.md` stands as written.
 
-**Reversal path, corrected now that two lanes have landed.** The original note said the divergence
-was reversible by closing the three non-dispatcher PRs. That is no longer accurate, and the obvious
-repair — "revert the two merges" — is also wrong: #237 and #240 are **completed**, so reverting
-`8134cf4` and `a8ed1d4` would discard finished work without reducing the number of *active*
-workstreams by one, which is what a hard-count reading of the cap would require.
+## Completed work
 
-The correct reversal is forward-looking: as of this snapshot there are three active streams — the
-blocked #232 rollout plus open PRs #238 and #239 — so if #233 resolves the cap as a hard count,
-compliance means **parking or closing one of those three current streams**, not undoing merges.
-Recorded explicitly because a stated reversal path that has silently expired is worse than none,
-and because the intuitive correction to it is also wrong.
-
-**What the experiment measured, for whoever rules on #233.** Four region-disjoint lanes produced no
-*code* collision — the declared code boundaries held exactly as predicted. Three costs appeared
-elsewhere, and they are the real input to the decision:
-
-1. **`main` moved four times under the in-flight branches**, not twice: `3ade22b` (the `.gitignore`
-   direct push, #236), then PR #234's merge `8a1a685`, then PR #237's `8134cf4`, then PR #240's
-   `a8ed1d4`. Every merged lane moves the base for every unmerged one, so a four-lane wave
-   re-bases the stragglers repeatedly and invalidates their documentation evidence each time.
-2. **Documentation is an undeclared shared region** (see above) — that, not code overlap, is what
-   actually conflicted.
-3. **Review attention, not region overlap, was the binding constraint.** PR #234 alone consumed
-   four review rounds.
-
-That is evidence for reading B (reviewer bandwidth) as the cap's real content even though reading A
-(collision avoidance) is what the prose describes — with the refinement that a hybrid rule should
-declare shared-document ownership explicitly rather than only code regions.
-
-## Completed current snapshot
-
-- PR #234 merged as `8a1a685` and published this ledger, superseding parked PR #231 after a
-  confirmed late P1 on its rollout ordering; #231 closed unmerged with its branch preserved. It
-  fixed the producer-first ordering, added **H-14** for the human-only 1.6.27 proof, and recorded
-  the four-lane dispatch. It took **four** review rounds, each producing an ordering or gating P1
-  on a *different* surface; #242 records that as a document-structure problem — the rollout order is
-  restated in three places, so any edit can desynchronize them — and proposes stating it once.
-- PR #240 merged as `a8ed1d4` and closed #110. `_composable()` now detects executable separators
-  outside inert quoted spans instead of by raw substring, so the flagship SPECS §6 must-allow class
-  (prose *containing* dangerous-looking text) is measured rather than silently dropped:
-  `SMOKE_BENIGN_CORPUS` 416 → 459, swept `(case, shape)` pairs 107,699 → 111,342. The aggregate
-  `CHARTER_RULE_DENY_FLOOR` is replaced by `CHARTER_RULE_DENY_PAIRS`, 569 exact `(probe, shape)`
-  pairs asserted as set membership across 8 postures, so added coverage can no longer compensate for
-  lost coverage. It surfaced 69 pre-existing over-blocks, recorded in `DOCUMENTED_CASE_OVER_BLOCKS`
-  and reported as #235 — without touching `dispatch.py`.
-- PR #237 merged as `8134cf4` and advanced #130 (`Refs`, not `Closes`). It measured the secret
-  matcher rather than asserting it, and disproved half the issue's premise: `.pem` **is** protected
-  by `\.pem$`, present since the repo's first commit. Because the `secrets?\.` and `\.pem$`
-  fragments and SPECS §6's wording have coexisted unchanged since `c87e906`, BLUEPRINT §2 class (c)
-  ("a listed must-block form NEWLY allowed") is not met, so the freeze's default governs and it
-  landed as a `FLOOR_LIMITATIONS.md` ledger line plus a SPECS §6 scope note. #130 stays open for the
-  owner's charter ruling; #244 tracks the remaining description-precision defects.
-- PR #230 merged as `731624106fc38a9f46e21553c61b3cb0ee56dfeb` and closed #227. Canonical
-  source 1.6.27 parses Git's valueless `push.followTags` record as true, preserves the exact
-  `--no-follow-tags` override, and fails closed on every other separator-free or unterminated
-  configuration listing. All nine hosted jobs and two distinct T3 review lenses passed.
-- PR #200 merged the six-case bounded #196 public-push narrowing repair and closed #196. A confirmed
-  late P1 showed that ordinary-submodule metadata could not prove a unique primary checkout, so
-  PR #202 withdrew only that exception and restored the fail-closed boundary. Both exact heads
-  passed all nine hosted checks; #202 also passed its required independent read-only review.
-- EvidenceDeck, SwarmingLilMen, and collaborative-hill-lab completed the bounded consumer rollout;
-  no other registered default checkout owns a tracked adapter.
-- Do not infer priority from issue number alone or reopen the completed #196/#200/#202 pipeline.
-
-## Completed in this wave
-
-- PR #182 closed #179 by changing only the aggregate Verify timeout from 15 to 20 minutes. PR #183
-  closed #171 by reducing reflog reachability probes from up to five Git processes to one stdin-fed
-  traversal with equivalent fail-closed results.
-- PR #187 closed #177 with schema/runtime surrogate parity. PR #194 closed #167 with suspend-aware,
-  rollback-detecting fingerprint expiry and global stop-on-invalidity. No live closeout apply ran.
-- PR #193 merged the four owner-authorized #184 public-push security repairs as `b2c2fd4`; #184 then
-  closed with exact producer proof, without authorizing live installation. PR #200 closed #196 with
-  five retained fail-closed usability narrowings; PR #202 removed the sixth after late review proved
-  its positive case unprovable. #201 records the remaining non-blocking numeric-boolean edge.
-- PR #195 published the current workbench continuity homes. PR #197 preserved direct non-commit
-  `ORIG_HEAD` identity and closed #172; its exact-head run passed all nine hosted jobs, and the
-  post-merge review/comment/thread refresh found no late feedback.
-- PR #198 skipped only the synthetic native-Windows executable-mode comparison, retained every
-  ordinary preservation probe, preserved the POSIX mode-only blocker, and closed #170. PR #199
-  published its state closeout.
-- PR #204 closed #89 with static Windows Git command-fidelity diagnosis; exact head `2150b420`,
-  base `6b49a67`, and all nine jobs in run `30714604384` passed before merge `77a9759`. PR #206
-  closed #131 with the tailored new-repo documentation contract; exact head `47fd5c1` and run
-  `30717285862` passed before merge `ace7d77`. PR #205 closed #189 with diagnosis-only static
-  Claude-hook topology reporting; exact head `ebfb03b`, base `ace7d77`, run `30718502986`, and
-  zero unresolved threads passed before merge `e6d0558`.
-- #74 closed on current executable evidence: PR #71 commits `0b488e5`/`e688d1e` are ancestors of
-  main and the full hook smoke suite passed 2237/2237; the invalid-descriptor residual remains
-  non-blocking. #96 closed on its existing PR #100 policy evidence (commit `6bedff3`, merge
-  `62dfbb1`), the #75-to-#95 split, and focused cross-product proof 27/27.
-- Documentation-only PR #208 closed #85 (base `0b3317d`, head `02cd197`, merge `02e3ba6`): all
-  nine jobs in run `30722065509` passed with zero unresolved threads. It documents Codex project
-  hook trust bootstrap only; no trust mutation, canary, or deployment ran. Documentation-only PR
-  #209 closed #84 (base `02e3ba6`, head `0e5845e`, merge `aee3ea6`): all nine jobs in run
-  `30722999868` passed with zero unresolved threads. It documents linked-worktree candidate
-  validation only; no Doctor behavior, trust/canary/deployment, or consumer rollout changed.
-- Documentation-only PR #210 published the preceding state ledger (merge `4203e7c`). PR #211
-  closed #109 by making cross-product shapes executable (merge `b483709`). PR #213 closed #119
-  by isolating the non-temporary prefix fixture (head `0134bb81`, base `b483709`, merge
-  `446e14f`); all nine hosted checks passed before merge.
-- PR #212 closed #98 by making `doctor --config-root` compare source guidance only after proving
-  a clean, current `main` checkout of the harness origin's `claude-config` sibling. Final head
-  `62a59a8`, base `446e14f`, merge `ac3266a`, and all nine jobs in run `30731418878` passed. The
-  cross-platform fixture P1 and macOS physical-root error were fixed before that run; three P2
-  robustness notes were triaged without reopening the bounded fix round. No global deploy, trust
-  mutation, or live canary ran.
-- PRs #154/#155 were closed unmerged after exact supersession inventory; branches and historical
-  review evidence remain preserved.
+The completed record for this period is rotated to
+[`docs/archive/status-2026-08.md`](../docs/archive/status-2026-08.md) under SPECS §3's 150-line cap
+on the routed "now" document. Most recent: PR #234 (`8a1a685`) published the 1.6.27 ledger,
+PR #240 (`a8ed1d4`) closed #110, PR #237 (`8134cf4`) advanced #130, PR #230 (`7316241`) closed #227.
 
 ## Parked or queued, not active
 
