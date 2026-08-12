@@ -1,5 +1,10 @@
 # System state
 
+> **Licence decision (2026-08-12):** Owner-authored repository content is now
+> `GPL-3.0-only`, with the curl-derived fixture retained under curl's licence.
+> See `LICENSE`, `LICENSING.md`, and `THIRD_PARTY_NOTICES.md`. This does not
+> decide the licences of possible future extracted plugin or replay products.
+
 Snapshot: 2026-08-08, published `main@a8ed1d481b8903e71b0d0443a67887274d692d92` (PR #240's merge).
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 

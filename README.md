@@ -253,3 +253,13 @@ static byte equality still does not prove a future, moved, or changed adapter's 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
 laws: one home per policy, budgets with rotation, no speculative scaffolding.
+
+## License
+
+The owner-authored contents of this repository are licensed under GNU General
+Public License version 3 only (`GPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+The curl-derived option-arity fixture retains curl's own licence; see
+`THIRD_PARTY_NOTICES.md`.
+
+This repository-level decision does not decide the licences of the possible
+future clean-repository plugin or replay products described in the blueprints.
