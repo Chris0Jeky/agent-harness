@@ -7676,11 +7676,15 @@ def sync_global(args: argparse.Namespace) -> int:
     agent_state_path = managed_codex_agents_state_path(codex_home)
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
-    if agent_source.exists():
+    agent_source_exists = agent_source.exists() or path_is_alias(agent_source)
+    agent_state_exists = agent_state_path.exists() or path_is_alias(agent_state_path)
+    manage_agents = agent_source_exists or agent_state_exists
+    if agent_source_exists:
         if path_is_alias(agent_source) or not agent_source.is_dir():
             raise HarnessError(
                 f"Codex agent source must be an ordinary directory: {agent_source}"
             )
+    if manage_agents:
         agents_home = codex_home / "agents"
         if path_is_alias(agents_home) or (
             agents_home.exists() and not agents_home.is_dir()
@@ -7689,7 +7693,11 @@ def sync_global(args: argparse.Namespace) -> int:
                 f"Codex agents destination must be an ordinary directory: {agents_home}"
             )
         current_agent_state = read_managed_codex_agents_state(agent_state_path)
-        sources = sorted(agent_source.glob("*.toml"), key=lambda path: path.name)
+        sources = (
+            sorted(agent_source.glob("*.toml"), key=lambda path: path.name)
+            if agent_source_exists
+            else []
+        )
         for source in sources:
             if path_is_alias(source) or not source.is_file():
                 raise HarnessError(
@@ -7742,7 +7750,7 @@ def sync_global(args: argparse.Namespace) -> int:
     )
     for _source, target, equal in skill_states:
         print(f"{'=' if equal else '->'} {target}")
-    if not agent_source.exists():
+    if not manage_agents:
         print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
     else:
         for _name, source, target, equal in agent_states:
@@ -7787,7 +7795,7 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copytree(target, backup)
             shutil.rmtree(target)
         shutil.copytree(source, target)
-    if agent_source.exists():
+    if manage_agents:
         for _name, source, target, equal in agent_states:
             if equal:
                 continue

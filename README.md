@@ -141,7 +141,8 @@ up changed global guidance, shared Claude-home hook bytes, managed skill folders
 `codex/agents/*.toml` definitions before replacing them. Agent definitions deploy to
 `<codex-home>/agents`; the durable managed-entry record permits stale removal only when the
 deployed bytes still match the last harness-managed version, so unrelated or locally changed files
-are preserved. It also prunes the obsolete managed global Codex floor while preserving unrelated
+are preserved. Removing the source `codex/agents/` directory reconciles that managed set to empty;
+a checkout that never had a managed-entry record remains a no-op. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)

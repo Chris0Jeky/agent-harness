@@ -2678,6 +2678,41 @@ allow_local_binding = true
         )
         self.assertEqual(set(state["agents"]), {"alpha.toml"})
 
+    def test_sync_global_agents_removes_last_source_directory_entries_safely(
+        self,
+    ) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-last-source")
+        )
+        removable = source_agents / "removable.toml"
+        changed = source_agents / "changed.toml"
+        removable.write_text("model = 'removable'\n", encoding="utf-8")
+        changed.write_text("model = 'changed'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        (target_agents / "changed.toml").write_text(
+            "model = 'changed locally'\n", encoding="utf-8"
+        )
+        unrelated = target_agents / "human.toml"
+        unrelated.write_text("model = 'human'\n", encoding="utf-8")
+        removable.unlink()
+        changed.unlink()
+        source_agents.rmdir()
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertFalse((target_agents / "removable.toml").exists())
+        self.assertEqual(
+            (target_agents / "changed.toml").read_text(encoding="utf-8"),
+            "model = 'changed locally'\n",
+        )
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "model = 'human'\n")
+        backups = list((codex_home / "backups").glob("*/agents/removable.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            backups[0].read_text(encoding="utf-8"), "model = 'removable'\n"
+        )
+        self.assertFalse(harness.managed_codex_agents_state_path(codex_home).exists())
+
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
         config_root = root / "config"
