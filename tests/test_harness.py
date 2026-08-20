@@ -154,6 +154,25 @@ class HarnessTests(unittest.TestCase):
         )
         return source_skill, target_skill, skills_home, args
 
+    def make_sync_global_agent_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        source_agents = config_root / "codex" / "agents"
+        source_agents.mkdir(parents=True)
+        (config_root / "codex" / "skills").mkdir()
+        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        codex_home = root / "codex-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(root / "skills-home"),
+            apply=True,
+        )
+        return source_agents, codex_home / "agents", codex_home, args
+
     def assert_sync_global_rejects_alias_without_writes(
         self,
         args: SimpleNamespace,
@@ -2577,6 +2596,222 @@ allow_local_binding = true
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_sync_global_agents_dry_run_does_not_write(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-dry-run")
+        )
+        (source_agents / "luna.toml").write_text("model = 'luna'\n", encoding="utf-8")
+        args.apply = False
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        agent_line = next(
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("agent -> ")
+        )
+        self.assertIn(f"{os.sep}agents{os.sep}luna.toml (source:", agent_line)
+        self.assertFalse(codex_home.exists())
+
+    def test_sync_global_agents_apply_backs_up_changed_destination(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-apply")
+        )
+        source = source_agents / "luna.toml"
+        target = target_agents / source.name
+        source.write_text("model = 'luna'\n", encoding="utf-8")
+        target.parent.mkdir(parents=True)
+        target.write_text("model = 'old'\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(harness.same_file(source, target))
+        backups = list((codex_home / "backups").glob("*/agents/luna.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), "model = 'old'\n")
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["agents"], {"luna.toml": harness.sha256_file(source)})
+
+    def test_sync_global_agents_identity_is_a_noop(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-noop")
+        )
+        source = source_agents / "luna.toml"
+        source.write_text("model = 'luna'\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+        backups_before = list((codex_home / "backups").glob("*/agents/luna.toml"))
+        output = io.StringIO()
+        with mock.patch.object(
+            harness.shutil,
+            "copy2",
+            side_effect=AssertionError("identical agent should not be copied"),
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            backups_before, list((codex_home / "backups").glob("*/agents/luna.toml"))
+        )
+        agent_line = next(
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("agent = ")
+        )
+        self.assertIn(f"{os.sep}agents{os.sep}luna.toml (source:", agent_line)
+
+    def test_sync_global_agents_keeps_case_only_rename_destination(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-case-only-rename")
+        )
+        upper_source = source_agents / "Luna.toml"
+        upper_source.write_text("model = 'luna'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        lower_source = source_agents / "luna.toml"
+        upper_source.rename(lower_source)
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        target = target_agents / "luna.toml"
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "model = 'luna'\n")
+        self.assertEqual(
+            [entry.name for entry in target_agents.iterdir()], ["luna.toml"]
+        )
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"luna.toml"})
+
+    def test_sync_global_agents_rejects_casefold_colliding_sources(self) -> None:
+        source_agents, _target_agents, _codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-casefold-collision")
+        )
+        upper = source_agents / "Luna.toml"
+        lower = source_agents / "luna.toml"
+        upper.write_text("model = 'luna'\n", encoding="utf-8")
+        if lower != upper:
+            lower.write_text("model = 'luna'\n", encoding="utf-8")
+
+        with mock.patch.object(Path, "glob", return_value=[upper, lower]):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "sources collide at the destination"
+            ):
+                harness.sync_global(args)
+
+    def test_sync_global_agents_removes_only_unchanged_stale_entries(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-stale")
+        )
+        alpha = source_agents / "alpha.toml"
+        beta = source_agents / "beta.toml"
+        alpha.write_text("model = 'alpha'\n", encoding="utf-8")
+        beta.write_text("model = 'beta'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        unrelated = target_agents / "human.toml"
+        unrelated.write_text("model = 'human'\n", encoding="utf-8")
+        beta.unlink()
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue((target_agents / "alpha.toml").exists())
+        self.assertFalse((target_agents / "beta.toml").exists())
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "model = 'human'\n")
+        backups = list((codex_home / "backups").glob("*/agents/beta.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), "model = 'beta'\n")
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"alpha.toml"})
+
+    def test_sync_global_agents_removes_last_source_directory_entries_safely(
+        self,
+    ) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-last-source")
+        )
+        removable = source_agents / "removable.toml"
+        changed = source_agents / "changed.toml"
+        removable.write_text("model = 'removable'\n", encoding="utf-8")
+        changed.write_text("model = 'changed'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        (target_agents / "changed.toml").write_text(
+            "model = 'changed locally'\n", encoding="utf-8"
+        )
+        unrelated = target_agents / "human.toml"
+        unrelated.write_text("model = 'human'\n", encoding="utf-8")
+        removable.unlink()
+        changed.unlink()
+        source_agents.rmdir()
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertFalse((target_agents / "removable.toml").exists())
+        self.assertEqual(
+            (target_agents / "changed.toml").read_text(encoding="utf-8"),
+            "model = 'changed locally'\n",
+        )
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "model = 'human'\n")
+        backups = list((codex_home / "backups").glob("*/agents/removable.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            backups[0].read_text(encoding="utf-8"), "model = 'removable'\n"
+        )
+        self.assertFalse(harness.managed_codex_agents_state_path(codex_home).exists())
+
+    def test_sync_global_agents_revalidates_stale_target_before_removal(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-stale-revalidate")
+        )
+        current = source_agents / "current.toml"
+        stale = source_agents / "stale.toml"
+        current.write_text("model = 'current'\n", encoding="utf-8")
+        stale.write_text("model = 'stale'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        current.write_text("model = 'updated'\n", encoding="utf-8")
+        stale.unlink()
+        stale_target = target_agents / "stale.toml"
+        original_copy2 = harness.shutil.copy2
+
+        def mutate_stale_target(
+            source: Path, target: Path, *args: object, **kwargs: object
+        ) -> str:
+            if (
+                Path(source).samefile(current)
+                and Path(target).parent.samefile(target_agents)
+                and Path(target).name == "current.toml"
+            ):
+                stale_target.write_text("model = 'edited locally'\n", encoding="utf-8")
+            return original_copy2(source, target, *args, **kwargs)
+
+        with mock.patch.object(
+            harness.shutil, "copy2", side_effect=mutate_stale_target
+        ):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            stale_target.read_text(encoding="utf-8"), "model = 'edited locally'\n"
+        )
+        self.assertEqual(list((codex_home / "backups").glob("*/agents/stale.toml")), [])
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"current.toml"})
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
