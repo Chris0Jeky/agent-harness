@@ -5870,6 +5870,57 @@ def managed_codex_agent_name(name: object) -> str:
     return name
 
 
+def managed_codex_agent_destination_key(name: object) -> str:
+    """Return the case-insensitive identity that every destination must reserve."""
+    return managed_codex_agent_name(name).casefold()
+
+
+def managed_codex_agent_destination_path(agents_home: Path, name: str) -> Path:
+    """Find one destination by managed identity, rejecting ambiguous case twins."""
+    desired = agents_home / name
+    if not agents_home.exists():
+        return desired
+    destination_key = managed_codex_agent_destination_key(name)
+    try:
+        matches = [
+            entry
+            for entry in agents_home.iterdir()
+            if managed_codex_agent_destination_key(entry.name) == destination_key
+        ]
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect Codex agent destination {agents_home}: {exc}"
+        ) from exc
+    if len(matches) > 1:
+        rendered = ", ".join(str(entry) for entry in matches)
+        raise HarnessError(
+            f"Codex agent destination identity is ambiguous for {name}: {rendered}"
+        )
+    return matches[0] if matches else desired
+
+
+def rename_codex_agent_to_canonical_name(current: Path, desired: Path) -> None:
+    """Rename a case-only destination safely, restoring its old name on failure."""
+    if current.name == desired.name:
+        return
+    temporary = current.with_name(f".harness-agent-rename-{uuid.uuid4().hex}")
+    try:
+        current.rename(temporary)
+        try:
+            temporary.rename(desired)
+        except OSError as exc:
+            try:
+                temporary.rename(current)
+            except OSError:
+                pass
+            raise HarnessError(
+                f"cannot rename Codex agent {current} to {desired}; restored old name "
+                "when possible"
+            ) from exc
+    except OSError as exc:
+        raise HarnessError(f"cannot rename Codex agent {current} to {desired}") from exc
+
+
 def sha256_file(path: Path) -> str:
     """Return the SHA-256 of an ordinary file's exact bytes."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -7671,11 +7722,12 @@ def sync_global(args: argparse.Namespace) -> int:
         (source, target, same_tree(source, target)) for source, target in skill_actions
     ]
     agent_source = codex_source / "agents"
-    agent_states: list[tuple[str, Path, Path, bool]] = []
+    agent_states: list[tuple[str, Path, Path, Path, bool, bool]] = []
     stale_agent_states: list[tuple[str, Path, str]] = []
     agent_state_path = managed_codex_agents_state_path(codex_home)
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
+    source_agent_keys: dict[str, str] = {}
     agent_source_exists = agent_source.exists() or path_is_alias(agent_source)
     agent_state_exists = agent_state_path.exists() or path_is_alias(agent_state_path)
     manage_agents = agent_source_exists or agent_state_exists
@@ -7704,16 +7756,31 @@ def sync_global(args: argparse.Namespace) -> int:
                     f"Codex agent source must be an ordinary file: {source}"
                 )
             name = managed_codex_agent_name(source.name)
-            target = agents_home / name
-            if path_is_alias(target) or (target.exists() and not target.is_file()):
+            destination_key = managed_codex_agent_destination_key(name)
+            conflicting_name = source_agent_keys.get(destination_key)
+            if conflicting_name is not None:
                 raise HarnessError(
-                    f"Codex agent destination must be an ordinary file: {target}"
+                    "Codex agent sources collide at the destination: "
+                    f"{conflicting_name} and {name}"
                 )
-            equal = same_file(source, target)
-            agent_states.append((name, source, target, equal))
+            source_agent_keys[destination_key] = name
+            target = agents_home / name
+            existing_target = managed_codex_agent_destination_path(agents_home, name)
+            if path_is_alias(existing_target) or (
+                existing_target.exists() and not existing_target.is_file()
+            ):
+                raise HarnessError(
+                    "Codex agent destination must be an ordinary file: "
+                    f"{existing_target}"
+                )
+            equal = same_file(source, existing_target)
+            canonical_name_needed = existing_target.name != name
+            agent_states.append(
+                (name, source, target, existing_target, equal, canonical_name_needed)
+            )
             next_agent_state[name] = sha256_file(source)
         for name, digest in current_agent_state.items():
-            if name in next_agent_state:
+            if managed_codex_agent_destination_key(name) in source_agent_keys:
                 continue
             target = agents_home / name
             if target.exists() and target.is_file() and not path_is_alias(target):
@@ -7753,8 +7820,17 @@ def sync_global(args: argparse.Namespace) -> int:
     if not manage_agents:
         print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
     else:
-        for _name, source, target, equal in agent_states:
+        for (
+            _name,
+            source,
+            target,
+            _existing_target,
+            equal,
+            canonical_name_needed,
+        ) in agent_states:
             print(f"agent {'=' if equal else '->'} {target} (source: {source})")
+            if canonical_name_needed:
+                print(f"agent rename {target} (canonical source filename)")
         for _name, target, status in stale_agent_states:
             if status == "remove":
                 print(f"agent remove {target} (stale managed entry)")
@@ -7796,18 +7872,43 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.rmtree(target)
         shutil.copytree(source, target)
     if manage_agents:
-        for _name, source, target, equal in agent_states:
-            if equal:
+        for (
+            _name,
+            source,
+            target,
+            existing_target,
+            equal,
+            canonical_name_needed,
+        ) in agent_states:
+            if equal and not canonical_name_needed:
                 continue
-            if target.exists():
-                backup = backup_root / "agents" / target.name
+            if existing_target.exists() and not equal:
+                backup = backup_root / "agents" / existing_target.name
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, backup)
-                print(f"agent backup {backup} (before replacing {target})")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+                shutil.copy2(existing_target, backup)
+                print(f"agent backup {backup} (before replacing {existing_target})")
+            if not equal:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, existing_target)
+            if canonical_name_needed:
+                rename_codex_agent_to_canonical_name(existing_target, target)
         for _name, target, status in stale_agent_states:
             if status != "remove":
+                continue
+            expected_digest = current_agent_state[_name]
+            try:
+                stale_target_is_unchanged = (
+                    not path_is_alias(target)
+                    and target.is_file()
+                    and sha256_file(target) == expected_digest
+                )
+            except OSError:
+                stale_target_is_unchanged = False
+            if not stale_target_is_unchanged:
+                print(
+                    f"agent preserve {target} "
+                    "(stale entry changed outside sync before removal)"
+                )
                 continue
             backup = backup_root / "agents" / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)

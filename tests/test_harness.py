@@ -2658,6 +2658,47 @@ allow_local_binding = true
         )
         self.assertIn(f"agent = {target_agents / 'luna.toml'}", output.getvalue())
 
+    def test_sync_global_agents_keeps_case_only_rename_destination(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-case-only-rename")
+        )
+        upper_source = source_agents / "Luna.toml"
+        upper_source.write_text("model = 'luna'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        lower_source = source_agents / "luna.toml"
+        upper_source.rename(lower_source)
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        target = target_agents / "luna.toml"
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "model = 'luna'\n")
+        self.assertEqual(
+            [entry.name for entry in target_agents.iterdir()], ["luna.toml"]
+        )
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"luna.toml"})
+
+    def test_sync_global_agents_rejects_casefold_colliding_sources(self) -> None:
+        source_agents, _target_agents, _codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-casefold-collision")
+        )
+        upper = source_agents / "Luna.toml"
+        lower = source_agents / "luna.toml"
+        upper.write_text("model = 'luna'\n", encoding="utf-8")
+        if lower != upper:
+            lower.write_text("model = 'luna'\n", encoding="utf-8")
+
+        with mock.patch.object(Path, "glob", return_value=[upper, lower]):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "sources collide at the destination"
+            ):
+                harness.sync_global(args)
+
     def test_sync_global_agents_removes_only_unchanged_stale_entries(self) -> None:
         source_agents, target_agents, codex_home, args = (
             self.make_sync_global_agent_fixture("agents-stale")
@@ -2720,6 +2761,43 @@ allow_local_binding = true
             backups[0].read_text(encoding="utf-8"), "model = 'removable'\n"
         )
         self.assertFalse(harness.managed_codex_agents_state_path(codex_home).exists())
+
+    def test_sync_global_agents_revalidates_stale_target_before_removal(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-stale-revalidate")
+        )
+        current = source_agents / "current.toml"
+        stale = source_agents / "stale.toml"
+        current.write_text("model = 'current'\n", encoding="utf-8")
+        stale.write_text("model = 'stale'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        current.write_text("model = 'updated'\n", encoding="utf-8")
+        stale.unlink()
+        stale_target = target_agents / "stale.toml"
+        original_copy2 = harness.shutil.copy2
+
+        def mutate_stale_target(
+            source: Path, target: Path, *args: object, **kwargs: object
+        ) -> str:
+            if source == current and target == target_agents / "current.toml":
+                stale_target.write_text("model = 'edited locally'\n", encoding="utf-8")
+            return original_copy2(source, target, *args, **kwargs)
+
+        with mock.patch.object(
+            harness.shutil, "copy2", side_effect=mutate_stale_target
+        ):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            stale_target.read_text(encoding="utf-8"), "model = 'edited locally'\n"
+        )
+        self.assertEqual(list((codex_home / "backups").glob("*/agents/stale.toml")), [])
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"current.toml"})
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
