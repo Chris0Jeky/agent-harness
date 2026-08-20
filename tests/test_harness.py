@@ -2608,7 +2608,9 @@ allow_local_binding = true
         with redirect_stdout(output):
             self.assertEqual(harness.sync_global(args), 0)
 
-        self.assertIn(f"agent -> {target_agents / 'luna.toml'}", output.getvalue())
+        self.assertIn(
+            f"agent -> {target_agents.resolve() / 'luna.toml'}", output.getvalue()
+        )
         self.assertFalse(codex_home.exists())
 
     def test_sync_global_agents_apply_backs_up_changed_destination(self) -> None:
@@ -2656,7 +2658,9 @@ allow_local_binding = true
         self.assertEqual(
             backups_before, list((codex_home / "backups").glob("*/agents/luna.toml"))
         )
-        self.assertIn(f"agent = {target_agents / 'luna.toml'}", output.getvalue())
+        self.assertIn(
+            f"agent = {target_agents.resolve() / 'luna.toml'}", output.getvalue()
+        )
 
     def test_sync_global_agents_keeps_case_only_rename_destination(self) -> None:
         source_agents, target_agents, codex_home, args = (
@@ -2779,7 +2783,10 @@ allow_local_binding = true
         def mutate_stale_target(
             source: Path, target: Path, *args: object, **kwargs: object
         ) -> str:
-            if source == current and target == target_agents / "current.toml":
+            if (
+                Path(source).resolve() == current.resolve()
+                and Path(target).resolve() == (target_agents / "current.toml").resolve()
+            ):
                 stale_target.write_text("model = 'edited locally'\n", encoding="utf-8")
             return original_copy2(source, target, *args, **kwargs)
 
