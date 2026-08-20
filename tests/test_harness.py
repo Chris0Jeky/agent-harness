@@ -1847,13 +1847,17 @@ class HarnessTests(unittest.TestCase):
         config.write_text(
             "ignored = " + ("[" * 1100) + "0" + ("]" * 1100), encoding="utf-8"
         )
-        with self.assertRaises(harness.HarnessError):
+        with self.assertRaisesRegex(harness.HarnessError, r"invalid Codex config .*"):
             harness.toml_config(config)
 
     def test_toml_config_handles_deep_post_parse_validation(self) -> None:
         config = Path(self.temp.name) / "config.toml"
-        config.write_text(("nested." * 1100) + "leaf = 0", encoding="utf-8")
-        self.assertIsNotNone(harness.toml_config(config))
+        config.write_text("ignored = 0", encoding="utf-8")
+        parsed: object = 0
+        for _ in range(1100):
+            parsed = {"nested": parsed}
+        with mock.patch.object(harness.tomllib, "loads", return_value=parsed):
+            self.assertIs(harness.toml_config(config), parsed)
 
     def test_inline_hooks_preserve_ignored_toml_datetime(self) -> None:
         config = Path(self.temp.name) / "config.toml"
@@ -1898,28 +1902,32 @@ class HarnessTests(unittest.TestCase):
 
     def test_deep_inline_hooks_never_leak_a_raw_recursion_error(self) -> None:
         config = Path(self.temp.name) / "config.toml"
-        config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
+        nested: object = 0
+        for _ in range(10000):
+            nested = {"nested": nested}
 
-        for convert in (
-            harness.inline_hooks_document,
-            harness.inline_hook_documents_from_config,
-        ):
-            with self.subTest(convert=convert.__name__):
-                try:
-                    converted = convert(config)
-                except harness.HarnessError as error:
-                    self.assertRegex(
-                        str(error), r"unsupported inline hooks value in .*config\.toml"
-                    )
-                else:
-                    # A Python that survives the depth must carry the whole
-                    # inline document across, not a truncated prefix.
-                    document = (
-                        converted
-                        if isinstance(converted, str)
-                        else "".join(text for _location, text in converted)
-                    )
-                    self.assertEqual(document.count('"nested"'), 10000)
+        with mock.patch.object(harness, "toml_config", return_value={"hooks": nested}):
+            for convert in (
+                harness.inline_hooks_document,
+                harness.inline_hook_documents_from_config,
+            ):
+                with self.subTest(convert=convert.__name__):
+                    try:
+                        converted = convert(config)
+                    except harness.HarnessError as error:
+                        self.assertRegex(
+                            str(error),
+                            r"unsupported inline hooks value in .*config\.toml",
+                        )
+                    else:
+                        # A Python that survives the depth must carry the whole
+                        # inline document across, not a truncated prefix.
+                        document = (
+                            converted
+                            if isinstance(converted, str)
+                            else "".join(text for _location, text in converted)
+                        )
+                        self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
