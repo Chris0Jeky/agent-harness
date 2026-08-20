@@ -173,6 +173,34 @@ class HarnessTests(unittest.TestCase):
         )
         return source_agents, codex_home / "agents", codex_home, args
 
+    def make_scoped_sync_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        agents = codex_source / "agents"
+        route_skill = codex_source / "skills" / "route-codex-work"
+        other_skill = codex_source / "skills" / "other"
+        for path in (agents, route_skill, other_skill):
+            path.mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("source guidance\n", encoding="utf-8")
+        (codex_source / "REPOS.md").write_text("source repos\n", encoding="utf-8")
+        (agents / "luna.toml").write_text("model = 'luna'\n", encoding="utf-8")
+        (route_skill / "SKILL.md").write_text("route source\n", encoding="utf-8")
+        (other_skill / "SKILL.md").write_text("other source\n", encoding="utf-8")
+        codex_home = root / "codex-home"
+        claude_home = root / "claude-home"
+        skills_home = root / "skills-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        return codex_source, codex_home, claude_home, skills_home, args
+
     def assert_sync_global_rejects_alias_without_writes(
         self,
         args: SimpleNamespace,
@@ -2812,6 +2840,121 @@ allow_local_binding = true
             )
         )
         self.assertEqual(set(state["agents"]), {"current.toml"})
+
+    def test_sync_global_only_agents_and_named_skill_dry_run_is_read_only(self) -> None:
+        _source, codex_home, _claude_home, _skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-dry-run")
+        )
+        args.apply = False
+        args.only = ["codex-agents", "skill:route-codex-work"]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        text = output.getvalue()
+        self.assertIn("agents", text)
+        self.assertIn("route-codex-work", text)
+        self.assertNotIn("AGENTS.md", text)
+        self.assertNotIn("REPOS.md", text)
+        self.assertNotIn("hooks.json", text)
+        self.assertNotIn("other", text)
+        self.assertFalse(codex_home.exists())
+
+    def test_sync_global_only_agents_and_named_skill_applies_exact_scope(self) -> None:
+        source, codex_home, claude_home, skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-apply")
+        )
+        (codex_home / "AGENTS.md").parent.mkdir(parents=True)
+        (codex_home / "AGENTS.md").write_text("keep guidance\n", encoding="utf-8")
+        (codex_home / "REPOS.md").write_text("keep repos\n", encoding="utf-8")
+        (codex_home / "hooks.json").write_text("keep hooks\n", encoding="utf-8")
+        (claude_home / "hooks").mkdir(parents=True)
+        for name in ("dispatch.py", "smoke_test.py"):
+            (claude_home / "hooks" / name).write_text("keep hook\n", encoding="utf-8")
+        for name in ("route-codex-work", "other"):
+            target = skills_home / name
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("keep skill\n", encoding="utf-8")
+        args.only = ["codex-agents", "skill:route-codex-work"]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(
+            harness.same_file(
+                source / "agents" / "luna.toml", codex_home / "agents" / "luna.toml"
+            )
+        )
+        self.assertTrue(
+            harness.same_tree(
+                source / "skills" / "route-codex-work",
+                skills_home / "route-codex-work",
+            )
+        )
+        self.assertEqual(
+            (codex_home / "AGENTS.md").read_text(encoding="utf-8"), "keep guidance\n"
+        )
+        self.assertEqual(
+            (codex_home / "REPOS.md").read_text(encoding="utf-8"), "keep repos\n"
+        )
+        self.assertEqual(
+            (codex_home / "hooks.json").read_text(encoding="utf-8"), "keep hooks\n"
+        )
+        self.assertEqual(
+            (claude_home / "hooks" / "dispatch.py").read_text(encoding="utf-8"),
+            "keep hook\n",
+        )
+        self.assertEqual(
+            (skills_home / "other" / "SKILL.md").read_text(encoding="utf-8"),
+            "keep skill\n",
+        )
+        text = output.getvalue()
+        self.assertNotIn("AGENTS.md", text)
+        self.assertNotIn("REPOS.md", text)
+        self.assertNotIn("hooks.json", text)
+        self.assertNotIn(str(skills_home / "other"), text)
+
+    def test_sync_global_default_selection_keeps_existing_components(self) -> None:
+        source, codex_home, claude_home, skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-default")
+        )
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(
+            harness.same_file(source / "AGENTS.md", codex_home / "AGENTS.md")
+        )
+        self.assertTrue(harness.same_file(source / "REPOS.md", codex_home / "REPOS.md"))
+        self.assertTrue(
+            harness.same_file(
+                Path(harness.__file__).resolve().parent
+                / "templates"
+                / "hooks"
+                / "dispatch.py",
+                claude_home / "hooks" / "dispatch.py",
+            )
+        )
+        self.assertTrue(
+            harness.same_tree(source / "skills" / "other", skills_home / "other")
+        )
+
+    def test_sync_global_only_rejects_unknown_and_missing_skills_without_writes(
+        self,
+    ) -> None:
+        _source, codex_home, _claude_home, _skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-invalid")
+        )
+        args.apply = False
+        args.only = ["unknown"]
+        with self.assertRaisesRegex(harness.HarnessError, "unknown sync component"):
+            harness.sync_global(args)
+        self.assertFalse(codex_home.exists())
+        args.only = ["skill:missing"]
+        with self.assertRaisesRegex(harness.HarnessError, "missing sync sources"):
+            harness.sync_global(args)
+        self.assertFalse(codex_home.exists())
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)

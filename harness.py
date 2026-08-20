@@ -7683,6 +7683,34 @@ def remove_managed_codex_floor(
         ) from exc
 
 
+def sync_global_selection(
+    values: list[str] | None,
+) -> tuple[bool, bool, set[str]]:
+    """Parse repeatable sync components without accepting path-like selectors."""
+    if not values:
+        return True, True, set()
+    sync_agents = False
+    skills: set[str] = set()
+    for value in values:
+        if value == "codex-agents":
+            sync_agents = True
+            continue
+        if value.startswith("skill:"):
+            name = value.removeprefix("skill:")
+            if (
+                not name
+                or name.startswith(".")
+                or "/" in name
+                or "\\" in name
+                or Path(name).name != name
+            ):
+                raise HarnessError(f"unknown sync component: {value}")
+            skills.add(name)
+            continue
+        raise HarnessError(f"unknown sync component: {value}")
+    return False, sync_agents, skills
+
+
 def sync_global(args: argparse.Namespace) -> int:
     config_root = Path(args.config_root).resolve()
     codex_source = config_root / "codex"
@@ -7692,32 +7720,56 @@ def sync_global(args: argparse.Namespace) -> int:
     ).resolve()
     claude_home = Path(args.claude_home or Path.home() / ".claude").resolve()
     skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+    default_sync, sync_agents, selected_skills = sync_global_selection(
+        getattr(args, "only", None)
+    )
     required = [
-        codex_source / "AGENTS.md",
-        harness_root / "templates" / "hooks" / "dispatch.py",
-        harness_root / "templates" / "hooks" / "smoke_test.py",
+        *(
+            [
+                codex_source / "AGENTS.md",
+                harness_root / "templates" / "hooks" / "dispatch.py",
+                harness_root / "templates" / "hooks" / "smoke_test.py",
+            ]
+            if default_sync
+            else []
+        ),
+        *(
+            codex_source / "skills" / name / "SKILL.md"
+            for name in sorted(selected_skills)
+        ),
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise HarnessError("missing sync sources: " + ", ".join(missing))
-    actions = [
-        (codex_source / "AGENTS.md", codex_home / "AGENTS.md"),
-        (
-            harness_root / "templates" / "hooks" / "dispatch.py",
-            claude_home / "hooks" / "dispatch.py",
-        ),
-        (
-            harness_root / "templates" / "hooks" / "smoke_test.py",
-            claude_home / "hooks" / "smoke_test.py",
-        ),
-    ]
-    if (codex_source / "REPOS.md").is_file():
+    actions = (
+        [
+            (codex_source / "AGENTS.md", codex_home / "AGENTS.md"),
+            (
+                harness_root / "templates" / "hooks" / "dispatch.py",
+                claude_home / "hooks" / "dispatch.py",
+            ),
+            (
+                harness_root / "templates" / "hooks" / "smoke_test.py",
+                claude_home / "hooks" / "smoke_test.py",
+            ),
+        ]
+        if default_sync
+        else []
+    )
+    if default_sync and (codex_source / "REPOS.md").is_file():
         actions.append((codex_source / "REPOS.md", codex_home / "REPOS.md"))
-    skill_actions = [
-        (skill, skills_home / skill.name)
-        for skill in sorted((codex_source / "skills").iterdir())
-        if (skill / "SKILL.md").is_file()
-    ]
+    skill_actions = (
+        [
+            (skill, skills_home / skill.name)
+            for skill in sorted((codex_source / "skills").iterdir())
+            if (skill / "SKILL.md").is_file()
+        ]
+        if default_sync
+        else [
+            (codex_source / "skills" / name, skills_home / name)
+            for name in sorted(selected_skills)
+        ]
+    )
     skill_states = [
         (source, target, same_tree(source, target)) for source, target in skill_actions
     ]
@@ -7728,9 +7780,14 @@ def sync_global(args: argparse.Namespace) -> int:
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
     source_agent_keys: dict[str, str] = {}
-    agent_source_exists = agent_source.exists() or path_is_alias(agent_source)
-    agent_state_exists = agent_state_path.exists() or path_is_alias(agent_state_path)
-    manage_agents = agent_source_exists or agent_state_exists
+    agent_selection = default_sync or sync_agents
+    agent_source_exists = agent_selection and (
+        agent_source.exists() or path_is_alias(agent_source)
+    )
+    agent_state_exists = agent_selection and (
+        agent_state_path.exists() or path_is_alias(agent_state_path)
+    )
+    manage_agents = agent_selection and (agent_source_exists or agent_state_exists)
     if agent_source_exists:
         if path_is_alias(agent_source) or not agent_source.is_dir():
             raise HarnessError(
@@ -7793,67 +7850,81 @@ def sync_global(args: argparse.Namespace) -> int:
             else:
                 stale_agent_states.append((name, target, "absent"))
     print(f"Codex home: {codex_home}")
-    print(f"Claude home: {claude_home}")
-    print(f"Skills home: {skills_home}")
+    if default_sync:
+        print(f"Claude home: {claude_home}")
+    if default_sync or skill_states:
+        print(f"Skills home: {skills_home}")
     for source, target in actions:
         print(f"{'=' if same_file(source, target) else '->'} {target}")
-    current_hooks = (
-        (codex_home / "hooks.json").read_text(encoding="utf-8")
-        if (codex_home / "hooks.json").is_file()
-        else ""
-    )
-    hook_text = remove_managed_codex_floor(
-        current_hooks, codex_home / "hooks" / "dispatch.py"
-    )
-    remaining_global_floors = managed_codex_floor_groups(hook_text) if hook_text else []
-    if remaining_global_floors:
-        raise HarnessError(
-            "refusing global sync: an unowned or ambiguous Codex floor remains in "
-            f"{codex_home / 'hooks.json'}"
+    current_hooks = ""
+    hook_text = ""
+    if default_sync:
+        current_hooks = (
+            (codex_home / "hooks.json").read_text(encoding="utf-8")
+            if (codex_home / "hooks.json").is_file()
+            else ""
         )
-    print(
-        f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}"
-        " (no global Codex deny floor)"
-    )
+        hook_text = remove_managed_codex_floor(
+            current_hooks, codex_home / "hooks" / "dispatch.py"
+        )
+        remaining_global_floors = (
+            managed_codex_floor_groups(hook_text) if hook_text else []
+        )
+        if remaining_global_floors:
+            raise HarnessError(
+                "refusing global sync: an unowned or ambiguous Codex floor remains in "
+                f"{codex_home / 'hooks.json'}"
+            )
+        print(
+            f"{'=' if current_hooks == hook_text else '->'} {codex_home / 'hooks.json'}"
+            " (no global Codex deny floor)"
+        )
     for _source, target, equal in skill_states:
         print(f"{'=' if equal else '->'} {target}")
-    if not manage_agents:
-        print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
-    else:
-        for (
-            _name,
-            source,
-            target,
-            _existing_target,
-            equal,
-            canonical_name_needed,
-        ) in agent_states:
-            print(f"agent {'=' if equal else '->'} {target} (source: {source})")
-            if canonical_name_needed:
-                print(f"agent rename {target} (canonical source filename)")
-        for _name, target, status in stale_agent_states:
-            if status == "remove":
-                print(f"agent remove {target} (stale managed entry)")
-            elif status == "preserve":
-                print(f"agent preserve {target} (stale entry changed outside sync)")
-            else:
-                print(f"agent = {target} (stale managed entry already absent)")
-        if current_agent_state != next_agent_state:
-            print(f"agent state -> {agent_state_path}")
+    if default_sync or sync_agents:
+        if not manage_agents:
+            print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
         else:
-            print(f"agent state = {agent_state_path}")
+            for (
+                _name,
+                source,
+                target,
+                _existing_target,
+                equal,
+                canonical_name_needed,
+            ) in agent_states:
+                print(f"agent {'=' if equal else '->'} {target} (source: {source})")
+                if canonical_name_needed:
+                    print(f"agent rename {target} (canonical source filename)")
+            for _name, target, status in stale_agent_states:
+                if status == "remove":
+                    print(f"agent remove {target} (stale managed entry)")
+                elif status == "preserve":
+                    print(f"agent preserve {target} (stale entry changed outside sync)")
+                else:
+                    print(f"agent = {target} (stale managed entry already absent)")
+            if current_agent_state != next_agent_state:
+                print(f"agent state -> {agent_state_path}")
+            else:
+                print(f"agent state = {agent_state_path}")
     if not args.apply:
         print("dry run; pass --apply to install")
         return 0
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_root = reserve_backup_root(codex_home / "backups", stamp)
-    skill_backup = reserve_backup_root(
-        skills_home / ".harness-backups", backup_root.name
-    )
+    backup_root: Path | None = None
+    skill_backup: Path | None = None
+    if default_sync or manage_agents:
+        backup_root = reserve_backup_root(codex_home / "backups", stamp)
+    if default_sync:
+        skill_backup = reserve_backup_root(
+            skills_home / ".harness-backups", backup_root.name
+        )
+    elif skill_states:
+        skill_backup = reserve_backup_root(skills_home / ".harness-backups", stamp)
     for source, target in actions:
         copy_with_backup(source, target, backup_root)
     hooks_target = codex_home / "hooks.json"
-    if current_hooks != hook_text:
+    if default_sync and current_hooks != hook_text:
         if hooks_target.exists():
             backup_root.mkdir(parents=True, exist_ok=True)
             shutil.copy2(hooks_target, backup_root / "hooks.json")
@@ -7872,6 +7943,7 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.rmtree(target)
         shutil.copytree(source, target)
     if manage_agents:
+        assert backup_root is not None
         for (
             _name,
             source,
@@ -7925,13 +7997,21 @@ def sync_global(args: argparse.Namespace) -> int:
                 write_managed_codex_agents_state(agent_state_path, next_agent_state)
             else:
                 agent_state_path.unlink(missing_ok=True)
-    print(
-        "installed shared guidance and dispatcher layer; "
-        f"backups: {backup_root}; skill backups: {skill_backup}"
-    )
-    print(
-        "Codex deny-floor trust remains project-local; review each repo's .codex/hooks.json in /hooks."
-    )
+    if default_sync:
+        print(
+            "installed shared guidance and dispatcher layer; "
+            f"backups: {backup_root}; skill backups: {skill_backup}"
+        )
+        print(
+            "Codex deny-floor trust remains project-local; review each repo's .codex/hooks.json in /hooks."
+        )
+    else:
+        backup_details = []
+        if backup_root is not None:
+            backup_details.append(f"backups: {backup_root}")
+        if skill_backup is not None:
+            backup_details.append(f"skill backups: {skill_backup}")
+        print("installed selected global components; " + "; ".join(backup_details))
     return 0
 
 
@@ -8521,6 +8601,11 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--codex-home")
     sync.add_argument("--claude-home")
     sync.add_argument("--skills-home")
+    sync.add_argument(
+        "--only",
+        action="append",
+        help="sync only codex-agents or one named skill:<name>; repeat as needed",
+    )
     sync.add_argument("--apply", action="store_true")
     sync.set_defaults(func=sync_global)
 
