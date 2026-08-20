@@ -39,6 +39,8 @@ WORKTREE_OWNERSHIP_LOCK_DIRECTORY = "agent-harness-closeout-lease.lock"
 WORKTREE_OWNERSHIP_DEFAULT_SECONDS = 300.0
 WORKTREE_OWNERSHIP_MAX_SECONDS = 3600.0
 WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS = 10.0
+MANAGED_CODEX_AGENTS_STATE_FILENAME = ".harness-sync-global-agents.json"
+MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION = 1
 WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -5843,6 +5845,80 @@ def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
     return "updated" if (backup_root / target.name).exists() else "created"
 
 
+def managed_codex_agents_state_path(codex_home: Path) -> Path:
+    """Return the durable ownership record for global Codex agent definitions."""
+    return codex_home / MANAGED_CODEX_AGENTS_STATE_FILENAME
+
+
+def managed_codex_agent_name(name: object) -> str:
+    """Validate a state-file agent basename before using it as a destination."""
+    if not isinstance(name, str):
+        raise HarnessError(
+            "invalid managed Codex agents state: agent name is not a string"
+        )
+    if (
+        not name
+        or name.startswith(".")
+        or "/" in name
+        or "\\" in name
+        or Path(name).name != name
+        or not name.endswith(".toml")
+    ):
+        raise HarnessError(
+            f"invalid managed Codex agents state: unsafe agent name {name!r}"
+        )
+    return name
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 of an ordinary file's exact bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
+    """Read a narrow ownership record; malformed state fails closed before writes."""
+    if path_is_alias(state_path):
+        raise HarnessError(f"invalid managed Codex agents state path: {state_path}")
+    if not state_path.exists():
+        return {}
+    if not state_path.is_file():
+        raise HarnessError(f"invalid managed Codex agents state path: {state_path}")
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            f"cannot read managed Codex agents state {state_path}: {exc}"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION
+        or not isinstance(payload.get("agents"), dict)
+        or set(payload) != {"schema_version", "agents"}
+    ):
+        raise HarnessError(f"invalid managed Codex agents state: {state_path}")
+    agents: dict[str, str] = {}
+    for name, digest in payload["agents"].items():
+        name = managed_codex_agent_name(name)
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise HarnessError(
+                f"invalid managed Codex agents state: invalid digest for {name}"
+            )
+        agents[name] = digest
+    return agents
+
+
+def write_managed_codex_agents_state(
+    state_path: Path, agents: Mapping[str, str]
+) -> None:
+    """Write the versioned ownership record after a successful agent sync."""
+    payload = {
+        "schema_version": MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION,
+        "agents": dict(sorted(agents.items())),
+    }
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def reserve_backup_root(parent: Path, stem: str) -> Path:
     """Atomically reserve a backup directory without replacing an earlier run."""
     parent.mkdir(parents=True, exist_ok=True)
@@ -7594,6 +7670,53 @@ def sync_global(args: argparse.Namespace) -> int:
     skill_states = [
         (source, target, same_tree(source, target)) for source, target in skill_actions
     ]
+    agent_source = codex_source / "agents"
+    agent_states: list[tuple[str, Path, Path, bool]] = []
+    stale_agent_states: list[tuple[str, Path, str]] = []
+    agent_state_path = managed_codex_agents_state_path(codex_home)
+    current_agent_state: dict[str, str] = {}
+    next_agent_state: dict[str, str] = {}
+    if agent_source.exists():
+        if path_is_alias(agent_source) or not agent_source.is_dir():
+            raise HarnessError(
+                f"Codex agent source must be an ordinary directory: {agent_source}"
+            )
+        agents_home = codex_home / "agents"
+        if path_is_alias(agents_home) or (
+            agents_home.exists() and not agents_home.is_dir()
+        ):
+            raise HarnessError(
+                f"Codex agents destination must be an ordinary directory: {agents_home}"
+            )
+        current_agent_state = read_managed_codex_agents_state(agent_state_path)
+        sources = sorted(agent_source.glob("*.toml"), key=lambda path: path.name)
+        for source in sources:
+            if path_is_alias(source) or not source.is_file():
+                raise HarnessError(
+                    f"Codex agent source must be an ordinary file: {source}"
+                )
+            name = managed_codex_agent_name(source.name)
+            target = agents_home / name
+            if path_is_alias(target) or (target.exists() and not target.is_file()):
+                raise HarnessError(
+                    f"Codex agent destination must be an ordinary file: {target}"
+                )
+            equal = same_file(source, target)
+            agent_states.append((name, source, target, equal))
+            next_agent_state[name] = sha256_file(source)
+        for name, digest in current_agent_state.items():
+            if name in next_agent_state:
+                continue
+            target = agents_home / name
+            if target.exists() and target.is_file() and not path_is_alias(target):
+                if sha256_file(target) == digest:
+                    stale_agent_states.append((name, target, "remove"))
+                else:
+                    stale_agent_states.append((name, target, "preserve"))
+            elif path_is_alias(target):
+                stale_agent_states.append((name, target, "preserve"))
+            else:
+                stale_agent_states.append((name, target, "absent"))
     print(f"Codex home: {codex_home}")
     print(f"Claude home: {claude_home}")
     print(f"Skills home: {skills_home}")
@@ -7619,6 +7742,22 @@ def sync_global(args: argparse.Namespace) -> int:
     )
     for _source, target, equal in skill_states:
         print(f"{'=' if equal else '->'} {target}")
+    if not agent_source.exists():
+        print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
+    else:
+        for _name, source, target, equal in agent_states:
+            print(f"agent {'=' if equal else '->'} {target} (source: {source})")
+        for _name, target, status in stale_agent_states:
+            if status == "remove":
+                print(f"agent remove {target} (stale managed entry)")
+            elif status == "preserve":
+                print(f"agent preserve {target} (stale entry changed outside sync)")
+            else:
+                print(f"agent = {target} (stale managed entry already absent)")
+        if current_agent_state != next_agent_state:
+            print(f"agent state -> {agent_state_path}")
+        else:
+            print(f"agent state = {agent_state_path}")
     if not args.apply:
         print("dry run; pass --apply to install")
         return 0
@@ -7648,6 +7787,35 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copytree(target, backup)
             shutil.rmtree(target)
         shutil.copytree(source, target)
+    if agent_source.exists():
+        for _name, source, target, equal in agent_states:
+            if equal:
+                continue
+            if target.exists():
+                backup = backup_root / "agents" / target.name
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+                print(f"agent backup {backup} (before replacing {target})")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        for _name, target, status in stale_agent_states:
+            if status != "remove":
+                continue
+            backup = backup_root / "agents" / target.name
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, backup)
+            print(f"agent backup {backup} (before removing {target})")
+            target.unlink()
+        if current_agent_state != next_agent_state:
+            if agent_state_path.exists():
+                backup = backup_root / "managed-codex-agents-state.json"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(agent_state_path, backup)
+                print(f"agent state backup {backup}")
+            if next_agent_state:
+                write_managed_codex_agents_state(agent_state_path, next_agent_state)
+            else:
+                agent_state_path.unlink(missing_ok=True)
     print(
         "installed shared guidance and dispatcher layer; "
         f"backups: {backup_root}; skill backups: {skill_backup}"

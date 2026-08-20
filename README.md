@@ -137,8 +137,11 @@ guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPRO
 byte mismatch or absent deployed target fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
-up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
-replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
+up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed
+`codex/agents/*.toml` definitions before replacing them. Agent definitions deploy to
+`<codex-home>/agents`; the durable managed-entry record permits stale removal only when the
+deployed bytes still match the last harness-managed version, so unrelated or locally changed files
+are preserved. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
