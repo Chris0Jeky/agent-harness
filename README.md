@@ -39,6 +39,11 @@ py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --claimant session
 # Diff, then install global guidance, skills, and the shared dispatcher with backups.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
+
+# Limit a rollout to reviewed custom agents and one named global skill. Repeat
+# --only for each component; an unknown component or absent selected skill fails closed.
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work --apply
 ```
 
 `worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
