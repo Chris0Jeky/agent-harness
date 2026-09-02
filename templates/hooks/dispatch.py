@@ -12843,8 +12843,13 @@ def check(
             if len(toks) >= 2 and toks[1] == "api":
                 method = None
                 has_fields = False
+                opaque_body = False
                 for index, token in enumerate(toks[2:], start=2):
                     lowered = token.lower()
+                    if lowered == "--input" or lowered.startswith("--input="):
+                        # The request body comes from a file or stdin the
+                        # floor never reads (issue #259, late #257 review).
+                        opaque_body = True
                     clustered_method = re.fullmatch(r"-i*[xX](?:=?([A-Za-z]+))?", token)
                     if clustered_method:
                         method = (
@@ -12864,6 +12869,29 @@ def check(
                 is_mutation = (method and method != "GET") or (
                     method is None and has_fields
                 )
+                if method is not None and method not in {
+                    "GET",
+                    "HEAD",
+                    "OPTIONS",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                }:
+                    # A method the shell computes at run time ($M, a quoted
+                    # expansion) can be DELETE; the narrowed allowlist below
+                    # keys on the literal method, so it cannot apply.
+                    return (
+                        "deny",
+                        "sensitive_data repo: a dynamic or unknown gh api method "
+                        "cannot be narrowed; spell the HTTP method literally.",
+                    )
+                if is_mutation and opaque_body:
+                    return (
+                        "deny",
+                        "sensitive_data repo: a gh api mutation whose body comes from "
+                        "--input is opaque to the floor; pass fields on the command line.",
+                    )
                 if is_mutation:
                     # Owner decision 2026-08-18: routine gh api mutations
                     # (PRs, issues, comments, labels) are allowed — the old
