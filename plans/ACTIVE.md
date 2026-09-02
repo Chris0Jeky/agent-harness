@@ -10,18 +10,18 @@ and the owner's `~/.claude/hooks` are all **1.6.32** (PR #262 on top of #260's 1
 Claude runtime canary trio passed live in the deploying session on 2026-09-02; the Codex exact-CWD
 re-trust and Codex canaries are still owed — **H-15** in `HUMAN_TODO.md`.
 
-## Active rollout — issue #232, blocked on human-only runtime proof
+## Active rollout — issue #232, blocked on the Codex half of the runtime proof
 
-Static deployment is NOT complete and is NOT runtime proof: claude-config `hooks/dispatch.py` and
-the owner's `~/.claude/hooks` carry **1.6.29** (the owner's consumer-side authoring of
-2026-08-18), canonical is **1.6.31** (PR #260) with **1.6.32** in PR #262, and the last runtime
-canaries were 1.6.26. The 1.6.27 record (claude-config PR #127, identity-only `sync-global`) is
-historical.
+Static deployment of **1.6.32** is complete (claude-config PR #196; hooks-only install into
+`~/.claude/hooks`, digest == canonical) and the **Claude** runtime proof is done (live canary trio,
+2026-09-02). Static deployment is never runtime proof for the OTHER runtime: the Codex exact-CWD
+re-trust and Codex canaries are outstanding. The 1.6.27 record (claude-config PR #127) and the
+1.6.29 consumer-side authoring are historical.
 
 The remaining rollout is STRICTLY ORDERED. SPECS §5 fixes a five-phase order, and this file uses
 that numbering and no other:
 
-| Phase | SPECS §5 step | State (re-owed at 1.6.31, 2026-09-02) |
+| Phase | SPECS §5 step | State (1.6.32, 2026-09-02) |
 |---|---|---|
 | P1 | producer merge | **done** — PR #262 (1.6.32) on #260 (1.6.31), #239 (1.6.30), #257 (1.6.29) |
 | P2 | reviewed clean-main install | **done** — claude-config PR #196 (byte-identical, smoke 2361/2361); hooks-only install into `~/.claude/hooks` with backup, digest == canonical; Claude canary trio passed live |
@@ -45,15 +45,17 @@ it (H-15 in `HUMAN_TODO.md` is the human-side record):
   (`& $py -m build` at this T3 repo), and a double-check — the inert local deny probe
   (`git push --dry-run --no-verify --force . HEAD:refs/heads/codex-h2-deny-canary`) must be denied
   once with a `FLOOR_ACK` key and pass when re-run with that key as a trailing comment.
-- **P3b — fresh global Claude proof**, independently, against the deployed bytes, with the same
-  trio. Claude and Codex are distinct runtimes; neither proves the other.
-- **P4/P5 — only after P3 and P3b both succeed.** The three consumer marker PRs — EvidenceDeck #21,
+- **P3b — fresh global Claude proof: DONE 2026-09-02** against the deployed 1.6.32 bytes, in the
+  deploying Claude session (`rm -rf` on a nonexistent outside path denied once with a key and
+  allowed when acknowledged; a dynamic redirect target allowed). Claude and Codex are distinct
+  runtimes; this does not prove Codex.
+- **P4/P5 — only after P3 succeeds.** The three consumer marker PRs — EvidenceDeck #21,
   collaborative-hill-lab #5, SwarmingLilMen #52 — were closed unmerged at the producer-first gate;
   their reviewed branches and heads are preserved. Reopen them one at a time, each for its own
   exact-root proof. SwarmingLilMen additionally carries a separate owner gate under its own issue
   #91.
 
-Refreshing or validating any consumer marker before P3 and P3b both pass is out of order and is not
+Refreshing or validating any consumer marker before P3 passes is out of order and is not
 authorized by this file. No runtime proof is inherited from deployment, from Doctor, or from the
 completed 1.6.26 wave.
 
@@ -62,7 +64,8 @@ completed 1.6.26 wave.
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
 region boundary. Exactly one touched `templates/hooks/dispatch.py`; the other three were forbidden
 from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, or the charter
-digests. **Two landed, two remain open with confirmed blockers.**
+digests. **All four landed**, two on 2026-08-07/08 and two on 2026-09-02, alongside the three
+floor PRs of 2026-09-02.
 
 
 | Lane | PR | Outcome |
@@ -73,11 +76,10 @@ digests. **Two landed, two remain open with confirmed blockers.**
 | #139 nested logical root | **#238** | **MERGED `000268b`** at head `5221b54`: the three P1s fixed (junction-aware search, nested-Git boundary, doctor's layer walk and nearest-adapter rule), fresh-context review MERGE, #258 tracks the LOW. |
 | 1.6.29 upstream | **#257** | **MERGED `2b793f2`**: the owner's claude-config decisions brought back to the producer, byte-faithful plus black; four carve-out defects its review found are fixed in #260 (#259). |
 | guide posture / FLOOR_ACK | **#260** | **MERGED `d6392dd`** as floor 1.6.31 after two review rounds (the second closed the masked-charter-spelling hole). |
+| masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
-No implementation lane is open. The one queued follow-up is **PR #262** (floor 1.6.32: an
-opacity-first deny re-checks every later command segment with the analyzer, the late Codex P1 on
-#260); it merges on nine green checks plus one independent review, and the rollout above then
-carries 1.6.32 rather than 1.6.31.
+No implementation lane is open and nothing is queued; the only outstanding work is the Codex half
+of the rollout above (H-15).
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is
 its code and tests only; the shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`,
