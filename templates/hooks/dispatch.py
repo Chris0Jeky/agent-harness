@@ -11583,6 +11583,20 @@ def check(
                                     "Only branch refs (refs/heads/*) may be deleted; other ref namespaces are floor-blocked.",
                                 )
                             deletion_name = deletion_name[len("refs/heads/") :]
+                        # Issue #259: git resolves `heads/main`, `tags/v1.0` and
+                        # `remotes/x/y` by DWIM abbreviation, so a namespace
+                        # prefix without `refs/` still names a protected branch
+                        # or a tag. Only a bare branch name is a branch name.
+                        if re.match(
+                            r"(?:heads|tags|remotes|refs)/",
+                            deletion_name,
+                            re.IGNORECASE,
+                        ):
+                            return (
+                                "deny",
+                                "Deleting a ref through a namespace prefix "
+                                "(heads/, tags/, remotes/) is floor-blocked; name the branch bare.",
+                            )
                         if (
                             not deletion_name
                             or re.search(r"[*?\[\]]", deletion_name)
@@ -12863,11 +12877,50 @@ def check(
                         # push --delete carve-out — one literal refs/heads/
                         # path, never protected/production names, never
                         # dynamic tokens. Every other DELETE stays blocked.
-                        ref_paths = [
-                            t
-                            for t in toks[2:]
-                            if not t.startswith("-") and "git/refs/heads/" in t.lower()
-                        ]
+                        # Issue #259: only the ENDPOINT may be the branch ref.
+                        # A field value or input path carrying the same text
+                        # (`-f x=git/refs/heads/feat`) is a decoy, not a target.
+                        value_options = {
+                            "-x",
+                            "--method",
+                            "-f",
+                            "--raw-field",
+                            "-F",
+                            "--field",
+                            "--input",
+                            "-H",
+                            "--header",
+                            "-p",
+                            "--preview",
+                            "--hostname",
+                            "-q",
+                            "--jq",
+                            "-t",
+                            "--template",
+                            "--cache",
+                        }
+                        endpoint = None
+                        skip_next = False
+                        for t in toks[2:]:
+                            if skip_next:
+                                skip_next = False
+                                continue
+                            if t.startswith("-"):
+                                lowered_option = t.lower()
+                                if "=" not in lowered_option and (
+                                    lowered_option in value_options
+                                    or re.fullmatch(r"-i*[xXfFHpqt]", t)
+                                ):
+                                    skip_next = True
+                                continue
+                            endpoint = t
+                            break
+                        ref_paths = (
+                            [endpoint]
+                            if endpoint is not None
+                            and "git/refs/heads/" in endpoint.lower()
+                            else []
+                        )
                         if (
                             len(ref_paths) == 1
                             and not re.search(r"[*?\[\]]", ref_paths[0])
@@ -12894,7 +12947,7 @@ def check(
                     joined = " ".join(toks[2:]).lower()
                     if re.search(
                         r"\bgists\b|\buser/repos\b|\borgs/[\w.-]+/repos\b"
-                        r"|\bpublic=true\b|\bprivate=false\b|\bvisibility\b",
+                        r"|public=true\b|private=false\b|visibility\b",
                         joined,
                     ):
                         return (
