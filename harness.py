@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import base64
 import binascii
 import ctypes
@@ -3970,7 +3971,13 @@ def searchable_child_directories(directory: Path) -> list[Path]:
 
     Aliases are never followed: a junction or symlink can leave the checkout
     entirely or loop, and a root reached through one is not a path this tool
-    can prove anything about.
+    can prove anything about. `is_dir(follow_symlinks=False)` alone does not
+    deliver that on Windows, where a directory junction is a reparse point
+    rather than a symlink, so the junction-aware `path_is_alias` decides.
+
+    A child that carries its own `.git` entry is a nested repository or
+    submodule: a declaration under it belongs to THAT checkout, whose Git
+    facts are not this checkout's, so the search never crosses the boundary.
     """
     try:
         entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
@@ -3992,7 +3999,17 @@ def searchable_child_directories(directory: Path) -> list[Path]:
                 f"cannot inspect nested logical repo root candidate "
                 f"{entry.path}: {exc}"
             ) from exc
-        children.append(Path(entry.path))
+        child = Path(entry.path)
+        if path_is_alias(child):
+            continue
+        try:
+            if (child / ".git").exists():
+                continue
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect nested logical repo root candidate {child}: {exc}"
+            ) from exc
+        children.append(child)
     return children
 
 
@@ -4005,9 +4022,9 @@ def nested_logical_roots(
     part of that repo, not competitors to it.
     """
     found: list[Path] = []
-    frontier: list[tuple[Path, int]] = [(root, 0)]
+    frontier: deque[tuple[Path, int]] = deque([(root, 0)])
     while frontier:
-        directory, depth = frontier.pop(0)
+        directory, depth = frontier.popleft()
         if depth >= max_depth:
             continue
         for child in searchable_child_directories(directory):
@@ -8019,10 +8036,20 @@ def doctor(args: argparse.Namespace) -> int:
             logical_root_relative = logical_root_subpath(
                 logical_root, requested_checkout
             )
+            # A downward (rule 2) selection targets the descendant product, so
+            # the layer walk runs from the checkout root to THAT root exactly
+            # as a session started inside it would load layers. A rule-1 root
+            # is on the requested path's own ancestor chain, so the walk to
+            # the requested path already inventories it.
+            layer_walk_path = (
+                logical_root
+                if requested_path in logical_root.resolve().parents
+                else requested_path
+            )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
                 for layer in codex_project_layer_dirs(
-                    requested_path, requested_checkout
+                    layer_walk_path, requested_checkout
                 )
             ]
             if marker_ok:
@@ -8039,7 +8066,7 @@ def doctor(args: argparse.Namespace) -> int:
                     f"project-root marker check failed: {marker_detail}"
                 )
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
-                requested_path, requested_checkout, authoritative_checkout
+                layer_walk_path, requested_checkout, authoritative_checkout
             )
             json_hook_documents = [
                 (hooks, text)
@@ -8162,8 +8189,18 @@ def doctor(args: argparse.Namespace) -> int:
             # SUBPATH in the root checkout, not merely from the Git root's
             # `.codex`: for a nested product the Git-root path names a file
             # that does not exist and cannot be the authoritative source.
+            # The canonical adapter is the NEAREST `.codex/hooks.json` at or
+            # above the logical root: the product's own when it has one, else
+            # the umbrella layer that Codex loads for every cwd beneath it.
+            # For an ordinary repository that is the Git root's, as before.
+            canonical_relative = logical_root_relative
+            for relative in (logical_root_relative, *logical_root_relative.parents):
+                candidate = authoritative_checkout / relative / ".codex" / "hooks.json"
+                if any(hooks == candidate for hooks, _text in json_hook_documents):
+                    canonical_relative = relative
+                    break
             canonical_hooks = (
-                authoritative_checkout / logical_root_relative / ".codex" / "hooks.json"
+                authoritative_checkout / canonical_relative / ".codex" / "hooks.json"
             )
             canonical_root_floor_entries = [
                 entry
@@ -8181,7 +8218,7 @@ def doctor(args: argparse.Namespace) -> int:
             # source hooks from the authoritative root checkout instead.
             canonical_state_hooks = (
                 requested_logical_checkout
-                / logical_root_relative
+                / canonical_relative
                 / ".codex"
                 / "hooks.json"
                 if requested_checkout == authoritative_checkout
@@ -8209,8 +8246,8 @@ def doctor(args: argparse.Namespace) -> int:
             logical_root_detail = (
                 f"logical repo root {logical_root} is nested at "
                 f"{logical_root_relative.as_posix()} inside "
-                f"{requested_checkout}, so the canonical adapter is that "
-                "subpath's .codex/hooks.json; "
+                f"{requested_checkout}, so the canonical adapter is the nearest "
+                f".codex/hooks.json at or above it ({canonical_relative.as_posix()}); "
                 if logical_root != requested_checkout
                 else ""
             )

@@ -73,8 +73,8 @@ Two Python artifacts, both deliberately dependency-free (stdlib only):
   It validates each complete hook subtree and the hook-specific metadata it interprets before
   requiring the canonical adapter's POSIX and Windows commands to match a conservative
   direct/wrapper execution shape and declare the current dispatcher marker. The canonical
-  adapter is the LOGICAL root's `.codex/hooks.json` (SPECS §2.1), mapped across a linked
-  worktree at the same logical relative subpath. A repo-relative
+  adapter is the nearest `.codex/hooks.json` at or above the LOGICAL root (SPECS §2.1), mapped
+  across a linked worktree at the same logical relative subpath. A repo-relative
   wrapper path is rejected when the session cwd is not the hook source root. Non-default persisted
   project-root markers, unsupported stored legacy profile selectors, and inspectable activation
   blockers fail closed. It does not fully validate unrelated config fields, prove runtime/cloud

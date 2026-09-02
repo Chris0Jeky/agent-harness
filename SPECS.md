@@ -208,8 +208,10 @@ in order (`harness.logical_repo_root`):
    when an outer umbrella also declares one.
 2. **A fully undeclared directory may resolve downward.** If the requested directory carries
    NEITHER half, declared roots below it are searched (breadth-first, max depth 4, skipping
-   dot-directories, vendor directories, and anything reached through a symlink or junction; a
-   declared root ends the descent on its branch). Exactly one match is selected. **Two or more
+   dot-directories, vendor directories, anything reached through a symlink or junction — the
+   junction-aware `path_is_alias` predicate decides, not `is_dir` — and any child that carries
+   its own `.git`, which is another checkout's repository or submodule; a declared root ends
+   the descent on its branch). Exactly one match is selected. **Two or more
    competing roots are ambiguous and raise** — the operator re-runs against one of them — and
    the tool never picks a product silently.
 3. **Otherwise the Git checkout root is the repo**, exactly as before. A HALF-declared
@@ -226,9 +228,12 @@ Consequences, all of which the tests pin:
   running Git from inside the logical root, which answers for the checkout that owns it.
   `audit --json` reports both, as `repo` (logical) and `checkout` (Git).
 - `doctor --repo` walks every active `.codex` layer from the checkout root to the requested
-  path as before, but the CANONICAL adapter is the logical root's `.codex/hooks.json`. In a
-  linked worktree the authoritative source is that same logical relative subpath in the root
-  checkout, not the Git root's `.codex`.
+  path as before — or down to the logical root when rule 2 selected a descendant, exactly as
+  a session started inside that product would load layers. The CANONICAL adapter is the
+  NEAREST `.codex/hooks.json` at or above the logical root: the product's own when it has one,
+  otherwise the umbrella layer Codex loads for every cwd beneath it; for an ordinary repository
+  that is the Git root's, unchanged. In a linked worktree the authoritative source is that same
+  logical relative subpath in the root checkout, not the Git root's `.codex`.
 
 ## §3 Budget table (enforced by `check-budgets.mjs`, ~80 lines)
 

@@ -1269,6 +1269,44 @@ class HarnessTests(unittest.TestCase):
         # vendor directory, and not shadowed by a declared ancestor.
         self.assertEqual(harness.nested_logical_roots(checkout), [shallow])
 
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows shape")
+    def test_nested_logical_root_search_skips_directory_junctions(self) -> None:
+        # `is_dir(follow_symlinks=False)` classifies a junction as an ordinary
+        # directory, so the search followed one out of the checkout (selecting
+        # a root that physically lives elsewhere) or back into it (reporting a
+        # one-product checkout as ambiguous). Review finding on PR #238.
+        import _winapi
+
+        checkout = self.make_repo()
+        product = self.declare_logical_root(checkout / "products" / "app")
+        outside = Path(self.temp.name) / "outside-target"
+        self.declare_logical_root(outside)
+        _winapi.CreateJunction(str(outside), str(checkout / "linked"))
+        _winapi.CreateJunction(str(checkout), str(checkout / "mirror"))
+
+        self.assertEqual(harness.nested_logical_roots(checkout), [product])
+        self.assertEqual(
+            harness.logical_repo_root(checkout.resolve(), checkout.resolve()),
+            product.resolve(),
+        )
+
+    def test_nested_logical_root_search_stops_at_a_nested_git_boundary(self) -> None:
+        # A nested repository or submodule that declares both halves is owned
+        # by ANOTHER checkout: selecting it made `checkout` a false fact and
+        # read the inner repo's status and remotes as the outer's.
+        checkout = self.make_repo()
+        inner = self.declare_logical_root(checkout / "products" / "app")
+        (inner / ".git").mkdir()
+        self.declare_logical_root(checkout / "vendor-repo" / "product")
+        (checkout / "vendor-repo" / ".git").write_text(
+            "gitdir: elsewhere\n", encoding="utf-8"
+        )
+
+        self.assertEqual(harness.nested_logical_roots(checkout), [])
+        result = harness.audit_repo(checkout)
+        self.assertEqual(result["repo"], str(checkout.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
+
     def test_remove_managed_floor_preserves_unrelated_hooks(self) -> None:
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
         managed_handler = harness.canonical_legacy_codex_floor_handler(dispatcher)
@@ -5303,6 +5341,43 @@ allow_local_binding = true
         self.assertIn("1 canonical root hooks.json handler(s)", output)
         self.assertIn(f"logical repo root {nested.resolve()}", output)
         self.assertIn("nested at products/app", output)
+        self.assertIn(str(nested_hooks.resolve()), output)
+
+    def test_doctor_certifies_an_undeclared_checkout_through_its_root_adapter(
+        self,
+    ) -> None:
+        # Regression pinned from the PR #238 review: an undeclared checkout
+        # with a valid root adapter and one declared product that has no
+        # `.codex` of its own was certified before the nested-root rule and
+        # failed after it, because the canonical adapter was retargeted to a
+        # file the layer walk never inventoried.
+        checkout = self.make_repo()
+        root_hooks = self.write_hooks(checkout, self.valid_codex_adapter_text())
+        nested = self.declare_logical_root(checkout / "products" / "app")
+
+        result, output = self.run_doctor_with_fixture_globals(checkout)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+        self.assertIn(f"logical repo root {nested.resolve()}", output)
+        self.assertIn("nearest .codex/hooks.json at or above it (.)", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+
+    def test_doctor_walks_layers_down_to_a_downward_selected_root(self) -> None:
+        # Rule 2 selects the product from the undeclared root, so the layer
+        # walk must reach the product's own adapter as a session started
+        # inside it would.
+        checkout = self.make_repo()
+        nested = self.declare_logical_root(checkout / "products" / "app")
+        nested_hooks = self.write_hooks(nested, self.valid_codex_adapter_text())
+
+        result, output = self.run_doctor_with_fixture_globals(checkout)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+        self.assertIn("(products/app)", output)
         self.assertIn(str(nested_hooks.resolve()), output)
 
     def test_doctor_maps_a_nested_logical_root_across_a_linked_worktree(self) -> None:
