@@ -2119,6 +2119,14 @@ _DO_BLOCK_EXTRA_OVER_BLOCKS = [
     "git push origin",
     "git push origin 'refs/heads/*:refs/heads/*'",
     "git push origin main",
+    # Floor 1.6.29's named-branch deletion allows inherit the same hole as every
+    # other `git push` here: the do-block composition re-reads the refspec as a
+    # dynamic option, so the bare-allowed deletion denies inside the block.
+    "git push --delete origin feat/a feat/b",
+    "git push origin --delete feature/old-work",
+    "git push origin :feature/old-work",
+    "git push origin :refs/heads/feature/old-work",
+    "git push origin main :old",
     "git restore --source=.env report.txt",
     "git restore .",
     "git restore report.txt",
