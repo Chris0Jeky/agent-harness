@@ -12822,8 +12822,7 @@ def check(
                         ref_paths = [
                             t
                             for t in toks[2:]
-                            if not t.startswith("-")
-                            and "git/refs/heads/" in t.lower()
+                            if not t.startswith("-") and "git/refs/heads/" in t.lower()
                         ]
                         if (
                             len(ref_paths) == 1
