@@ -227,8 +227,9 @@ T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny t
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
 double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive
 repositories keep the walls, and any repo can declare `floor_posture: wall`; 1.6.32 (the late #260 review's P1) re-checks every later command
-segment with the analyzer itself, so a masked work-loss or publication action is a double-check
-whatever its spelling. 1.6.30 honours
+segment (split on `;`, `&&`, `||`, `&`, newline) with the analyzer itself, so a masked work-loss
+or publication action in one of them is a double-check whatever its spelling; a pipeline's right
+side and shell-variable indirection remain the hint's job. 1.6.30 honours
 Git's numeric booleans in the exact `--no-follow-tags` narrowing (#201, PR #239). 1.6.29 upstreams two owner decisions of 2026-08-18 that were authored directly
 in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
 left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard

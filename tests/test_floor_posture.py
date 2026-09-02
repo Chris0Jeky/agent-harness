@@ -532,6 +532,17 @@ class HookRoundTripTests(unittest.TestCase):
         # A later segment the analyzer allows changes nothing.
         self.declare(1)
         self.assertEqual(self.invoke("echo hi > $target; git status"), ("allow", ""))
+        # Review of PR #262: a continuation inside the later segment, and a
+        # lone `&` separator, both reach the analyzer.
+        self.declare(3)
+        for command in (
+            "echo hi > $target; git reset \\\n  --hard",
+            "echo hi > $target & git checkout main -f",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIn("A later segment:", reason)
 
     def test_charter_spellings_masked_by_opacity_double_check_through_main(self):
         self.declare(1)

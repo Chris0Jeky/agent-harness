@@ -13207,20 +13207,35 @@ _CHARTER_HINT = re.compile(
 # the spellings it knows; this re-check lets the analyzer itself speak for
 # every segment, so a masked guarded action in any segment forces the
 # double-check whatever its spelling (late Codex P1 on PR #260).
-_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\r?\n")
+# A lone `&` is bash's background separator and cmd.exe's sequencer.
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\r?\n|&")
 
 
 def masked_segment_verdict(
     command: str, tier_cfg: dict, project_dir: str, command_cwd: str, checker
 ):
     """The first non-opacity verdict among the command's segments, or None."""
-    whole = command.strip()
-    for fragment in _SEGMENT_SPLIT.split(command):
+    # Join backslash-newline continuations BEFORE splitting on newlines, as
+    # the whole-command path does, so `git reset \` + `--hard` is one segment.
+    joined = remove_shell_line_continuations(command)
+    whole = joined.strip()
+    # Fragments share one remote cache and deadline: N pushes in one command
+    # resolve the remote once, not N times, inside the hook's time budget.
+    remote_cache: dict = {}
+    remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    for fragment in _SEGMENT_SPLIT.split(joined):
         fragment = fragment.strip()
         if not fragment or fragment == whole:
             continue
         try:
-            decision, reason = checker(fragment, tier_cfg, project_dir, command_cwd)
+            decision, reason = checker(
+                fragment,
+                tier_cfg,
+                project_dir,
+                command_cwd,
+                _remote_cache=remote_cache,
+                _remote_deadline=remote_deadline,
+            )
         except Exception:  # a fragment the analyzer cannot parse is not evidence
             continue
         if decision == "ask" or (
@@ -13439,7 +13454,11 @@ def main():
             payload_cwd or env_project_dir,
         )
         masked = None
-        if decision == "deny" and reason_is_pure_opacity(reason):
+        if (
+            decision == "deny"
+            and reason_is_pure_opacity(reason)
+            and floor_posture(tier_cfg) != "wall"
+        ):
             masked = masked_segment_verdict(
                 command, tier_cfg, project_dir, payload_cwd or env_project_dir, check
             )
