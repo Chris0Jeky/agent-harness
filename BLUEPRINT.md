@@ -295,6 +295,16 @@ The owner-authorized 2026-08-03 Developer Lens exact-route publication exception
 bounded exception to that freeze; it does not reopen general parser or bypass-family work. The
 feature freeze resumes immediately after that contract lands.
 
+**Posture (owner decision 2026-09-02).** Re-measured on the owner's box before the change, the
+deployed floor's real blocks were still the #21 profile: the opacity class and force-push
+spellings, two months on. The owner ruled that below T4/`wave_mode` the floor is a guide, not a
+wall: pure opacity proceeds, and every other deny or ask becomes one deliberate double-check
+(`FLOOR_ACK`, SPECS §5.4). This lands the ratified #26/#62 slices in one seam and, by the owner's
+explicit direction, goes one step past #26's "never a charter deny" invariant: the irreversible
+core below T4 is protected by a forced re-read of the exact command, not by refusal. T4,
+`wave_mode` and (by default) `sensitive_data` keep the walls; any repo can declare
+`floor_posture: wall`. The freeze is otherwise unchanged.
+
 ---
 
 ## 3. Regions — the context-economy primitive (T3+; embryo at T2)

@@ -154,6 +154,7 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   "authority": { "push": "free", "merge": "gated" },
   "flags": { "sensitive_data": false, "wave_mode": false, "dormant_production": false,
              "relaxed_work_loss_guards": false },
+  "floor_posture": "guide",
   "public_synthetic_publication": {
     "remote": "origin", "repository": "OWNER/REPOSITORY"
   },
@@ -169,6 +170,10 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
+- `floor_posture` (optional): `wall` | `guide` — how the deny floor RENDERS its verdicts
+  (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`; `sensitive_data`
+  defaults to `wall`; everything else defaults to `guide`. Co-located and chained declarations
+  merge strictest-wins (`wall` beats `guide`; a declared `guide` never relaxes T4/wave).
 - `public_synthetic_publication` is an optional, remote-bound relaxation for the owner-ratified
   public-source/private-runtime split. It contains exactly a literal Git remote name and GitHub
   `OWNER/REPOSITORY`. It authorizes only an explicit named-branch/`HEAD` push to that remote's
@@ -480,6 +485,35 @@ The rollout order is fixed: **producer merge → reviewed clean-main install →
 re-trust and canaries → consumer marker refresh → each consumer's exact-CWD re-trust and canaries**.
 Consumer marker updates and their runtime validation are separate reviewed rollout work; neither a
 producer PR nor a standalone scratch audit performs them.
+
+### §5.4 Posture and FLOOR_ACK (owner decision 2026-09-02; #21 slices #26 / #62)
+
+The analyzer's verdict (`check()`: allow / ask / deny) is computed exactly as before and then
+RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_posture`):
+
+| Analyzer verdict | `wall` | `guide` |
+|---|---|---|
+| allow | allow | allow |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]`, never one naming a `secret-looking` target | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
+| any other deny — the charter: force spellings, `rm -rf` outside the project, secret-file mutation, pipe-to-shell, sudo, remote-ref destruction, `sensitive_data` publication | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` |
+| ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes |
+| dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable |
+
+- Effective posture: T4 or `wave_mode` → `wall`, whatever is declared. Otherwise a declared
+  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `guide`.
+- The key is the first 10 hex characters of SHA-256 over `<reason>\n<command without the marker>`,
+  so it binds to that exact command AND verdict: a corrected command, or the same command denied
+  for a new reason, is a fresh double-check. The marker is a trailing shell comment
+  (`# FLOOR_ACK=<key>`, case-insensitive, on its own last line after a heredoc) because a comment
+  is inert in bash and PowerShell and cannot change what runs. It is stripped BEFORE analysis, so
+  the analyzer sees the denied text unchanged; a `wall` posture ignores it.
+- `smoke_test.py` pins the ANALYZER under an explicit `wall` fixture and the posture layer in its
+  own `floor-posture` section; `tests/test_floor_posture.py` asserts every deny literal in
+  `dispatch.py` classifies deliberately — a reason the opacity table does not recognise stays on
+  the double-check path, never on allow.
+- What this is not: a wall. Below T4/wave the floor is, by owner decision, a speed bump: the
+  irreversible core is protected by one deliberate re-read of the exact command, not by refusal.
+  A repository that wants the old walls declares `"floor_posture": "wall"`.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 

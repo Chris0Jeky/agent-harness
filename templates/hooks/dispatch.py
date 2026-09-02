@@ -25,6 +25,19 @@ Contract (BLUEPRINT §2, SPECS §5-6):
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
   (fail closed). Changes to this file are T4-class work: top model + review + smoke tests.
+- POSTURE (owner decision 2026-09-02; #21 slices #26/#62): every verdict above is the
+  ANALYZER's. Its rendering is scaled by `floor_posture`, resolved from the tier:
+    wall  -> the verdicts land as written (T4, wave_mode, or `sensitive_data` by default,
+             or any declaration that sets `"floor_posture": "wall"`).
+    guide -> a deny that only reports the PARSER's uncertainty ("cannot be inspected",
+             "opaque", "malformed", ...) becomes allow: the parser's limits are not the
+             agent's fault. Every other deny, and every ask, becomes a DOUBLE-CHECK: the
+             floor denies once with a FLOOR_ACK key bound to that exact command and reason,
+             and the identical command re-run with the trailing comment `# FLOOR_ACK=<key>`
+             proceeds. The default below T4/wave for a non-sensitive repository.
+  A `wall` posture ignores every acknowledgement. The `dispatcher error` fail-closed deny
+  is never scaled. Codex has no ask channel, so guide is strictly kinder to it than the
+  old blanket ask->deny; the wall mapping keeps that old behaviour.
 
 A change here must keep `smoke_test.py` green: python smoke_test.py
 """
@@ -44,7 +57,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.29 (2026-08-18)"
+FLOOR_VERSION = "1.6.31 (2026-09-02)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -9124,10 +9137,32 @@ def read_tier_file(path: str) -> dict:
                 "tier.json public_synthetic_publication.repository must be an "
                 "OWNER/REPOSITORY pair"
             )
+    posture = data.get("floor_posture")
+    if posture is not None and posture not in _FLOOR_POSTURES:
+        raise ValueError(
+            'tier.json floor_posture must be "wall" or "guide" when present'
+        )
     result = {"tier": tier, "flags": flags}
     if publication is not None:
         result["public_synthetic_publication"] = dict(publication)
+    if posture is not None:
+        result["floor_posture"] = posture
     return result
+
+
+def merge_floor_postures(configs: list) -> str | None:
+    """Strictest declared posture across co-located or chained declarations.
+
+    `wall` binds when any declaration sets it; `guide` binds only when at least
+    one declaration sets it and none says `wall`; otherwise nothing is declared
+    and the tier decides (`floor_posture`).
+    """
+    declared = {cfg.get("floor_posture") for cfg in configs}
+    if "wall" in declared:
+        return "wall"
+    if "guide" in declared:
+        return "guide"
+    return None
 
 
 def load_tier(project_dir: str) -> dict:
@@ -9166,6 +9201,9 @@ def load_tier(project_dir: str) -> dict:
         for publication in publications
     ):
         result["public_synthetic_publication"] = dict(publications[0])
+    posture = merge_floor_postures(configs)
+    if posture is not None:
+        result["floor_posture"] = posture
     return result
 
 
@@ -9218,10 +9256,14 @@ def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
     flags["relaxed_work_loss_guards"] = all(
         bool(cfg.get("flags", {}).get("relaxed_work_loss_guards")) for cfg in configs
     )
-    return project_dir, {
+    resolved = {
         "tier": max(cfg.get("tier", 1) for cfg in configs),
         "flags": flags,
     }
+    posture = merge_floor_postures(configs)
+    if posture is not None:
+        resolved["floor_posture"] = posture
+    return project_dir, resolved
 
 
 def segments(sanitized: str):
@@ -12822,8 +12864,7 @@ def check(
                         ref_paths = [
                             t
                             for t in toks[2:]
-                            if not t.startswith("-")
-                            and "git/refs/heads/" in t.lower()
+                            if not t.startswith("-") and "git/refs/heads/" in t.lower()
                         ]
                         if (
                             len(ref_paths) == 1
@@ -12864,6 +12905,104 @@ def check(
             cwd_uncertain = True
 
     return "allow", ""
+
+
+# --- posture ----------------------------------------------------------------
+# Owner decision 2026-09-02, landing the #21 redesign's slices #26 (FLOOR_ACK
+# self-unstick) and #62 (re-tier the opacity class) in one seam: the analyzer's
+# verdict is computed exactly as before, then RENDERED by posture.
+
+_FLOOR_POSTURES = ("wall", "guide")
+
+# A trailing shell comment is the acknowledgement carrier because it is inert
+# in bash and PowerShell alike and cannot alter what the command does. It is
+# stripped BEFORE analysis, so the analyzer sees the command exactly as it saw
+# the denied attempt and the key binds to that same text.
+_FLOOR_ACK_MARKER = re.compile(
+    r"(?:^|\s)#\s*FLOOR[-_]ACK\s*[:=]\s*([0-9a-f]{10})\s*$", re.IGNORECASE
+)
+
+# Reasons that report the PARSER's uncertainty rather than a proven irreversible
+# action (#21: 91% of real blocks; #62: the "pure opacity" channel). A reason
+# that also names a secret-looking target is the charter's secret-file rule
+# reached through an unresolved operand, not opacity, and stays acknowledgeable.
+# Anything this table does not recognise keeps the acknowledgement path, so an
+# unclassified new deny site fails toward the double-check, never toward allow.
+_OPACITY_REASON = re.compile(
+    r"cannot be inspected|cannot safely|opaque|malformed|nesting exceeds"
+    r"|depth exceeds|comment inside a scriptblock|\[push-config-unverifiable\]",
+    re.IGNORECASE,
+)
+_OPACITY_EXCLUDED = re.compile(r"secret-looking", re.IGNORECASE)
+
+
+def floor_posture(tier_cfg: dict) -> str:
+    """Effective posture: `wall` renders verdicts as written, `guide` scales them.
+
+    T4 and wave_mode are walls whatever is declared (other agents' work is in
+    the blast radius). Below that an explicit `floor_posture` declaration binds;
+    without one, `sensitive_data` keeps the wall (BLUEPRINT §2: tightening
+    overlays) and everything else guides.
+    """
+    tier = tier_cfg.get("tier", 1)
+    flags = tier_cfg.get("flags", {}) or {}
+    if tier >= 4 or bool(flags.get("wave_mode")):
+        return "wall"
+    declared = tier_cfg.get("floor_posture")
+    if declared in _FLOOR_POSTURES:
+        return declared
+    if bool(flags.get("sensitive_data")):
+        return "wall"
+    return "guide"
+
+
+def split_floor_ack(command: str) -> tuple[str, str | None]:
+    """Return (command without its acknowledgement marker, key or None)."""
+    match = _FLOOR_ACK_MARKER.search(command)
+    if not match:
+        return command, None
+    return command[: match.start()].rstrip(), match.group(1).lower()
+
+
+def floor_ack_key(reason: str, command: str) -> str:
+    """The acknowledgement key for one (reason, command) pair.
+
+    Bound to both so an acknowledgement cannot be carried onto a different
+    command or a different verdict: a corrected command, or the same command
+    denied for a new reason, is a fresh double-check.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(
+        f"{reason}\n{command.rstrip()}".encode("utf-8", "surrogatepass")
+    )
+    return digest.hexdigest()[:10]
+
+
+def reason_is_pure_opacity(reason: str) -> bool:
+    return bool(_OPACITY_REASON.search(reason)) and not _OPACITY_EXCLUDED.search(reason)
+
+
+def apply_floor_posture(
+    decision: str, reason: str, command: str, ack: str | None, tier_cfg: dict
+) -> tuple[str, str]:
+    """Render the analyzer's verdict under the effective posture."""
+    if decision == "allow":
+        return decision, reason
+    if floor_posture(tier_cfg) == "wall":
+        return decision, reason
+    if decision == "deny" and reason_is_pure_opacity(reason):
+        return "allow", ""
+    expected = floor_ack_key(reason, command)
+    if ack == expected:
+        return "allow", ""
+    return (
+        "deny",
+        f"{reason} || DOUBLE-CHECK, not a wall: re-read the target, branch or "
+        "destination. If this is what you intend, re-run the command UNCHANGED "
+        f"with the trailing comment `# FLOOR_ACK={expected}` (on its own last "
+        "line after a heredoc). A changed command gets a new key.",
+    )
 
 
 # --- entry ------------------------------------------------------------------
@@ -12980,12 +13119,14 @@ def main():
             env_project_dir,
             payload_cwd,
         )
+        command, ack = split_floor_ack(command)
         decision, reason = check(
             command,
             tier_cfg,
             project_dir,
             payload_cwd or env_project_dir,
         )
+        decision, reason = apply_floor_posture(decision, reason, command, ack, tier_cfg)
     except Exception as exc:  # fail CLOSED after a Bash payload is identified
         respond(
             "deny",

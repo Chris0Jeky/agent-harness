@@ -134,6 +134,8 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
+FLOOR_POSTURES = frozenset({"wall", "guide"})
+FLOOR_POSTURES = frozenset({"wall", "guide"})
 AUTHORITY_VALUES = {"free", "gated", "human-only"}
 SCAN_PATHS = (
     "AGENTS.md",
@@ -4099,6 +4101,8 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
                 data.get("public_synthetic_publication")
             )
         )
+    if "floor_posture" in data and data.get("floor_posture") not in FLOOR_POSTURES:
+        issues.append(f"floor_posture must be one of {sorted(FLOOR_POSTURES)}")
     return issues
 
 
