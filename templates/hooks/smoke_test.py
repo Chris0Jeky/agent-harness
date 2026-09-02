@@ -4724,6 +4724,26 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
                 "deny",
             )
         )
+    # Guarded opacity (#62): an unresolved DELETE operand is still a double-check.
+    for command in (
+        "rm -rf $ESCAPE_ROOT/data",
+        "Remove-Item -Rec $env:ESCAPE_ROOT/data",
+    ):
+        first = run_case(command, 1, dict(guide))
+        key = key_from_last_reason()
+        results.append(
+            (f"guide T1 dynamic delete denies once: {command}", first, "deny")
+        )
+        results.append(
+            (f"guide T1 dynamic delete carries a key: {command}", bool(key), True)
+        )
+        results.append(
+            (
+                f"guide T1 dynamic delete acknowledged allows: {command}",
+                run_case(f"{command} # FLOOR_ACK={key or '0' * 10}", 1, dict(guide)),
+                "allow",
+            )
+        )
     # Pure opacity proceeds below T4 and stays denied where walls bind.
     for command in ("& $py -m build", "echo hi > $target", "git run-alias-x"):
         results.append(

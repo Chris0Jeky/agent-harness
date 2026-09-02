@@ -150,6 +150,13 @@ class ReasonClassificationTests(unittest.TestCase):
         "Redirecting output into a secret-looking file (.env) is floor-blocked.",
         "sensitive_data repo: refusing a push to public remote origin",
         "Deleting protected branch 'main' is floor-blocked.",
+        # Guarded opacity (#62): an unresolved operand OF a delete stays a
+        # double-check -- rm -rf-class uncertainty is what the owner kept.
+        "Dynamic delete options/targets cannot be inspected safely.",
+        "Cannot safely inspect a splatted recursive-delete command.",
+        "Cannot safely resolve rm -rf target: $dir/data",
+        "Cannot safely resolve recursive Remove-Item target: build",
+        "find execution/deletion actions are opaque to the deny floor. Enumerate first.",
         "T4/wave: hard reset discards work that may not be yours. Inspect state; ask.",
         "dispatcher error (ValueError) — floor unavailable",
     )
@@ -190,7 +197,13 @@ class ReasonClassificationTests(unittest.TestCase):
         for reason in literals:
             if "secret-looking" in reason:
                 self.assertIn(reason, walls, reason)
-        for needle in ("orce-push", "outside the project", "irreversible-by-design"):
+        for needle in (
+            "orce-push",
+            "outside the project",
+            "irreversible-by-design",
+            "Dynamic delete",
+            "recursive-delete",
+        ):
             self.assertTrue(
                 any(needle in reason for reason in walls), f"{needle} not a wall"
             )

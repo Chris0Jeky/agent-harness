@@ -31,7 +31,9 @@ Contract (BLUEPRINT §2, SPECS §5-6):
              or any declaration that sets `"floor_posture": "wall"`).
     guide -> a deny that only reports the PARSER's uncertainty ("cannot be inspected",
              "opaque", "malformed", ...) becomes allow: the parser's limits are not the
-             agent's fault. Every other deny, and every ask, becomes a DOUBLE-CHECK: the
+             agent's fault -- unless the unresolved operand belongs to a DELETE or names
+             a secret-looking file, which stay on the double-check path (#62's guarded
+             opacity). Every other deny, and every ask, becomes a DOUBLE-CHECK: the
              floor denies once with a FLOOR_ACK key bound to that exact command and reason,
              and the identical command re-run with the trailing comment `# FLOOR_ACK=<key>`
              proceeds. The default below T4/wave for a non-sensitive repository.
@@ -12923,9 +12925,13 @@ _FLOOR_ACK_MARKER = re.compile(
 )
 
 # Reasons that report the PARSER's uncertainty rather than a proven irreversible
-# action (#21: 91% of real blocks; #62: the "pure opacity" channel). A reason
-# that also names a secret-looking target is the charter's secret-file rule
-# reached through an unresolved operand, not opacity, and stays acknowledgeable.
+# action (#21: 91% of real blocks; #62: the "pure opacity" channel). Two kinds
+# of uncertainty are NOT pure opacity and stay on the double-check path (#62's
+# "guarded opacity": an opaque operand OF a guarded verb): a reason naming a
+# secret-looking target (the charter's secret-file rule reached through an
+# unresolved operand) and a reason about an unresolved DELETE/removal operand
+# (`rm -rf $dir`, a splatted Remove-Item, `find -delete`) -- rm -rf-class
+# uncertainty is exactly what the owner asked to keep as a forced re-read.
 # Anything this table does not recognise keeps the acknowledgement path, so an
 # unclassified new deny site fails toward the double-check, never toward allow.
 _OPACITY_REASON = re.compile(
@@ -12933,7 +12939,9 @@ _OPACITY_REASON = re.compile(
     r"|depth exceeds|comment inside a scriptblock|\[push-config-unverifiable\]",
     re.IGNORECASE,
 )
-_OPACITY_EXCLUDED = re.compile(r"secret-looking", re.IGNORECASE)
+_OPACITY_EXCLUDED = re.compile(
+    r"secret-looking|delet|remov|rm -rf|recursive", re.IGNORECASE
+)
 
 
 def floor_posture(tier_cfg: dict) -> str:

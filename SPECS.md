@@ -494,7 +494,7 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 | Analyzer verdict | `wall` | `guide` |
 |---|---|---|
 | allow | allow | allow |
-| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]`, never one naming a `secret-looking` target | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`): those are #62's GUARDED opacity and take the row below | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
 | any other deny — the charter: force spellings, `rm -rf` outside the project, secret-file mutation, pipe-to-shell, sudo, remote-ref destruction, `sensitive_data` publication | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` |
 | ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes |
 | dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable |
