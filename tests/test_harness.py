@@ -88,6 +88,33 @@ class HarnessTests(unittest.TestCase):
         return hooks
 
     @staticmethod
+    def declare_logical_root(directory: Path, *, tier: int = 4) -> Path:
+        """Give one directory both halves of a logical repo declaration."""
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "AGENTS.md").write_text("# Product guidance\n", encoding="utf-8")
+        target = directory / ".agent-harness" / "tier.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "tier": tier,
+                    "name": harness.TIER_NAMES[tier],
+                    "authority": {"push": "free", "merge": "gated"},
+                    "flags": {"sensitive_data": False},
+                    "human_todo": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    @staticmethod
+    def valid_codex_adapter_text() -> str:
+        return (
+            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        ).read_text(encoding="utf-8")
+
+    @staticmethod
     def requirements_hook_paths(existing_dir: Path) -> dict[str, str]:
         """Point this platform's managed hook field at a real directory.
 
@@ -1155,6 +1182,177 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(
             any("stale jekyt-profile" in issue for issue in result["issues"])
         )
+
+    # --- logical repo roots nested inside a Git checkout (issue #139) --------
+
+    def test_audit_evaluates_a_declared_nested_logical_root(self) -> None:
+        # A monorepo-style checkout that declares nothing itself, holding one
+        # product that declares its own posture. Collapsing the audit to the
+        # Git root reported the product as T1/missing and dragged in the outer
+        # checkout's unrelated artifacts.
+        checkout = self.make_repo()
+        outer_artifact = checkout / ".claude" / "settings.json"
+        outer_artifact.parent.mkdir(parents=True)
+        outer_artifact.write_text(
+            '{"note": "C:/Users/jekyt/source/other"}', encoding="utf-8"
+        )
+        (checkout / "outer-only.txt").write_text("sibling\n", encoding="utf-8")
+        nested = self.declare_logical_root(checkout / "products" / "app")
+
+        result = harness.audit_repo(nested)
+
+        self.assertEqual(result["repo"], str(nested.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
+        self.assertEqual(result["tier"], 4)
+        self.assertEqual(result["issues"], [])
+        # The Git facts still come from the checkout that really owns the
+        # working tree, including files outside the logical root.
+        self.assertIn("outer-only.txt", result["git"])
+
+    def test_audit_selects_the_single_nested_root_from_an_undeclared_checkout(
+        self,
+    ) -> None:
+        checkout = self.make_repo()
+        nested = self.declare_logical_root(checkout / "products" / "app")
+
+        result = harness.audit_repo(checkout)
+
+        self.assertEqual(result["repo"], str(nested.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
+
+    def test_audit_command_names_the_checkout_of_a_nested_logical_root(self) -> None:
+        checkout = self.make_repo()
+        nested = self.declare_logical_root(checkout / "products" / "app")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = harness.audit_command(
+                SimpleNamespace(path=str(nested), json=False, offline=True),
+                harness_root=Path(self.temp.name) / "harness-root",
+                claude_home=Path(self.temp.name) / "claude-home",
+            )
+
+        text = output.getvalue()
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"repo: {nested.resolve()}", text)
+        self.assertIn(f"git checkout: {checkout.resolve()}", text)
+        self.assertIn("logical repo root is nested inside it", text)
+
+    def test_audit_fails_visibly_on_competing_nested_logical_roots(self) -> None:
+        checkout = self.make_repo()
+        self.declare_logical_root(checkout / "products" / "alpha")
+        self.declare_logical_root(checkout / "products" / "beta")
+
+        with self.assertRaisesRegex(
+            harness.HarnessError, "ambiguous nested logical repo roots"
+        ) as raised:
+            harness.audit_repo(checkout)
+
+        self.assertIn("alpha", str(raised.exception))
+        self.assertIn("beta", str(raised.exception))
+
+    def test_audit_keeps_a_declared_git_root_over_a_nested_declaration(self) -> None:
+        # Criterion 7: an ordinary repository whose logical and Git roots are
+        # identical never descends, whatever its subdirectories declare.
+        checkout = self.make_repo()
+        self.declare_logical_root(checkout, tier=2)
+        self.declare_logical_root(checkout / "products" / "app")
+
+        result = harness.audit_repo(checkout)
+
+        self.assertEqual(result["repo"], str(checkout.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
+        self.assertEqual(result["tier"], 2)
+
+    def test_audit_does_not_descend_from_a_half_declared_checkout_root(self) -> None:
+        # A root that carries one half of a declaration is a repo missing the
+        # other half, not an umbrella over nested products. Descending would
+        # silently retarget the audit and hide the missing tier file.
+        checkout = self.make_repo()
+        (checkout / "AGENTS.md").write_text("# Root guidance\n", encoding="utf-8")
+        self.declare_logical_root(checkout / "products" / "app")
+
+        result = harness.audit_repo(checkout)
+
+        self.assertEqual(result["repo"], str(checkout.resolve()))
+        self.assertIn(
+            "missing .agent-harness/tier.json (legacy .claude/tier.json also accepted)",
+            result["issues"],
+        )
+
+    def test_audit_keeps_the_git_root_for_an_undeclared_subdirectory(self) -> None:
+        checkout = self.make_repo()
+        (checkout / "AGENTS.md").write_text("# Root guidance\n", encoding="utf-8")
+        subdirectory = checkout / "src"
+        subdirectory.mkdir()
+
+        result = harness.audit_repo(subdirectory)
+
+        self.assertEqual(result["repo"], str(checkout.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
+
+    def test_nearest_declared_ancestor_wins_over_an_outer_declaration(self) -> None:
+        checkout = self.make_repo()
+        self.declare_logical_root(checkout, tier=2)
+        nested = self.declare_logical_root(checkout / "products" / "app")
+        deeper = nested / "src"
+        deeper.mkdir()
+
+        self.assertEqual(
+            harness.logical_repo_root(deeper.resolve(), checkout.resolve()),
+            nested.resolve(),
+        )
+
+    def test_nested_logical_root_search_is_bounded(self) -> None:
+        checkout = self.make_repo()
+        shallow = self.declare_logical_root(checkout / "one" / "two" / "three" / "four")
+        self.declare_logical_root(
+            checkout / "one" / "two" / "three" / "four" / "five" / "six"
+        )
+        self.declare_logical_root(checkout / "deep" / "two" / "three" / "four" / "five")
+        self.declare_logical_root(checkout / "node_modules" / "package")
+
+        # Found: exactly the one inside the depth bound, outside a skipped
+        # vendor directory, and not shadowed by a declared ancestor.
+        self.assertEqual(harness.nested_logical_roots(checkout), [shallow])
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows shape")
+    def test_nested_logical_root_search_skips_directory_junctions(self) -> None:
+        # `is_dir(follow_symlinks=False)` classifies a junction as an ordinary
+        # directory, so the search followed one out of the checkout (selecting
+        # a root that physically lives elsewhere) or back into it (reporting a
+        # one-product checkout as ambiguous). Review finding on PR #238.
+        import _winapi
+
+        checkout = self.make_repo()
+        product = self.declare_logical_root(checkout / "products" / "app")
+        outside = Path(self.temp.name) / "outside-target"
+        self.declare_logical_root(outside)
+        _winapi.CreateJunction(str(outside), str(checkout / "linked"))
+        _winapi.CreateJunction(str(checkout), str(checkout / "mirror"))
+
+        self.assertEqual(harness.nested_logical_roots(checkout), [product])
+        self.assertEqual(
+            harness.logical_repo_root(checkout.resolve(), checkout.resolve()),
+            product.resolve(),
+        )
+
+    def test_nested_logical_root_search_stops_at_a_nested_git_boundary(self) -> None:
+        # A nested repository or submodule that declares both halves is owned
+        # by ANOTHER checkout: selecting it made `checkout` a false fact and
+        # read the inner repo's status and remotes as the outer's.
+        checkout = self.make_repo()
+        inner = self.declare_logical_root(checkout / "products" / "app")
+        (inner / ".git").mkdir()
+        self.declare_logical_root(checkout / "vendor-repo" / "product")
+        (checkout / "vendor-repo" / ".git").write_text(
+            "gitdir: elsewhere\n", encoding="utf-8"
+        )
+
+        self.assertEqual(harness.nested_logical_roots(checkout), [])
+        result = harness.audit_repo(checkout)
+        self.assertEqual(result["repo"], str(checkout.resolve()))
+        self.assertEqual(result["checkout"], str(checkout.resolve()))
 
     def test_remove_managed_floor_preserves_unrelated_hooks(self) -> None:
         dispatcher = Path(self.temp.name) / "codex" / "hooks" / "dispatch.py"
@@ -5512,6 +5710,98 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn("2 active Codex hook layer(s)", output)
         self.assertIn("[FAIL] project Codex floor: 2 project floor handler(s)", output)
+
+    def test_doctor_certifies_a_declared_nested_logical_root_adapter(self) -> None:
+        # The Codex adapter, the tier and the instructions all live in the
+        # product directory; the umbrella checkout declares nothing. Insisting
+        # on a Git-root `.codex/hooks.json` made this impossible to certify.
+        checkout = self.make_repo()
+        nested = self.declare_logical_root(checkout / "products" / "app")
+        nested_hooks = self.write_hooks(nested, self.valid_codex_adapter_text())
+
+        result, output = self.run_doctor_with_fixture_globals(nested)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex adapter contract", output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+        self.assertIn(f"logical repo root {nested.resolve()}", output)
+        self.assertIn("nested at products/app", output)
+        self.assertIn(str(nested_hooks.resolve()), output)
+
+    def test_doctor_certifies_an_undeclared_checkout_through_its_root_adapter(
+        self,
+    ) -> None:
+        # Regression pinned from the PR #238 review: an undeclared checkout
+        # with a valid root adapter and one declared product that has no
+        # `.codex` of its own was certified before the nested-root rule and
+        # failed after it, because the canonical adapter was retargeted to a
+        # file the layer walk never inventoried.
+        checkout = self.make_repo()
+        root_hooks = self.write_hooks(checkout, self.valid_codex_adapter_text())
+        nested = self.declare_logical_root(checkout / "products" / "app")
+
+        result, output = self.run_doctor_with_fixture_globals(checkout)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+        self.assertIn(f"logical repo root {nested.resolve()}", output)
+        self.assertIn("nearest .codex/hooks.json at or above it (.)", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+
+    def test_doctor_walks_layers_down_to_a_downward_selected_root(self) -> None:
+        # Rule 2 selects the product from the undeclared root, so the layer
+        # walk must reach the product's own adapter as a session started
+        # inside it would.
+        checkout = self.make_repo()
+        nested = self.declare_logical_root(checkout / "products" / "app")
+        nested_hooks = self.write_hooks(nested, self.valid_codex_adapter_text())
+
+        result, output = self.run_doctor_with_fixture_globals(checkout)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+        self.assertIn("(products/app)", output)
+        self.assertIn(str(nested_hooks.resolve()), output)
+
+    def test_doctor_maps_a_nested_logical_root_across_a_linked_worktree(self) -> None:
+        # Criterion 4: the authoritative source is the SAME LOGICAL RELATIVE
+        # SUBPATH in the root checkout, not the root checkout's own `.codex`.
+        root, linked = self.make_linked_worktree()
+        adapter = self.valid_codex_adapter_text()
+        root_product = self.declare_logical_root(root / "products" / "app")
+        root_hooks = self.write_hooks(root_product, adapter)
+        linked_product = self.declare_logical_root(linked / "products" / "app")
+        self.write_hooks(linked_product, adapter)
+
+        result, output = self.run_doctor_with_fixture_globals(linked_product)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] Codex hook source: linked worktree", output)
+        self.assertIn(str(root_hooks.resolve()), output)
+        self.assertIn("identical worktree copy is ignored", output)
+        self.assertIn("[ok] project Codex floor: 1 project floor handler(s)", output)
+        self.assertIn("1 canonical root hooks.json handler(s)", output)
+
+    def test_doctor_reports_a_worktree_only_nested_logical_root_source(self) -> None:
+        # The same mapping in the failing direction: a product adapter that
+        # exists only in the linked worktree has no authoritative source.
+        root, linked = self.make_linked_worktree()
+        self.declare_logical_root(root / "products" / "app")
+        linked_product = self.declare_logical_root(linked / "products" / "app")
+        self.write_hooks(linked_product, self.valid_codex_adapter_text())
+
+        result, output = self.run_doctor_with_fixture_globals(linked_product)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] Codex hook source", output)
+        self.assertIn(
+            str((root / "products" / "app" / ".codex" / "hooks.json").resolve()),
+            output,
+        )
+        self.assertIn("authoritative root source is absent", output)
 
     def test_doctor_audits_nested_inline_hook_layer(self) -> None:
         repo = self.make_repo()
