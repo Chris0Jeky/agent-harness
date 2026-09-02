@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import base64
 import binascii
 import ctypes
@@ -3897,6 +3898,194 @@ def tier_path(repo: Path) -> Path | None:
     return paths[0] if paths else None
 
 
+# --- logical repo roots: a declared repo nested inside a Git checkout --------
+#
+# One Git checkout can carry several products, each declaring its own harness
+# posture, while the checkout root itself declares none (SPECS §2.1). Collapsing
+# such a path to the Git root audited the wrong thing: the wrong tier, a
+# "missing root AGENTS.md" that is deliberate, and stale-path findings from a
+# sibling product. The selection rule below is deliberately narrow — a logical
+# root must carry BOTH declarations, containment breaks a tie, and anything it
+# cannot decide fails loudly instead of picking a product for the operator.
+LOGICAL_ROOT_INSTRUCTIONS = "AGENTS.md"
+# Depth is measured from the requested directory. Four levels reach the usual
+# `products/<name>`, `packages/<scope>/<name>` layouts without walking a whole
+# source tree, and the search only ever runs for a fully undeclared directory.
+LOGICAL_ROOT_SCAN_MAX_DEPTH = 4
+# Directory names that never hold a declared repo root but are expensive, or
+# actively misleading, to walk. Dot-directories are skipped separately: they
+# are where the declarations themselves live.
+LOGICAL_ROOT_SCAN_SKIP_DIRS = frozenset(
+    {
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "site-packages",
+        "target",
+        "venv",
+        "vendor",
+    }
+)
+
+
+def declares_logical_root(directory: Path) -> bool:
+    """Whether this directory declares a repo root: instructions AND a tier.
+
+    Either half alone is ambiguous — a bare `AGENTS.md` is common in a
+    subdirectory of an ordinary repo, and a lone `.codex/` layer says nothing
+    about posture — so both are required before anything is treated as a
+    repository in its own right.
+    """
+    return (directory / LOGICAL_ROOT_INSTRUCTIONS).is_file() and bool(
+        tier_paths(directory)
+    )
+
+
+def declares_no_harness_surface(directory: Path) -> bool:
+    """Whether this directory declares NEITHER half of a repo root.
+
+    A half-declared directory keeps the historical treatment: it is the repo
+    being audited and the missing half is the finding. Only a directory that
+    declares nothing at all can be an umbrella over nested products.
+    """
+    return not (directory / LOGICAL_ROOT_INSTRUCTIONS).is_file() and not tier_paths(
+        directory
+    )
+
+
+def logical_root_chain(requested: Path, checkout: Path) -> list[Path]:
+    """The requested directory and each ancestor up to the checkout root.
+
+    An empty list means the requested path is not inside the checkout, which
+    the caller must treat as "no logical root selection is provable here".
+    """
+    chain: list[Path] = []
+    for candidate in (requested, *requested.parents):
+        chain.append(candidate)
+        if candidate == checkout:
+            return chain
+    return []
+
+
+def searchable_child_directories(directory: Path) -> list[Path]:
+    """Real child directories a nested-root search may descend into.
+
+    Aliases are never followed: a junction or symlink can leave the checkout
+    entirely or loop, and a root reached through one is not a path this tool
+    can prove anything about. `is_dir(follow_symlinks=False)` alone does not
+    deliver that on Windows, where a directory junction is a reparse point
+    rather than a symlink, so the junction-aware `path_is_alias` decides.
+
+    A child that carries its own `.git` entry is a nested repository or
+    submodule: a declaration under it belongs to THAT checkout, whose Git
+    facts are not this checkout's, so the search never crosses the boundary.
+    """
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot search for nested logical repo roots in {directory}: {exc}"
+        ) from exc
+    children: list[Path] = []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name in LOGICAL_ROOT_SCAN_SKIP_DIRS:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect nested logical repo root candidate "
+                f"{entry.path}: {exc}"
+            ) from exc
+        child = Path(entry.path)
+        if path_is_alias(child):
+            continue
+        try:
+            if (child / ".git").exists():
+                continue
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect nested logical repo root candidate {child}: {exc}"
+            ) from exc
+        children.append(child)
+    return children
+
+
+def nested_logical_roots(
+    root: Path, *, max_depth: int = LOGICAL_ROOT_SCAN_MAX_DEPTH
+) -> list[Path]:
+    """Every declared logical root strictly below ``root``, nearest first.
+
+    A declared root ends the descent on its branch: its own subdirectories are
+    part of that repo, not competitors to it.
+    """
+    found: list[Path] = []
+    frontier: deque[tuple[Path, int]] = deque([(root, 0)])
+    while frontier:
+        directory, depth = frontier.popleft()
+        if depth >= max_depth:
+            continue
+        for child in searchable_child_directories(directory):
+            if declares_logical_root(child):
+                found.append(child)
+                continue
+            frontier.append((child, depth + 1))
+    return found
+
+
+def logical_repo_root(requested: Path, checkout: Path) -> Path:
+    """Select the logical repo root for an explicitly requested path.
+
+    The rule, in order (SPECS §2.1):
+
+    1. The nearest directory on the chain from the requested path up to the
+       Git checkout root that declares BOTH `AGENTS.md` and a tier file wins.
+       Containment breaks the tie, so a product's own declaration binds for a
+       path inside it even when an outer umbrella also declares one.
+    2. Otherwise, if the requested directory declares NEITHER half, search
+       below it for declared roots. Exactly one is selected; two or more are
+       ambiguous and raise rather than picking one silently.
+    3. Otherwise the Git checkout root is the repo, exactly as before. Every
+       ordinary repository whose logical and Git roots are identical takes
+       rule 1 at the root itself and is unaffected by the rest.
+    """
+    if not requested.is_dir():
+        return checkout
+    chain = logical_root_chain(requested, checkout)
+    if not chain:
+        return checkout
+    for candidate in chain:
+        if declares_logical_root(candidate):
+            return candidate
+    if not declares_no_harness_surface(requested):
+        return checkout
+    nested = nested_logical_roots(requested)
+    if len(nested) > 1:
+        raise HarnessError(
+            "ambiguous nested logical repo roots under "
+            f"{requested}: {', '.join(str(candidate) for candidate in nested)}; "
+            "re-run against exactly one of them"
+        )
+    if nested:
+        return nested[0]
+    return checkout
+
+
+def logical_root_subpath(logical_root: Path, checkout: Path) -> Path:
+    """The logical root's subpath inside its checkout (`.` at the root)."""
+    try:
+        return logical_root.relative_to(checkout)
+    except ValueError as exc:
+        raise HarnessError(
+            f"logical repo root {logical_root} is not inside its Git checkout "
+            f"{checkout}"
+        ) from exc
+
+
 def read_tier_file(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -5561,7 +5750,12 @@ def audit_repo(
     command_runner: Any = bounded_command_output,
     deadline: float | None = None,
 ) -> dict[str, Any]:
-    repo = git_root(path)
+    checkout = git_root(path)
+    # Every declaration, budget, stale-path scan and reality check below is
+    # scoped to the LOGICAL repo. The Git facts stay the checkout's: `git` run
+    # from inside the logical root still answers for the checkout that owns it,
+    # which is the point — the repository really is the outer one.
+    repo = logical_repo_root(Path(path).resolve(), checkout)
     declarations = tier_declarations(repo)
     tier_data = merge_tier_declarations([data for _, data in declarations])
     issues: list[str] = []
@@ -5601,6 +5795,10 @@ def audit_repo(
     status = run(["git", "status", "--short", "--branch"], repo)
     return {
         "repo": str(repo),
+        # The Git checkout that owns `repo`. Equal to it for every ordinary
+        # repository; different only when a declared logical root is nested
+        # inside a larger checkout, which a consumer cannot otherwise tell.
+        "checkout": str(checkout),
         "tier_file": str(declarations[0][0]) if declarations else None,
         # Every declaration that bound this posture, not just the first found:
         # a consumer that sees one path cannot tell a single-file repo from one
@@ -8188,10 +8386,27 @@ def doctor(args: argparse.Namespace) -> int:
                     "the resolved Git cwd: "
                     f"{logical_relative_path} != {resolved_relative_path}"
                 )
+            # The repo being certified, which is the Git checkout root for
+            # every ordinary repository and a declared subdirectory of it for a
+            # monorepo-style product (SPECS §2.1).
+            logical_root = logical_repo_root(requested_path, requested_checkout)
+            logical_root_relative = logical_root_subpath(
+                logical_root, requested_checkout
+            )
+            # A downward (rule 2) selection targets the descendant product, so
+            # the layer walk runs from the checkout root to THAT root exactly
+            # as a session started inside it would load layers. A rule-1 root
+            # is on the requested path's own ancestor chain, so the walk to
+            # the requested path already inventories it.
+            layer_walk_path = (
+                logical_root
+                if requested_path in logical_root.resolve().parents
+                else requested_path
+            )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
                 for layer in codex_project_layer_dirs(
-                    requested_path, requested_checkout
+                    layer_walk_path, requested_checkout
                 )
             ]
             if marker_ok:
@@ -8208,7 +8423,7 @@ def doctor(args: argparse.Namespace) -> int:
                     f"project-root marker check failed: {marker_detail}"
                 )
             repo_hook_paths, source_ok, source_detail = codex_hook_sources_status(
-                requested_path, requested_checkout, authoritative_checkout
+                layer_walk_path, requested_checkout, authoritative_checkout
             )
             json_hook_documents = [
                 (hooks, text)
@@ -8327,7 +8542,23 @@ def doctor(args: argparse.Namespace) -> int:
                 "handler that reaches the shared floor: nothing to check here, and "
                 "the project floor check owns that verdict"
             )
-            canonical_hooks = authoritative_checkout / ".codex" / "hooks.json"
+            # A linked worktree takes its hooks from the SAME LOGICAL RELATIVE
+            # SUBPATH in the root checkout, not merely from the Git root's
+            # `.codex`: for a nested product the Git-root path names a file
+            # that does not exist and cannot be the authoritative source.
+            # The canonical adapter is the NEAREST `.codex/hooks.json` at or
+            # above the logical root: the product's own when it has one, else
+            # the umbrella layer that Codex loads for every cwd beneath it.
+            # For an ordinary repository that is the Git root's, as before.
+            canonical_relative = logical_root_relative
+            for relative in (logical_root_relative, *logical_root_relative.parents):
+                candidate = authoritative_checkout / relative / ".codex" / "hooks.json"
+                if any(hooks == candidate for hooks, _text in json_hook_documents):
+                    canonical_relative = relative
+                    break
+            canonical_hooks = (
+                authoritative_checkout / canonical_relative / ".codex" / "hooks.json"
+            )
             canonical_root_floor_entries = [
                 entry
                 for hooks, hooks_text in json_hook_documents
@@ -8343,7 +8574,10 @@ def doctor(args: argparse.Namespace) -> int:
             # symlink/junction -C path for normal checkouts; linked worktrees
             # source hooks from the authoritative root checkout instead.
             canonical_state_hooks = (
-                requested_logical_checkout / ".codex" / "hooks.json"
+                requested_logical_checkout
+                / canonical_relative
+                / ".codex"
+                / "hooks.json"
                 if requested_checkout == authoritative_checkout
                 else canonical_hooks
             )
@@ -8366,11 +8600,20 @@ def doctor(args: argparse.Namespace) -> int:
                 if unresolvable_wrapper_sources
                 else ""
             )
+            logical_root_detail = (
+                f"logical repo root {logical_root} is nested at "
+                f"{logical_root_relative.as_posix()} inside "
+                f"{requested_checkout}, so the canonical adapter is the nearest "
+                f".codex/hooks.json at or above it ({canonical_relative.as_posix()}); "
+                if logical_root != requested_checkout
+                else ""
+            )
             project_detail = (
                 f"{project_floor_count} project floor handler(s); "
                 f"{candidate_floor_count} candidate handler(s); "
                 f"{current_floor_count} current audit-marker handler(s); "
                 f"{canonical_root_floor_count} canonical root hooks.json handler(s); "
+                f"{logical_root_detail}"
                 f"{wrapper_detail}"
                 f"{source_detail}; the expected=<sha256> value is an audit-only "
                 "marker, never verified at runtime; trust is checked manually "
@@ -8409,7 +8652,10 @@ def doctor(args: argparse.Namespace) -> int:
             linked_worktree_source_ambiguous = (
                 requested_checkout != authoritative_checkout
             )
-            claude_requested_repo = requested_checkout
+            # Claude reads project settings from the repo it is working in. For
+            # a nested logical repo that is the product directory, not the
+            # umbrella checkout that declares nothing.
+            claude_requested_repo = logical_root
         except UnboundLocalError:
             # The existing Codex root-resolution failure means we cannot prove
             # which Claude project settings file the runtime would read either.
@@ -8453,7 +8699,13 @@ def doctor(args: argparse.Namespace) -> int:
             )
         )
         try:
-            reality_repo = git_root(Path(args.repo))
+            reality_checkout = git_root(Path(args.repo))
+            # Same scoping rule as `audit`: the declarations measured here are
+            # the logical repo's, while every Git fact they are measured
+            # against still comes from the checkout that owns it.
+            reality_repo = logical_repo_root(
+                Path(args.repo).resolve(), reality_checkout
+            )
             _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
@@ -8542,6 +8794,13 @@ def audit_command(
         print(json.dumps(result, indent=2))
     else:
         print(f"repo: {result['repo']}")
+        if result["checkout"] != result["repo"]:
+            # Say it out loud: the tier, budgets and stale-path scan below
+            # belong to the nested logical repo, the Git lines to the checkout.
+            print(
+                f"git checkout: {result['checkout']} "
+                "(logical repo root is nested inside it)"
+            )
         sources = ", ".join(result["tier_files"]) or "missing"
         if len(result["tier_files"]) > 1:
             sources += "; strictest binds"
