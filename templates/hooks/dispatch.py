@@ -59,7 +59,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.31 (2026-09-02)"
+FLOOR_VERSION = "1.6.32 (2026-09-02)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -13194,9 +13194,55 @@ _CHARTER_HINT = re.compile(
     r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
     r"|\btoken|\.netrc|\.npmrc|\.pypirc"
     r"|\bcp\b|\bmv\b|copy-item|move-item|set-content|add-content|out-file|\binstall\b"
-    r"|\btee\b|\bdd\b",
+    r"|\btee\b|\bdd\b"
+    r"|reset\s+--hard|clean\s+-[a-z]*[fdx]|checkout\s+--\s|checkout\s+-[a-z]*f|restore\s+\."
+    r"|--discard-changes|worktree\s+remove|stash\s+drop|stash\s+clear|branch\s+-[a-z]*D"
+    r"|\bgh\s+(?:repo|gist)\b|--public\b|--visibility\b|\bgh\s+api\b",
     re.IGNORECASE,
 )
+
+# A command is checked as ONE text, and the analyzer returns its FIRST deny.
+# When that deny is opacity, a LATER segment (`; git reset --hard`,
+# `&& gh repo create x --public`) is never analysed. The hint above catches
+# the spellings it knows; this re-check lets the analyzer itself speak for
+# every segment, so a masked guarded action in any segment forces the
+# double-check whatever its spelling (late Codex P1 on PR #260).
+# A lone `&` is bash's background separator and cmd.exe's sequencer.
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\r?\n|&")
+
+
+def masked_segment_verdict(
+    command: str, tier_cfg: dict, project_dir: str, command_cwd: str, checker
+):
+    """The first non-opacity verdict among the command's segments, or None."""
+    # Join backslash-newline continuations BEFORE splitting on newlines, as
+    # the whole-command path does, so `git reset \` + `--hard` is one segment.
+    joined = remove_shell_line_continuations(command)
+    whole = joined.strip()
+    # Fragments share one remote cache and deadline: N pushes in one command
+    # resolve the remote once, not N times, inside the hook's time budget.
+    remote_cache: dict = {}
+    remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    for fragment in _SEGMENT_SPLIT.split(joined):
+        fragment = fragment.strip()
+        if not fragment or fragment == whole:
+            continue
+        try:
+            decision, reason = checker(
+                fragment,
+                tier_cfg,
+                project_dir,
+                command_cwd,
+                _remote_cache=remote_cache,
+                _remote_deadline=remote_deadline,
+            )
+        except Exception:  # a fragment the analyzer cannot parse is not evidence
+            continue
+        if decision == "ask" or (
+            decision == "deny" and not reason_is_pure_opacity(reason)
+        ):
+            return decision, reason
+    return None
 
 
 def floor_posture(tier_cfg: dict) -> str:
@@ -13252,19 +13298,28 @@ def command_carries_charter_hint(command: str) -> bool:
 
 
 def apply_floor_posture(
-    decision: str, reason: str, command: str, ack: str | None, tier_cfg: dict
+    decision: str,
+    reason: str,
+    command: str,
+    ack: str | None,
+    tier_cfg: dict,
+    masked=None,
 ) -> tuple[str, str]:
-    """Render the analyzer's verdict under the effective posture."""
+    """Render the analyzer's verdict under the effective posture.
+
+    `masked` is the first non-opacity verdict the analyzer gives one of the
+    command's LATER segments (`masked_segment_verdict`), consulted only when
+    the whole-command verdict is pure opacity.
+    """
     if decision == "allow":
         return decision, reason
     if floor_posture(tier_cfg) == "wall":
         return decision, reason
-    if (
-        decision == "deny"
-        and reason_is_pure_opacity(reason)
-        and not command_carries_charter_hint(command)
-    ):
-        return "allow", ""
+    if decision == "deny" and reason_is_pure_opacity(reason):
+        if masked is not None:
+            reason = f"{reason} A later segment: {masked[1]}"
+        elif not command_carries_charter_hint(command):
+            return "allow", ""
     expected = floor_ack_key(reason, command)
     if ack == expected:
         return "allow", ""
@@ -13398,7 +13453,18 @@ def main():
             project_dir,
             payload_cwd or env_project_dir,
         )
-        decision, reason = apply_floor_posture(decision, reason, command, ack, tier_cfg)
+        masked = None
+        if (
+            decision == "deny"
+            and reason_is_pure_opacity(reason)
+            and floor_posture(tier_cfg) != "wall"
+        ):
+            masked = masked_segment_verdict(
+                command, tier_cfg, project_dir, payload_cwd or env_project_dir, check
+            )
+        decision, reason = apply_floor_posture(
+            decision, reason, command, ack, tier_cfg, masked
+        )
     except Exception as exc:  # fail CLOSED after a Bash payload is identified
         respond(
             "deny",

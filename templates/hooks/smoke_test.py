@@ -4896,6 +4896,39 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
                 "deny",
             )
         )
+    # A masked LATER segment is re-checked by the analyzer itself (1.6.32).
+    results.append(
+        (
+            "guide T3 masked reset --hard double-checks",
+            run_case("echo hi > $target; git reset --hard", 3, dict(guide)),
+            "deny",
+        )
+    )
+    results.append(
+        (
+            "guide T3 masked reset --hard names the segment",
+            "A later segment:" in LAST_REASON[0],
+            True,
+        )
+    )
+    results.append(
+        (
+            "guide sensitive masked gh repo create --public double-checks",
+            run_case(
+                "echo hi > $target && gh repo create x --public",
+                1,
+                {"sensitive_data": True, **guide},
+            ),
+            "deny",
+        )
+    )
+    results.append(
+        (
+            "guide T1 masked benign segment still allows",
+            run_case("echo hi > $target; git status", 1, dict(guide)),
+            "allow",
+        )
+    )
     # Uppercase -C/-X are flags, not program text: these opacity allows survive.
     for command in (
         "git -C $S status > $LOG",
