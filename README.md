@@ -221,10 +221,17 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-08): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.27 after the bounded #227 repair: a valueless `push.followTags` is parsed with Git's
-true semantics, while every other separator-free configuration record remains malformed and
-fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
+Current state (2026-09-02): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+source is 1.6.29, which upstreams two owner decisions of 2026-08-18 that were authored directly
+in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
+left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard
+to the irreversible/exfiltration surfaces (repo/gist creation, visibility flips, non-branch
+DELETEs) so routine PR/issue/comment mutations pass (#59), and 1.6.29 allows an explicit
+named-branch remote deletion (`git push --delete <branch>`, `:<branch>`) while wildcards, tags,
+other ref namespaces, protected/production names and dynamic tokens stay denied; the
+`sensitive_data` push narrowing still rejects every deletion selector. 1.6.27 was the bounded
+#227 repair: a valueless `push.followTags` is parsed with Git's true semantics, while every other
+separator-free configuration record remains malformed and fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
 its bounded post-merge security follow-up: that route requires exactly one refspec and rejects
 configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`vcs`, plus
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
