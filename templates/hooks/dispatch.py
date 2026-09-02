@@ -9159,7 +9159,15 @@ def merge_floor_postures(configs: list) -> str | None:
     one declaration sets it and none says `wall`; otherwise nothing is declared
     and the tier decides (`floor_posture`).
     """
-    declared = {cfg.get("floor_posture") for cfg in configs}
+    declared = set()
+    for cfg in configs:
+        posture = cfg.get("floor_posture")
+        if posture is None and bool((cfg.get("flags") or {}).get("sensitive_data")):
+            # A sensitive declaration that says nothing about posture keeps
+            # its default wall as a VOTE, so a nested or co-located `guide`
+            # cannot relax an outer tightening overlay (PR #260 review).
+            posture = "wall"
+        declared.add(posture)
     if "wall" in declared:
         return "wall"
     if "guide" in declared:
@@ -11587,7 +11595,9 @@ def check(
                         # `remotes/x/y` by DWIM abbreviation, so a namespace
                         # prefix without `refs/` still names a protected branch
                         # or a tag. Only a bare branch name is a branch name.
-                        if re.match(
+                        if not deletion_target.lower().startswith(
+                            "refs/heads/"
+                        ) and re.match(
                             r"(?:heads|tags|remotes|refs)/",
                             deletion_name,
                             re.IGNORECASE,
@@ -12953,6 +12963,14 @@ def check(
                             len(ref_paths) == 1
                             and not re.search(r"[*?\[\]]", ref_paths[0])
                             and not has_dynamic_shell_token(ref_paths[0])
+                            # Issue #259 / PR #260 review: the server
+                            # percent-decodes and normalises dot segments,
+                            # so `%6Dain` and `feat/../main` are `main`.
+                            and re.fullmatch(
+                                r"[A-Za-z0-9._/-]+",
+                                ref_paths[0].lower().rsplit("git/refs/heads/", 1)[1],
+                            )
+                            and ".." not in ref_paths[0]
                             and ref_paths[0]
                             .lower()
                             .rsplit("git/refs/heads/", 1)[1]
@@ -12975,7 +12993,8 @@ def check(
                     joined = " ".join(toks[2:]).lower()
                     if re.search(
                         r"\bgists\b|\buser/repos\b|\borgs/[\w.-]+/repos\b"
-                        r"|public=true\b|private=false\b|visibility\b",
+                        r"|public=true\b|private=false\b|visibility\b"
+                        r"|(?:private|public)=(?!true\b|false\b)",
                         joined,
                     ):
                         return (
@@ -13021,7 +13040,32 @@ _OPACITY_REASON = re.compile(
     re.IGNORECASE,
 )
 _OPACITY_EXCLUDED = re.compile(
-    r"secret-looking|delet|remov|rm -rf|recursive", re.IGNORECASE
+    r"secret-looking|delet|remov|rm -rf|recursive|pathspec|\bgit rm\b",
+    re.IGNORECASE,
+)
+
+# The analyzer returns its FIRST deny. When that deny is opacity-worded, the
+# command may still carry a literal charter spelling the analyzer never
+# reached (`git push --force origin $BRANCH` denies as "dynamic refspec" before
+# the force check; `sh -c "$(curl ...)"` denies as "dynamic executable"). So an
+# opacity deny proceeds only when the COMMAND TEXT, quotes included, carries no
+# charter hint. Over-triggering is safe: it costs one double-check, never a
+# wall. The reviewed hint set (PR #260, HIGH-1/2): force spellings and any git
+# push at all; recursive/forced deletion verbs; privilege elevation; program
+# text piped or substituted into an interpreter; nested program text
+# (`-c`, `eval`, `-x/--exec`, `foreach`, `bisect run`); brace expansion;
+# secret-looking names; file copies/moves/writes onto them.
+_CHARTER_HINT = re.compile(
+    r"--force|\bgit\b[^|;&\n]*\bpush\b|\bpush\b[^|;&\n]*\s\+[\w/]"
+    r"|\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\brd\b|remove-item|\bri\b|\bunlink\b"
+    r"|\bsudo\b|\bdoas\b|\bsu\b|\brunas\b|start-process"
+    r"|\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|\|\s*(?:pwsh|powershell|iex|invoke-expression)\b"
+    r"|\$\(\s*(?:curl|wget|invoke-webrequest|iwr)|<\(\s*(?:curl|wget)"
+    r"|\beval\b|\biex\b|invoke-expression|\s-c\s|\s-x\s|--exec\b|\bforeach\b|bisect\s+run"
+    r"|\{[^{}\s]*,[^{}\s]*\}"
+    r"|\.env\b|credential|secret|id_rsa|id_ed25519|\.pem\b|\.key\b|\btoken|\.netrc|\.npmrc|\.pypirc"
+    r"|\bcp\b|\bmv\b|copy-item|move-item|set-content|out-file|\binstall\b|\btee\b|\bdd\b",
+    re.IGNORECASE,
 )
 
 
@@ -13072,6 +13116,11 @@ def reason_is_pure_opacity(reason: str) -> bool:
     return bool(_OPACITY_REASON.search(reason)) and not _OPACITY_EXCLUDED.search(reason)
 
 
+def command_carries_charter_hint(command: str) -> bool:
+    """Whether the command text, quotes included, spells a charter action."""
+    return bool(_CHARTER_HINT.search(command))
+
+
 def apply_floor_posture(
     decision: str, reason: str, command: str, ack: str | None, tier_cfg: dict
 ) -> tuple[str, str]:
@@ -13080,7 +13129,11 @@ def apply_floor_posture(
         return decision, reason
     if floor_posture(tier_cfg) == "wall":
         return decision, reason
-    if decision == "deny" and reason_is_pure_opacity(reason):
+    if (
+        decision == "deny"
+        and reason_is_pure_opacity(reason)
+        and not command_carries_charter_hint(command)
+    ):
         return "allow", ""
     expected = floor_ack_key(reason, command)
     if ack == expected:

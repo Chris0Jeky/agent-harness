@@ -494,13 +494,16 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 | Analyzer verdict | `wall` | `guide` |
 |---|---|---|
 | allow | allow | allow |
-| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`): those are #62's GUARDED opacity and take the row below | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
 | any other deny — the charter: force spellings, `rm -rf` outside the project, secret-file mutation, pipe-to-shell, sudo, remote-ref destruction, `sensitive_data` publication | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` |
 | ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes |
 | dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable |
 
 - Effective posture: T4 or `wave_mode` → `wall`, whatever is declared. Otherwise a declared
-  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `guide`.
+  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `guide`. In the merge across
+  co-located and chained declarations an undeclared `sensitive_data` declaration VOTES `wall`, so
+  a nested or co-located `guide` cannot relax an outer tightening overlay; only the same
+  declaration saying both `sensitive_data` and `guide` is the owner's explicit choice.
 - The key is the first 10 hex characters of SHA-256 over `<reason>\n<command without the marker>`,
   so it binds to that exact command AND verdict: a corrected command, or the same command denied
   for a new reason, is a fresh double-check. The marker is a trailing shell comment
