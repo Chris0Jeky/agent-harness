@@ -102,6 +102,9 @@ from `.agent-harness/tier.json` (strictest of it and legacy `.claude/`) and emit
 allow/ask/deny JSON. Contract (docstring + BLUEPRINT §2, SPECS §5-6):
 - Blocks only the irreversible at every tier (force-push, rm -rf outside project, pipe-to-shell
   installs, sudo, secret-file mutation); work-loss guards are tier-dependent
+- Posture (SPECS §5.4): below T4/wave the verdict is a GUIDE — pure-opacity denies proceed and
+  everything else is one acknowledgeable double-check (`# FLOOR_ACK=<key>`); T4/wave/sensitive
+  and any `floor_posture: wall` declaration keep the walls
 - Strips quoted strings before matching — never inspects commit-message/PR-body text
 - Unparseable stdin → allow (can't identify the command); exception during rule evaluation →
   deny (fail closed)

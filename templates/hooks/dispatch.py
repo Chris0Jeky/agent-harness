@@ -25,6 +25,21 @@ Contract (BLUEPRINT §2, SPECS §5-6):
 - Failure behavior: stdin that cannot be parsed -> allow (we cannot even identify the
   command; denying would brick every session). Exceptions during RULE EVALUATION -> deny
   (fail closed). Changes to this file are T4-class work: top model + review + smoke tests.
+- POSTURE (owner decision 2026-09-02; #21 slices #26/#62): every verdict above is the
+  ANALYZER's. Its rendering is scaled by `floor_posture`, resolved from the tier:
+    wall  -> the verdicts land as written (T4, wave_mode, or `sensitive_data` by default,
+             or any declaration that sets `"floor_posture": "wall"`).
+    guide -> a deny that only reports the PARSER's uncertainty ("cannot be inspected",
+             "opaque", "malformed", ...) becomes allow: the parser's limits are not the
+             agent's fault -- unless the unresolved operand belongs to a DELETE or names
+             a secret-looking file, which stay on the double-check path (#62's guarded
+             opacity). Every other deny, and every ask, becomes a DOUBLE-CHECK: the
+             floor denies once with a FLOOR_ACK key bound to that exact command and reason,
+             and the identical command re-run with the trailing comment `# FLOOR_ACK=<key>`
+             proceeds. The default below T4/wave for a non-sensitive repository.
+  A `wall` posture ignores every acknowledgement. The `dispatcher error` fail-closed deny
+  is never scaled. Codex has no ask channel, so guide is strictly kinder to it than the
+  old blanket ask->deny; the wall mapping keeps that old behaviour.
 
 A change here must keep `smoke_test.py` green: python smoke_test.py
 """
@@ -44,7 +59,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.30 (2026-09-02)"
+FLOOR_VERSION = "1.6.31 (2026-09-02)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -3351,6 +3366,54 @@ ENV_ROOTS = re.compile(
     r'^"?(\$\{?home\}?|\$env:userprofile|%userprofile%)"?$', re.IGNORECASE
 )
 
+# The interpreter heads a downloaded body must never be piped into, and the
+# privilege/identity elevation heads. Both are the analyzer's charter
+# vocabulary; the posture layer's charter hint is built FROM them so the two
+# can never drift apart (PR #260 review round 2).
+_PIPE_INTERPRETER_HEADS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "source",
+        ".",
+        "eval",
+        "iex",
+        "invoke-expression",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
+        "php",
+        "node",
+        "lua",
+        "r",
+        "rscript",
+    }
+)
+_PRIVILEGE_HEADS = frozenset(
+    {
+        "sudo",
+        "su",
+        "doas",
+        "pkexec",
+        "run0",
+        "please",
+        "runas",
+        "runuser",
+        "setpriv",
+        "sg",
+    }
+)
 _SECRET_PATH = re.compile(
     r"(^|[\\/])\.env(rc)?(\.[\w.]+)?([\\/]|$)|credential|secrets?\."
     r"|(^|[\\/._-])id_(?:rsa|dsa|ecdsa|ed25519)"
@@ -9230,10 +9293,40 @@ def read_tier_file(path: str) -> dict:
                 "tier.json public_synthetic_publication.repository must be an "
                 "OWNER/REPOSITORY pair"
             )
+    posture = data.get("floor_posture")
+    if posture is not None and posture not in _FLOOR_POSTURES:
+        raise ValueError(
+            'tier.json floor_posture must be "wall" or "guide" when present'
+        )
     result = {"tier": tier, "flags": flags}
     if publication is not None:
         result["public_synthetic_publication"] = dict(publication)
+    if posture is not None:
+        result["floor_posture"] = posture
     return result
+
+
+def merge_floor_postures(configs: list) -> str | None:
+    """Strictest declared posture across co-located or chained declarations.
+
+    `wall` binds when any declaration sets it; `guide` binds only when at least
+    one declaration sets it and none says `wall`; otherwise nothing is declared
+    and the tier decides (`floor_posture`).
+    """
+    declared = set()
+    for cfg in configs:
+        posture = cfg.get("floor_posture")
+        if posture is None and bool((cfg.get("flags") or {}).get("sensitive_data")):
+            # A sensitive declaration that says nothing about posture keeps
+            # its default wall as a VOTE, so a nested or co-located `guide`
+            # cannot relax an outer tightening overlay (PR #260 review).
+            posture = "wall"
+        declared.add(posture)
+    if "wall" in declared:
+        return "wall"
+    if "guide" in declared:
+        return "guide"
+    return None
 
 
 def load_tier(project_dir: str) -> dict:
@@ -9272,6 +9365,9 @@ def load_tier(project_dir: str) -> dict:
         for publication in publications
     ):
         result["public_synthetic_publication"] = dict(publications[0])
+    posture = merge_floor_postures(configs)
+    if posture is not None:
+        result["floor_posture"] = posture
     return result
 
 
@@ -9324,10 +9420,14 @@ def resolve_context(env_project_dir: str, payload_cwd: str) -> tuple[str, dict]:
     flags["relaxed_work_loss_guards"] = all(
         bool(cfg.get("flags", {}).get("relaxed_work_loss_guards")) for cfg in configs
     )
-    return project_dir, {
+    resolved = {
         "tier": max(cfg.get("tier", 1) for cfg in configs),
         "flags": flags,
     }
+    posture = merge_floor_postures(configs)
+    if posture is not None:
+        resolved["floor_posture"] = posture
+    return project_dir, resolved
 
 
 def segments(sanitized: str):
@@ -9420,34 +9520,7 @@ def has_download_pipe_to_shell(command: str) -> bool:
         ):
             download_seen = True
         stage_head, _ = command_head(stage)
-        if download_seen and stage_head in {
-            "sh",
-            "bash",
-            "zsh",
-            "dash",
-            "ash",
-            "ksh",
-            "fish",
-            "csh",
-            "tcsh",
-            "pwsh",
-            "powershell",
-            "cmd",
-            "source",
-            ".",
-            "eval",
-            "iex",
-            "invoke-expression",
-            "python",
-            "python3",
-            "perl",
-            "ruby",
-            "php",
-            "node",
-            "lua",
-            "r",
-            "rscript",
-        }:
+        if download_seen and stage_head in _PIPE_INTERPRETER_HEADS:
             return True
         if stage_head in {
             "curl",
@@ -10208,18 +10281,7 @@ def check(
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
             continue
-        if head in {
-            "sudo",
-            "su",
-            "doas",
-            "pkexec",
-            "run0",
-            "please",
-            "runas",
-            "runuser",
-            "setpriv",
-            "sg",
-        }:
+        if head in _PRIVILEGE_HEADS:
             return (
                 "deny",
                 f"{head} is blocked at the floor: privilege/identity elevation conceals "
@@ -11645,6 +11707,20 @@ def check(
                                     "Only branch refs (refs/heads/*) may be deleted; other ref namespaces are floor-blocked.",
                                 )
                             deletion_name = deletion_name[len("refs/heads/") :]
+                        # Issue #259: git resolves `heads/main`, `tags/v1.0` and
+                        # `remotes/x/y` by DWIM abbreviation, so a namespace
+                        # prefix without `refs/` still names a protected branch
+                        # or a tag. Only a bare branch name is a branch name.
+                        if not deletion_target.startswith("refs/heads/") and re.match(
+                            r"(?:heads|tags|remotes|refs)/",
+                            deletion_name,
+                            re.IGNORECASE,
+                        ):
+                            return (
+                                "deny",
+                                "Deleting a ref through a namespace prefix "
+                                "(heads/, tags/, remotes/) is floor-blocked; name the branch bare.",
+                            )
                         if (
                             not deletion_name
                             or re.search(r"[*?\[\]]", deletion_name)
@@ -12891,8 +12967,13 @@ def check(
             if len(toks) >= 2 and toks[1] == "api":
                 method = None
                 has_fields = False
+                opaque_body = False
                 for index, token in enumerate(toks[2:], start=2):
                     lowered = token.lower()
+                    if lowered == "--input" or lowered.startswith("--input="):
+                        # The request body comes from a file or stdin the
+                        # floor never reads (issue #259, late #257 review).
+                        opaque_body = True
                     clustered_method = re.fullmatch(r"-i*[xX](?:=?([A-Za-z]+))?", token)
                     if clustered_method:
                         method = (
@@ -12912,6 +12993,29 @@ def check(
                 is_mutation = (method and method != "GET") or (
                     method is None and has_fields
                 )
+                if method is not None and method not in {
+                    "GET",
+                    "HEAD",
+                    "OPTIONS",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                }:
+                    # A method the shell computes at run time ($M, a quoted
+                    # expansion) can be DELETE; the narrowed allowlist below
+                    # keys on the literal method, so it cannot apply.
+                    return (
+                        "deny",
+                        "sensitive_data repo: a dynamic or unknown gh api method "
+                        "cannot be narrowed; spell the HTTP method literally.",
+                    )
+                if is_mutation and opaque_body:
+                    return (
+                        "deny",
+                        "sensitive_data repo: a gh api mutation whose body comes from "
+                        "--input is opaque to the floor; pass fields on the command line.",
+                    )
                 if is_mutation:
                     # Owner decision 2026-08-18: routine gh api mutations
                     # (PRs, issues, comments, labels) are allowed — the old
@@ -12925,15 +13029,64 @@ def check(
                         # push --delete carve-out — one literal refs/heads/
                         # path, never protected/production names, never
                         # dynamic tokens. Every other DELETE stays blocked.
-                        ref_paths = [
-                            t
-                            for t in toks[2:]
-                            if not t.startswith("-") and "git/refs/heads/" in t.lower()
-                        ]
+                        # Issue #259: only the ENDPOINT may be the branch ref.
+                        # A field value or input path carrying the same text
+                        # (`-f x=git/refs/heads/feat`) is a decoy, not a target.
+                        value_options = {
+                            "-x",
+                            "--method",
+                            "-f",
+                            "--raw-field",
+                            "-F",
+                            "--field",
+                            "--input",
+                            "-H",
+                            "--header",
+                            "-p",
+                            "--preview",
+                            "--hostname",
+                            "-q",
+                            "--jq",
+                            "-t",
+                            "--template",
+                            "--cache",
+                        }
+                        endpoint = None
+                        skip_next = False
+                        for t in toks[2:]:
+                            if skip_next:
+                                skip_next = False
+                                continue
+                            if t.startswith("-"):
+                                lowered_option = t.lower()
+                                if "=" not in lowered_option and (
+                                    lowered_option in value_options
+                                    or re.fullmatch(r"-i*[xXfFHpqt]", t)
+                                ):
+                                    skip_next = True
+                                continue
+                            endpoint = t
+                            break
+                        ref_paths = (
+                            [endpoint]
+                            if endpoint is not None
+                            and "git/refs/heads/" in endpoint.lower()
+                            else []
+                        )
                         if (
                             len(ref_paths) == 1
                             and not re.search(r"[*?\[\]]", ref_paths[0])
                             and not has_dynamic_shell_token(ref_paths[0])
+                            # Issue #259 / PR #260 review: the server
+                            # percent-decodes and normalises dot segments,
+                            # so `%6Dain` and `feat/../main` are `main`.
+                            and all(
+                                re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", part)
+                                for part in ref_paths[0]
+                                .lower()
+                                .rsplit("git/refs/heads/", 1)[1]
+                                .split("/")
+                            )
                             and ref_paths[0]
                             .lower()
                             .rsplit("git/refs/heads/", 1)[1]
@@ -12956,7 +13109,8 @@ def check(
                     joined = " ".join(toks[2:]).lower()
                     if re.search(
                         r"\bgists\b|\buser/repos\b|\borgs/[\w.-]+/repos\b"
-                        r"|\bpublic=true\b|\bprivate=false\b|\bvisibility\b",
+                        r"|public=true\b|private=false\b|visibility\b"
+                        r"|(?:private|public)=(?!true\b|false\b)",
                         joined,
                     ):
                         return (
@@ -12969,6 +13123,158 @@ def check(
             cwd_uncertain = True
 
     return "allow", ""
+
+
+# --- posture ----------------------------------------------------------------
+# Owner decision 2026-09-02, landing the #21 redesign's slices #26 (FLOOR_ACK
+# self-unstick) and #62 (re-tier the opacity class) in one seam: the analyzer's
+# verdict is computed exactly as before, then RENDERED by posture.
+
+_FLOOR_POSTURES = ("wall", "guide")
+
+# A trailing shell comment is the acknowledgement carrier because it is inert
+# in bash and PowerShell alike and cannot alter what the command does. It is
+# stripped BEFORE analysis, so the analyzer sees the command exactly as it saw
+# the denied attempt and the key binds to that same text.
+_FLOOR_ACK_MARKER = re.compile(
+    r"(?:^|\s)#\s*FLOOR[-_]ACK\s*[:=]\s*([0-9a-f]{10})\s*$", re.IGNORECASE
+)
+
+# Reasons that report the PARSER's uncertainty rather than a proven irreversible
+# action (#21: 91% of real blocks; #62: the "pure opacity" channel). Two kinds
+# of uncertainty are NOT pure opacity and stay on the double-check path (#62's
+# "guarded opacity": an opaque operand OF a guarded verb): a reason naming a
+# secret-looking target (the charter's secret-file rule reached through an
+# unresolved operand) and a reason about an unresolved DELETE/removal operand
+# (`rm -rf $dir`, a splatted Remove-Item, `find -delete`) -- rm -rf-class
+# uncertainty is exactly what the owner asked to keep as a forced re-read.
+# Anything this table does not recognise keeps the acknowledgement path, so an
+# unclassified new deny site fails toward the double-check, never toward allow.
+_OPACITY_REASON = re.compile(
+    r"cannot be inspected|cannot safely|opaque|malformed|nesting exceeds"
+    r"|depth exceeds|comment inside a scriptblock|\[push-config-unverifiable\]",
+    re.IGNORECASE,
+)
+_OPACITY_EXCLUDED = re.compile(
+    r"secret-looking|delet|remov|rm -rf|recursive|pathspec|\bgit rm\b",
+    re.IGNORECASE,
+)
+
+# The analyzer returns its FIRST deny. When that deny is opacity-worded, the
+# command may still carry a literal charter spelling the analyzer never
+# reached (`git push --force origin $BRANCH` denies as "dynamic refspec" before
+# the force check; `sh -c "$(curl ...)"` denies as "dynamic executable"). So an
+# opacity deny proceeds only when the COMMAND TEXT, quotes included, carries no
+# charter hint. Over-triggering is safe: it costs one double-check, never a
+# wall. The reviewed hint set (PR #260, HIGH-1/2): force spellings and any git
+# push at all; recursive/forced deletion verbs; privilege elevation; program
+# text piped or substituted into an interpreter; nested program text
+# (`-c`, `eval`, `-x/--exec`, `foreach`, `bisect run`); brace expansion;
+# secret-looking names; file copies/moves/writes onto them.
+_HINT_INTERPRETERS = "|".join(
+    sorted((re.escape(head) for head in _PIPE_INTERPRETER_HEADS), key=len, reverse=True)
+)
+_HINT_PRIVILEGE = "|".join(sorted(re.escape(head) for head in _PRIVILEGE_HEADS))
+# A segment span that may continue across a backslash-newline.
+_HINT_SPAN = r"(?:[^|;&\n]|\\\n)*"
+_CHARTER_HINT = re.compile(
+    r"--force|\bgit\b" + _HINT_SPAN + r"\bpush\b|\bpush\b" + _HINT_SPAN + r"\s\+[\w/]"
+    r"|\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
+    r"|\bunlink\b|\bshred\b|-delete\b"
+    r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
+    r"|\|\s*(?:\S*[\\/])?(?:(?:"
+    + _HINT_PRIVILEGE
+    + r"|env)\s+)?(?:"
+    + _HINT_INTERPRETERS
+    + r")(?:\.exe)?(?![\w.-])"
+    r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
+    r"|\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s|\s-x\s)|--exec\b|\bforeach\b"
+    r"|bisect\s+run|\b(?:powershell|pwsh)(?:\.exe)?\b" + _HINT_SPAN + r"\s-e"
+    r"|\{[^{}\s]*,[^{}\s]*\}"
+    r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
+    r"|\btoken|\.netrc|\.npmrc|\.pypirc"
+    r"|\bcp\b|\bmv\b|copy-item|move-item|set-content|add-content|out-file|\binstall\b"
+    r"|\btee\b|\bdd\b",
+    re.IGNORECASE,
+)
+
+
+def floor_posture(tier_cfg: dict) -> str:
+    """Effective posture: `wall` renders verdicts as written, `guide` scales them.
+
+    T4 and wave_mode are walls whatever is declared (other agents' work is in
+    the blast radius). Below that an explicit `floor_posture` declaration binds;
+    without one, `sensitive_data` keeps the wall (BLUEPRINT §2: tightening
+    overlays) and everything else guides.
+    """
+    tier = tier_cfg.get("tier", 1)
+    flags = tier_cfg.get("flags", {}) or {}
+    if tier >= 4 or bool(flags.get("wave_mode")):
+        return "wall"
+    declared = tier_cfg.get("floor_posture")
+    if declared in _FLOOR_POSTURES:
+        return declared
+    if bool(flags.get("sensitive_data")):
+        return "wall"
+    return "guide"
+
+
+def split_floor_ack(command: str) -> tuple[str, str | None]:
+    """Return (command without its acknowledgement marker, key or None)."""
+    match = _FLOOR_ACK_MARKER.search(command)
+    if not match:
+        return command, None
+    return command[: match.start()].rstrip(), match.group(1).lower()
+
+
+def floor_ack_key(reason: str, command: str) -> str:
+    """The acknowledgement key for one (reason, command) pair.
+
+    Bound to both so an acknowledgement cannot be carried onto a different
+    command or a different verdict: a corrected command, or the same command
+    denied for a new reason, is a fresh double-check.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(
+        f"{reason}\n{command.rstrip()}".encode("utf-8", "surrogatepass")
+    )
+    return digest.hexdigest()[:10]
+
+
+def reason_is_pure_opacity(reason: str) -> bool:
+    return bool(_OPACITY_REASON.search(reason)) and not _OPACITY_EXCLUDED.search(reason)
+
+
+def command_carries_charter_hint(command: str) -> bool:
+    """Whether the command text, quotes included, spells a charter action."""
+    return bool(_CHARTER_HINT.search(command)) or bool(_SECRET_PATH.search(command))
+
+
+def apply_floor_posture(
+    decision: str, reason: str, command: str, ack: str | None, tier_cfg: dict
+) -> tuple[str, str]:
+    """Render the analyzer's verdict under the effective posture."""
+    if decision == "allow":
+        return decision, reason
+    if floor_posture(tier_cfg) == "wall":
+        return decision, reason
+    if (
+        decision == "deny"
+        and reason_is_pure_opacity(reason)
+        and not command_carries_charter_hint(command)
+    ):
+        return "allow", ""
+    expected = floor_ack_key(reason, command)
+    if ack == expected:
+        return "allow", ""
+    return (
+        "deny",
+        f"{reason} || DOUBLE-CHECK, not a wall: re-read the target, branch or "
+        "destination. If this is what you intend, re-run the command UNCHANGED "
+        f"with the trailing comment `# FLOOR_ACK={expected}` (on its own last "
+        "line after a heredoc). A changed command gets a new key.",
+    )
 
 
 # --- entry ------------------------------------------------------------------
@@ -13085,12 +13391,14 @@ def main():
             env_project_dir,
             payload_cwd,
         )
+        command, ack = split_floor_ack(command)
         decision, reason = check(
             command,
             tier_cfg,
             project_dir,
             payload_cwd or env_project_dir,
         )
+        decision, reason = apply_floor_posture(decision, reason, command, ack, tier_cfg)
     except Exception as exc:  # fail CLOSED after a Bash payload is identified
         respond(
             "deny",

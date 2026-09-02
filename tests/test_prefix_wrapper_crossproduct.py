@@ -2127,6 +2127,8 @@ _DO_BLOCK_EXTRA_OVER_BLOCKS = [
     "git push origin :feature/old-work",
     "git push origin :refs/heads/feature/old-work",
     "git push origin main :old",
+    "git push origin --delete refs/heads/heads/feature",
+    "git push origin :refs/heads/tags/feature",
     "git restore --source=.env report.txt",
     "git restore .",
     "git restore report.txt",

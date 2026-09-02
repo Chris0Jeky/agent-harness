@@ -135,6 +135,7 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
+FLOOR_POSTURES = frozenset({"wall", "guide"})
 AUTHORITY_VALUES = {"free", "gated", "human-only"}
 SCAN_PATHS = (
     "AGENTS.md",
@@ -4178,7 +4179,33 @@ def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any
         merged["public_synthetic_publication"] = publication
     else:
         merged.pop("public_synthetic_publication", None)
+    posture = merge_floor_postures(declarations)
+    if posture is not None:
+        merged["floor_posture"] = posture
+    else:
+        merged.pop("floor_posture", None)
     return merged
+
+
+def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
+    """Strictest declared posture, exactly as `dispatch.merge_floor_postures`.
+
+    `wall` binds when any declaration sets it — or leaves it unset while
+    declaring `sensitive_data`, whose default wall is a vote; `guide` binds
+    only when at least one declaration sets it and none says `wall`.
+    """
+    votes = set()
+    for declaration in declarations:
+        posture = declaration.get("floor_posture")
+        flags = declaration.get("flags")
+        if posture is None and isinstance(flags, dict) and flags.get("sensitive_data"):
+            posture = "wall"
+        votes.add(posture)
+    if "wall" in votes:
+        return "wall"
+    if "guide" in votes:
+        return "guide"
+    return None
 
 
 def merge_public_synthetic_publication(
@@ -4288,6 +4315,11 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
                 data.get("public_synthetic_publication")
             )
         )
+    posture = data.get("floor_posture")
+    if posture is not None and not (
+        isinstance(posture, str) and posture in FLOOR_POSTURES
+    ):
+        issues.append(f"floor_posture must be one of {sorted(FLOOR_POSTURES)}")
     return issues
 
 

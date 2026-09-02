@@ -222,7 +222,12 @@ common Git directory has no checkout (for example, a bare repository). Configure
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Current state (2026-09-02): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.29, which upstreams two owner decisions of 2026-08-18 that were authored directly
+source is 1.6.31, the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
+T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
+the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
+double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive
+repositories keep the walls, and any repo can declare `floor_posture: wall`. 1.6.30 honours
+Git's numeric booleans in the exact `--no-follow-tags` narrowing (#201, PR #239). 1.6.29 upstreams two owner decisions of 2026-08-18 that were authored directly
 in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
 left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard
 to the irreversible/exfiltration surfaces (repo/gist creation, visibility flips, non-branch
@@ -247,12 +252,12 @@ Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof r
 sibling, future, or changed adapter inherits the prior evidence. That pending proof is human-only
 and strictly ordered — see **H-14** in `HUMAN_TODO.md` and issue #232.
 
-The 2026-08-07/08 wave changed tests and documentation only, so this shipped state is unmoved:
-`FLOOR_VERSION` is still 1.6.27 and no adapter marker changed. It merged the cross-product gate
-repair (PR #240, #110), the secret-file scope ledger line (PR #237, #130) and this state record
-(PR #234). The two lanes that would move implementation — #201's dispatcher slice (PR #239) and
-#139's nested logical repo root (PR #238) — are open with confirmed blockers recorded on their
-threads, so neither has changed shipped behaviour.
+The 2026-08-07/08 wave changed tests and documentation only (PR #240 / #110, PR #237 / #130,
+the state record PR #234). The 2026-09-02 session then moved implementation: PR #238 landed
+#139's nested logical repo root with its three review defects fixed (#258 tracks one LOW
+follow-up); PR #257 upstreamed 1.6.29; PR #239 carries #201 as 1.6.30; and 1.6.31 is the guide
+posture above, which also fixes the four 1.6.29 carve-out defects the #257 review found (#259).
+Every producer marker change re-owes runtime proof: **H-15** in `HUMAN_TODO.md`.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology

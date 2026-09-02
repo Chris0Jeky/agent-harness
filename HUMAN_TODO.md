@@ -156,6 +156,16 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
+- [ ] **H-15** — **Deploy and re-trust floor 1.6.31 (guide posture).** Canonical source moved
+  1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions) → 1.6.30 (#201 / PR #239)
+  → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction; SPECS §5.4). The agent lane is
+  the byte sync into claude-config `hooks/` and `harness.py sync-global --config-root <claude-config>
+  --apply`. Human-only: a new session in each enabled Codex root for the `/hooks` re-trust, and one
+  canary trio per runtime — a harmless allow, an opacity allow (e.g. `& $py -m build` at T1-T3), and
+  a double-check (`rm -rf` on a nonexistent path outside the project: first attempt denied with a
+  key, acknowledged re-run allowed). Also your call: claude-config is T3 + `sensitive_data`, so it
+  keeps the walls by default — declare `"floor_posture": "guide"` there if you want the guide too.
+
 ## Changelog
 
 - 2026-08-07 — **H-14 added.** Between 2026-08-03 and today this file had zero open items while a
