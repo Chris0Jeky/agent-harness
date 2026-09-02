@@ -51,12 +51,32 @@ is what this module measures; the inner program's runtime behaviour is not.
 The deny-direction check count is also softer than it looks, and the number is not left
 to speak for itself. Nine enforced shapes (systemd-run, chroot, unshare, nsenter,
 runuser, su-c, xargs, find-exec, for-block-iex) deny essentially any payload, so roughly
-8,600 of those checks pass tautologically; and across all 52 enforced shapes, between 2
+8,600 of those checks pass tautologically; and across all 71 enforced shapes, between 3
 and 19 of each charter probe's denies come from a blanket opacity or privilege rule
-rather than from the rule the probe is named for. `CHARTER_RULE_DENY_FLOOR` and
-`DenyReasonTests` record and guard the part that is real, by comparing each deny's reason
-against the reason the BARE command produces — the floor carries no rule IDs yet (#26),
-so the bare reason is the closest available identity for a rule.
+rather than from the rule the probe is named for. `CHARTER_RULE_DENY_PAIRS` and
+`DenyReasonTests` record and guard the part that is real — 569 (probe, shape) pairs — by
+comparing each deny's reason against the reason the BARE command produces; the floor
+carries no rule IDs yet (#26), so the bare reason is the closest available identity for a
+rule. That record is a SET and not a count (issue #110): a per-probe integer asserted
+with `>=` cannot tell a rule that went quiet under one wrapper and loud under a newly
+promoted one from a rule that did neither, and the roster grows by promotions every time
+this gate closes a baseline. It had already drifted — the recorded floors were measured
+against 52 enforced shapes and every one of them sat 18-19 pairs below the truth.
+
+The false-positive direction has the mirror-image failure mode, and it also had it: the
+gate can only measure what its composability filter admits. `_composable` used to match
+its operator characters as RAW SUBSTRINGS, so `git commit -m 'redirect &> .env is
+blocked'` was dropped while `git commit -m 'fix the bug'` was kept — which excluded
+exactly the interesting half of the flagship SPECS §6 must-allow class, since prose ABOUT
+a dangerous command necessarily carries `&`, `>`, `$`, `(`, `|` or `;`. It now asks
+whether the operator is shell STRUCTURE, outside every inert quoted span, and
+`ComposabilityFilterTests` pins both edges. Admitting the class added 43 smoke allow-cases
+and 3,643 swept (case, shape) pairs, and surfaced 69 pre-existing over-blocks that nothing
+had ever measured (#235, plus #21's existing evaluator-opacity family). Inert is a strong
+word here and is meant literally: a span whose text depends on which dialect reads it is
+NOT inert, so a backslash before `"`, a backtick, `$` or `\\` inside a double-quoted span
+excludes the case — `"never \\`rm .env\\` please"` carries a carriage return under
+PowerShell and does not under POSIX.
 
 Hermetic by construction, and asserted rather than asserted-in-prose. `check()` reaches
 the host in three ways and all three are closed here: remote resolution is stubbed;
@@ -87,6 +107,9 @@ run — 50s on the author's machine, against 28s for the rest of `tests/` and 91
 the per-shape corpus to 150 cases only saved 8s, which is not worth a CI job that tests
 less than the local one. `FLOOR_CROSSPRODUCT_SAMPLE=<n>` applies that cap for local
 iteration; the sample is seeded per shape, so anything it reports reproduces exactly.
+Issue #110 moved both numbers and neither ratio: the benign sweep grew 10% (37,187 ->
+40,830 pairs) and asserting the reason record at all eight postures instead of one costs
+about 4s of the module's total.
 """
 
 import importlib.util
@@ -290,7 +313,7 @@ def decide_with_reason(
     The sweeps only need the decision, but throwing the reason away made a rule firing
     indistinguishable from an unrelated opacity deny — so a change that replaced a
     specific charter rule with a blanket "cannot inspect this wrapper" deny would have
-    counted as coverage. `CHARTER_RULE_DENY_FLOOR` uses this to tell the two apart.
+    counted as coverage. `CHARTER_RULE_DENY_PAIRS` uses this to tell the two apart.
     """
     if _PROJECT_DIR is None:  # pragma: no cover - guards misuse outside the module
         raise RuntimeError("module fixture not initialised")
@@ -750,43 +773,138 @@ DENY_CORPUS = [
     if expected == "deny" and _composable_deny_case(command)
 ]
 
-#: Tokens that make a smoke allow-case unusable as a cross-product payload: composing a
-#: multi-segment or already-redirected command with a prefix or wrapper produces a
-#: DIFFERENT command whose correct verdict is no longer "allow". Excluding them keeps a
-#: false-positive report meaningful — every survivor is a command whose verdict the shape
-#: genuinely changed.
-#:
-#: QUOTES ARE DELIBERATELY NOT IN THIS LIST. They were, and that was the single worst hole
-#: in the false-positive direction: SPECS §6 names "commit/PR bodies containing
-#: dangerous-looking text inside quotes" as the FLAGSHIP must-allow class, and excluding
-#: every quoted payload meant `git commit -m "block rm -rf in hook"` and
-#: `gh pr create --title "fix" --body-file body.md` were never crossed with any shape at
-#: all — the class issue #36 already had to fix once was measured by nothing. The stated
-#: reason (an embedded quote collides with the wrapper's own quoting) is a per-SHAPE
-#: problem and is solved per shape: `_posix_embeddable`/`_powershell_embeddable` decline
-#: the payload, and a template whose marker sits inside its own quoted span declares
-#: `outer_quote`. A plain `nohup <CMD>` or `> out.txt <CMD>` carries a quoted payload
-#: perfectly, and admitting them added 42 smoke allow-cases with zero new failures.
-_NON_COMPOSABLE = (
-    ";",
-    "&&",
-    "||",
-    "|",
-    "\n",
-    ">",
-    "<",
-    "`",
-    "$",
-    "&",
-    "{",
-    "}",
-    "(",
-    ")",
-)
+#: Characters that are executable shell STRUCTURE when they sit outside an inert quoted
+#: span: statement separators, pipes, every redirection operator, grouping, and the two
+#: expansion introducers. A payload carrying one of these as real structure composes into
+#: a DIFFERENT command whose correct verdict is no longer "allow", so a deny measured on
+#: it would not be a false positive.
+_STRUCTURAL_CHARACTERS = frozenset(";|&<>(){}$`")
+
+#: The two of them that keep expanding INSIDE a double-quoted span, in POSIX shells and
+#: in PowerShell alike. A double-quoted span is inert for everything else.
+_DOUBLE_QUOTED_STILL_ACTIVE = frozenset("$`")
+
+_QUOTES = frozenset("'\"")
+
+#: Inside a double-quoted span these are the characters a backslash means something
+#: different in front of depending on the dialect, so the span's text is undecidable.
+_DIALECT_DEPENDENT_AFTER_BACKSLASH = frozenset('"`$\\')
+
+#: Never inert enough to compose, whatever quotes surround them: every shape template in
+#: the roster is a single line, so a payload carrying a real line break is a different
+#: kind of object rather than a longer one. Checked on the raw text on purpose.
+_LINE_BREAKS = frozenset("\n\r")
+
+
+def _structure_outside_inert_quotes(command: str) -> bool:
+    """Whether `command` carries shell structure a shape would have to compose WITH.
+
+    Structure means the character is READ BY A SHELL: a `;` between two commands, a real
+    `>` redirect, a `$(...)` the shell will run. The same character inside an inert
+    quoted span is ordinary text, and text is exactly what the flagship must-allow class
+    of SPECS §6 is made of — `git commit -m 'redirect &> .env is blocked'` is one
+    command, not two, and stays one command under `nohup`, under `> out.txt` and under
+    every other transparent shape.
+    * outside a span, every separator, redirection, grouping character and expansion
+      introducer is structure;
+    * a SINGLE-quoted span is inert in both dialects — nothing expands inside it and it
+      carries no escape character;
+    * a DOUBLE-quoted span is inert for separators, redirections and grouping but NOT
+      for `$` and a backtick, which keep expanding in both dialects.
+
+    Conservative by construction, and deliberately so in ONE direction: it answers True —
+    "not composable" — whenever the quoting cannot be resolved. A false True only shrinks
+    the benign corpus; a false False manufactures a false-positive report against a
+    command whose meaning the shape genuinely changed, which is how a gate starts lying.
+    So an unbalanced quote answers True, and so does a backslash before a quote
+    character, which POSIX reads as an escaped literal and PowerShell reads as a literal
+    backslash followed by a span boundary — the scan cannot pick one without picking a
+    dialect the corpus does not declare.
+
+    The same rule covers a backslash inside a double-quoted span before `"`, a backtick,
+    `$` or `\\`, and that case is subtle enough that the first version of this function got
+    it wrong. POSIX gives the backslash escape semantics there; PowerShell gives it none
+    and keeps its OWN escape character, the backtick. `"never \\`rm .env\\` please"` is a
+    literal backslash-backtick-r under POSIX and a backslash plus a CARRIAGE RETURN under
+    PowerShell, so the span's TEXT depends on who reads it — and a payload whose text
+    changes under a shape is not the payload the sweep set out to measure, whatever the
+    floor then says about it. Undecidable, so excluded.
+
+    Known residual, unchanged by issue #110 and stated rather than hidden: a backslash
+    OUTSIDE any span is still treated as an ordinary character, so `echo \\a` is admitted
+    although POSIX reads it as `echo a` and PowerShell as `echo \\a`. That is pre-existing
+    behaviour — the old raw-text filter admitted it too — and tightening it would drop
+    Windows-path payloads the corpus has always measured.
+    """
+    if any(ch in command for ch in _LINE_BREAKS):
+        return True
+    quote: str | None = None
+    index = 0
+    length = len(command)
+    while index < length:
+        ch = command[index]
+        following = command[index + 1 : index + 2]
+        if quote is None:
+            if ch == "\\" and following in _QUOTES:
+                return True
+            if ch in _QUOTES:
+                quote = ch
+            elif ch in _STRUCTURAL_CHARACTERS:
+                return True
+            index += 1
+            continue
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            index += 1
+            continue
+        # Inside a double-quoted span.
+        if ch == "\\":
+            # The four characters POSIX lets a backslash escape here, and the four
+            # PowerShell does not. `\"` closes the span for one dialect and not the
+            # other; `\`` is a literal pair for one and an ESCAPE SEQUENCE for the other
+            # (`` `r `` is a carriage return, `` `n `` a newline); `\$` still expands
+            # under PowerShell; `\\` is one backslash for POSIX and two for PowerShell.
+            # None of them can be resolved without picking a dialect, so none of them is
+            # inert enough to compose.
+            if following in _DIALECT_DEPENDENT_AFTER_BACKSLASH:
+                return True
+            # Anything else — `\'`, `\a`, a Windows path separator — is a literal
+            # backslash followed by an ordinary character in every dialect.
+            index += 1
+            continue
+        if ch == '"':
+            quote = None
+        elif ch in _DOUBLE_QUOTED_STILL_ACTIVE:
+            return True
+        index += 1
+    return quote is not None
 
 
 def _composable(command: str) -> bool:
-    if any(token in command for token in _NON_COMPOSABLE):
+    """Whether a smoke allow-case can be crossed with a shape and still mean itself.
+
+    QUOTED PROSE IS DELIBERATELY ADMITTED, and the filter has now been wrong about it
+    twice in opposite ways. First the quote CHARACTER was a disqualifier, which meant
+    `git commit -m "block rm -rf in hook"` and `gh pr create --title "fix" --body-file
+    body.md` were never crossed with any shape at all — SPECS §6 names "commit/PR bodies
+    containing dangerous-looking text inside quotes" as the FLAGSHIP must-allow class,
+    and the class issue #36 already had to fix once was measured by nothing. That reason
+    (an embedded quote collides with the wrapper's own quoting) is a per-SHAPE problem
+    and is solved per shape: `_posix_embeddable`/`_powershell_embeddable` decline the
+    payload, and a template whose marker sits inside its own quoted span declares
+    `outer_quote`. A plain `nohup <CMD>` or `> out.txt <CMD>` carries a quoted payload
+    perfectly.
+
+    Then (issue #110) the operator characters were matched as RAW SUBSTRINGS, which
+    re-imposed the same exclusion on the half of the class that matters: prose ABOUT a
+    dangerous command necessarily carries `&`, `>`, `$`, `(`, `|` or `;`, so
+    `git commit -m 'redirect &> .env is blocked'` and `git commit -m 'wip $(rm -rf /)'`
+    were dropped while `git commit -m 'fix the bug'` was kept. Quoted prose that contains
+    no dangerous-looking text is not the class; it is the easy half of it. The filter now
+    asks whether the operator is shell STRUCTURE, not whether the byte is present.
+    """
+    if _structure_outside_inert_quotes(command):
         return False
     # Same reason as the deny side: a Windows path whose closing quote is preceded by
     # backslashes parses differently under POSIX quoting rules, so composing it changes
@@ -830,6 +948,30 @@ SMOKE_BENIGN_CORPUS = [
 
 BENIGN_CORPUS = SMOKE_BENIGN_CORPUS + [
     (command, 1, {}) for command in AGENT_BENIGN_COMMANDS
+]
+
+#: SPECS §6's flagship must-allow class, named so it is a test rather than a claim:
+#: prose that CONTAINS the dangerous-looking text, not prose that merely sits in quotes.
+#: The second kind was already in the corpus and is the easy half — `git commit -m "fix
+#: the bug"` is not what the class is about. Every entry below is a smoke allow-case and
+#: every one carries an operator character that the raw-text filter used to read as shell
+#: structure, so before issue #110 not one of them was crossed with a single shape.
+#:
+#: Pinned by name rather than measured by a pattern on purpose: a regex over the corpus
+#: would go green again the moment someone added one more quoted string, which is exactly
+#: how this class lost its coverage the first time.
+FLAGSHIP_QUOTED_PROSE = [
+    # Commit-message prose that CONTAINS the dangerous-looking text, which is the class.
+    "git commit -m 'redirect &> .env is blocked'",
+    "git commit -m 'wip $(rm -rf /)'",
+    'git commit -m "document echo > %TARGET%"',
+    # The same property one step out from prose: an operator spelling passed as DATA.
+    # Kept alongside the messages because the prose entries all happen to be `git
+    # commit`, and a class represented by one verb is one rule change away from being
+    # represented by nothing.
+    "echo '&>' .env",
+    'echo ">" .env',
+    "bash -c 'true' _ '&& git push --force'",
 ]
 
 
@@ -951,29 +1093,642 @@ QUOTED_BENIGN_REDIRECTS = [
     "echo '1>>' .env",
 ]
 
-#: How many ENFORCED shapes deny each charter probe FOR THE PROBE'S OWN RULE — the
-#: reason the bare command produces — rather than for an unrelated blanket reason
-#: ("cannot safely inspect wrapper options", "privilege elevation", "dynamic executable
-#: name"). Out of 52 enforced shapes every probe denies under all 52, but between 2 and
-#: 19 of those denies are opacity, not the charter rule: `sudo apt-get install thing`
-#: under `xargs -I{}` denies because xargs is opaque, and would keep denying if the sudo
-#: rule were deleted outright. Nine enforced shapes (systemd-run, chroot, unshare,
-#: nsenter, runuser, su-c, xargs, find-exec, for-block-iex) deny essentially everything,
-#: so ~8,600 of the advertised deny-direction checks are tautological.
+#: Which ENFORCED shapes deny each charter probe FOR THE PROBE'S OWN RULE — the reason
+#: the BARE command produces — rather than for an unrelated blanket reason ("cannot
+#: safely inspect wrapper options", "privilege elevation", "dynamic executable name").
+#: Every probe denies under every enforced shape it composes with, but a slice of those
+#: denies is opacity rather than the charter rule: `sudo apt-get install thing` under
+#: `xargs -I{}` denies because xargs is opaque, and would keep denying if the sudo rule
+#: were deleted outright. Nine enforced shapes (systemd-run, chroot, unshare, nsenter,
+#: runuser, su-c, xargs, find-exec, for-block-iex) deny essentially any payload, so a
+#: large share of the advertised deny-direction checks are tautological. This record is
+#: the part that is real.
 #:
-#: These floors are the measured counts. Asserted with `>=`, so adding a shape cannot
-#: break them, but converting a real rule into a blanket deny drops the count and fails.
-CHARTER_RULE_DENY_FLOOR = {
-    "rm-rf-outside": 42,
-    "force-push": 43,
-    "sudo": 44,
-    "pipe-to-shell": 33,
-    "secret-write": 49,
-    "secret-delete": 42,
-    "secret-write-quoted": 49,
-    "secret-redirect-leading-quoted": 50,
-    "secret-redirect-leading-quoted-double": 50,
+#: RECORDED AS PAIRS, NOT AS A COUNT (issue #110). This used to be
+#: `CHARTER_RULE_DENY_FLOOR`, one integer per probe asserted with `>=`, and an integer
+#: lower bound cannot express the property the test is named for: a rule that stops
+#: producing the bare reason under one wrapper and starts producing it under another
+#: leaves the count where it was, so the regression passes inside its own guard. That is
+#: drift that happens rather than drift that might — 21 shapes were promoted out of the
+#: #46 baseline in a single PR — and it HAD already happened silently. The recorded
+#: floors were measured against 52 enforced shapes; the roster is 71 today, and every
+#: floor sat 18-19 pairs under the truth, which is exactly how much coverage any one rule
+#: could have lost without moving a number. Pinning the SET means added coverage can
+#: never pay for lost coverage, in either direction.
+#:
+#: Regenerating: do not hand-edit. Run the sweep and paste what
+#: `DenyReasonTests.test_charter_rules_fire_under_exactly_the_recorded_shapes` prints —
+#: it emits the corrected tuple for every probe that drifted, and names each lost and
+#: each new pair so a promotion is never confused with a regression.
+CHARTER_RULE_DENY_PAIRS = {
+    "rm-rf-outside": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "cmd-c",
+        "command-builtin",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "zsh-c",
+    ),
+    "force-push": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "cmd-c",
+        "command-builtin",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
+    "sudo": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "cmd-c",
+        "command-builtin",
+        "do-block-iex",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
+    "pipe-to-shell": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "cmd-c",
+        "command-builtin",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "foreach-block",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "time-builtin",
+        "timeout",
+        "xargs",
+        "zsh-c",
+    ),
+    "secret-write": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "busybox-sh-c",
+        "call-operator-block",
+        "chroot",
+        "cmd-c",
+        "command-builtin",
+        "do-block-iex",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "nsenter",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "runuser",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "systemd-run",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "unshare",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
+    "secret-delete": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "cmd-c",
+        "command-builtin",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "zsh-c",
+    ),
+    "secret-write-quoted": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "busybox-sh-c",
+        "call-operator-block",
+        "chroot",
+        "cmd-c",
+        "command-builtin",
+        "do-block-iex",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "nsenter",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "runuser",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "systemd-run",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "unshare",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
+    "secret-redirect-leading-quoted": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "chroot",
+        "cmd-c",
+        "command-builtin",
+        "do-block-iex",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "nsenter",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "runuser",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "systemd-run",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "unshare",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
+    "secret-redirect-leading-quoted-double": (
+        "assignment",
+        "assignment-multi",
+        "assignment-quoted",
+        "assignment-then-redirect",
+        "bash-c",
+        "bash-lc",
+        "brace-group",
+        "busybox-sh-c",
+        "call-operator-block",
+        "chroot",
+        "cmd-c",
+        "command-builtin",
+        "do-block-iex",
+        "dot-source-block",
+        "env",
+        "env-assignment",
+        "env-clean",
+        "exec-builtin",
+        "flock",
+        "foreach-block",
+        "foreach-iex",
+        "foreach-second-statement",
+        "iex",
+        "invoke-expression",
+        "ionice",
+        "leading-newline",
+        "leading-whitespace",
+        "nice",
+        "nohup",
+        "nsenter",
+        "powershell-command",
+        "preceding-command-separator",
+        "pwsh-c",
+        "redirect-append",
+        "redirect-both",
+        "redirect-both-append",
+        "redirect-clobber",
+        "redirect-devnull",
+        "redirect-dup",
+        "redirect-dup-split",
+        "redirect-fd-high",
+        "redirect-gt-amp",
+        "redirect-herestring",
+        "redirect-input",
+        "redirect-pair",
+        "redirect-quoted-double",
+        "redirect-quoted-glued",
+        "redirect-quoted-single",
+        "redirect-stderr",
+        "redirect-then-assignment",
+        "redirect-truncate",
+        "runuser",
+        "script-utility-long",
+        "setsid",
+        "sh-c",
+        "stdbuf",
+        "subshell",
+        "systemd-run",
+        "taskset",
+        "time-builtin",
+        "timeout",
+        "try-block-iex",
+        "unshare",
+        "watch",
+        "wsl",
+        "wsl-exec",
+        "xargs",
+        "zsh-c",
+    ),
 }
+
+#: The postures the pair set above is asserted at. The record is keyed by (probe, shape)
+#: ALONE, and that is only sound while no pinned rule rides a tier or flag ladder — a
+#: baseline keyed without its posture dimension fails in BOTH directions once one does,
+#: reporting the postures that still block as regressions and the postures that stopped
+#: as unexpected fixes. So the invariance is MEASURED, not assumed: the same pair set is
+#: asserted at each posture below, and a rule that starts graduating fails here with the
+#: posture named, which is the signal to split the record by (probe, shape, tier, flags)
+#: rather than to widen it. Measured today: identical at all eight, on Windows and on
+#: Linux.
+CHARTER_RULE_DENY_POSTURES = (
+    (1, {}),
+    (2, {}),
+    (3, {}),
+    (4, {}),
+    (1, {"wave_mode": True}),
+    (2, {"wave_mode": True}),
+    (3, {"wave_mode": True}),
+    (4, {"wave_mode": True}),
+)
 
 #: Benign representatives. Every one is allowed bare (asserted below).
 BENIGN_PROBES = [
@@ -1195,8 +1950,15 @@ _over_block(
 
 #: Benign payloads an evaluator body denies on opacity (#21). Every one is a
 #: download/output-option command the parser will not model inside `iex`.
+#:
+#: Seven of them arrived with the issue #110 fix to `_composable`, which stopped dropping
+#: a payload because an operator character appeared anywhere in its raw text. They carry
+#: their braces and `%{...}` inside quotes, so the raw-text filter had never let them
+#: reach a shape; the verdicts themselves are unchanged and predate this gate.
 _EVALUATOR_OPACITY_OVER_BLOCKS = [
     "curl --disable https://example.invalid/.env",
+    'curl -q "https://example.invalid/{<kind>one,two}.txt" -o "report-#<kind>.txt"',
+    'curl -q "https://example.invalid/{one,two}.txt" -o "report-#1.txt"',
     "curl -q -- https://example.invalid/report.txt --trace=.env",
     "curl -q --alt-svc .env --alt-svc cache.txt https://example.invalid/report.txt",
     "curl -q --alt-svc cache.txt https://example.invalid/report.txt",
@@ -1226,13 +1988,18 @@ _EVALUATOR_OPACITY_OVER_BLOCKS = [
     "curl -q --trace .env --next --trace - https://example.invalid/report.txt",
     "curl -q --trace .env --trace - https://example.invalid/report.txt",
     "curl -q --user-agent=-O https://example.invalid/.env",
+    "curl -q --write-out '%output{.env}' --write-out '%{http_code}' https://example.invalid/report.txt",
     "curl -q -J -o report.txt https://example.invalid/report.txt",
+    'curl -q -O "https://example.invalid/{report,notes}.txt"',
     "curl -q -O 'https://example.invalid/report.txt#/.env'",
     "curl -q -O 'https://example.invalid/report.txt?next=/.env'",
     "curl -q -O https://example.invalid/report.txt",
     "curl -q -O https://example.invalid/report.txt -o - https://example.invalid/.env",
     "curl -q -c.env -ccookies.txt https://example.invalid/report.txt",
+    'curl -q -g "https://example.invalid/{env,txt}" -o ".#1"',
     "curl -q -g -O https://example.invalid/.[a-z]nv",
+    "curl -q -w '%%output{.env}' https://example.invalid/report.txt",
+    "curl -q -w '%{http_code}' https://example.invalid/report.txt",
     "curl -q https://api.example.com/data -o data.json",
     "curl -q https://example.invalid/.env",
     "curl -qAfoo.env https://example.invalid/file",
@@ -1546,6 +2313,104 @@ _case_over_block(
     ["time-builtin"],
     "#68",
     "the time builtin denies a benign download that is allowed bare",
+)
+
+# --- issue #235: a quoted span stops being quoted once the payload is a BODY ----------
+# Surfaced by the issue #110 fix to `_composable` and NOT introduced by it: none of these
+# verdicts changed, they were simply unmeasured, because the raw-text filter dropped every
+# payload whose prose carried an operator character before it could reach a shape. All 85
+# pairs are the over-block direction — the bare command allows and the composed one denies
+# — so this is the #21 surface, not a bypass, and `dispatch.py` is untouched.
+#
+# One mechanism, three faces. A quoted span is inert text to the outer shell and the floor
+# reads it that way, which is what makes SPECS §6's flagship must-allow class ("commit/PR
+# bodies containing dangerous-looking text inside quotes") allow at all. Ride the same
+# payload inside a body the floor re-parses as a child — a `cmd /c "..."` body, an `iex`
+# body, a ForEach-Object/do/try block — and the inner span's quote provenance is not
+# carried into the re-parse, so prose is judged as program text and the rule the prose
+# merely DESCRIBES fires against it. Same class as #81's "a quoted refspec is re-read as a
+# second --force-with-lease destination once the command is re-parsed as a child",
+# reaching the prose class instead of a git-argv rule.
+#
+# Measured flat: every pair below was re-measured at tiers 1-4 with and without
+# `wave_mode` and none of them rides a graduated ladder, so `when` stays unscoped rather
+# than being left unscoped by default. Also re-measured under Linux (WSL Ubuntu, CPython
+# 3.10) — identical set, so none of it is a Windows path-flavour artefact.
+
+#: WITHDRAWN, and left as a comment because the reasoning is the useful part. Five
+#: backtick-carrying prose payloads — `gh pr comment 1 --body "never \`rm .env\` please"`
+#: and four like it — were recorded here and reported in #235 as over-blocks. They are
+#: not valid measurements. A backslash before a backtick inside a DOUBLE-quoted span is
+#: dialect-dependent: POSIX escapes the backtick, PowerShell leaves the backslash literal
+#: and lets its own backtick escape the next character, so that payload carries a literal
+#: backtick-r under one dialect and a CARRIAGE RETURN under the other. The composed line
+#: therefore holds different TEXT than the bare command, and a payload whose text a shape
+#: changes is not a false-positive measurement whatever the floor then says about it.
+#: `_composable` now excludes the whole dialect-dependent set — the direction its own
+#: docstring promises — and these pairs went with it.
+#:
+#: Raised as a P2 on PR #240 by the Codex reviewer. The first version of this file
+#: asserted in a comment that the pair was inert in both dialects, which was simply
+#: wrong, and the recorded evidence rested on that assertion.
+
+#: A quoted brace expansion is how a user SUPPRESSES brace expansion, which is exactly why
+#: the bare commands allow. The quotes stop counting once the payload is a body, and the
+#: brace-expansion secret-target and refspec scans fire on text the shell would never
+#: expand.
+_QUOTED_BRACE_OVER_BLOCKS = [
+    "git push origin 'feature/{one,two}'",
+    "touch '.{e..e}nv'",
+    "touch '.{env,gitignore}'",
+]
+
+#: `cmd /c` cannot carry a single-quoted payload, and the honest reading is that this is
+#: as much a DIALECT artefact of the shape as a floor over-block: cmd.exe has no
+#: single-quote, so the composed line arguably does mean something different from the bare
+#: one. Recorded rather than argued with, which is what `_CMD_C_OVER_BLOCKS` (#69) already
+#: does for the identical mechanism on a refspec. The first entry is SPECS §6's flagship
+#: sentence denied verbatim.
+_CMD_C_QUOTED_SPAN_OVER_BLOCKS = [
+    "'&>' out git push --force origin main",
+    "'&>'out git push --force origin main",
+    "'(git)' push --force origin main",
+    "'(rm)' -rf /",
+    "'1>>' out.txt git push --force origin main",
+    "'2>' out.txt rm -rf /critical/outside",
+    "'<' input rm -rf /critical/outside",
+    "'<>' x rm -rf /critical/outside",
+    "'>' out.txt rm -rf /critical/outside",
+    "'>>' out.txt git push --force origin main",
+    "'>|' out git push --force origin main",
+    "bash -c 'true' _ '&& git push --force'",
+    "echo '&>' .env",
+    "echo '1>>' .env",
+    "echo '2>' .env",
+    "git commit -m 'redirect &> .env is blocked'",
+]
+
+_case_over_block(
+    _QUOTED_BRACE_OVER_BLOCKS,
+    ["cmd-c", "do-block-iex", "foreach-block"],
+    "#235",
+    "a QUOTED brace expansion — the spelling that suppresses expansion — is re-read as "
+    "a dynamic target once the payload is a body",
+)
+# The double-quoted twin is one shape narrower: `cmd /c "touch \".{e..e}nv\""` cannot be
+# composed at all (`_posix_embeddable` declines a payload carrying `"`), so recording
+# cmd-c for it would be a zombie entry `ShapeRosterTests` rejects.
+_case_over_block(
+    ['touch ".{e..e}nv"'],
+    ["do-block-iex", "foreach-block"],
+    "#235",
+    "a QUOTED brace expansion — the spelling that suppresses expansion — is re-read as "
+    "a dynamic target once the payload is a body",
+)
+_case_over_block(
+    _CMD_C_QUOTED_SPAN_OVER_BLOCKS,
+    ["cmd-c"],
+    "#235",
+    "a single-quoted span inside a cmd /c body is read as program text; cmd.exe has no "
+    "single-quote, so this is a dialect artefact of the shape as much as an over-block",
 )
 
 # --- issue #81: PR #70's git-argv rules do not survive a child re-parse --------------
@@ -2121,7 +2986,22 @@ class DenyDirectionTests(CrossProductBase):
 class DenyReasonTests(CrossProductBase):
     """A deny has to come from the rule it is credited to."""
 
-    def test_charter_rules_still_fire_rather_than_blanket_opacity(self):
+    def _shapes_firing_the_bare_reason(self, command: str, tier: int, flags: dict):
+        """Enforced shapes whose deny reason matches the BARE command's reason."""
+        _bare_decision, bare_reason = decide_with_reason(command, tier, flags)
+        fired = set()
+        for shape in ENFORCED_SHAPES:
+            if not shape.accepts(command):
+                continue
+            composed = shape.apply(command)
+            if composed is None:
+                continue
+            decision, reason = decide_with_reason(composed, tier, flags)
+            if decision == "deny" and reason == bare_reason:
+                fired.add(shape.name)
+        return fired
+
+    def test_charter_rules_fire_under_exactly_the_recorded_shapes(self):
         """Guard against a charter rule being replaced by an unrelated opacity deny.
 
         `decide()` returns only the decision, so "still denies" counted a blanket
@@ -2130,37 +3010,100 @@ class DenyReasonTests(CrossProductBase):
         denying under `xargs -I{}`, `su -c` and every privilege-boundary launcher, and
         the sweep would report full coverage. Comparing against the BARE reason
         separates the two without needing rule IDs the floor does not carry yet.
+
+        Asserted as a SET of (probe, shape) pairs, which is the half the recorded
+        integer floor could not do (issue #110). `fired >= floor` cannot tell a rule
+        that stopped firing under `nohup` and started firing under a newly promoted
+        `redirect-clobber` from a rule that did neither: the count is identical and the
+        regression sits inside its own guard. Losing a pair and gaining a pair are
+        different events and are reported as different events here — LOST means a rule
+        went quiet somewhere it used to speak, NEW means coverage arrived and has to be
+        recorded before it can be guarded.
         """
-        shortfalls = []
+        losses = []
+        gains = []
         for probe, command in CHARTER_PROBES:
-            _bare_decision, bare_reason = decide_with_reason(command)
-            fired = 0
-            for shape in ENFORCED_SHAPES:
-                if not shape.accepts(command):
-                    continue
-                composed = shape.apply(command)
-                if composed is None:
-                    continue
-                decision, reason = decide_with_reason(composed)
-                if decision == "deny" and reason == bare_reason:
-                    fired += 1
-            floor = CHARTER_RULE_DENY_FLOOR[probe]
-            if fired < floor:
-                shortfalls.append((probe, fired, floor))
+            recorded = set(CHARTER_RULE_DENY_PAIRS[probe])
+            for tier, flags in CHARTER_RULE_DENY_POSTURES:
+                fired = self._shapes_firing_the_bare_reason(command, tier, flags)
+                for name in sorted(recorded - fired):
+                    losses.append((probe, name, tier, flags))
+                for name in sorted(fired - recorded):
+                    gains.append((probe, name, tier, flags))
+        messages = []
+        if losses:
+            messages.append(
+                "LOST — a charter rule stopped firing under a shape where it used to "
+                "fire. The shape may still deny for an unrelated opacity reason, which "
+                "is not the same coverage:\n"
+                + "\n".join(
+                    f"  probe={probe} shape={name} tier={tier} flags={flags or '{}'}"
+                    for probe, name, tier, flags in losses[:40]
+                )
+                + (f"\n  ... and {len(losses) - 40} more" if len(losses) > 40 else "")
+            )
+        if gains:
+            messages.append(
+                "NEW — a charter rule now fires under a shape the record does not "
+                "carry. Coverage that is not recorded is not guarded; add these to "
+                "CHARTER_RULE_DENY_PAIRS:\n"
+                + "\n".join(
+                    f"  probe={probe} shape={name} tier={tier} flags={flags or '{}'}"
+                    for probe, name, tier, flags in gains[:40]
+                )
+                + (f"\n  ... and {len(gains) - 40} more" if len(gains) > 40 else "")
+            )
+        if messages:
+            messages.append(self._corrected_record(losses, gains))
+            self.fail("\n\n".join(messages))
+
+    def _corrected_record(self, losses, gains) -> str:
+        """The replacement literal, so nobody hand-edits 569 lines of pinned data."""
+        drifted = {probe for probe, *_rest in losses} | {
+            probe for probe, *_rest in gains
+        }
+        lines = [
+            "Corrected record for the drifted probes, measured at the FIRST posture in "
+            "CHARTER_RULE_DENY_POSTURES. Paste it only after deciding that every LOST "
+            "pair above is a promotion and not a regression:"
+        ]
+        tier, flags = CHARTER_RULE_DENY_POSTURES[0]
+        for probe, command in CHARTER_PROBES:
+            if probe not in drifted:
+                continue
+            fired = self._shapes_firing_the_bare_reason(command, tier, flags)
+            lines.append(f"    {probe!r}: (")
+            lines.extend(f"        {name!r}," for name in sorted(fired))
+            lines.append("    ),")
+        return "\n".join(lines)
+
+    def test_every_charter_probe_has_a_recorded_pair_set(self):
         self.assertEqual(
-            shortfalls,
-            [],
-            "a charter rule stopped firing under shapes where it used to fire; the "
-            "shapes may still deny for an unrelated opacity reason, which is not the "
-            "same coverage (probe, fired, recorded floor)",
+            sorted(CHARTER_RULE_DENY_PAIRS),
+            sorted(CHARTER_PROBE_IDS),
+            "every charter probe needs a recorded pair set, or its rule is unguarded",
         )
 
-    def test_every_charter_probe_has_a_recorded_reason_floor(self):
-        self.assertEqual(
-            sorted(CHARTER_RULE_DENY_FLOOR),
-            sorted(CHARTER_PROBE_IDS),
-            "every charter probe needs a rule-deny floor, or the number is unguarded",
-        )
+    def test_every_recorded_pair_names_a_live_enforced_shape(self):
+        """A record naming a shape that no longer exists asserts nothing.
+
+        The pair set is only stronger than the integer floor while every name in it is
+        a shape the sweep actually visits. A stale name would be reported as LOST on
+        every run, which is noise that trains the next reader to widen the record
+        instead of reading it.
+        """
+        enforced = {shape.name for shape in ENFORCED_SHAPES}
+        for probe, names in CHARTER_RULE_DENY_PAIRS.items():
+            self.assertTrue(names, f"{probe}: empty pair set records nothing")
+            self.assertEqual(
+                sorted(names),
+                sorted(set(names)),
+                f"{probe}: duplicate shape name in the recorded pair set",
+            )
+            for name in names:
+                self.assertIn(
+                    name, enforced, f"{probe}: {name} is not an enforced shape"
+                )
 
 
 class FalsePositiveDirectionTests(CrossProductBase):
@@ -2186,6 +3129,187 @@ class FalsePositiveDirectionTests(CrossProductBase):
             self.unexpectedly_fixed(fixed, "DOCUMENTED_CASE_OVER_BLOCKS"),
             self.render(failures, "false-positive-direction"),
         )
+
+
+class ComposabilityFilterTests(CrossProductBase):
+    """`_composable` has to read shell STRUCTURE, not scan for bytes (issue #110).
+
+    The filter decides what the whole false-positive direction is allowed to measure, so
+    a mistake in it is invisible: the sweep still reports green, over fewer commands.
+    These assert the two edges directly — that inert quoted prose gets in, and that real
+    structure and undecidable quoting stay out — because neither shows up as a failure
+    anywhere else in this module.
+    """
+
+    def test_the_flagship_quoted_prose_class_is_in_the_smoke_benign_corpus(self):
+        corpus = {command for command, _tier, _flags in SMOKE_BENIGN_CORPUS}
+        missing = [
+            command for command in FLAGSHIP_QUOTED_PROSE if command not in corpus
+        ]
+        self.assertEqual(
+            missing,
+            [],
+            "SPECS §6's flagship must-allow class is operator-bearing prose, and these "
+            "smoke allow-cases are no longer reaching SMOKE_BENIGN_CORPUS — so the "
+            "class is measured by nothing again",
+        )
+
+    def test_every_flagship_case_actually_carries_an_operator(self):
+        """The list has to keep meaning what it says, not drift into easy cases."""
+        toothless = [
+            command
+            for command in FLAGSHIP_QUOTED_PROSE
+            if not (set(command) & _STRUCTURAL_CHARACTERS)
+        ]
+        self.assertEqual(
+            toothless,
+            [],
+            "a flagship entry carries no operator character, so it exercises the easy "
+            "half of the class the raw-text filter already admitted",
+        )
+
+    def test_the_flagship_prose_is_carried_by_most_transparent_shapes(self):
+        """Admitting the class buys nothing if no shape can carry it.
+
+        A payload holding a `'` is declined by every `<QCMD>` and `<ICMD>` template, so
+        "in the corpus" and "actually swept" are different claims and only the second
+        one is coverage.
+        """
+        for command in FLAGSHIP_QUOTED_PROSE:
+            reached = [
+                shape.name
+                for shape in TRANSPARENT_SHAPES
+                if shape.accepts(command) and shape.apply(command) is not None
+            ]
+            self.assertGreater(
+                len(reached),
+                0.5 * len(TRANSPARENT_SHAPES),
+                f"{command!r} is carried by only {len(reached)}/"
+                f"{len(TRANSPARENT_SHAPES)} transparent shapes",
+            )
+
+    def test_real_shell_structure_is_still_excluded(self):
+        """The relaxation is about quoting, not about admitting multi-segment lines."""
+        for command in (
+            "git status; rm -rf /critical/outside",
+            "true && false",
+            "cat notes.txt | tee copy.txt",
+            "echo hi > out.txt",
+            "echo hi < in.txt",
+            "git commit -m x & true",
+            "( git status )",
+            "echo `whoami`",
+            "echo $HOME",
+            # A DOUBLE-quoted span is inert for separators and redirections but not for
+            # the two expansion introducers: PowerShell and POSIX both still read them.
+            'git commit -m "wip $(rm -rf /critical/outside)"',
+            'git commit -m "wip `rm -rf /critical/outside`"',
+            "git commit -m 'line one\nline two'",
+        ):
+            self.assertFalse(
+                _composable(command), f"{command!r} carries real structure"
+            )
+
+    def test_the_scanner_fails_toward_exclusion_when_quoting_is_undecidable(self):
+        """Unprovable inertness is treated as structure, never as prose.
+
+        A false exclusion only shrinks the corpus. A false ADMISSION composes a command
+        whose meaning the shape changed and then reports the resulting deny as a floor
+        false positive, which is the one failure mode a measurement tool must not have.
+        """
+        for command in (
+            "git commit -m 'unbalanced",
+            'git commit -m "unbalanced',
+            "git commit -m 'nested \" still open",
+            # POSIX reads `\'` as an escaped literal quote; PowerShell reads a literal
+            # backslash followed by a span boundary. The scan cannot pick one.
+            "echo \\'",
+            'echo \\"',
+            # A backslash inside a DOUBLE-quoted span before `"`, a backtick, `$` or a
+            # backslash. POSIX gives it escape semantics; PowerShell gives it none and
+            # keeps its own backtick escape, so these two carry a literal backtick-r
+            # under POSIX and a CARRIAGE RETURN under PowerShell. Both were admitted by
+            # the first version of the #110 fix, and both were recorded as over-blocks
+            # on the strength of a composition whose text is not the payload's — raised
+            # as a P2 on PR #240 and pinned here so it cannot come back.
+            'gh pr comment 1 --body "never \\`rm .env\\` please"',
+            'git commit -m "document \\`rm -rf /critical/outside\\` handling"',
+            'echo "a \\$HOME b"',
+            'echo "a \\\\ b"',
+        ):
+            self.assertFalse(
+                _composable(command), f"{command!r} has undecidable quoting"
+            )
+
+    def test_a_backslash_before_an_ordinary_character_stays_admitted(self):
+        """The dialect rule is about four characters, not about every backslash.
+
+        Narrow on purpose: `\\'` and a Windows path separator are a literal backslash
+        followed by an ordinary character in POSIX, PowerShell and cmd alike, so
+        excluding them would shrink the corpus for no measurement gain.
+        """
+        for command in (
+            'echo "a \\\' b"',
+            "bash -c \"touch \\'.env-sample\\'\"",
+        ):
+            self.assertTrue(
+                _composable(command), f"{command!r} is dialect-independent text"
+            )
+
+    def test_a_second_tokenizer_agrees_no_admitted_case_carries_real_structure(self):
+        """Cross-check the whole admitted corpus against an INDEPENDENT tokenizer.
+
+        Every test above this one asserts `_structure_outside_inert_quotes` against
+        examples its own author thought of, which is the failure mode this repository
+        keeps rediscovering: a hand-written matcher tested only on the shapes its author
+        had in mind. `shlex` in non-POSIX mode with `punctuation_chars` is a separate
+        implementation of the same question, written by somebody else — it keeps the
+        quote characters in the token, so a token made ENTIRELY of operator characters
+        is one the shell would execute, and a token like `'>'` or `">"` is data.
+
+        The two must agree over all 477 admitted payloads: if the scanner ever starts
+        admitting a payload with a live `;` or `|` in it, the corpus stops being a
+        benign corpus and every deny it reports afterwards is noise. Comment handling is
+        switched off deliberately — left on, a `#` would truncate the token stream and
+        could hide the very operator this is looking for.
+        """
+        operators = set("();<>|&")
+        offenders = []
+        for command, _tier, _flags in BENIGN_CORPUS:
+            lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                tokens = list(lexer)
+            except ValueError as error:
+                offenders.append((command, f"shlex cannot parse it: {error}"))
+                continue
+            live = [
+                token
+                for token in tokens
+                if token and all(char in operators for char in token)
+            ]
+            if live:
+                offenders.append((command, live))
+        self.assertEqual(
+            offenders,
+            [],
+            "an admitted benign payload carries a shell operator a second tokenizer "
+            "reads as executable structure (payload, offending tokens)",
+        )
+
+    def test_inert_quoted_operators_are_admitted_in_both_quote_styles(self):
+        for command in (
+            "git commit -m 'redirect &> .env is blocked'",
+            'git commit -m "redirect &> .env is blocked"',
+            "echo 'a;b'",
+            'echo "a;b"',
+            "echo '|'",
+            'echo "(x)"',
+            "git commit -m 'wip $(rm -rf /)'",
+            "echo 'plain'",
+        ):
+            self.assertTrue(_composable(command), f"{command!r} is inert quoted text")
 
 
 class DocumentedBaselineTests(CrossProductBase):

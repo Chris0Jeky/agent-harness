@@ -181,6 +181,53 @@ class HarnessTests(unittest.TestCase):
         )
         return source_skill, target_skill, skills_home, args
 
+    def make_sync_global_agent_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        source_agents = config_root / "codex" / "agents"
+        source_agents.mkdir(parents=True)
+        (config_root / "codex" / "skills").mkdir()
+        (config_root / "codex" / "AGENTS.md").write_text("# laws\n", encoding="utf-8")
+        codex_home = root / "codex-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(root / "skills-home"),
+            apply=True,
+        )
+        return source_agents, codex_home / "agents", codex_home, args
+
+    def make_scoped_sync_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name) / name
+        config_root = root / "config"
+        codex_source = config_root / "codex"
+        agents = codex_source / "agents"
+        route_skill = codex_source / "skills" / "route-codex-work"
+        other_skill = codex_source / "skills" / "other"
+        for path in (agents, route_skill, other_skill):
+            path.mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("source guidance\n", encoding="utf-8")
+        (codex_source / "REPOS.md").write_text("source repos\n", encoding="utf-8")
+        (agents / "luna.toml").write_text("model = 'luna'\n", encoding="utf-8")
+        (route_skill / "SKILL.md").write_text("route source\n", encoding="utf-8")
+        (other_skill / "SKILL.md").write_text("other source\n", encoding="utf-8")
+        codex_home = root / "codex-home"
+        claude_home = root / "claude-home"
+        skills_home = root / "skills-home"
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(codex_home),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            apply=True,
+        )
+        return codex_source, codex_home, claude_home, skills_home, args
+
     def assert_sync_global_rejects_alias_without_writes(
         self,
         args: SimpleNamespace,
@@ -2045,13 +2092,17 @@ class HarnessTests(unittest.TestCase):
         config.write_text(
             "ignored = " + ("[" * 1100) + "0" + ("]" * 1100), encoding="utf-8"
         )
-        with self.assertRaises(harness.HarnessError):
+        with self.assertRaisesRegex(harness.HarnessError, r"invalid Codex config .*"):
             harness.toml_config(config)
 
     def test_toml_config_handles_deep_post_parse_validation(self) -> None:
         config = Path(self.temp.name) / "config.toml"
-        config.write_text(("nested." * 1100) + "leaf = 0", encoding="utf-8")
-        self.assertIsNotNone(harness.toml_config(config))
+        config.write_text("ignored = 0", encoding="utf-8")
+        parsed: object = 0
+        for _ in range(1100):
+            parsed = {"nested": parsed}
+        with mock.patch.object(harness.tomllib, "loads", return_value=parsed):
+            self.assertIs(harness.toml_config(config), parsed)
 
     def test_inline_hooks_preserve_ignored_toml_datetime(self) -> None:
         config = Path(self.temp.name) / "config.toml"
@@ -2096,28 +2147,32 @@ class HarnessTests(unittest.TestCase):
 
     def test_deep_inline_hooks_never_leak_a_raw_recursion_error(self) -> None:
         config = Path(self.temp.name) / "config.toml"
-        config.write_text("hooks." + ("nested." * 10000) + "leaf = 0", encoding="utf-8")
+        nested: object = 0
+        for _ in range(10000):
+            nested = {"nested": nested}
 
-        for convert in (
-            harness.inline_hooks_document,
-            harness.inline_hook_documents_from_config,
-        ):
-            with self.subTest(convert=convert.__name__):
-                try:
-                    converted = convert(config)
-                except harness.HarnessError as error:
-                    self.assertRegex(
-                        str(error), r"unsupported inline hooks value in .*config\.toml"
-                    )
-                else:
-                    # A Python that survives the depth must carry the whole
-                    # inline document across, not a truncated prefix.
-                    document = (
-                        converted
-                        if isinstance(converted, str)
-                        else "".join(text for _location, text in converted)
-                    )
-                    self.assertEqual(document.count('"nested"'), 10000)
+        with mock.patch.object(harness, "toml_config", return_value={"hooks": nested}):
+            for convert in (
+                harness.inline_hooks_document,
+                harness.inline_hook_documents_from_config,
+            ):
+                with self.subTest(convert=convert.__name__):
+                    try:
+                        converted = convert(config)
+                    except harness.HarnessError as error:
+                        self.assertRegex(
+                            str(error),
+                            r"unsupported inline hooks value in .*config\.toml",
+                        )
+                    else:
+                        # A Python that survives the depth must carry the whole
+                        # inline document across, not a truncated prefix.
+                        document = (
+                            converted
+                            if isinstance(converted, str)
+                            else "".join(text for _location, text in converted)
+                        )
+                        self.assertEqual(document.count('"nested"'), 10000)
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
@@ -2767,6 +2822,337 @@ allow_local_binding = true
 
         self.assertEqual(result, 0, output)
         self.assertIn("[ok] Codex project hook activation", output)
+
+    def test_sync_global_agents_dry_run_does_not_write(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-dry-run")
+        )
+        (source_agents / "luna.toml").write_text("model = 'luna'\n", encoding="utf-8")
+        args.apply = False
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        agent_line = next(
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("agent -> ")
+        )
+        self.assertIn(f"{os.sep}agents{os.sep}luna.toml (source:", agent_line)
+        self.assertFalse(codex_home.exists())
+
+    def test_sync_global_agents_apply_backs_up_changed_destination(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-apply")
+        )
+        source = source_agents / "luna.toml"
+        target = target_agents / source.name
+        source.write_text("model = 'luna'\n", encoding="utf-8")
+        target.parent.mkdir(parents=True)
+        target.write_text("model = 'old'\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(harness.same_file(source, target))
+        backups = list((codex_home / "backups").glob("*/agents/luna.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), "model = 'old'\n")
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["agents"], {"luna.toml": harness.sha256_file(source)})
+
+    def test_sync_global_agents_identity_is_a_noop(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-noop")
+        )
+        source = source_agents / "luna.toml"
+        source.write_text("model = 'luna'\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+        backups_before = list((codex_home / "backups").glob("*/agents/luna.toml"))
+        output = io.StringIO()
+        with mock.patch.object(
+            harness.shutil,
+            "copy2",
+            side_effect=AssertionError("identical agent should not be copied"),
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            backups_before, list((codex_home / "backups").glob("*/agents/luna.toml"))
+        )
+        agent_line = next(
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("agent = ")
+        )
+        self.assertIn(f"{os.sep}agents{os.sep}luna.toml (source:", agent_line)
+
+    def test_sync_global_agents_keeps_case_only_rename_destination(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-case-only-rename")
+        )
+        upper_source = source_agents / "Luna.toml"
+        upper_source.write_text("model = 'luna'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        lower_source = source_agents / "luna.toml"
+        upper_source.rename(lower_source)
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        target = target_agents / "luna.toml"
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "model = 'luna'\n")
+        self.assertEqual(
+            [entry.name for entry in target_agents.iterdir()], ["luna.toml"]
+        )
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"luna.toml"})
+
+    def test_sync_global_agents_rejects_casefold_colliding_sources(self) -> None:
+        source_agents, _target_agents, _codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-casefold-collision")
+        )
+        upper = source_agents / "Luna.toml"
+        lower = source_agents / "luna.toml"
+        upper.write_text("model = 'luna'\n", encoding="utf-8")
+        if lower != upper:
+            lower.write_text("model = 'luna'\n", encoding="utf-8")
+
+        with mock.patch.object(Path, "glob", return_value=[upper, lower]):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "sources collide at the destination"
+            ):
+                harness.sync_global(args)
+
+    def test_sync_global_agents_removes_only_unchanged_stale_entries(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-stale")
+        )
+        alpha = source_agents / "alpha.toml"
+        beta = source_agents / "beta.toml"
+        alpha.write_text("model = 'alpha'\n", encoding="utf-8")
+        beta.write_text("model = 'beta'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        unrelated = target_agents / "human.toml"
+        unrelated.write_text("model = 'human'\n", encoding="utf-8")
+        beta.unlink()
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue((target_agents / "alpha.toml").exists())
+        self.assertFalse((target_agents / "beta.toml").exists())
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "model = 'human'\n")
+        backups = list((codex_home / "backups").glob("*/agents/beta.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), "model = 'beta'\n")
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"alpha.toml"})
+
+    def test_sync_global_agents_removes_last_source_directory_entries_safely(
+        self,
+    ) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-last-source")
+        )
+        removable = source_agents / "removable.toml"
+        changed = source_agents / "changed.toml"
+        removable.write_text("model = 'removable'\n", encoding="utf-8")
+        changed.write_text("model = 'changed'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        (target_agents / "changed.toml").write_text(
+            "model = 'changed locally'\n", encoding="utf-8"
+        )
+        unrelated = target_agents / "human.toml"
+        unrelated.write_text("model = 'human'\n", encoding="utf-8")
+        removable.unlink()
+        changed.unlink()
+        source_agents.rmdir()
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertFalse((target_agents / "removable.toml").exists())
+        self.assertEqual(
+            (target_agents / "changed.toml").read_text(encoding="utf-8"),
+            "model = 'changed locally'\n",
+        )
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "model = 'human'\n")
+        backups = list((codex_home / "backups").glob("*/agents/removable.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            backups[0].read_text(encoding="utf-8"), "model = 'removable'\n"
+        )
+        self.assertFalse(harness.managed_codex_agents_state_path(codex_home).exists())
+
+    def test_sync_global_agents_revalidates_stale_target_before_removal(self) -> None:
+        source_agents, target_agents, codex_home, args = (
+            self.make_sync_global_agent_fixture("agents-stale-revalidate")
+        )
+        current = source_agents / "current.toml"
+        stale = source_agents / "stale.toml"
+        current.write_text("model = 'current'\n", encoding="utf-8")
+        stale.write_text("model = 'stale'\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+        current.write_text("model = 'updated'\n", encoding="utf-8")
+        stale.unlink()
+        stale_target = target_agents / "stale.toml"
+        original_copy2 = harness.shutil.copy2
+
+        def mutate_stale_target(
+            source: Path, target: Path, *args: object, **kwargs: object
+        ) -> str:
+            if (
+                Path(source).samefile(current)
+                and Path(target).parent.samefile(target_agents)
+                and Path(target).name == "current.toml"
+            ):
+                stale_target.write_text("model = 'edited locally'\n", encoding="utf-8")
+            return original_copy2(source, target, *args, **kwargs)
+
+        with mock.patch.object(
+            harness.shutil, "copy2", side_effect=mutate_stale_target
+        ):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            stale_target.read_text(encoding="utf-8"), "model = 'edited locally'\n"
+        )
+        self.assertEqual(list((codex_home / "backups").glob("*/agents/stale.toml")), [])
+        state = json.loads(
+            harness.managed_codex_agents_state_path(codex_home).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(state["agents"]), {"current.toml"})
+
+    def test_sync_global_only_agents_and_named_skill_dry_run_is_read_only(self) -> None:
+        _source, codex_home, _claude_home, _skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-dry-run")
+        )
+        args.apply = False
+        args.only = ["codex-agents", "skill:route-codex-work"]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        text = output.getvalue()
+        self.assertIn("agents", text)
+        self.assertIn("route-codex-work", text)
+        self.assertNotIn("AGENTS.md", text)
+        self.assertNotIn("REPOS.md", text)
+        self.assertNotIn("hooks.json", text)
+        self.assertNotIn("other", text)
+        self.assertFalse(codex_home.exists())
+
+    def test_sync_global_only_agents_and_named_skill_applies_exact_scope(self) -> None:
+        source, codex_home, claude_home, skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-apply")
+        )
+        (codex_home / "AGENTS.md").parent.mkdir(parents=True)
+        (codex_home / "AGENTS.md").write_text("keep guidance\n", encoding="utf-8")
+        (codex_home / "REPOS.md").write_text("keep repos\n", encoding="utf-8")
+        (codex_home / "hooks.json").write_text("keep hooks\n", encoding="utf-8")
+        (claude_home / "hooks").mkdir(parents=True)
+        for name in ("dispatch.py", "smoke_test.py"):
+            (claude_home / "hooks" / name).write_text("keep hook\n", encoding="utf-8")
+        for name in ("route-codex-work", "other"):
+            target = skills_home / name
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("keep skill\n", encoding="utf-8")
+        args.only = ["codex-agents", "skill:route-codex-work"]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(
+            harness.same_file(
+                source / "agents" / "luna.toml", codex_home / "agents" / "luna.toml"
+            )
+        )
+        self.assertTrue(
+            harness.same_tree(
+                source / "skills" / "route-codex-work",
+                skills_home / "route-codex-work",
+            )
+        )
+        self.assertEqual(
+            (codex_home / "AGENTS.md").read_text(encoding="utf-8"), "keep guidance\n"
+        )
+        self.assertEqual(
+            (codex_home / "REPOS.md").read_text(encoding="utf-8"), "keep repos\n"
+        )
+        self.assertEqual(
+            (codex_home / "hooks.json").read_text(encoding="utf-8"), "keep hooks\n"
+        )
+        self.assertEqual(
+            (claude_home / "hooks" / "dispatch.py").read_text(encoding="utf-8"),
+            "keep hook\n",
+        )
+        self.assertEqual(
+            (skills_home / "other" / "SKILL.md").read_text(encoding="utf-8"),
+            "keep skill\n",
+        )
+        text = output.getvalue()
+        self.assertNotIn("AGENTS.md", text)
+        self.assertNotIn("REPOS.md", text)
+        self.assertNotIn("hooks.json", text)
+        self.assertNotIn(str(skills_home / "other"), text)
+
+    def test_sync_global_default_selection_keeps_existing_components(self) -> None:
+        source, codex_home, claude_home, skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-default")
+        )
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(
+            harness.same_file(source / "AGENTS.md", codex_home / "AGENTS.md")
+        )
+        self.assertTrue(harness.same_file(source / "REPOS.md", codex_home / "REPOS.md"))
+        self.assertTrue(
+            harness.same_file(
+                Path(harness.__file__).resolve().parent
+                / "templates"
+                / "hooks"
+                / "dispatch.py",
+                claude_home / "hooks" / "dispatch.py",
+            )
+        )
+        self.assertTrue(
+            harness.same_tree(source / "skills" / "other", skills_home / "other")
+        )
+
+    def test_sync_global_only_rejects_unknown_and_missing_skills_without_writes(
+        self,
+    ) -> None:
+        _source, codex_home, _claude_home, _skills_home, args = (
+            self.make_scoped_sync_fixture("scoped-sync-invalid")
+        )
+        args.apply = False
+        args.only = ["unknown"]
+        with self.assertRaisesRegex(harness.HarnessError, "unknown sync component"):
+            harness.sync_global(args)
+        self.assertFalse(codex_home.exists())
+        args.only = ["skill:missing"]
+        with self.assertRaisesRegex(harness.HarnessError, "missing sync sources"):
+            harness.sync_global(args)
+        self.assertFalse(codex_home.exists())
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
