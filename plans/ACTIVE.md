@@ -5,11 +5,10 @@ Snapshot: 2026-09-02. Published `main` head: `d6392dd7959cd887bd83551bf43ddd53b9
 blockers were fixed, and two new floor lanes merged with them (PR #257 = 1.6.29, PR #260 = 1.6.31).
 The rollout workstream below is re-owed at 1.6.31 and stays blocked on human-only runtime proof.
 
-Current runtime state: canonical source and the producer marker are **1.6.31**; deployed bytes
-(claude-config `hooks/`, the owner's `~/.claude/hooks`) are **1.6.29**, authored consumer-side by
-the owner on 2026-08-18 and upstreamed by #257; runtime canaries remain at **1.6.26**. Canonical
-is therefore two versions AHEAD of deployed. The consumer sync and every marker change require
-their own exact-root proof — **H-15** in `HUMAN_TODO.md`.
+Current runtime state: canonical source, the producer marker, claude-config `hooks/` (PR #196)
+and the owner's `~/.claude/hooks` are all **1.6.32** (PR #262 on top of #260's 1.6.31); the
+Claude runtime canary trio passed live in the deploying session on 2026-09-02; the Codex exact-CWD
+re-trust and Codex canaries are still owed — **H-15** in `HUMAN_TODO.md`.
 
 ## Active rollout — issue #232, blocked on human-only runtime proof
 
@@ -24,13 +23,13 @@ that numbering and no other:
 
 | Phase | SPECS §5 step | State (re-owed at 1.6.31, 2026-09-02) |
 |---|---|---|
-| P1 | producer merge | **done** — PR #260 (1.6.31) on top of #257 (1.6.29) and #239 (1.6.30) |
-| P2 | reviewed clean-main install | **NOT DONE** — claude-config `hooks/` is at 1.6.29; sync 1.6.31 bytes in by PR, then `sync-global --apply` |
-| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** — add the 1.6.31 canary trio (SPECS §5.4): harmless allow, opacity allow, double-check |
+| P1 | producer merge | **done** — PR #262 (1.6.32) on #260 (1.6.31), #239 (1.6.30), #257 (1.6.29) |
+| P2 | reviewed clean-main install | **done** — claude-config PR #196 (byte-identical, smoke 2361/2361); hooks-only install into `~/.claude/hooks` with backup, digest == canonical; Claude canary trio passed live |
+| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** (Codex) — the 1.6.32 canary trio (SPECS §5.4): harmless allow, opacity allow, double-check |
 | P4 | consumer marker refresh | **NOT DONE — blocked by BOTH P3 and P3b** |
 | P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — blocked by P4** |
 
-Only P1 is complete. Everything below is outstanding. Perform it in this sequence and never out of
+P1 and P2 are complete. Everything below is outstanding. Perform it in this sequence and never out of
 it (H-15 in `HUMAN_TODO.md` is the human-side record):
 
 - **P2 — reviewed clean-main install (agent lane).** Sync the canonical bytes of the version being
