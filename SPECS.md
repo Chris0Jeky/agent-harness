@@ -545,7 +545,9 @@ declared remote plus one local branch/`HEAD`, that remote has exactly one push U
 declared GitHub repository, no configured `core.gitProxy`/`core.sshCommand` or declared-remote
 `receivepack`/`vcs` overrides its transport/receiver, and no command-line `--receive-pack`/`--exec`
 or force-with-lease is requested. The declaration never relaxes public repo/gist creation,
-visibility changes, or arbitrary `gh api` mutation.
+visibility changes, or the `gh api` exfiltration surfaces (since 1.6.28 the `sensitive_data`
+`gh api` guard is narrowed to those surfaces plus non-branch DELETEs; routine PR/issue/comment
+mutations pass).
 
 Secret-file scope, measured not asserted: `` `.env`/`*credentials*`/`*secret*` `` above is
 implemented as a NAME test — `.env`/`.envrc`/`.env.<suffix>` anchored to a path boundary, any

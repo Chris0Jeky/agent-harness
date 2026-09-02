@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.27 (2026-08-03)"
+FLOOR_VERSION = "1.6.29 (2026-08-18)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -11394,6 +11394,8 @@ def check(
                     )
                 lease_requested = False
                 lease_selectors = []
+                delete_requested = False
+                delete_colon_targets = []
                 for t in args:
                     short_flags, _short_consumes_next = git_push_short_option_shape(t)
                     dangerous_options = {
@@ -11437,12 +11439,23 @@ def check(
                     if t.startswith("+") and len(t) > 1:
                         return "deny", "A +refspec is a forced update in disguise."
                     if t.startswith(":") and len(t) > 1:
-                        return "deny", "A :refspec deletes a remote ref."
-                    if t in {"--mirror", "--prune", "--delete"} or ("d" in short_flags):
+                        # A leading-colon refspec is a deletion; validated as a
+                        # named-branch delete below (floor 1.6.29).
+                        delete_colon_targets.append(t[1:])
+                        continue
+                    if t in {"--mirror", "--prune"}:
                         return (
                             "deny",
-                            "Mirroring or deleting remote refs is floor-blocked.",
+                            "Mirroring or pruning remote refs is floor-blocked.",
                         )
+                    if t == "--delete" or ("d" in short_flags):
+                        # Owner decision 2026-08-18 (floor 1.6.29): explicit
+                        # single-branch deletions are allowed — the GitHub web
+                        # UI already permits the same action, so the blanket
+                        # deny was ceremony. Targets validated after the
+                        # positional walk: literal branch names only, never
+                        # protected/production refs, never wildcards or tags.
+                        delete_requested = True
 
                 push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
                 # `--all`/`--tags`/`--repo` are recognized DURING the option walk,
@@ -11494,6 +11507,52 @@ def check(
                     positionals.append(token)
                     masked_positionals.append(raw_args[index])
                     index += 1
+                if delete_requested or delete_colon_targets:
+                    # Floor 1.6.29: named-branch deletions only. Everything a
+                    # deletion could destroy beyond one explicitly named,
+                    # unprotected branch stays denied: wildcards, tags/other
+                    # ref namespaces, protected/production branches, dynamic
+                    # tokens the hook cannot read.
+                    protected_deletion_names = {
+                        "main",
+                        "master",
+                        "head",
+                        "app_production",
+                        "options_prod",
+                    }
+                    deletion_targets = list(delete_colon_targets)
+                    if delete_requested:
+                        deletion_targets.extend(
+                            positionals if repository_via_option else positionals[1:]
+                        )
+                    if not deletion_targets:
+                        return (
+                            "deny",
+                            "A remote-ref deletion with no explicit branch name is floor-blocked.",
+                        )
+                    for deletion_target in deletion_targets:
+                        deletion_name = deletion_target
+                        if deletion_name.startswith("refs/"):
+                            if not deletion_name.startswith("refs/heads/"):
+                                return (
+                                    "deny",
+                                    "Only branch refs (refs/heads/*) may be deleted; other ref namespaces are floor-blocked.",
+                                )
+                            deletion_name = deletion_name[len("refs/heads/") :]
+                        if (
+                            not deletion_name
+                            or re.search(r"[*?\[\]]", deletion_name)
+                            or has_dynamic_shell_token(deletion_target)
+                        ):
+                            return (
+                                "deny",
+                                "Deleting remote refs by wildcard or dynamic name is floor-blocked.",
+                            )
+                        if deletion_name.lower() in protected_deletion_names:
+                            return (
+                                "deny",
+                                f"Deleting protected branch '{deletion_name}' is floor-blocked.",
+                            )
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
                 )
@@ -12744,11 +12803,61 @@ def check(
                         has_fields = True
                     elif lowered.startswith(("--raw-field=", "--field=", "--input=")):
                         has_fields = True
-                if (method and method != "GET") or (method is None and has_fields):
-                    return (
-                        "deny",
-                        "sensitive_data repo: arbitrary gh api mutations are blocked.",
-                    )
+                is_mutation = (method and method != "GET") or (
+                    method is None and has_fields
+                )
+                if is_mutation:
+                    # Owner decision 2026-08-18: routine gh api mutations
+                    # (PRs, issues, comments, labels) are allowed — the old
+                    # blanket deny stalled PR creation whenever the GraphQL
+                    # pool was exhausted. Only the irreversible / exfil
+                    # surfaces stay blocked, mirroring the narrower
+                    # olb pre_bash.py rule: repo/gist creation, visibility
+                    # flips, and DELETEs.
+                    if method == "DELETE":
+                        # Floor 1.6.29: branch-ref deletion mirrors the git
+                        # push --delete carve-out — one literal refs/heads/
+                        # path, never protected/production names, never
+                        # dynamic tokens. Every other DELETE stays blocked.
+                        ref_paths = [
+                            t
+                            for t in toks[2:]
+                            if not t.startswith("-") and "git/refs/heads/" in t.lower()
+                        ]
+                        if (
+                            len(ref_paths) == 1
+                            and not re.search(r"[*?\[\]]", ref_paths[0])
+                            and not has_dynamic_shell_token(ref_paths[0])
+                            and ref_paths[0]
+                            .lower()
+                            .rsplit("git/refs/heads/", 1)[1]
+                            .rstrip("/")
+                            not in {
+                                "main",
+                                "master",
+                                "head",
+                                "app_production",
+                                "options_prod",
+                                "",
+                            }
+                        ):
+                            pass
+                        else:
+                            return (
+                                "deny",
+                                "sensitive_data repo: gh api DELETE mutations are blocked (single branch-ref deletes excepted).",
+                            )
+                    joined = " ".join(toks[2:]).lower()
+                    if re.search(
+                        r"\bgists\b|\buser/repos\b|\borgs/[\w.-]+/repos\b"
+                        r"|\bpublic=true\b|\bprivate=false\b|\bvisibility\b",
+                        joined,
+                    ):
+                        return (
+                            "deny",
+                            "sensitive_data repo: gh api mutations of gist/"
+                            "repo-creation/visibility surfaces are blocked.",
+                        )
 
         if cwd_conditionally_changed and operator_after != "&&":
             cwd_uncertain = True

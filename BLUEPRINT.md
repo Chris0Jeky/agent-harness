@@ -122,8 +122,9 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
   worktrees with a sensitive primary, and unresolved probes retain the deny.
   This declaration does not inspect Git objects or prove a diff synthetic; the repository's
   exact-diff and synthetic-artifact gates remain required before publication. All other
-  `sensitive_data` denies, including public repo/gist creation, visibility changes, and arbitrary
-  `gh api` mutation, remain active.
+  `sensitive_data` denies, including public repo/gist creation, visibility changes, and the
+  `gh api` exfiltration surfaces (repo/gist creation, visibility flips, non-branch DELETEs; since
+  1.6.28 routine PR/issue/comment mutations pass), remain active.
 - `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
   guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
   clean main after every wave.
