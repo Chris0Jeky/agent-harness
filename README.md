@@ -245,15 +245,15 @@ configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. Claude-config PR #127 merged the canonical 1.6.27 consumer bytes, and reviewed
-clean-main `sync-global` dry-run/apply established the matching static global deployment. Runtime
-proof remains at 1.6.26: fresh clients last proved the agent-harness project adapter and the global
-Claude hook separately at that version. The registry inventory then found exactly three current
-Codex consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4
-merged their 1.6.26 adapters. Each merged exact root was individually reviewed, trusted, enabled,
-Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof remains pending; no
-sibling, future, or changed adapter inherits the prior evidence. That pending proof is human-only
-and strictly ordered — see **H-14** in `HUMAN_TODO.md` and issue #232.
+fail-closed. **Deployed state (2026-09-02):** claude-config PR #196 merged the byte-identical 1.6.32
+`hooks/`, the two files were installed into `~/.claude/hooks` with a backup (deployed digest ==
+canonical), and the **Claude** runtime canary trio of SPECS §5.4 passed live in the deploying
+session. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
+current Codex consumers (EvidenceDeck PR #20, SwarmingLilMen PR #51, collaborative-hill-lab PR #4
+merged their 1.6.26 adapters, each reviewed, trusted, enabled, Doctor-green and canaried). The
+producer's exact-CWD Codex re-trust and canaries at 1.6.32, then the consumer marker refreshes, are
+human-only and strictly ordered — see **H-15** in `HUMAN_TODO.md` and issue #232; no sibling,
+future, or changed adapter inherits prior evidence.
 
 The 2026-08-07/08 wave changed tests and documentation only (PR #240 / #110, PR #237 / #130,
 the state record PR #234). The 2026-09-02 session then moved implementation: PR #238 landed
