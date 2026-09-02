@@ -5,22 +5,38 @@
 > See `LICENSE`, `LICENSING.md`, and `THIRD_PARTY_NOTICES.md`. This does not
 > decide the licences of possible future extracted plugin or replay products.
 
-Snapshot: 2026-08-08, published `main@a8ed1d481b8903e71b0d0443a67887274d692d92` (PR #240's merge).
+Snapshot: 2026-09-02, published `main@d6392dd7959cd887bd83551bf43ddd53b96e97bf` (PR #260's merge `d6392dd`).
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
-**`templates/hooks/dispatch.py` is unchanged since PR #230's merge
-`731624106fc38a9f46e21553c61b3cb0ee56dfeb`.** The 2026-08-07/08 wave merged PR #234 (`8a1a685`,
-this ledger), PR #237 (`8134cf4`, a `FLOOR_LIMITATIONS.md` scope line plus a SPECS §6 note) and
-PR #240 (`a8ed1d4`, cross-product gate tests) — documentation and tests only. `FLOOR_VERSION` is
-still 1.6.27 and no adapter marker moved. The one lane that would change the dispatcher (#201,
-PR #239) is still open.
+**`templates/hooks/dispatch.py` moved four versions on 2026-09-02**, all through the PR lane with
+nine green checks and an independent adversarial review each: PR #257 upstreamed **1.6.29** (the
+owner's 2026-08-18 claude-config decisions 1.6.28/1.6.29, which had been authored in the consumer
+and left canonical trailing the deployed bytes — closed #59); PR #239 landed #201 as **1.6.30**
+(Git numeric booleans in the exact `--no-follow-tags` narrowing; #243 carries the two
+toolchain-dependent edges); PR #260 landed **1.6.31**, the owner's guide posture and the
+`FLOOR_ACK` double-check (SPECS §5.4; closes #26, #62, #259) plus the hardening of the 1.6.29
+carve-outs its reviews found. PR #238 landed #139's nested logical repo root in `harness.py` with
+its three review defects fixed (#258 tracks one LOW follow-up). The 2026-08-07/08 wave before it
+(PR #234, #237, #240) was documentation and tests only.
 
 One commit on `main` from this period did NOT arrive through the PR lane: `3ade22b`, which adds only
 `/.claude/worktrees` to `.gitignore`, was pushed directly by the worktree-isolation machinery. That
 direct push is what #236 tracks. PR #230's merge `7316241` and every merge above went through the
 normal lane.
 
-## Runtime state: 2026-08-07
+## Runtime state: 2026-09-02
+
+Canonical source is **1.6.31**; the producer marker moved with each of 1.6.29, 1.6.30 and 1.6.31.
+Deployed bytes: claude-config `hooks/dispatch.py` and the owner's `~/.claude/hooks` are at
+**1.6.29** (the owner's own consumer-side authoring, which #257 upstreamed), so canonical is now
+AHEAD of deployed by two versions and Doctor's canonical-vs-deployed comparison reads as drift
+until the consumer sync. Runtime proof is still the historical **1.6.26** canaries. **H-15** in
+`HUMAN_TODO.md` owns the 1.6.31 rollout: the agent lane is the byte sync into claude-config and
+`sync-global --apply`; the human-only lane is the exact-CWD `/hooks` re-trust and the canary
+trio per runtime (harmless allow, opacity allow, double-check). Nothing below is inferred from
+source merges.
+
+### Runtime state as recorded on 2026-08-07
 
 The owner explicitly lifted the 2026-08-02 PreTool pause and authorized rollout. PR #230 merged
 canonical source 1.6.27 and changed the agent-harness producer marker. Claude-config PR #127 merged
