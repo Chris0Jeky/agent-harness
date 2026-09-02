@@ -3366,6 +3366,54 @@ ENV_ROOTS = re.compile(
     r'^"?(\$\{?home\}?|\$env:userprofile|%userprofile%)"?$', re.IGNORECASE
 )
 
+# The interpreter heads a downloaded body must never be piped into, and the
+# privilege/identity elevation heads. Both are the analyzer's charter
+# vocabulary; the posture layer's charter hint is built FROM them so the two
+# can never drift apart (PR #260 review round 2).
+_PIPE_INTERPRETER_HEADS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "source",
+        ".",
+        "eval",
+        "iex",
+        "invoke-expression",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
+        "php",
+        "node",
+        "lua",
+        "r",
+        "rscript",
+    }
+)
+_PRIVILEGE_HEADS = frozenset(
+    {
+        "sudo",
+        "su",
+        "doas",
+        "pkexec",
+        "run0",
+        "please",
+        "runas",
+        "runuser",
+        "setpriv",
+        "sg",
+    }
+)
 _SECRET_PATH = re.compile(
     r"(^|[\\/])\.env(rc)?(\.[\w.]+)?([\\/]|$)|credential|secrets?\."
     r"|(^|[\\/._-])id_(?:rsa|dsa|ecdsa|ed25519)"
@@ -9366,34 +9414,7 @@ def has_download_pipe_to_shell(command: str) -> bool:
         ):
             download_seen = True
         stage_head, _ = command_head(stage)
-        if download_seen and stage_head in {
-            "sh",
-            "bash",
-            "zsh",
-            "dash",
-            "ash",
-            "ksh",
-            "fish",
-            "csh",
-            "tcsh",
-            "pwsh",
-            "powershell",
-            "cmd",
-            "source",
-            ".",
-            "eval",
-            "iex",
-            "invoke-expression",
-            "python",
-            "python3",
-            "perl",
-            "ruby",
-            "php",
-            "node",
-            "lua",
-            "r",
-            "rscript",
-        }:
+        if download_seen and stage_head in _PIPE_INTERPRETER_HEADS:
             return True
         if stage_head in {
             "curl",
@@ -10154,18 +10175,7 @@ def check(
                 if evaluated_decision[0] != "allow":
                     return evaluated_decision
             continue
-        if head in {
-            "sudo",
-            "su",
-            "doas",
-            "pkexec",
-            "run0",
-            "please",
-            "runas",
-            "runuser",
-            "setpriv",
-            "sg",
-        }:
+        if head in _PRIVILEGE_HEADS:
             return (
                 "deny",
                 f"{head} is blocked at the floor: privilege/identity elevation conceals "
@@ -11595,9 +11605,7 @@ def check(
                         # `remotes/x/y` by DWIM abbreviation, so a namespace
                         # prefix without `refs/` still names a protected branch
                         # or a tag. Only a bare branch name is a branch name.
-                        if not deletion_target.lower().startswith(
-                            "refs/heads/"
-                        ) and re.match(
+                        if not deletion_target.startswith("refs/heads/") and re.match(
                             r"(?:heads|tags|remotes|refs)/",
                             deletion_name,
                             re.IGNORECASE,
@@ -12966,11 +12974,13 @@ def check(
                             # Issue #259 / PR #260 review: the server
                             # percent-decodes and normalises dot segments,
                             # so `%6Dain` and `feat/../main` are `main`.
-                            and re.fullmatch(
-                                r"[A-Za-z0-9._/-]+",
-                                ref_paths[0].lower().rsplit("git/refs/heads/", 1)[1],
+                            and all(
+                                re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", part)
+                                for part in ref_paths[0]
+                                .lower()
+                                .rsplit("git/refs/heads/", 1)[1]
+                                .split("/")
                             )
-                            and ".." not in ref_paths[0]
                             and ref_paths[0]
                             .lower()
                             .rsplit("git/refs/heads/", 1)[1]
@@ -13055,16 +13065,30 @@ _OPACITY_EXCLUDED = re.compile(
 # text piped or substituted into an interpreter; nested program text
 # (`-c`, `eval`, `-x/--exec`, `foreach`, `bisect run`); brace expansion;
 # secret-looking names; file copies/moves/writes onto them.
+_HINT_INTERPRETERS = "|".join(
+    sorted((re.escape(head) for head in _PIPE_INTERPRETER_HEADS), key=len, reverse=True)
+)
+_HINT_PRIVILEGE = "|".join(sorted(re.escape(head) for head in _PRIVILEGE_HEADS))
+# A segment span that may continue across a backslash-newline.
+_HINT_SPAN = r"(?:[^|;&\n]|\\\n)*"
 _CHARTER_HINT = re.compile(
-    r"--force|\bgit\b[^|;&\n]*\bpush\b|\bpush\b[^|;&\n]*\s\+[\w/]"
-    r"|\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\brd\b|remove-item|\bri\b|\bunlink\b"
-    r"|\bsudo\b|\bdoas\b|\bsu\b|\brunas\b|start-process"
-    r"|\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|\|\s*(?:pwsh|powershell|iex|invoke-expression)\b"
-    r"|\$\(\s*(?:curl|wget|invoke-webrequest|iwr)|<\(\s*(?:curl|wget)"
-    r"|\beval\b|\biex\b|invoke-expression|\s-c\s|\s-x\s|--exec\b|\bforeach\b|bisect\s+run"
+    r"--force|\bgit\b" + _HINT_SPAN + r"\bpush\b|\bpush\b" + _HINT_SPAN + r"\s\+[\w/]"
+    r"|\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
+    r"|\bunlink\b|\bshred\b|-delete\b"
+    r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
+    r"|\|\s*(?:\S*[\\/])?(?:(?:"
+    + _HINT_PRIVILEGE
+    + r"|env)\s+)?(?:"
+    + _HINT_INTERPRETERS
+    + r")(?:\.exe)?(?![\w.-])"
+    r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
+    r"|\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s|\s-x\s)|--exec\b|\bforeach\b"
+    r"|bisect\s+run|\b(?:powershell|pwsh)(?:\.exe)?\b" + _HINT_SPAN + r"\s-e"
     r"|\{[^{}\s]*,[^{}\s]*\}"
-    r"|\.env\b|credential|secret|id_rsa|id_ed25519|\.pem\b|\.key\b|\btoken|\.netrc|\.npmrc|\.pypirc"
-    r"|\bcp\b|\bmv\b|copy-item|move-item|set-content|out-file|\binstall\b|\btee\b|\bdd\b",
+    r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
+    r"|\btoken|\.netrc|\.npmrc|\.pypirc"
+    r"|\bcp\b|\bmv\b|copy-item|move-item|set-content|add-content|out-file|\binstall\b"
+    r"|\btee\b|\bdd\b",
     re.IGNORECASE,
 )
 
@@ -13118,7 +13142,7 @@ def reason_is_pure_opacity(reason: str) -> bool:
 
 def command_carries_charter_hint(command: str) -> bool:
     """Whether the command text, quotes included, spells a charter action."""
-    return bool(_CHARTER_HINT.search(command))
+    return bool(_CHARTER_HINT.search(command)) or bool(_SECRET_PATH.search(command))
 
 
 def apply_floor_posture(
