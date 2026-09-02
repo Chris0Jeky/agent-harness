@@ -222,11 +222,13 @@ common Git directory has no checkout (for example, a bare repository). Configure
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
 Current state (2026-09-02): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.31, the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
+source is 1.6.32: 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
 T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
 double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive
-repositories keep the walls, and any repo can declare `floor_posture: wall`. 1.6.30 honours
+repositories keep the walls, and any repo can declare `floor_posture: wall`; 1.6.32 (the late #260 review's P1) re-checks every later command
+segment with the analyzer itself, so a masked work-loss or publication action is a double-check
+whatever its spelling. 1.6.30 honours
 Git's numeric booleans in the exact `--no-follow-tags` narrowing (#201, PR #239). 1.6.29 upstreams two owner decisions of 2026-08-18 that were authored directly
 in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
 left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard

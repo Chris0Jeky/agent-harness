@@ -235,6 +235,11 @@ class ReasonClassificationTests(unittest.TestCase):
             "echo hi > $target; powershell -enc UgBlAG0AbwB2AGUA",
             "echo hi > $target; erase /s /q C:\\critical\\x",
             "echo hi > $target; find /critical/x -delete",
+            "echo hi > $target; git reset --hard",
+            "echo hi > $target; git clean -fdx",
+            "echo hi > $target; git checkout -- .",
+            "echo hi > $target && gh repo create x --public",
+            "echo hi > $target && gh repo edit --visibility public",
             "git \\\n  push -f origin $BRANCH",
         )
         for command in hinted:
@@ -510,6 +515,23 @@ class HookRoundTripTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('"permissionDecision": "deny"', proc.stdout)
+
+    def test_a_masked_later_segment_is_re_checked_by_the_analyzer(self):
+        # Late Codex P1 on PR #260: the hint cannot know every guarded verb,
+        # so a later segment is analysed on its own.
+        self.declare(3)
+        decision, reason = self.invoke("echo hi > $target; git reset --hard")
+        self.assertEqual(decision, "deny")
+        self.assertIn("A later segment:", reason)
+        self.assertIn("reset --hard", reason)
+        self.assertIsNotNone(self.key_in(reason), reason)
+        self.declare(1, {"sensitive_data": True}, "guide")
+        decision, reason = self.invoke("echo hi > $target && gh repo create x --public")
+        self.assertEqual(decision, "deny")
+        self.assertIn("PUBLIC", reason)
+        # A later segment the analyzer allows changes nothing.
+        self.declare(1)
+        self.assertEqual(self.invoke("echo hi > $target; git status"), ("allow", ""))
 
     def test_charter_spellings_masked_by_opacity_double_check_through_main(self):
         self.declare(1)
