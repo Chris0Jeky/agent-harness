@@ -39,6 +39,11 @@ py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --claimant session
 # Diff, then install global guidance, skills, and the shared dispatcher with backups.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
+
+# Limit a rollout to reviewed custom agents and one named global skill. Repeat
+# --only for each component; an unknown component or absent selected skill fails closed.
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work --apply
 ```
 
 `worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
@@ -137,8 +142,12 @@ guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPRO
 byte mismatch or absent deployed target fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
-up changed global guidance, shared Claude-home hook bytes, and managed skill folders before
-replacing them. It also prunes the obsolete managed global Codex floor while preserving unrelated
+up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed
+`codex/agents/*.toml` definitions before replacing them. Agent definitions deploy to
+`<codex-home>/agents`; the durable managed-entry record permits stale removal only when the
+deployed bytes still match the last harness-managed version, so unrelated or locally changed files
+are preserved. Removing the source `codex/agents/` directory reconciles that managed set to empty;
+a checkout that never had a managed-entry record remains a no-op. It also prunes the obsolete managed global Codex floor while preserving unrelated
 Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
@@ -212,24 +221,38 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-08-07): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.28 after the bounded #201 repair: `push.followTags` is now read with Git's full
-boolean grammar, so a valid NUMERIC value (zero false, any other magnitude true) is honored by the
-exact option-position `--no-follow-tags` override instead of failing closed as unknown. It retains
-the 1.6.27 #227 repair, where a valueless `push.followTags` is parsed with Git's
-true semantics while every other separator-free configuration record remains malformed and
-fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
+Current state (2026-09-02): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
+source is 1.6.29, which upstreams two owner decisions of 2026-08-18 that were authored directly
+in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
+left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard
+to the irreversible/exfiltration surfaces (repo/gist creation, visibility flips, non-branch
+DELETEs) so routine PR/issue/comment mutations pass (#59), and 1.6.29 allows an explicit
+named-branch remote deletion (`git push --delete <branch>`, `:<branch>`) while wildcards, tags,
+other ref namespaces, protected/production names and dynamic tokens stay denied; the
+`sensitive_data` push narrowing still rejects every deletion selector. 1.6.27 was the bounded
+#227 repair: a valueless `push.followTags` is parsed with Git's true semantics, while every other
+separator-free configuration record remains malformed and fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
 its bounded post-merge security follow-up: that route requires exactly one refspec and rejects
 configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`vcs`, plus
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. Claude-config PR #123 merged the canonical consumer bytes, and reviewed clean-main
-`sync-global --apply` deployed 1.6.26. Fresh clients proved the agent-harness project adapter and the
-global Claude hook separately. The registry inventory then found exactly three current Codex
-consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4 merged their
-current adapters. Each merged exact root was individually reviewed, trusted, enabled, Doctor-green,
-and proved by deliberate allow/deny canaries. No sibling or future adapter inherits that evidence.
+fail-closed. Claude-config PR #127 merged the canonical 1.6.27 consumer bytes, and reviewed
+clean-main `sync-global` dry-run/apply established the matching static global deployment. Runtime
+proof remains at 1.6.26: fresh clients last proved the agent-harness project adapter and the global
+Claude hook separately at that version. The registry inventory then found exactly three current
+Codex consumers: EvidenceDeck PR #20, SwarmingLilMen PR #51, and collaborative-hill-lab PR #4
+merged their 1.6.26 adapters. Each merged exact root was individually reviewed, trusted, enabled,
+Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof remains pending; no
+sibling, future, or changed adapter inherits the prior evidence. That pending proof is human-only
+and strictly ordered — see **H-14** in `HUMAN_TODO.md` and issue #232.
+
+The 2026-08-07/08 wave changed tests and documentation only, so this shipped state is unmoved:
+`FLOOR_VERSION` is still 1.6.27 and no adapter marker changed. It merged the cross-product gate
+repair (PR #240, #110), the secret-file scope ledger line (PR #237, #130) and this state record
+(PR #234). The two lanes that would move implementation — #201's dispatcher slice (PR #239) and
+#139's nested logical repo root (PR #238) — are open with confirmed blockers recorded on their
+threads, so neither has changed shipped behaviour.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
@@ -246,3 +269,13 @@ static byte equality still does not prove a future, moved, or changed adapter's 
 Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
 architecture proposals, and an adversarial completeness critique. This repo obeys its own
 laws: one home per policy, budgets with rotation, no speculative scaffolding.
+
+## License
+
+The owner-authored contents of this repository are licensed under GNU General
+Public License version 3 only (`GPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+The curl-derived option-arity fixture retains curl's own licence; see
+`THIRD_PARTY_NOTICES.md`.
+
+This repository-level decision does not decide the licences of the possible
+future clean-repository plugin or replay products described in the blueprints.
