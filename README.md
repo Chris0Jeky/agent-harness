@@ -252,12 +252,12 @@ Doctor-green, and proved by deliberate allow/deny canaries. Fresh 1.6.27 proof r
 sibling, future, or changed adapter inherits the prior evidence. That pending proof is human-only
 and strictly ordered — see **H-14** in `HUMAN_TODO.md` and issue #232.
 
-The 2026-08-07/08 wave changed tests and documentation only, so this shipped state is unmoved:
-`FLOOR_VERSION` is still 1.6.27 and no adapter marker changed. It merged the cross-product gate
-repair (PR #240, #110), the secret-file scope ledger line (PR #237, #130) and this state record
-(PR #234). The two lanes that would move implementation — #201's dispatcher slice (PR #239) and
-#139's nested logical repo root (PR #238) — are open with confirmed blockers recorded on their
-threads, so neither has changed shipped behaviour.
+The 2026-08-07/08 wave changed tests and documentation only (PR #240 / #110, PR #237 / #130,
+the state record PR #234). The 2026-09-02 session then moved implementation: PR #238 landed
+#139's nested logical repo root with its three review defects fixed (#258 tracks one LOW
+follow-up); PR #257 upstreamed 1.6.29; PR #239 carries #201 as 1.6.30; and 1.6.31 is the guide
+posture above, which also fixes the four 1.6.29 carve-out defects the #257 review found (#259).
+Every producer marker change re-owes runtime proof: **H-15** in `HUMAN_TODO.md`.
 Replay v0
 is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
 charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
