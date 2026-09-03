@@ -172,12 +172,35 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `tests/test_floor_redirect_shapes.py`, and the consequence recorded in its AGENTS.md and ESTATE
   row: below the fail-closed `dispatcher error` deny, nothing in that repository is a wall any
   more — the irreversible core and the `sensitive_data` public-remote refusal are acknowledgeable
-  double-checks. **One consequence needs your call:** `~/.claude` on Kraspyon is a deployment
-  checkout of claude-config, so its next `git pull` carries that declaration into the runtime home
-  and a session rooted there gets the same rendering. It is one declaration behind today (measured
-  2026-09-03: no `floor_posture`, `last_reviewed` 2026-07-26); pull it when you want them level.
+  double-checks. That repository's runtime consequence is **H-16**, not this item.
+
+- [ ] **H-16** — **Prove the guide posture inside the `~/.claude` runtime home, in a real session.**
+  `~/.claude` on Kraspyon is a deployment checkout of claude-config, so the posture declaration
+  reaches it through the normal deployment pull rather than through any separate decision.
+  **Agent lane done 2026-09-03:** that checkout was fast-forwarded `86508a1 → 1594f9c`
+  (`git checkout origin/main -- hooks/…` first, so the two hook files were staged at bytes
+  IDENTICAL to what was already on disk and the live floor was never downgraded mid-pull; backup
+  `~/.claude/.harness-backups/20260903T0025Z`). Verified after the pull: `hooks/dispatch.py`
+  normalized SHA `9bdb630e…` and `hooks/smoke_test.py` `dacae787…`, both unchanged and equal to
+  canonical; `.agent-harness/tier.json` there now reads `floor_posture: guide`; only `settings.json`
+  remains locally modified, which is Claude Code rewriting it. A direct dispatcher canary with that
+  checkout as the project dir then rendered guide: a forced push denied once with a key, a dynamic
+  redirect target and `git status` allowed.
+  **Still yours, and this is the whole item:** that canary invoked `dispatch.py` directly — it is
+  not proof that the RUNTIME runs it. Start a new normal session whose CWD is `~/.claude`, review
+  `/hooks` there, confirm the PreTool floor is trusted and enabled for that exact root, and then run
+  the canary pair through the runtime itself (a harmless allow, and a deliberate deny that should
+  now come back as a double-check carrying a `# FLOOR_ACK=` key rather than a flat refusal). Do the
+  same on the Codex side if you keep a Codex root there. Until that is done, the runtime home is
+  level on paper and unproven in practice — do not describe it as verified.
 
 ## Changelog
+
+- 2026-09-03 — **H-16 added, and H-15 narrowed to the Codex re-trust.** The owner directed `guide`
+  posture for claude-config; PR #197 there landed the declaration. The runtime consequence — that
+  `~/.claude` is a checkout of the same repository and therefore inherits it — is its own item
+  rather than a clause inside H-15, because H-15 closes when the Codex canaries pass and the
+  runtime-home proof would have disappeared with it (Codex review of PR #264).
 
 - 2026-08-07 — **H-14 added.** Between 2026-08-03 and today this file had zero open items while a
   human-only, strictly-ordered runtime proof was in fact outstanding: PR #230 changed the producer
