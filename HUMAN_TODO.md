@@ -156,7 +156,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
-- [ ] **H-15** — **Re-trust floor 1.6.32 (guide posture) in Codex; decide claude-config's posture.**
+- [ ] **H-15** — **Re-trust floor 1.6.32 (guide posture) in Codex.**
   Canonical source moved 1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions)
   → 1.6.30 (#201 / PR #239) → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction;
   SPECS §5.4) → 1.6.32 (PR #262, masked later segments). **Agent lane done 2026-09-02:**
@@ -166,9 +166,16 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
   acknowledged; a dynamic redirect target allowed). **Still human-only:** a new normal Codex TUI in
   each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
-  `plans/ACTIVE.md` P3), and your call on claude-config: it is T3 + `sensitive_data`, so it keeps
-  the walls by default — declare `"floor_posture": "guide"` in its `tier.json` if you want the
-  guide there too.
+  `plans/ACTIVE.md` P3). **The claude-config half is closed 2026-09-03:** you directed guide there,
+  and claude-config PR #197 landed `"floor_posture": "guide"` in its `tier.json` (merge `1594f9c`)
+  with the six-shape canary against the deployed 1.6.32, both renderings pinned by its
+  `tests/test_floor_redirect_shapes.py`, and the consequence recorded in its AGENTS.md and ESTATE
+  row: below the fail-closed `dispatcher error` deny, nothing in that repository is a wall any
+  more — the irreversible core and the `sensitive_data` public-remote refusal are acknowledgeable
+  double-checks. **One consequence needs your call:** `~/.claude` on Kraspyon is a deployment
+  checkout of claude-config, so its next `git pull` carries that declaration into the runtime home
+  and a session rooted there gets the same rendering. It is one declaration behind today (measured
+  2026-09-03: no `floor_posture`, `last_reviewed` 2026-07-26); pull it when you want them level.
 
 ## Changelog
 
