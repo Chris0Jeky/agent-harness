@@ -5,9 +5,10 @@ Snapshot: 2026-09-02. Published `main` head: `d6392dd7959cd887bd83551bf43ddd53b9
 blockers were fixed, and two new floor lanes merged with them (PR #257 = 1.6.29, PR #260 = 1.6.31).
 The rollout workstream below is re-owed at 1.6.31 and stays blocked on human-only runtime proof.
 
-Current runtime state: canonical source, the producer marker, claude-config `hooks/` (PR #196)
-and the owner's `~/.claude/hooks` are all **1.6.32** (PR #262 on top of #260's 1.6.31); the
-Claude runtime canary trio passed live in the deploying session on 2026-09-02; the Codex exact-CWD
+Current runtime state (2026-09-03): canonical source, the producer marker, claude-config `hooks/`
+(PR #199) and the owner's `~/.claude/hooks` are all **1.6.33** (PR #267 on top of #262's 1.6.32);
+`doctor` proves canonical == deployed; the Claude runtime canary trio plus the 1.6.33-specific
+`gh … --help` pair passed live in the deploying session on 2026-09-03; the Codex exact-CWD
 re-trust and Codex canaries are still owed — **H-15** in `HUMAN_TODO.md`.
 
 2026-09-03: the owner directed `guide` posture for claude-config. Its `tier.json` declares it
@@ -19,20 +20,21 @@ session — **H-16**, which does not close with H-15.
 
 ## Active rollout — issue #232, blocked on the Codex half of the runtime proof
 
-Static deployment of **1.6.32** is complete (claude-config PR #196; hooks-only install into
-`~/.claude/hooks`, digest == canonical) and the **Claude** runtime proof is done (live canary trio,
-2026-09-02). Static deployment is never runtime proof for the OTHER runtime: the Codex exact-CWD
-re-trust and Codex canaries are outstanding. The 1.6.27 record (claude-config PR #127) and the
-1.6.29 consumer-side authoring are historical.
+Static deployment of **1.6.33** is complete (claude-config PR #199; `sync-global --apply` into
+`~/.claude/hooks`, `doctor` canonical == deployed) and the **Claude** runtime proof is done (live
+canary trio plus the 1.6.33 `gh … --help` pair, 2026-09-03). Static deployment is never runtime
+proof for the OTHER runtime: the Codex exact-CWD re-trust and Codex canaries are outstanding. The
+1.6.32 record (claude-config PR #196), the 1.6.27 record (claude-config PR #127) and the 1.6.29
+consumer-side authoring are historical.
 
 The remaining rollout is STRICTLY ORDERED. SPECS §5 fixes a five-phase order, and this file uses
 that numbering and no other:
 
-| Phase | SPECS §5 step | State (1.6.32, 2026-09-02) |
+| Phase | SPECS §5 step | State (1.6.33, 2026-09-03) |
 |---|---|---|
-| P1 | producer merge | **done** — PR #262 (1.6.32) on #260 (1.6.31), #239 (1.6.30), #257 (1.6.29) |
-| P2 | reviewed clean-main install | **done** — claude-config PR #196 (byte-identical, smoke 2361/2361); hooks-only install into `~/.claude/hooks` with backup, digest == canonical; Claude canary trio passed live |
-| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** (Codex) — the 1.6.32 canary trio (SPECS §5.4): harmless allow, opacity allow, double-check |
+| P1 | producer merge | **done** — PR #267 (1.6.33) on #262 (1.6.32), #260 (1.6.31), #239 (1.6.30), #257 (1.6.29) |
+| P2 | reviewed clean-main install | **done** — claude-config PR #199 (byte-identical, smoke 2383/2383); `sync-global --apply` into `~/.claude/hooks` with backup, `doctor` canonical == deployed; Claude canary trio plus the 1.6.33 pair passed live |
+| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** (Codex) — the 1.6.33 canary trio (SPECS §5.4): harmless allow, opacity allow, double-check, plus the 1.6.33 `gh repo view --help` / `gh repo delete --help` pair |
 | P4 | consumer marker refresh | **NOT DONE — blocked by BOTH P3 and P3b** |
 | P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — blocked by P4** |
 

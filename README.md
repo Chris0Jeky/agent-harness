@@ -255,12 +255,12 @@ configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. **Deployed state (2026-09-02):** claude-config PR #196 merged the byte-identical 1.6.32
-`hooks/`, the two files were installed into `~/.claude/hooks` with a backup, and the **Claude**
-runtime canary trio of SPECS §5.4 passed live in the deploying session. **The deployed copy is
-therefore 1.6.32 and canonical is now 1.6.33** — that deploy, the Claude canaries and the Codex
-re-trust are all owed again at the new marker, and **H-15** in `HUMAN_TODO.md` names 1.6.33
-explicitly. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
+fail-closed. **Deployed state (2026-09-03):** claude-config PR #199 merged the byte-identical 1.6.33
+`hooks/` (smoke 2383/2383), `sync-global --apply` installed the two files into `~/.claude/hooks`
+with a backup, `doctor` proves canonical 1.6.33 == deployed 1.6.33, and the **Claude** runtime
+canary trio of SPECS §5.4 plus the 1.6.33-specific `gh … --help` pair passed live in the deploying
+session. **Deployed and canonical are both 1.6.33**; only the Codex exact-CWD re-trust and Codex
+canaries remain owed — **H-15** in `HUMAN_TODO.md` carries the evidence. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
 current Codex consumers (EvidenceDeck PR #20, SwarmingLilMen PR #51, collaborative-hill-lab PR #4
 merged their 1.6.26 adapters, each reviewed, trusted, enabled, Doctor-green and canaried). The
 producer's exact-CWD Codex re-trust and canaries at 1.6.33, then the consumer marker refreshes, are
