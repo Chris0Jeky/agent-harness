@@ -13277,8 +13277,16 @@ def masked_segment_fragments(joined: str) -> list[str]:
     the real `;`. Whenever it ends inside a quote, the naive 1.6.32 split is
     added as well. Extra fragments can only ever ADD a verdict — the caller
     returns the first non-opacity one and `apply_floor_posture` uses it only to
-    strengthen — so the fallback costs coverage nothing and is scoped to
-    commands whose quoting is already anomalous, never to a balanced one.
+    strengthen — so the fallback costs coverage nothing.
+
+    It is scoped to what THIS WALK reads as unbalanced, which is not what bash
+    reads as unbalanced: the backtick rule is PowerShell's, so a shell-legal
+    single-quoted span ending in a backtick takes the fallback too. Measured on
+    the false-positive shape that implies -- `git commit -m 'note; git config
+    core.sshCommand `x`' > $LOG` -- the verdict is still allow, because the
+    fragment the naive split hands back carries the backtick and produces no
+    verdict of its own. A balanced span with no backtick never reaches here,
+    which is what keeps `-m 'note; git config core.sshCommand helper'` inert.
     """
     fragments = [segment for segment, _operator in windows_operator_segments(joined)]
     if operator_walk_ends_inside_a_quote(joined):

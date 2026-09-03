@@ -169,7 +169,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   deploying
   session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
   acknowledged; a dynamic redirect target allowed). **None of that evidence covers 1.6.33** — the
-  deployed copy is still 1.6.32 and the canonical marker is now `80e949f9…`. **Owed again at
+  deployed copy is still 1.6.32 and the canonical marker is now `8ea8f6c7…`. **Owed again at
   1.6.33:** the claude-config sync and the `~/.claude/hooks` deploy, a fresh Claude canary trio,
   and — human-only — a new normal Codex TUI in
   each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,

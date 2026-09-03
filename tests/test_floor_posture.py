@@ -593,6 +593,14 @@ class HookRoundTripTests(unittest.TestCase):
             self.invoke("git commit -m 'note; git config core.sshCommand x' > $LOG"),
             ("allow", ""),
         )
+        # And the shape where the walk's PowerShell backtick rule calls a
+        # shell-LEGAL span unbalanced: the fallback runs, and the fragment it
+        # hands back still produces no verdict, so the commit message stays
+        # uninspected (review of PR #267 asked for this one by name).
+        self.assertEqual(
+            self.invoke("git commit -m 'note; git config core.sshCommand `x`' > $LOG"),
+            ("allow", ""),
+        )
 
     def test_the_quote_walk_and_the_balance_check_agree(self):
         # They share `operator_walk_quote_after`, so the balance check is
@@ -732,33 +740,38 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
             for key in list(os.environ)
             if key.startswith("CLAUDE_") or key.startswith("GIT_")
         }
-        with tempfile.TemporaryDirectory() as project:
-            cfg_dir = Path(project) / ".agent-harness"
-            cfg_dir.mkdir()
-            (cfg_dir / "tier.json").write_text(
-                json.dumps(declaration), encoding="utf-8"
-            )
-            payload = json.dumps(
-                {
-                    "tool_name": "Bash",
-                    "tool_input": {"command": command},
-                    "cwd": project,
-                }
-            )
-            dispatch.check = recording_check
-            sys.argv = ["dispatch.py", "--event", "pre", "--runtime", "claude"]
-            sys.stdin = io.StringIO(payload)
-            sys.stdout = io.StringIO()
-            try:
-                dispatch.main()
-            except SystemExit:
-                pass
-            finally:
-                dispatch.check = original_check
-                sys.argv = original_argv
-                sys.stdin = original_stdin
-                sys.stdout = original_stdout
-                os.environ.update(ambient)
+        # The guard opens BEFORE anything that can raise: a failed mkdir or
+        # write would otherwise leave the suite without its CLAUDE_*/GIT_*
+        # environment, and a failed setup would leave `dispatch.check`
+        # monkeypatched for every later test (review of PR #267).
+        try:
+            with tempfile.TemporaryDirectory() as project:
+                cfg_dir = Path(project) / ".agent-harness"
+                cfg_dir.mkdir()
+                (cfg_dir / "tier.json").write_text(
+                    json.dumps(declaration), encoding="utf-8"
+                )
+                payload = json.dumps(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                        "cwd": project,
+                    }
+                )
+                dispatch.check = recording_check
+                sys.argv = ["dispatch.py", "--event", "pre", "--runtime", "claude"]
+                sys.stdin = io.StringIO(payload)
+                sys.stdout = io.StringIO()
+                try:
+                    dispatch.main()
+                except SystemExit:
+                    pass
+        finally:
+            dispatch.check = original_check
+            sys.argv = original_argv
+            sys.stdin = original_stdin
+            sys.stdout = original_stdout
+            os.environ.update(ambient)
         return calls
 
     def test_whole_check_and_segment_re_check_share_one_cache_and_deadline(self):

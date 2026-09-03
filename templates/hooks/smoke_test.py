@@ -4993,17 +4993,19 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
         )
     # MUST-ALLOW: and a BALANCED quoted separator is still inert, even when the
     # command has no other separator for the walk to split on.
-    results.append(
-        (
-            "guide T3 balanced quoted separator with a redirect still allows",
-            run_case(
-                "git commit -m 'note; git config core.sshCommand helper' > $LOG",
-                3,
-                dict(guide),
-            ),
-            "allow",
+    for command in (
+        "git commit -m 'note; git config core.sshCommand helper' > $LOG",
+        # The walk's backtick rule calls this shell-LEGAL span unbalanced, so
+        # the fallback runs; the fragment it returns still yields no verdict.
+        "git commit -m 'note; git config core.sshCommand `x`' > $LOG",
+    ):
+        results.append(
+            (
+                f"guide T3 balanced quoted separator with a redirect allows: {command}",
+                run_case(command, 3, dict(guide)),
+                "allow",
+            )
         )
-    )
     # MUST-ALLOW: a pipeline stage the analyzer allows changes nothing.
     for command in (
         "echo hi > $target | grep foo",
