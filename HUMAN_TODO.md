@@ -156,17 +156,36 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
-- [ ] **H-15** — **Re-trust floor 1.6.32 (guide posture) in Codex.**
+- [ ] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture).**
   Canonical source moved 1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions)
   → 1.6.30 (#201 / PR #239) → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction;
-  SPECS §5.4) → 1.6.32 (PR #262, masked later segments). **Agent lane done 2026-09-02:**
+  SPECS §5.4) → 1.6.32 (PR #262, masked later segments) → **1.6.33 (2026-09-03, PR #267: one
+  remote-resolution budget per hook invocation, and a mutating-only `gh` charter hint. The
+  segmentation half of that review was attempted and REVERTED — it introduced two bypasses and
+  three false positives; #268 carries the measurement, and the deny surface is otherwise
+  byte-for-byte 1.6.32's)**. **Agent lane done 2026-09-02, at 1.6.32
+  only:**
   claude-config PR #196 synced the byte-identical 1.6.32 bytes (its smoke 2361/2361), and the two
   hook files were installed into `~/.claude/hooks` (backup `.harness-backups/20260902T182855Z`,
-  digest `9bdb630e…` == canonical); the **Claude** canary trio then passed live in the deploying
+  digest `9bdb630e…` == canonical 1.6.32); the **Claude** canary trio then passed live in the
+  deploying
   session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
-  acknowledged; a dynamic redirect target allowed). **Still human-only:** a new normal Codex TUI in
+  acknowledged; a dynamic redirect target allowed). **None of that evidence covers 1.6.33** — the
+  deployed copy is still 1.6.32 and the canonical marker is now `9da63957…`. **Owed again at
+  1.6.33:** the claude-config sync and the `~/.claude/hooks` deploy, a fresh Claude canary trio,
+  and — human-only — a new normal Codex TUI in
   each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
-  `plans/ACTIVE.md` P3). **The claude-config half is closed 2026-09-03:** you directed guide there,
+  `plans/ACTIVE.md` P3). Add one 1.6.33-specific pair to the trio, in a guide-posture repo. Both
+  carry `--help`, so each is **inert if the hook is missing or disabled** — which is exactly the
+  case the probe exists to detect (the H-16 reasoning below):
+  1. `echo hi > $target; gh repo view --help` must be **ALLOWED**. On the deployed 1.6.32 this same
+     command is a double-check, so an allow here is positive proof the new bytes are the ones
+     running — a stronger signal than a deny, which 1.6.32 would also give.
+  2. `echo hi > $target; gh repo delete --help` must still come back as a **double-check with a
+     key**, proving the narrowing did not disarm the mutating half.
+
+  Measured on both revisions before writing them here. **The claude-config posture half is closed
+  2026-09-03:** you directed guide there,
   and claude-config PR #197 landed `"floor_posture": "guide"` in its `tier.json` (merge `1594f9c`)
   with the six-shape canary against the deployed 1.6.32, both renderings pinned by its
   `tests/test_floor_redirect_shapes.py`, and the consequence recorded in its AGENTS.md and ESTATE

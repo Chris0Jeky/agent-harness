@@ -4929,6 +4929,84 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
             "allow",
         )
     )
+    # 1.6.33. The re-check deliberately keeps the 1.6.32 SEPARATOR SET: `;`,
+    # `&&`, `||`, `&`, newline, and NOT `|`. PR #267 tried a quote-aware walk
+    # that also split pipelines and it produced two bypasses and three false
+    # positives (#268). These are the shapes that measured the decision, pinned
+    # in both directions so a future attempt has to face them.
+    #
+    # MUST-DENY: a guarded later segment stays a double-check even when the
+    # command carries quoting the walk read differently from the shell.
+    for command in (
+        # Valid Bash: both `\'` are literal, so both `;` are real separators.
+        "echo hi > $target; echo don\\'t; git config core.sshCommand helper; echo foo\\'bar",
+        "echo hi > $target; echo don\\'t; git config core.sshCommand helper",
+        'echo hi > $target; echo \\"a; git config core.sshCommand helper; echo \\"b',
+        # A quoted INTERPRETER payload is program text, not data.
+        "powershell -Command 'echo inner > $other; git config core.sshCommand helper'",
+    ):
+        results.append(
+            (
+                f"guide T3 masked segment survives quoting shapes: {command}",
+                run_case(command, 3, dict(guide)),
+                "deny",
+            )
+        )
+        results.append(
+            (
+                f"guide T3 masked segment names the segment: {command}",
+                "A later segment:" in LAST_REASON[0],
+                True,
+            )
+        )
+    # MUST-ALLOW: `|` is NOT a separator here, so none of these three shapes --
+    # a trailing comment, a backslash-escaped pipe, arithmetic bitwise OR --
+    # can be mis-read as a later command.
+    for command in (
+        "echo hi > $target # note | git config core.sshCommand helper",
+        "echo hi > $target \\| git config core.sshCommand helper",
+        "echo hi > $target $((1 | git)) config core.sshCommand helper",
+    ):
+        results.append(
+            (
+                f"guide T3 pipe-adjacent shape is not a segment: {command}",
+                run_case(command, 3, dict(guide)),
+                "allow",
+            )
+        )
+    # MUST-ALLOW: the gh charter hint names MUTATING subcommands only, so a
+    # read-only gh call behind an opacity is allowed exactly as it is bare.
+    for command in (
+        "echo hi > $target; gh repo view",
+        "echo hi > $target; gh gist list",
+        "echo hi > $target; gh repo clone owner/x",
+        "echo hi > $target; gh repo autolink list",
+        "echo hi > $target; gh repo autolink view 123",
+    ):
+        results.append(
+            (
+                f"guide T1 read-only gh behind opacity allows: {command}",
+                run_case(command, 1, dict(guide)),
+                "allow",
+            )
+        )
+    # MUST-DENY: and every mutating spelling it exists for still double-checks,
+    # `autolink` being a subcommand GROUP whose own create/delete mutate.
+    for command in (
+        "echo hi > $target; gh repo delete owner/x",
+        "echo hi > $target; gh gist delete abc123",
+        "echo hi > $target && gh repo create x --public",
+        "echo hi > $target; gh repo edit --visibility public",
+        "echo hi > $target; gh repo autolink create TICKET- https://x.example/n",
+        "echo hi > $target; gh repo autolink delete 123",
+    ):
+        results.append(
+            (
+                f"guide T1 mutating gh behind opacity double-checks: {command}",
+                run_case(command, 1, dict(guide)),
+                "deny",
+            )
+        )
     # Uppercase -C/-X are flags, not program text: these opacity allows survive.
     for command in (
         "git -C $S status > $LOG",

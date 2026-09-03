@@ -59,7 +59,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.32 (2026-09-02)"
+FLOOR_VERSION = "1.6.33 (2026-09-03)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -13197,7 +13197,18 @@ _CHARTER_HINT = re.compile(
     r"|\btee\b|\bdd\b"
     r"|reset\s+--hard|clean\s+-[a-z]*[fdx]|checkout\s+--\s|checkout\s+-[a-z]*f|restore\s+\."
     r"|--discard-changes|worktree\s+remove|stash\s+drop|stash\s+clear|branch\s+-[a-z]*D"
-    r"|\bgh\s+(?:repo|gist)\b|--public\b|--visibility\b|\bgh\s+api\b",
+    # MUTATING gh subcommands only. The bare `gh (repo|gist)` alternative this
+    # replaces made `gh repo view` and `gh gist list` -- reads the parent
+    # revision allowed -- into double-checks whenever any earlier segment was
+    # opaque (review of PR #262). `autolink` is a subcommand GROUP, so its own
+    # `create`/`delete` are reached through the optional group below while
+    # `autolink list`/`autolink view` stay reads (review of PR #267).
+    # `--public`/`--visibility` below still carry the publication forms
+    # whatever subcommand spells them.
+    r"|\bgh\s+(?:repo|gist)\s+(?:autolink\s+)?"
+    r"(?:create|delete|edit|rename|archive|unarchive"
+    r"|transfer|fork|sync|set-default|deploy-key)\b"
+    r"|--public\b|--visibility\b|\bgh\s+api\b",
     re.IGNORECASE,
 )
 
@@ -13212,17 +13223,28 @@ _SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\r?\n|&")
 
 
 def masked_segment_verdict(
-    command: str, tier_cfg: dict, project_dir: str, command_cwd: str, checker
+    command: str,
+    tier_cfg: dict,
+    project_dir: str,
+    command_cwd: str,
+    checker,
+    remote_cache: dict | None = None,
+    remote_deadline: float | None = None,
 ):
     """The first non-opacity verdict among the command's segments, or None."""
     # Join backslash-newline continuations BEFORE splitting on newlines, as
     # the whole-command path does, so `git reset \` + `--hard` is one segment.
     joined = remove_shell_line_continuations(command)
     whole = joined.strip()
-    # Fragments share one remote cache and deadline: N pushes in one command
-    # resolve the remote once, not N times, inside the hook's time budget.
-    remote_cache: dict = {}
-    remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
+    # One remote cache and deadline for the WHOLE hook invocation: main() passes
+    # the pair it already gave the whole-command check, so a push resolved there
+    # is not resolved again here, and the two analyses cannot each spend a full
+    # _REMOTE_RESOLUTION_BUDGET_SECONDS and overrun the adapter's 5s timeout
+    # (review of PR #262). Defaulted so a direct caller still gets a budget.
+    if remote_cache is None:
+        remote_cache = {}
+    if remote_deadline is None:
+        remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
     for fragment in _SEGMENT_SPLIT.split(joined):
         fragment = fragment.strip()
         if not fragment or fragment == whole:
@@ -13447,11 +13469,17 @@ def main():
             payload_cwd,
         )
         command, ack = split_floor_ack(command)
+        # ONE remote-resolution cache and deadline for this hook invocation,
+        # shared by the whole-command check and the masked-segment re-check.
+        remote_cache: dict = {}
+        remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
         decision, reason = check(
             command,
             tier_cfg,
             project_dir,
             payload_cwd or env_project_dir,
+            _remote_cache=remote_cache,
+            _remote_deadline=remote_deadline,
         )
         masked = None
         if (
@@ -13460,7 +13488,13 @@ def main():
             and floor_posture(tier_cfg) != "wall"
         ):
             masked = masked_segment_verdict(
-                command, tier_cfg, project_dir, payload_cwd or env_project_dir, check
+                command,
+                tier_cfg,
+                project_dir,
+                payload_cwd or env_project_dir,
+                check,
+                remote_cache,
+                remote_deadline,
             )
         decision, reason = apply_floor_posture(
             decision, reason, command, ack, tier_cfg, masked

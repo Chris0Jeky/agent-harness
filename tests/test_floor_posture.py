@@ -9,6 +9,7 @@ dispatcher classifies deliberately, and the hook-level round trip through
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -544,6 +545,63 @@ class HookRoundTripTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("A later segment:", reason)
 
+    def test_the_re_check_separator_set_is_deliberate(self):
+        # PR #267 tried replacing `_SEGMENT_SPLIT` with a quote-aware walk that
+        # also split pipelines. Measured against 1.6.32 it produced two
+        # BYPASSES (a command whose quoting the walk read differently from the
+        # shell, and a quoted interpreter payload) and three FALSE POSITIVES
+        # (a trailing comment, an escaped `\|`, arithmetic `$((a | b))`). The
+        # separator set stays as it is; #268 carries the analysis. These pin
+        # both directions so the next attempt has to answer them.
+        self.declare(3)
+        for command in (
+            # Valid Bash: both `\'` are literal, so both `;` really separate.
+            "echo hi > $target; echo don\\'t; git config core.sshCommand x; echo a\\'b",
+            "echo hi > $target; echo don\\'t; git config core.sshCommand x",
+            # A quoted INTERPRETER payload is program text, not inert data.
+            "powershell -Command 'echo inner > $other; git config core.sshCommand x'",
+        ):
+            with self.subTest(deny=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIn("A later segment:", reason)
+                self.assertIsNotNone(self.key_in(reason), reason)
+        for command in (
+            "echo hi > $target # note | git config core.sshCommand x",
+            "echo hi > $target \\| git config core.sshCommand x",
+            "echo hi > $target $((1 | git)) config core.sshCommand x",
+        ):
+            with self.subTest(allow=command):
+                self.assertEqual(self.invoke(command), ("allow", ""))
+
+    def test_gh_charter_hint_covers_mutating_subcommands_only(self):
+        # Review of PR #262: the bare `gh (repo|gist)` alternative turned every
+        # read-only gh call behind an opacity into a double-check. Review of
+        # PR #267: `autolink` is a subcommand GROUP, so its own create/delete
+        # have to be reached through it.
+        self.declare(1)
+        for command in (
+            "echo hi > $target; gh repo view",
+            "echo hi > $target; gh gist list",
+            "echo hi > $target; gh repo clone owner/x",
+            "echo hi > $target; gh repo autolink list",
+            "echo hi > $target; gh repo autolink view 123",
+        ):
+            with self.subTest(allow=command):
+                self.assertEqual(self.invoke(command), ("allow", ""))
+        for command in (
+            "echo hi > $target; gh repo delete owner/x",
+            "echo hi > $target; gh gist delete abc123",
+            "echo hi > $target && gh repo create x --public",
+            "echo hi > $target; gh repo edit --visibility public",
+            "echo hi > $target; gh repo autolink create TICKET- https://x.example/n",
+            "echo hi > $target; gh repo autolink delete 123",
+        ):
+            with self.subTest(deny=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIsNotNone(self.key_in(reason), reason)
+
     def test_charter_spellings_masked_by_opacity_double_check_through_main(self):
         self.declare(1)
         for command in (
@@ -589,6 +647,99 @@ class HookRoundTripTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertIn("dispatcher error", reason)
         self.assertNotIn("FLOOR_ACK", reason)
+
+
+class RemoteBudgetThreadingTests(unittest.TestCase):
+    """One remote-resolution cache and deadline for the whole hook invocation.
+
+    Review of PR #262: the whole-command check and the masked-segment re-check
+    each created their own ``_remote_cache`` and their own
+    ``_REMOTE_RESOLUTION_BUDGET_SECONDS`` deadline, so one command could resolve
+    the same push twice and spend two full budgets — past the adapter's
+    declared 5s timeout. Measured before the fix: 6 probes over 6.57s for
+    ``git push origin feature; git run-alias-x`` against 3 over 3.33s for that
+    push alone; after it, 3 over 3.41s.
+    """
+
+    def _drive_main(self, command, declaration):
+        calls = []
+
+        def recording_check(
+            command_text, tier_cfg, project_dir, command_cwd, *args, **kwargs
+        ):
+            calls.append(
+                (
+                    command_text,
+                    kwargs.get("_remote_cache"),
+                    kwargs.get("_remote_deadline"),
+                )
+            )
+            if len(calls) == 1:
+                return "deny", "A dynamic redirect target cannot be inspected safely."
+            return "allow", ""
+
+        original_check = dispatch.check
+        original_argv = sys.argv
+        original_stdin = sys.stdin
+        original_stdout = sys.stdout
+        # main() reads CLAUDE_PROJECT_DIR, and resolve_context merges THAT
+        # repo's declaration with the payload cwd's, strictest wins. Running
+        # in-process would otherwise inherit an ambient wall and skip the
+        # re-check this test exists to observe. The guard opens BEFORE anything
+        # that can raise, so a failed setup cannot leave the suite without its
+        # environment or leave `check` monkeypatched for every later test.
+        ambient = {
+            key: os.environ.pop(key)
+            for key in list(os.environ)
+            if key.startswith("CLAUDE_") or key.startswith("GIT_")
+        }
+        try:
+            with tempfile.TemporaryDirectory() as project:
+                cfg_dir = Path(project) / ".agent-harness"
+                cfg_dir.mkdir()
+                (cfg_dir / "tier.json").write_text(
+                    json.dumps(declaration), encoding="utf-8"
+                )
+                payload = json.dumps(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                        "cwd": project,
+                    }
+                )
+                dispatch.check = recording_check
+                sys.argv = ["dispatch.py", "--event", "pre", "--runtime", "claude"]
+                sys.stdin = io.StringIO(payload)
+                sys.stdout = io.StringIO()
+                try:
+                    dispatch.main()
+                except SystemExit:
+                    pass
+        finally:
+            dispatch.check = original_check
+            sys.argv = original_argv
+            sys.stdin = original_stdin
+            sys.stdout = original_stdout
+            os.environ.update(ambient)
+        return calls
+
+    def test_whole_check_and_segment_re_check_share_one_cache_and_deadline(self):
+        calls = self._drive_main(
+            "echo hi > $target; git push origin main",
+            {"tier": 3, "flags": {}, "floor_posture": "guide"},
+        )
+        self.assertGreaterEqual(len(calls), 2, calls)
+        self.assertIsInstance(calls[0][1], dict)
+        self.assertIsInstance(calls[0][2], float)
+        self.assertEqual(len({id(cache) for _, cache, _ in calls}), 1)
+        self.assertEqual(len({deadline for _, _, deadline in calls}), 1)
+
+    def test_a_wall_posture_never_runs_the_segment_re_check(self):
+        calls = self._drive_main(
+            "echo hi > $target; git push origin main",
+            {"tier": 3, "flags": {}, "floor_posture": "wall"},
+        )
+        self.assertEqual(len(calls), 1, calls)
 
 
 if __name__ == "__main__":
