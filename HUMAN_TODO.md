@@ -170,12 +170,24 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   digest `9bdb630e…` == canonical 1.6.32); the **Claude** canary trio then passed live in the
   deploying
   session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
-  acknowledged; a dynamic redirect target allowed). **None of that evidence covers 1.6.33** — the
-  deployed copy is still 1.6.32 and the canonical marker is now `9da63957…`. **Owed again at
-  1.6.33:** the claude-config sync and the `~/.claude/hooks` deploy, a fresh Claude canary trio,
-  and — human-only — a new normal Codex TUI in
+  acknowledged; a dynamic redirect target allowed). **Agent lane done again 2026-09-03, at
+  1.6.33:** claude-config PR #199 synced the canonical `86dfca3` bytes (its smoke 2383/2383,
+  `git diff --check` clean, Codex clean, merged `94d922d`); `sync-global --apply` from clean
+  published mains installed the two hook files into `~/.claude/hooks` (Codex backup
+  `20260903T131545Z`); `doctor --config-root` reports **floor version ok: canonical 1.6.33 ==
+  deployed 1.6.33**, harness checkout level with origin/main `86dfca3`. The Claude canary trio
+  then passed live in the deploying session against the 1.6.33 bytes, in the guide-posture
+  claude-config checkout: `git status --short --branch` allowed; `rm -rf` on a nonexistent
+  outside path double-checked once with a key and allowed when acknowledged; and the
+  1.6.33-specific pair below — `gh repo view --help` after the opaque segment **allowed** (the
+  positive proof; 1.6.32 double-checked it), `gh repo delete --help` after it **double-checked
+  with a key** and passed when acknowledged, both banners reporting `floor 1.6.33 (2026-09-03)`.
+  Observed alongside, not caused by this: `doctor` reports the global Claude guidance as FAIL
+  because the `~/.claude` deployment checkout sits at `0b7ab26`, 49 commits behind claude-config
+  `origin/main`, with locally modified hook and memory files — that is H-16's runtime-home item,
+  untouched here. **Still owed — human-only:** a new normal Codex TUI in
   each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
-  `plans/ACTIVE.md` P3). Add one 1.6.33-specific pair to the trio, in a guide-posture repo. Both
+  `plans/ACTIVE.md` P3). The 1.6.33-specific pair for that trio, in a guide-posture repo. Both
   carry `--help`, so each is **inert if the hook is missing or disabled** — which is exactly the
   case the probe exists to detect (the H-16 reasoning below):
   1. `echo hi > $target; gh repo view --help` must be **ALLOWED**. On the deployed 1.6.32 this same
