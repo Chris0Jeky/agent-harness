@@ -2749,50 +2749,6 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
     return "".join(result)
 
 
-def operator_walk_quote_after(
-    command: str,
-    index: int,
-    quote: str | None,
-    single_quotes_are_inert: bool,
-) -> str | None:
-    """The quote state AFTER `windows_operator_segments` consumes `command[index]`.
-
-    ONE definition, two callers: the splitter below and
-    `operator_walk_ends_inside_a_quote`, which asks whether that walk finished
-    holding a quote open. Two copies of this rule would drift, and the
-    consequence of drift is a segment the re-check silently never inspects.
-    """
-    char = command[index]
-    if quote:
-        if char == quote and (index == 0 or command[index - 1] != "`"):
-            return None
-        return quote
-    if char == '"' or (char == "'" and single_quotes_are_inert):
-        return char
-    return quote
-
-
-def operator_walk_ends_inside_a_quote(
-    command: str, single_quotes_are_inert: bool = True
-) -> bool:
-    """Whether the operator walk finishes INSIDE a quote it never closed.
-
-    When it does, every separator after that point was read as quoted data, so
-    `windows_operator_segments` may have swallowed a REAL command separator:
-    `echo don\\'t > $LOG; git config …` is one bash command followed by another,
-    but the walk has no backslash-escape rule and opens a quote at that
-    apostrophe. Its caller answers by ALSO taking the naive split, which is what
-    the shipped 1.6.32 re-check used, so no coverage is lost to a quoting shape
-    this walk reads differently from the shell.
-    """
-    quote: str | None = None
-    for index in range(len(command)):
-        quote = operator_walk_quote_after(
-            command, index, quote, single_quotes_are_inert
-        )
-    return quote is not None
-
-
 def windows_operator_segments(
     command: str,
     *,
@@ -2806,17 +2762,16 @@ def windows_operator_segments(
     index = 0
     while index < len(command):
         char = command[index]
-        opened = operator_walk_quote_after(
-            command, index, quote, single_quotes_are_inert
-        )
-        if quote or opened:
-            # Inside a quoted span, or this character opens one: it is data,
-            # never an operator.
-            quote = opened
+        if quote:
+            if char == quote and (index == 0 or command[index - 1] != "`"):
+                quote = None
             current.append(char)
             index += 1
             continue
-        if char == "&" and (
+        if char == '"' or (char == "'" and single_quotes_are_inert):
+            quote = char
+            current.append(char)
+        elif char == "&" and (
             (current and current[-1] in "<>")
             or (
                 aggregate_redirects
@@ -13245,9 +13200,13 @@ _CHARTER_HINT = re.compile(
     # MUTATING gh subcommands only. The bare `gh (repo|gist)` alternative this
     # replaces made `gh repo view` and `gh gist list` -- reads the parent
     # revision allowed -- into double-checks whenever any earlier segment was
-    # opaque (review of PR #262). `--public`/`--visibility` below still carry
-    # the publication forms whatever subcommand spells them.
-    r"|\bgh\s+(?:repo|gist)\s+(?:create|delete|edit|rename|archive|unarchive"
+    # opaque (review of PR #262). `autolink` is a subcommand GROUP, so its own
+    # `create`/`delete` are reached through the optional group below while
+    # `autolink list`/`autolink view` stay reads (review of PR #267).
+    # `--public`/`--visibility` below still carry the publication forms
+    # whatever subcommand spells them.
+    r"|\bgh\s+(?:repo|gist)\s+(?:autolink\s+)?"
+    r"(?:create|delete|edit|rename|archive|unarchive"
     r"|transfer|fork|sync|set-default|deploy-key)\b"
     r"|--public\b|--visibility\b|\bgh\s+api\b",
     re.IGNORECASE,
@@ -13259,44 +13218,8 @@ _CHARTER_HINT = re.compile(
 # the spellings it knows; this re-check lets the analyzer itself speak for
 # every segment, so a masked guarded action in any segment forces the
 # double-check whatever its spelling (late Codex P1 on PR #260).
-# The 1.6.32 splitter, kept as the fallback for a command the quote-aware walk
-# reads differently from the shell (see `masked_segment_fragments`).
-_SEGMENT_SPLIT = re.compile(r"&&|\|\||\|&|;|\r?\n|&|\|")
-
-
-def masked_segment_fragments(joined: str) -> list[str]:
-    """The command's later segments, quote-aware, with a fail-CLOSED fallback.
-
-    The quote-aware walk is the primary reading: it is the one `check()` itself
-    uses for the whole command, so a separator inside a commit message is inert
-    in both, and `|`/`|&` pipeline stages are segments in both.
-
-    But that walk has no backslash-escape rule and treats a backtick before a
-    closing quote as an escape, so `echo don\\'t > $LOG; …` and
-    `echo 'run `make`' > $LOG; …` leave it holding a quote open and swallowing
-    the real `;`. Whenever it ends inside a quote, the naive 1.6.32 split is
-    added as well. Extra fragments can only ever ADD a verdict — the caller
-    returns the first non-opacity one and `apply_floor_posture` uses it only to
-    strengthen — so the fallback costs coverage nothing.
-
-    It is scoped to what THIS WALK reads as unbalanced, which is not what bash
-    reads as unbalanced: the backtick rule is PowerShell's, so a shell-legal
-    single-quoted span ending in a backtick takes the fallback too. Measured on
-    the false-positive shape that implies -- `git commit -m 'note; git config
-    core.sshCommand `x`' > $LOG` -- the verdict is still allow, because the
-    fragment the naive split hands back carries the backtick and produces no
-    verdict of its own. A balanced span with no backtick never reaches here,
-    which is what keeps `-m 'note; git config core.sshCommand helper'` inert.
-    """
-    fragments = [segment for segment, _operator in windows_operator_segments(joined)]
-    if operator_walk_ends_inside_a_quote(joined):
-        fragments.extend(_SEGMENT_SPLIT.split(joined))
-    ordered: list[str] = []
-    for fragment in fragments:
-        fragment = fragment.strip()
-        if fragment and fragment not in ordered:
-            ordered.append(fragment)
-    return ordered
+# A lone `&` is bash's background separator and cmd.exe's sequencer.
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\r?\n|&")
 
 
 def masked_segment_verdict(
@@ -13316,14 +13239,15 @@ def masked_segment_verdict(
     # One remote cache and deadline for the WHOLE hook invocation: main() passes
     # the pair it already gave the whole-command check, so a push resolved there
     # is not resolved again here, and the two analyses cannot each spend a full
-    # _REMOTE_RESOLUTION_BUDGET_SECONDS and overrun the adapter's timeout
+    # _REMOTE_RESOLUTION_BUDGET_SECONDS and overrun the adapter's 5s timeout
     # (review of PR #262). Defaulted so a direct caller still gets a budget.
     if remote_cache is None:
         remote_cache = {}
     if remote_deadline is None:
         remote_deadline = time.monotonic() + _REMOTE_RESOLUTION_BUDGET_SECONDS
-    for fragment in masked_segment_fragments(joined):
-        if fragment == whole:
+    for fragment in _SEGMENT_SPLIT.split(joined):
+        fragment = fragment.strip()
+        if not fragment or fragment == whole:
             continue
         try:
             decision, reason = checker(

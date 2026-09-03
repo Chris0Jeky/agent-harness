@@ -545,15 +545,21 @@ class HookRoundTripTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("A later segment:", reason)
 
-    def test_masked_segments_are_split_quote_aware_including_pipelines(self):
-        # Review of PR #262. A pipeline stage is another executable segment, so
-        # the re-check must see it; a separator inside QUOTED data is inert, so
-        # commit-message text must never be re-parsed as a command.
+    def test_the_re_check_separator_set_is_deliberate(self):
+        # PR #267 tried replacing `_SEGMENT_SPLIT` with a quote-aware walk that
+        # also split pipelines. Measured against 1.6.32 it produced two
+        # BYPASSES (a command whose quoting the walk read differently from the
+        # shell, and a quoted interpreter payload) and three FALSE POSITIVES
+        # (a trailing comment, an escaped `\|`, arithmetic `$((a | b))`). The
+        # separator set stays as it is; #268 carries the analysis. These pin
+        # both directions so the next attempt has to answer them.
         self.declare(3)
         for command in (
-            "echo hi > $target | git config core.sshCommand helper",
-            "echo hi > $target |& git config core.sshCommand helper",
-            "echo hi > $target 2>&1; git config core.sshCommand helper",
+            # Valid Bash: both `\'` are literal, so both `;` really separate.
+            "echo hi > $target; echo don\\'t; git config core.sshCommand x; echo a\\'b",
+            "echo hi > $target; echo don\\'t; git config core.sshCommand x",
+            # A quoted INTERPRETER payload is program text, not inert data.
+            "powershell -Command 'echo inner > $other; git config core.sshCommand x'",
         ):
             with self.subTest(deny=command):
                 decision, reason = self.invoke(command)
@@ -561,85 +567,25 @@ class HookRoundTripTests(unittest.TestCase):
                 self.assertIn("A later segment:", reason)
                 self.assertIsNotNone(self.key_in(reason), reason)
         for command in (
-            "echo hi > $target; git commit -m 'note; git config core.sshCommand x'",
-            "echo hi > $target; git commit -m 'note | git config core.sshCommand x'",
-            'echo hi > $target && git commit -m "note && git config core.sshCommand x"',
-            "echo hi > $target; git commit -m $'note; git config core.sshCommand x'",
-            "echo hi > $target | grep foo",
-            "echo hi > $target | git status",
+            "echo hi > $target # note | git config core.sshCommand x",
+            "echo hi > $target \\| git config core.sshCommand x",
+            "echo hi > $target $((1 | git)) config core.sshCommand x",
         ):
             with self.subTest(allow=command):
                 self.assertEqual(self.invoke(command), ("allow", ""))
 
-    def test_unbalanced_quoting_falls_back_to_the_naive_split(self):
-        # Review of PR #267: the quote-aware walk has no backslash-escape rule
-        # and reads a backtick before a closing quote as an escape, so these
-        # leave it holding a quote open and swallowing a REAL separator. The
-        # first is an executable bash command that really runs `git config`.
-        self.declare(3)
-        for command in (
-            "echo don\\'t > $LOG; git config core.sshCommand helper",
-            "echo $'don\\'t' > $LOG; git config core.sshCommand helper",
-            "echo 'run `make`' > $LOG; git config core.sshCommand helper",
-            'echo hi > $target; git commit -m "open ; git config core.sshCommand x',
-        ):
-            with self.subTest(deny=command):
-                decision, reason = self.invoke(command)
-                self.assertEqual(decision, "deny")
-                self.assertIn("A later segment:", reason)
-        # The fallback is scoped to an unbalanced walk: a balanced quoted
-        # separator stays inert even with no other separator in the command.
-        self.assertEqual(
-            self.invoke("git commit -m 'note; git config core.sshCommand x' > $LOG"),
-            ("allow", ""),
-        )
-        # And the shape where the walk's PowerShell backtick rule calls a
-        # shell-LEGAL span unbalanced: the fallback runs, and the fragment it
-        # hands back still produces no verdict, so the commit message stays
-        # uninspected (review of PR #267 asked for this one by name).
-        self.assertEqual(
-            self.invoke("git commit -m 'note; git config core.sshCommand `x`' > $LOG"),
-            ("allow", ""),
-        )
-
-    def test_the_quote_walk_and_the_balance_check_agree(self):
-        # They share `operator_walk_quote_after`, so the balance check is
-        # exactly the walk's own reading of the same text: when it reports the
-        # walk ends outside every quote, the walk really did reach and split the
-        # trailing `;`, and when it reports otherwise the `;` was swallowed.
-        for command, ends_open in (
-            ("echo plain", False),
-            ("echo 'a; b'; git status", False),
-            ('echo "a; b"; git status', False),
-            ("echo $'a; b'; git status", False),
-            ("echo don\\'t; git status", True),
-            ("echo 'run `make`'; git status", True),
-            ('git commit -m "open ; x', True),
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(
-                    dispatch.operator_walk_ends_inside_a_quote(command), ends_open
-                )
-                trailing_separator = "; git status" in command
-                reached = any(
-                    segment == "git status"
-                    for segment, _op in dispatch.windows_operator_segments(command)
-                )
-                self.assertEqual(reached, trailing_separator and not ends_open)
-                # The fallback is what puts that swallowed segment back.
-                self.assertIn(
-                    "git status" if trailing_separator else command.strip(),
-                    dispatch.masked_segment_fragments(command),
-                )
-
     def test_gh_charter_hint_covers_mutating_subcommands_only(self):
         # Review of PR #262: the bare `gh (repo|gist)` alternative turned every
-        # read-only gh call behind an opacity into a double-check.
+        # read-only gh call behind an opacity into a double-check. Review of
+        # PR #267: `autolink` is a subcommand GROUP, so its own create/delete
+        # have to be reached through it.
         self.declare(1)
         for command in (
             "echo hi > $target; gh repo view",
             "echo hi > $target; gh gist list",
             "echo hi > $target; gh repo clone owner/x",
+            "echo hi > $target; gh repo autolink list",
+            "echo hi > $target; gh repo autolink view 123",
         ):
             with self.subTest(allow=command):
                 self.assertEqual(self.invoke(command), ("allow", ""))
@@ -648,6 +594,8 @@ class HookRoundTripTests(unittest.TestCase):
             "echo hi > $target; gh gist delete abc123",
             "echo hi > $target && gh repo create x --public",
             "echo hi > $target; gh repo edit --visibility public",
+            "echo hi > $target; gh repo autolink create TICKET- https://x.example/n",
+            "echo hi > $target; gh repo autolink delete 123",
         ):
             with self.subTest(deny=command):
                 decision, reason = self.invoke(command)
@@ -707,7 +655,10 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
     Review of PR #262: the whole-command check and the masked-segment re-check
     each created their own ``_remote_cache`` and their own
     ``_REMOTE_RESOLUTION_BUDGET_SECONDS`` deadline, so one command could resolve
-    the same push twice and spend two full budgets — past the adapter timeout.
+    the same push twice and spend two full budgets — past the adapter's
+    declared 5s timeout. Measured before the fix: 6 probes over 6.57s for
+    ``git push origin feature; git run-alias-x`` against 3 over 3.33s for that
+    push alone; after it, 3 over 3.41s.
     """
 
     def _drive_main(self, command, declaration):
@@ -734,16 +685,14 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
         # main() reads CLAUDE_PROJECT_DIR, and resolve_context merges THAT
         # repo's declaration with the payload cwd's, strictest wins. Running
         # in-process would otherwise inherit an ambient wall and skip the
-        # re-check this test exists to observe (review of PR #267).
+        # re-check this test exists to observe. The guard opens BEFORE anything
+        # that can raise, so a failed setup cannot leave the suite without its
+        # environment or leave `check` monkeypatched for every later test.
         ambient = {
             key: os.environ.pop(key)
             for key in list(os.environ)
             if key.startswith("CLAUDE_") or key.startswith("GIT_")
         }
-        # The guard opens BEFORE anything that can raise: a failed mkdir or
-        # write would otherwise leave the suite without its CLAUDE_*/GIT_*
-        # environment, and a failed setup would leave `dispatch.check`
-        # monkeypatched for every later test (review of PR #267).
         try:
             with tempfile.TemporaryDirectory() as project:
                 cfg_dir = Path(project) / ".agent-harness"

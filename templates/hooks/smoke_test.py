@@ -4929,92 +4929,48 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
             "allow",
         )
     )
-    # 1.6.33, review of PR #262. MUST-DENY: the re-check now uses the
-    # quote-aware operator splitter, so a PIPELINE stage is a segment too, and
-    # `2>&1` is read as the redirection it is rather than as a separator.
+    # 1.6.33. The re-check deliberately keeps the 1.6.32 SEPARATOR SET: `;`,
+    # `&&`, `||`, `&`, newline, and NOT `|`. PR #267 tried a quote-aware walk
+    # that also split pipelines and it produced two bypasses and three false
+    # positives (#268). These are the shapes that measured the decision, pinned
+    # in both directions so a future attempt has to face them.
+    #
+    # MUST-DENY: a guarded later segment stays a double-check even when the
+    # command carries quoting the walk read differently from the shell.
     for command in (
-        "echo hi > $target | git config core.sshCommand helper",
-        "echo hi > $target |& git config core.sshCommand helper",
-        "echo hi > $target 2>&1; git config core.sshCommand helper",
+        # Valid Bash: both `\'` are literal, so both `;` are real separators.
+        "echo hi > $target; echo don\\'t; git config core.sshCommand helper; echo foo\\'bar",
+        "echo hi > $target; echo don\\'t; git config core.sshCommand helper",
+        'echo hi > $target; echo \\"a; git config core.sshCommand helper; echo \\"b',
+        # A quoted INTERPRETER payload is program text, not data.
+        "powershell -Command 'echo inner > $other; git config core.sshCommand helper'",
     ):
         results.append(
             (
-                f"guide T3 masked pipeline segment double-checks: {command}",
+                f"guide T3 masked segment survives quoting shapes: {command}",
                 run_case(command, 3, dict(guide)),
                 "deny",
             )
         )
         results.append(
             (
-                f"guide T3 masked pipeline segment names the segment: {command}",
+                f"guide T3 masked segment names the segment: {command}",
                 "A later segment:" in LAST_REASON[0],
                 True,
             )
         )
-    # MUST-ALLOW: a separator inside QUOTED data is inert. The dispatcher never
-    # inspects commit-message text, and the earlier opacity does not change that.
+    # MUST-ALLOW: `|` is NOT a separator here, so none of these three shapes --
+    # a trailing comment, a backslash-escaped pipe, arithmetic bitwise OR --
+    # can be mis-read as a later command.
     for command in (
-        "echo hi > $target; git commit -m 'note; git config core.sshCommand helper'",
-        "echo hi > $target; git commit -m 'note | git config core.sshCommand helper'",
-        'echo hi > $target && git commit -m "note && git config core.sshCommand helper"',
-        # `$'...'` is bash's ANSI-C quoting, so its `;` is data too.
-        "echo hi > $target; git commit -m $'note; git config core.sshCommand helper'",
+        "echo hi > $target # note | git config core.sshCommand helper",
+        "echo hi > $target \\| git config core.sshCommand helper",
+        "echo hi > $target $((1 | git)) config core.sshCommand helper",
     ):
         results.append(
             (
-                f"guide T3 quoted separator stays inert: {command}",
+                f"guide T3 pipe-adjacent shape is not a segment: {command}",
                 run_case(command, 3, dict(guide)),
-                "allow",
-            )
-        )
-    # MUST-DENY: a quoting shape the quote-aware walk reads differently from
-    # the shell must not cost coverage. Each of these leaves that walk holding a
-    # quote open, so the naive 1.6.32 split runs as well and the guarded later
-    # segment is still analysed. The first is a real, executable bash command.
-    for command in (
-        "echo don\\'t > $LOG; git config core.sshCommand helper",
-        "echo $'don\\'t' > $LOG; git config core.sshCommand helper",
-        "echo 'run `make`' > $LOG; git config core.sshCommand helper",
-        'echo hi > $target; git commit -m "open ; git config core.sshCommand x',
-    ):
-        results.append(
-            (
-                f"guide T3 unbalanced quoting keeps segment coverage: {command}",
-                run_case(command, 3, dict(guide)),
-                "deny",
-            )
-        )
-        results.append(
-            (
-                f"guide T3 unbalanced quoting names the segment: {command}",
-                "A later segment:" in LAST_REASON[0],
-                True,
-            )
-        )
-    # MUST-ALLOW: and a BALANCED quoted separator is still inert, even when the
-    # command has no other separator for the walk to split on.
-    for command in (
-        "git commit -m 'note; git config core.sshCommand helper' > $LOG",
-        # The walk's backtick rule calls this shell-LEGAL span unbalanced, so
-        # the fallback runs; the fragment it returns still yields no verdict.
-        "git commit -m 'note; git config core.sshCommand `x`' > $LOG",
-    ):
-        results.append(
-            (
-                f"guide T3 balanced quoted separator with a redirect allows: {command}",
-                run_case(command, 3, dict(guide)),
-                "allow",
-            )
-        )
-    # MUST-ALLOW: a pipeline stage the analyzer allows changes nothing.
-    for command in (
-        "echo hi > $target | grep foo",
-        "echo hi > $target | git status",
-    ):
-        results.append(
-            (
-                f"guide T1 masked benign pipeline stage still allows: {command}",
-                run_case(command, 1, dict(guide)),
                 "allow",
             )
         )
@@ -5024,6 +4980,8 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
         "echo hi > $target; gh repo view",
         "echo hi > $target; gh gist list",
         "echo hi > $target; gh repo clone owner/x",
+        "echo hi > $target; gh repo autolink list",
+        "echo hi > $target; gh repo autolink view 123",
     ):
         results.append(
             (
@@ -5032,12 +4990,15 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
                 "allow",
             )
         )
-    # MUST-DENY: and the mutating spellings it exists for still double-check.
+    # MUST-DENY: and every mutating spelling it exists for still double-checks,
+    # `autolink` being a subcommand GROUP whose own create/delete mutate.
     for command in (
         "echo hi > $target; gh repo delete owner/x",
         "echo hi > $target; gh gist delete abc123",
         "echo hi > $target && gh repo create x --public",
         "echo hi > $target; gh repo edit --visibility public",
+        "echo hi > $target; gh repo autolink create TICKET- https://x.example/n",
+        "echo hi > $target; gh repo autolink delete 123",
     ):
         results.append(
             (

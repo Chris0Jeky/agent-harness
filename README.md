@@ -227,15 +227,19 @@ T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny t
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
 double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive
 repositories keep the walls, and any repo can declare `floor_posture: wall`; 1.6.32 (the late #260 review's P1) re-checks every later command
-segment with the analyzer itself, so a masked work-loss
-or publication action in one of them is a double-check whatever its spelling. 1.6.33 is that
-re-check's PR #262 review repair: segments now come from the **quote-aware** operator splitter, so
-a separator inside a commit message is inert again and `|`/`|&` pipeline stages are covered; the
-`gh` charter hint names mutating subcommands only, so `gh repo view`/`gh gist list` behind an
-opacity are allowed as before; and one remote-resolution cache and deadline now span the whole hook
-invocation instead of one per analysis. Shell-variable indirection remains the hint's job, and the
-re-check still sees each segment without the analyzer's cross-segment alias/env/cwd state
-(`FLOOR_LIMITATIONS.md`, #266). 1.6.30 honours
+segment (split on `;`, `&&`, `||`, `&`, newline) with the analyzer itself, so a masked work-loss
+or publication action in one of them is a double-check whatever its spelling; a pipeline's right
+side and shell-variable indirection remain the hint's job. 1.6.33 carries the two PR #262 review
+repairs that do **not** touch segmentation: one remote-resolution cache and deadline now span the
+whole hook invocation rather than one per analysis (two independent 3.5s budgets could exceed the
+adapter's declared 5s timeout and return no verdict), and the `gh` charter hint names mutating
+subcommands only, so `gh repo view`, `gh gist list` and `gh repo autolink list` behind an opacity
+are allowed while `create`/`delete`/`edit --visibility` still double-check. The **segmentation**
+repair was attempted and reverted: a quote-aware splitter that also covered `|` produced two
+bypasses and three false positives against 1.6.32, and the bypass involving a quoted interpreter
+payload is provably unreachable from the segmentation layer — the measurement, and the residuals
+left standing (a quoted separator still splits; a bare `|` is still not a separator), are in
+`FLOOR_LIMITATIONS.md` and #268. 1.6.30 honours
 Git's numeric booleans in the exact `--no-follow-tags` narrowing (#201, PR #239). 1.6.29 upstreams two owner decisions of 2026-08-18 that were authored directly
 in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
 left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard
