@@ -571,6 +571,59 @@ class HookRoundTripTests(unittest.TestCase):
             with self.subTest(allow=command):
                 self.assertEqual(self.invoke(command), ("allow", ""))
 
+    def test_unbalanced_quoting_falls_back_to_the_naive_split(self):
+        # Review of PR #267: the quote-aware walk has no backslash-escape rule
+        # and reads a backtick before a closing quote as an escape, so these
+        # leave it holding a quote open and swallowing a REAL separator. The
+        # first is an executable bash command that really runs `git config`.
+        self.declare(3)
+        for command in (
+            "echo don\\'t > $LOG; git config core.sshCommand helper",
+            "echo $'don\\'t' > $LOG; git config core.sshCommand helper",
+            "echo 'run `make`' > $LOG; git config core.sshCommand helper",
+            'echo hi > $target; git commit -m "open ; git config core.sshCommand x',
+        ):
+            with self.subTest(deny=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIn("A later segment:", reason)
+        # The fallback is scoped to an unbalanced walk: a balanced quoted
+        # separator stays inert even with no other separator in the command.
+        self.assertEqual(
+            self.invoke("git commit -m 'note; git config core.sshCommand x' > $LOG"),
+            ("allow", ""),
+        )
+
+    def test_the_quote_walk_and_the_balance_check_agree(self):
+        # They share `operator_walk_quote_after`, so the balance check is
+        # exactly the walk's own reading of the same text: when it reports the
+        # walk ends outside every quote, the walk really did reach and split the
+        # trailing `;`, and when it reports otherwise the `;` was swallowed.
+        for command, ends_open in (
+            ("echo plain", False),
+            ("echo 'a; b'; git status", False),
+            ('echo "a; b"; git status', False),
+            ("echo $'a; b'; git status", False),
+            ("echo don\\'t; git status", True),
+            ("echo 'run `make`'; git status", True),
+            ('git commit -m "open ; x', True),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    dispatch.operator_walk_ends_inside_a_quote(command), ends_open
+                )
+                trailing_separator = "; git status" in command
+                reached = any(
+                    segment == "git status"
+                    for segment, _op in dispatch.windows_operator_segments(command)
+                )
+                self.assertEqual(reached, trailing_separator and not ends_open)
+                # The fallback is what puts that swallowed segment back.
+                self.assertIn(
+                    "git status" if trailing_separator else command.strip(),
+                    dispatch.masked_segment_fragments(command),
+                )
+
     def test_gh_charter_hint_covers_mutating_subcommands_only(self):
         # Review of PR #262: the bare `gh (repo|gist)` alternative turned every
         # read-only gh call behind an opacity into a double-check.
@@ -670,6 +723,15 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
         original_argv = sys.argv
         original_stdin = sys.stdin
         original_stdout = sys.stdout
+        # main() reads CLAUDE_PROJECT_DIR, and resolve_context merges THAT
+        # repo's declaration with the payload cwd's, strictest wins. Running
+        # in-process would otherwise inherit an ambient wall and skip the
+        # re-check this test exists to observe (review of PR #267).
+        ambient = {
+            key: os.environ.pop(key)
+            for key in list(os.environ)
+            if key.startswith("CLAUDE_") or key.startswith("GIT_")
+        }
         with tempfile.TemporaryDirectory() as project:
             cfg_dir = Path(project) / ".agent-harness"
             cfg_dir.mkdir()
@@ -696,6 +758,7 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
                 sys.argv = original_argv
                 sys.stdin = original_stdin
                 sys.stdout = original_stdout
+                os.environ.update(ambient)
         return calls
 
     def test_whole_check_and_segment_re_check_share_one_cache_and_deadline(self):

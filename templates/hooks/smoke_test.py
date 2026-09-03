@@ -4967,6 +4967,43 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
                 "allow",
             )
         )
+    # MUST-DENY: a quoting shape the quote-aware walk reads differently from
+    # the shell must not cost coverage. Each of these leaves that walk holding a
+    # quote open, so the naive 1.6.32 split runs as well and the guarded later
+    # segment is still analysed. The first is a real, executable bash command.
+    for command in (
+        "echo don\\'t > $LOG; git config core.sshCommand helper",
+        "echo $'don\\'t' > $LOG; git config core.sshCommand helper",
+        "echo 'run `make`' > $LOG; git config core.sshCommand helper",
+        'echo hi > $target; git commit -m "open ; git config core.sshCommand x',
+    ):
+        results.append(
+            (
+                f"guide T3 unbalanced quoting keeps segment coverage: {command}",
+                run_case(command, 3, dict(guide)),
+                "deny",
+            )
+        )
+        results.append(
+            (
+                f"guide T3 unbalanced quoting names the segment: {command}",
+                "A later segment:" in LAST_REASON[0],
+                True,
+            )
+        )
+    # MUST-ALLOW: and a BALANCED quoted separator is still inert, even when the
+    # command has no other separator for the walk to split on.
+    results.append(
+        (
+            "guide T3 balanced quoted separator with a redirect still allows",
+            run_case(
+                "git commit -m 'note; git config core.sshCommand helper' > $LOG",
+                3,
+                dict(guide),
+            ),
+            "allow",
+        )
+    )
     # MUST-ALLOW: a pipeline stage the analyzer allows changes nothing.
     for command in (
         "echo hi > $target | grep foo",
