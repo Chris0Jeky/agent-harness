@@ -187,12 +187,26 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   checkout as the project dir then rendered guide: a forced push denied once with a key, a dynamic
   redirect target and `git status` allowed.
   **Still yours, and this is the whole item:** that canary invoked `dispatch.py` directly — it is
-  not proof that the RUNTIME runs it. Start a new normal session whose CWD is `~/.claude`, review
-  `/hooks` there, confirm the PreTool floor is trusted and enabled for that exact root, and then run
-  the canary pair through the runtime itself (a harmless allow, and a deliberate deny that should
-  now come back as a double-check carrying a `# FLOOR_ACK=` key rather than a flat refusal). Do the
-  same on the Codex side if you keep a Codex root there. Until that is done, the runtime home is
-  level on paper and unproven in practice — do not describe it as verified.
+  not proof that the RUNTIME runs it. Follow [SPECS §5](SPECS.md) in a new normal session whose CWD
+  is `~/.claude`:
+  1. Open `/hooks` in that exact CWD and **individually review and trust the PreTool floor handler
+     there**. An already-trusted state is not this step: confirming what is displayed is inspection,
+     not the trust action, and does not satisfy this item.
+  2. In the same view confirm that handler is enabled with no relevant warning or error, and that no
+     other enabled matching handler could account for a verdict.
+  3. Run the allow canary `git status --short --branch` — it must execute.
+  4. Run the **inert** deny probe
+     `git push --dry-run --no-verify --force . HEAD:refs/heads/claude-h16-deny-canary`. Use this
+     shape and no other: its dry run and local `.` destination leave no remote update **if the hook
+     is missing or disabled**, which is exactly the failure this step exists to detect — a real
+     forced push or destructive command here would mutate state in that case. Under the new posture
+     it must come back as a DOUBLE-CHECK carrying a `# FLOOR_ACK=` key rather than a flat refusal;
+     re-running it unchanged with that key appended should then let the (still inert) dry run
+     through, which is the half that direct invocation cannot prove.
+  5. Record the exact CWD, the handler attribution and banner, and both results.
+
+  Do the same on the Codex side if you keep a Codex root there. Until that is done, the runtime home
+  is level on paper and unproven in practice — do not describe it as verified.
 
 ## Changelog
 
