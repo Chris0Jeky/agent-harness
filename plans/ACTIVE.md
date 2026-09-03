@@ -10,6 +10,13 @@ and the owner's `~/.claude/hooks` are all **1.6.32** (PR #262 on top of #260's 1
 Claude runtime canary trio passed live in the deploying session on 2026-09-02; the Codex exact-CWD
 re-trust and Codex canaries are still owed — **H-15** in `HUMAN_TODO.md`.
 
+2026-09-03: the owner directed `guide` posture for claude-config. Its `tier.json` declares it
+(claude-config PR #197, merge `1594f9c`), and `~/.claude` — a deployment checkout of that same
+repository — was fast-forwarded to it with the hook bytes unchanged. Below the fail-closed
+`dispatcher error` deny, nothing in either surface is a wall now; the irreversible core is an
+acknowledgeable double-check there. The runtime home is level on paper and unproven in a real
+session — **H-16**, which does not close with H-15.
+
 ## Active rollout — issue #232, blocked on the Codex half of the runtime proof
 
 Static deployment of **1.6.32** is complete (claude-config PR #196; hooks-only install into
@@ -78,8 +85,8 @@ floor PRs of 2026-09-02.
 | guide posture / FLOOR_ACK | **#260** | **MERGED `d6392dd`** as floor 1.6.31 after two review rounds (the second closed the masked-charter-spelling hole). |
 | masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
-No implementation lane is open and nothing is queued; the only outstanding work is the Codex half
-of the rollout above (H-15).
+No implementation lane is open and nothing is queued; the outstanding work is the Codex half of the
+rollout above (H-15) and the runtime-home posture proof (H-16). Closing H-15 does not close H-16.
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is
 its code and tests only; the shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`,
