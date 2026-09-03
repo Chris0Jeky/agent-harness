@@ -156,29 +156,76 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
-- [ ] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture); decide claude-config's posture.**
+- [ ] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture).**
   Canonical source moved 1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions)
   → 1.6.30 (#201 / PR #239) → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction;
-  SPECS §5.4) → 1.6.32 (PR #262, masked later segments) → **1.6.33 (2026-09-03, PR #262's review
-  repair: quote-aware segment splitting, pipeline segments, mutating-only `gh` hint, one remote
-  budget per hook invocation)**. **Agent lane done 2026-09-02, at 1.6.32 only:** claude-config
-  PR #196 synced the byte-identical 1.6.32 bytes (its smoke 2361/2361), and the two hook files were
-  installed into `~/.claude/hooks` (backup `.harness-backups/20260902T182855Z`, digest `9bdb630e…`
-  == canonical 1.6.32); the **Claude** canary trio then passed live in the deploying session
-  (`rm -rf` on a nonexistent outside path denied once with a key, allowed when acknowledged; a
-  dynamic redirect target allowed). **That evidence does NOT cover 1.6.33** — the deployed copy is
-  still 1.6.32 and the canonical marker is now
-  `910fd518…`. **Owed again at 1.6.33:** the claude-config sync + `~/.claude/hooks` deploy, a fresh
-  Claude canary trio, and — human-only — a new normal Codex TUI in each enabled Codex root for the
-  `/hooks` re-trust and the same trio there (the producer first, `plans/ACTIVE.md` P3). Add one
-  1.6.33-specific canary to the trio: in a guide-posture repo,
+  SPECS §5.4) → 1.6.32 (PR #262, masked later segments) → **1.6.33 (2026-09-03, PR #267: PR #262's
+  review repair — quote-aware segment splitting, pipeline segments, a mutating-only `gh` hint, and
+  one remote-resolution budget per hook invocation)**. **Agent lane done 2026-09-02, at 1.6.32
+  only:**
+  claude-config PR #196 synced the byte-identical 1.6.32 bytes (its smoke 2361/2361), and the two
+  hook files were installed into `~/.claude/hooks` (backup `.harness-backups/20260902T182855Z`,
+  digest `9bdb630e…` == canonical 1.6.32); the **Claude** canary trio then passed live in the
+  deploying
+  session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
+  acknowledged; a dynamic redirect target allowed). **None of that evidence covers 1.6.33** — the
+  deployed copy is still 1.6.32 and the canonical marker is now `910fd518…`. **Owed again at
+  1.6.33:** the claude-config sync and the `~/.claude/hooks` deploy, a fresh Claude canary trio,
+  and — human-only — a new normal Codex TUI in
+  each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
+  `plans/ACTIVE.md` P3). Add one 1.6.33-specific pair to the trio, in a guide-posture repo:
   `echo hi > $target; git commit -m 'note; git config core.sshCommand helper'` must be **allowed**
-  (the quoted separator is inert again) while
-  `echo hi > $target | git config core.sshCommand helper` must ask for a key. Also still open: your
-  call on claude-config: it is T3 + `sensitive_data`, so it keeps the walls by default — declare
-  `"floor_posture": "guide"` in its `tier.json` if you want the guide there too.
+  (a separator inside a commit message is inert again), while
+  `echo hi > $target | git config core.sshCommand helper` must come back as a double-check with a
+  key. **The claude-config posture half is closed 2026-09-03:** you directed guide there,
+  and claude-config PR #197 landed `"floor_posture": "guide"` in its `tier.json` (merge `1594f9c`)
+  with the six-shape canary against the deployed 1.6.32, both renderings pinned by its
+  `tests/test_floor_redirect_shapes.py`, and the consequence recorded in its AGENTS.md and ESTATE
+  row: below the fail-closed `dispatcher error` deny, nothing in that repository is a wall any
+  more — the irreversible core and the `sensitive_data` public-remote refusal are acknowledgeable
+  double-checks. That repository's runtime consequence is **H-16**, not this item.
+
+- [ ] **H-16** — **Prove the guide posture inside the `~/.claude` runtime home, in a real session.**
+  `~/.claude` on Kraspyon is a deployment checkout of claude-config, so the posture declaration
+  reaches it through the normal deployment pull rather than through any separate decision.
+  **Agent lane done 2026-09-03:** that checkout was fast-forwarded `86508a1 → 1594f9c`
+  (`git checkout origin/main -- hooks/…` first, so the two hook files were staged at bytes
+  IDENTICAL to what was already on disk and the live floor was never downgraded mid-pull; backup
+  `~/.claude/.harness-backups/20260903T0025Z`). Verified after the pull: `hooks/dispatch.py`
+  normalized SHA `9bdb630e…` and `hooks/smoke_test.py` `dacae787…`, both unchanged and equal to
+  canonical; `.agent-harness/tier.json` there now reads `floor_posture: guide`; only `settings.json`
+  remains locally modified, which is Claude Code rewriting it. A direct dispatcher canary with that
+  checkout as the project dir then rendered guide: a forced push denied once with a key, a dynamic
+  redirect target and `git status` allowed.
+  **Still yours, and this is the whole item:** that canary invoked `dispatch.py` directly — it is
+  not proof that the RUNTIME runs it. Follow [SPECS §5](SPECS.md) in a new normal session whose CWD
+  is `~/.claude`:
+  1. Open `/hooks` in that exact CWD and **individually review and trust the PreTool floor handler
+     there**. An already-trusted state is not this step: confirming what is displayed is inspection,
+     not the trust action, and does not satisfy this item.
+  2. In the same view confirm that handler is enabled with no relevant warning or error, and that no
+     other enabled matching handler could account for a verdict.
+  3. Run the allow canary `git status --short --branch` — it must execute.
+  4. Run the **inert** deny probe
+     `git push --dry-run --no-verify --force . HEAD:refs/heads/claude-h16-deny-canary`. Use this
+     shape and no other: its dry run and local `.` destination leave no remote update **if the hook
+     is missing or disabled**, which is exactly the failure this step exists to detect — a real
+     forced push or destructive command here would mutate state in that case. Under the new posture
+     it must come back as a DOUBLE-CHECK carrying a `# FLOOR_ACK=` key rather than a flat refusal;
+     re-running it unchanged with that key appended should then let the (still inert) dry run
+     through, which is the half that direct invocation cannot prove.
+  5. Record the exact CWD, the handler attribution and banner, and both results.
+
+  Do the same on the Codex side if you keep a Codex root there. Until that is done, the runtime home
+  is level on paper and unproven in practice — do not describe it as verified.
 
 ## Changelog
+
+- 2026-09-03 — **H-16 added, and H-15 narrowed to the Codex re-trust.** The owner directed `guide`
+  posture for claude-config; PR #197 there landed the declaration. The runtime consequence — that
+  `~/.claude` is a checkout of the same repository and therefore inherits it — is its own item
+  rather than a clause inside H-15, because H-15 closes when the Codex canaries pass and the
+  runtime-home proof would have disappeared with it (Codex review of PR #264).
 
 - 2026-08-07 — **H-14 added.** Between 2026-08-03 and today this file had zero open items while a
   human-only, strictly-ordered runtime proof was in fact outstanding: PR #230 changed the producer
