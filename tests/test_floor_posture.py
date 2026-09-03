@@ -9,6 +9,7 @@ dispatcher classifies deliberately, and the hook-level round trip through
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -544,6 +545,53 @@ class HookRoundTripTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("A later segment:", reason)
 
+    def test_masked_segments_are_split_quote_aware_including_pipelines(self):
+        # Review of PR #262. A pipeline stage is another executable segment, so
+        # the re-check must see it; a separator inside QUOTED data is inert, so
+        # commit-message text must never be re-parsed as a command.
+        self.declare(3)
+        for command in (
+            "echo hi > $target | git config core.sshCommand helper",
+            "echo hi > $target |& git config core.sshCommand helper",
+            "echo hi > $target 2>&1; git config core.sshCommand helper",
+        ):
+            with self.subTest(deny=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIn("A later segment:", reason)
+                self.assertIsNotNone(self.key_in(reason), reason)
+        for command in (
+            "echo hi > $target; git commit -m 'note; git config core.sshCommand x'",
+            "echo hi > $target; git commit -m 'note | git config core.sshCommand x'",
+            'echo hi > $target && git commit -m "note && git config core.sshCommand x"',
+            "echo hi > $target | grep foo",
+            "echo hi > $target | git status",
+        ):
+            with self.subTest(allow=command):
+                self.assertEqual(self.invoke(command), ("allow", ""))
+
+    def test_gh_charter_hint_covers_mutating_subcommands_only(self):
+        # Review of PR #262: the bare `gh (repo|gist)` alternative turned every
+        # read-only gh call behind an opacity into a double-check.
+        self.declare(1)
+        for command in (
+            "echo hi > $target; gh repo view",
+            "echo hi > $target; gh gist list",
+            "echo hi > $target; gh repo clone owner/x",
+        ):
+            with self.subTest(allow=command):
+                self.assertEqual(self.invoke(command), ("allow", ""))
+        for command in (
+            "echo hi > $target; gh repo delete owner/x",
+            "echo hi > $target; gh gist delete abc123",
+            "echo hi > $target && gh repo create x --public",
+            "echo hi > $target; gh repo edit --visibility public",
+        ):
+            with self.subTest(deny=command):
+                decision, reason = self.invoke(command)
+                self.assertEqual(decision, "deny")
+                self.assertIsNotNone(self.key_in(reason), reason)
+
     def test_charter_spellings_masked_by_opacity_double_check_through_main(self):
         self.declare(1)
         for command in (
@@ -589,6 +637,83 @@ class HookRoundTripTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertIn("dispatcher error", reason)
         self.assertNotIn("FLOOR_ACK", reason)
+
+
+class RemoteBudgetThreadingTests(unittest.TestCase):
+    """One remote-resolution cache and deadline for the whole hook invocation.
+
+    Review of PR #262: the whole-command check and the masked-segment re-check
+    each created their own ``_remote_cache`` and their own
+    ``_REMOTE_RESOLUTION_BUDGET_SECONDS`` deadline, so one command could resolve
+    the same push twice and spend two full budgets — past the adapter timeout.
+    """
+
+    def _drive_main(self, command, declaration):
+        calls = []
+
+        def recording_check(
+            command_text, tier_cfg, project_dir, command_cwd, *args, **kwargs
+        ):
+            calls.append(
+                (
+                    command_text,
+                    kwargs.get("_remote_cache"),
+                    kwargs.get("_remote_deadline"),
+                )
+            )
+            if len(calls) == 1:
+                return "deny", "A dynamic redirect target cannot be inspected safely."
+            return "allow", ""
+
+        original_check = dispatch.check
+        original_argv = sys.argv
+        original_stdin = sys.stdin
+        original_stdout = sys.stdout
+        with tempfile.TemporaryDirectory() as project:
+            cfg_dir = Path(project) / ".agent-harness"
+            cfg_dir.mkdir()
+            (cfg_dir / "tier.json").write_text(
+                json.dumps(declaration), encoding="utf-8"
+            )
+            payload = json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                    "cwd": project,
+                }
+            )
+            dispatch.check = recording_check
+            sys.argv = ["dispatch.py", "--event", "pre", "--runtime", "claude"]
+            sys.stdin = io.StringIO(payload)
+            sys.stdout = io.StringIO()
+            try:
+                dispatch.main()
+            except SystemExit:
+                pass
+            finally:
+                dispatch.check = original_check
+                sys.argv = original_argv
+                sys.stdin = original_stdin
+                sys.stdout = original_stdout
+        return calls
+
+    def test_whole_check_and_segment_re_check_share_one_cache_and_deadline(self):
+        calls = self._drive_main(
+            "echo hi > $target; git push origin main",
+            {"tier": 3, "flags": {}, "floor_posture": "guide"},
+        )
+        self.assertGreaterEqual(len(calls), 2, calls)
+        self.assertIsInstance(calls[0][1], dict)
+        self.assertIsInstance(calls[0][2], float)
+        self.assertEqual(len({id(cache) for _, cache, _ in calls}), 1)
+        self.assertEqual(len({deadline for _, _, deadline in calls}), 1)
+
+    def test_a_wall_posture_never_runs_the_segment_re_check(self):
+        calls = self._drive_main(
+            "echo hi > $target; git push origin main",
+            {"tier": 3, "flags": {}, "floor_posture": "wall"},
+        )
+        self.assertEqual(len(calls), 1, calls)
 
 
 if __name__ == "__main__":

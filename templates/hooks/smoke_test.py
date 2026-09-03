@@ -4929,6 +4929,82 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
             "allow",
         )
     )
+    # 1.6.33, review of PR #262. MUST-DENY: the re-check now uses the
+    # quote-aware operator splitter, so a PIPELINE stage is a segment too, and
+    # `2>&1` is read as the redirection it is rather than as a separator.
+    for command in (
+        "echo hi > $target | git config core.sshCommand helper",
+        "echo hi > $target |& git config core.sshCommand helper",
+        "echo hi > $target 2>&1; git config core.sshCommand helper",
+    ):
+        results.append(
+            (
+                f"guide T3 masked pipeline segment double-checks: {command}",
+                run_case(command, 3, dict(guide)),
+                "deny",
+            )
+        )
+        results.append(
+            (
+                f"guide T3 masked pipeline segment names the segment: {command}",
+                "A later segment:" in LAST_REASON[0],
+                True,
+            )
+        )
+    # MUST-ALLOW: a separator inside QUOTED data is inert. The dispatcher never
+    # inspects commit-message text, and the earlier opacity does not change that.
+    for command in (
+        "echo hi > $target; git commit -m 'note; git config core.sshCommand helper'",
+        "echo hi > $target; git commit -m 'note | git config core.sshCommand helper'",
+        'echo hi > $target && git commit -m "note && git config core.sshCommand helper"',
+    ):
+        results.append(
+            (
+                f"guide T3 quoted separator stays inert: {command}",
+                run_case(command, 3, dict(guide)),
+                "allow",
+            )
+        )
+    # MUST-ALLOW: a pipeline stage the analyzer allows changes nothing.
+    for command in (
+        "echo hi > $target | grep foo",
+        "echo hi > $target | git status",
+    ):
+        results.append(
+            (
+                f"guide T1 masked benign pipeline stage still allows: {command}",
+                run_case(command, 1, dict(guide)),
+                "allow",
+            )
+        )
+    # MUST-ALLOW: the gh charter hint names MUTATING subcommands only, so a
+    # read-only gh call behind an opacity is allowed exactly as it is bare.
+    for command in (
+        "echo hi > $target; gh repo view",
+        "echo hi > $target; gh gist list",
+        "echo hi > $target; gh repo clone owner/x",
+    ):
+        results.append(
+            (
+                f"guide T1 read-only gh behind opacity allows: {command}",
+                run_case(command, 1, dict(guide)),
+                "allow",
+            )
+        )
+    # MUST-DENY: and the mutating spellings it exists for still double-check.
+    for command in (
+        "echo hi > $target; gh repo delete owner/x",
+        "echo hi > $target; gh gist delete abc123",
+        "echo hi > $target && gh repo create x --public",
+        "echo hi > $target; gh repo edit --visibility public",
+    ):
+        results.append(
+            (
+                f"guide T1 mutating gh behind opacity double-checks: {command}",
+                run_case(command, 1, dict(guide)),
+                "deny",
+            )
+        )
     # Uppercase -C/-X are flags, not program text: these opacity allows survive.
     for command in (
         "git -C $S status > $LOG",
