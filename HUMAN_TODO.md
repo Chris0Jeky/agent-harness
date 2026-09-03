@@ -156,19 +156,27 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
-- [ ] **H-15** — **Re-trust floor 1.6.32 (guide posture) in Codex; decide claude-config's posture.**
+- [ ] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture); decide claude-config's posture.**
   Canonical source moved 1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions)
   → 1.6.30 (#201 / PR #239) → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction;
-  SPECS §5.4) → 1.6.32 (PR #262, masked later segments). **Agent lane done 2026-09-02:**
-  claude-config PR #196 synced the byte-identical 1.6.32 bytes (its smoke 2361/2361), and the two
-  hook files were installed into `~/.claude/hooks` (backup `.harness-backups/20260902T182855Z`,
-  digest `9bdb630e…` == canonical); the **Claude** canary trio then passed live in the deploying
-  session (`rm -rf` on a nonexistent outside path denied once with a key, allowed when
-  acknowledged; a dynamic redirect target allowed). **Still human-only:** a new normal Codex TUI in
-  each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
-  `plans/ACTIVE.md` P3), and your call on claude-config: it is T3 + `sensitive_data`, so it keeps
-  the walls by default — declare `"floor_posture": "guide"` in its `tier.json` if you want the
-  guide there too.
+  SPECS §5.4) → 1.6.32 (PR #262, masked later segments) → **1.6.33 (2026-09-03, PR #262's review
+  repair: quote-aware segment splitting, pipeline segments, mutating-only `gh` hint, one remote
+  budget per hook invocation)**. **Agent lane done 2026-09-02, at 1.6.32 only:** claude-config
+  PR #196 synced the byte-identical 1.6.32 bytes (its smoke 2361/2361), and the two hook files were
+  installed into `~/.claude/hooks` (backup `.harness-backups/20260902T182855Z`, digest `9bdb630e…`
+  == canonical 1.6.32); the **Claude** canary trio then passed live in the deploying session
+  (`rm -rf` on a nonexistent outside path denied once with a key, allowed when acknowledged; a
+  dynamic redirect target allowed). **That evidence does NOT cover 1.6.33** — the deployed copy is
+  still 1.6.32 and the canonical marker is now
+  `910fd518…`. **Owed again at 1.6.33:** the claude-config sync + `~/.claude/hooks` deploy, a fresh
+  Claude canary trio, and — human-only — a new normal Codex TUI in each enabled Codex root for the
+  `/hooks` re-trust and the same trio there (the producer first, `plans/ACTIVE.md` P3). Add one
+  1.6.33-specific canary to the trio: in a guide-posture repo,
+  `echo hi > $target; git commit -m 'note; git config core.sshCommand helper'` must be **allowed**
+  (the quoted separator is inert again) while
+  `echo hi > $target | git config core.sshCommand helper` must ask for a key. Also still open: your
+  call on claude-config: it is T3 + `sensitive_data`, so it keeps the walls by default — declare
+  `"floor_posture": "guide"` in its `tier.json` if you want the guide there too.
 
 ## Changelog
 
