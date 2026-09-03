@@ -564,6 +564,7 @@ class HookRoundTripTests(unittest.TestCase):
             "echo hi > $target; git commit -m 'note; git config core.sshCommand x'",
             "echo hi > $target; git commit -m 'note | git config core.sshCommand x'",
             'echo hi > $target && git commit -m "note && git config core.sshCommand x"',
+            "echo hi > $target; git commit -m $'note; git config core.sshCommand x'",
             "echo hi > $target | grep foo",
             "echo hi > $target | git status",
         ):

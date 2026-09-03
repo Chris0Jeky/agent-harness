@@ -4957,6 +4957,8 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
         "echo hi > $target; git commit -m 'note; git config core.sshCommand helper'",
         "echo hi > $target; git commit -m 'note | git config core.sshCommand helper'",
         'echo hi > $target && git commit -m "note && git config core.sshCommand helper"',
+        # `$'...'` is bash's ANSI-C quoting, so its `;` is data too.
+        "echo hi > $target; git commit -m $'note; git config core.sshCommand helper'",
     ):
         results.append(
             (
