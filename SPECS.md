@@ -733,7 +733,22 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   stale user-profile paths.
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
-  removes only the obsolete managed global Codex matcher.
+  removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under
+  `<codex-home>/backups/<timestamp>/skills/`, outside the recursively scanned `skills-home`; custom
+  overlapping home/source layouts fail before writes, and legacy `skills-home/.harness-backups/`
+  trees are neither migrated nor deleted.
+- `harness.py sync-global --config-root <claude-config> --only claude-skill:<name>
+  [--only claude-skill:<name> ...] [--apply]` — previews or installs only the named Claude-native
+  skill trees from `<config-root>/skills/` to `<claude-home>/skills/`. It preflights every selected
+  tree before writing, refuses aliases/reparse points, overlapping roots, traversal selectors, and
+  destination paths the source does not own, and backs up each complete existing destination tree
+  before replacement. Different bytes at a source-owned relative path are replaceable under
+  explicit `--apply`; the backup is the recovery boundary rather than an inferred local-edit
+  detector. Apply stages every changed source outside skill discovery and verifies its preflight
+  digest before moving a live target atomically into the backup. The moved snapshot is revalidated;
+  detected late writes refuse replacement and remain live or backed up. Promotion failure restores
+  a live copy while retaining the recovery backup. This does not claim lock-free writer exclusion.
+  This selector does not expand the no-`--only` default set.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition plus the static base-user and
   active-project MCP topology. It rejects active command-backed names duplicated across those

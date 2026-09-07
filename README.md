@@ -44,6 +44,11 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
 # --only for each component; an unknown component or absent selected skill fails closed.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work --apply
+
+# Preview one Claude-native skill from <config-root>/skills without reading or
+# writing the Codex globals, shared skill home, Claude hooks, or other Claude skills.
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work --apply
 ```
 
 `worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
@@ -152,6 +157,27 @@ Codex hooks. Each active repo must update its project `.codex/hooks.json` pin an
 trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
 for the exact-CWD TUI procedure and its runtime-evidence boundary.
+
+Future Codex skill backups live under `<codex-home>/backups/<timestamp>/skills/`, outside the
+configured shared skill root that Codex scans recursively. A custom `codex-home` whose backup tree
+overlaps the configured `skills-home`, or a selected source tree, is refused before writes. Legacy
+`<skills-home>/.harness-backups/` copies are left untouched; inspecting or moving those existing
+copies is a separate recovery operation.
+
+`--only claude-skill:<name>` is a separate, opt-in lane from
+`<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. Every selected source and
+destination is validated before a write. Selectors are basenames; aliases, reparse points,
+overlapping source/destination roots, unsupported tree entries, missing `SKILL.md`, and destination
+paths absent from the source tree fail closed. Matching destination paths may contain different
+bytes: `--apply` backs up the complete existing destination directory under
+`<claude-home>/.harness-backups/<timestamp>/skills/` before replacing it. Source trees are first
+staged under the same hidden run root, outside skill discovery, and must retain their preflight
+digest. An existing live directory moves into its backup atomically, then the moved snapshot is
+validated before the staged source is promoted. A late save causes refusal and is retained in the
+live tree or recovery backup; a failed promotion restores a live copy while retaining the backup.
+This is drift detection and recovery, not lock-free writer exclusion, and the lane does not infer
+whether changed bytes at source-owned paths were edited locally. Omitting `--only` retains the
+existing default sync set and does not add Claude-native skills.
 For a dispatcher or adapter-marker candidate made in a linked worktree, see
 [safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
 the candidate as installed or live.

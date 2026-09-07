@@ -228,6 +228,28 @@ class HarnessTests(unittest.TestCase):
         )
         return codex_source, codex_home, claude_home, skills_home, args
 
+    def make_claude_skill_sync_fixture(
+        self, name: str, skill_names: tuple[str, ...] = ("sample",)
+    ) -> tuple[Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name).resolve() / name
+        config_root = root / "config"
+        claude_home = root / "claude-home"
+        for skill_name in skill_names:
+            source = config_root / "skills" / skill_name
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text(
+                f"# source {skill_name}\n", encoding="utf-8"
+            )
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(claude_home),
+            skills_home=str(root / "codex-skills-home"),
+            apply=True,
+            only=[f"claude-skill:{skill_name}" for skill_name in skill_names],
+        )
+        return config_root, claude_home, args
+
     def assert_sync_global_rejects_alias_without_writes(
         self,
         args: SimpleNamespace,
@@ -3154,6 +3176,224 @@ allow_local_binding = true
             harness.sync_global(args)
         self.assertFalse(codex_home.exists())
 
+    def test_sync_global_only_claude_skill_isolated_apply_and_backup(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-apply"
+        )
+        source = config_root / "skills" / "sample"
+        (source / "guide.md").write_bytes(b"new guide\x00")
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old skill\x00")
+        unrelated = claude_home / "skills" / "other"
+        unrelated.mkdir()
+        (unrelated / "SKILL.md").write_text("keep\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertTrue(harness.same_tree(source, target))
+        backups = list((claude_home / ".harness-backups").glob("*/skills/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "SKILL.md").read_bytes(), b"old skill\x00")
+        self.assertEqual((unrelated / "SKILL.md").read_text(encoding="utf-8"), "keep\n")
+        self.assertFalse(Path(args.codex_home).exists())
+        self.assertFalse(Path(args.skills_home).exists())
+        self.assertFalse((claude_home / "hooks").exists())
+
+    def test_sync_global_claude_skill_preserves_save_during_backup_move(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-backup-race"
+        )
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old skill\x00")
+        original_rename = Path.rename
+        raced = False
+
+        def rename_with_late_save(path: Path, destination: Path) -> Path:
+            nonlocal raced
+            if path == target and not raced:
+                (target / "saved-after-backup.txt").write_bytes(b"late save\x00")
+                raced = True
+            return original_rename(path, destination)
+
+        with mock.patch.object(
+            Path, "rename", autospec=True, side_effect=rename_with_late_save
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "changed while moving to backup"
+            ):
+                harness.sync_global(args)
+
+        self.assertTrue(raced)
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"old skill\x00")
+        self.assertEqual(
+            (target / "saved-after-backup.txt").read_bytes(), b"late save\x00"
+        )
+        self.assertEqual(
+            list((claude_home / ".harness-backups").glob("*/skills/sample")), []
+        )
+
+    def test_sync_global_claude_skill_refuses_staged_source_drift(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-source-drift"
+        )
+        source = config_root / "skills" / "sample"
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("old target\n", encoding="utf-8")
+        original_copytree = shutil.copytree
+
+        def copytree_with_source_drift(
+            source_path: Path,
+            destination: Path,
+            *copy_args: object,
+            **copy_kwargs: object,
+        ) -> Path:
+            result = original_copytree(
+                source_path, destination, *copy_args, **copy_kwargs
+            )
+            if source_path == source:
+                (source / "SKILL.md").write_text("changed source\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(
+            harness.shutil, "copytree", side_effect=copytree_with_source_drift
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "changed after preflight"
+            ):
+                harness.sync_global(args)
+
+        self.assertEqual(
+            (target / "SKILL.md").read_text(encoding="utf-8"), "old target\n"
+        )
+        self.assertEqual(
+            list((claude_home / ".harness-backups").glob("*/skills/sample")), []
+        )
+
+    def test_sync_global_claude_skill_promotion_failure_restores_live_copy(
+        self,
+    ) -> None:
+        _config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-promotion-failure"
+        )
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old target\x00")
+        original_rename = Path.rename
+
+        def fail_stage_promotion(path: Path, destination: Path) -> Path:
+            if ".staged-skills" in path.parts and destination == target:
+                raise OSError("synthetic promotion failure")
+            return original_rename(path, destination)
+
+        with mock.patch.object(
+            Path, "rename", autospec=True, side_effect=fail_stage_promotion
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, "cannot promote staged"):
+                harness.sync_global(args)
+
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"old target\x00")
+        backups = list(
+            (claude_home / ".harness-backups").glob("*/skills/sample/SKILL.md")
+        )
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"old target\x00")
+        staged = list(
+            (claude_home / ".harness-backups").glob("*/.staged-skills/sample/SKILL.md")
+        )
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_text(encoding="utf-8"), "# source sample\n")
+
+    def test_sync_global_claude_skill_preflights_all_before_writes(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-preflight", ("alpha", "beta")
+        )
+        alpha_target = claude_home / "skills" / "alpha"
+        alpha_target.mkdir(parents=True)
+        (alpha_target / "SKILL.md").write_text("old alpha\n", encoding="utf-8")
+        beta_target = claude_home / "skills" / "beta"
+        beta_target.mkdir(parents=True)
+        (beta_target / "SKILL.md").write_text("old beta\n", encoding="utf-8")
+        (beta_target / "local.txt").write_bytes(b"preserve me")
+
+        with self.assertRaisesRegex(harness.HarnessError, "unknown paths"):
+            harness.sync_global(args)
+
+        self.assertEqual(
+            (alpha_target / "SKILL.md").read_text(encoding="utf-8"),
+            "old alpha\n",
+        )
+        self.assertEqual((beta_target / "local.txt").read_bytes(), b"preserve me")
+        self.assertFalse((claude_home / ".harness-backups").exists())
+        self.assertFalse(Path(args.codex_home).exists())
+
+    def test_sync_global_claude_skill_rejects_traversal_selectors(self) -> None:
+        _config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-traversal"
+        )
+        for selector in (
+            "claude-skill:../sample",
+            "claude-skill:sample/child",
+            "claude-skill:sample\\child",
+            "claude-skill:.sample",
+        ):
+            args.only = [selector]
+            with self.subTest(selector=selector):
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "unknown sync component"
+                ):
+                    harness.sync_global(args)
+        self.assertFalse(claude_home.exists())
+
+    def test_sync_global_claude_skill_rejects_alias_ancestor(self) -> None:
+        _config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-alias"
+        )
+        external_skills = Path(self.temp.name) / "external-claude-skills"
+        external_skills.mkdir()
+        (claude_home).mkdir()
+        alias = claude_home / "skills"
+        remove_alias = self.make_directory_alias(external_skills, alias)
+        try:
+            with self.assertRaisesRegex(
+                harness.HarnessError, "unsafe Claude skill destination path alias"
+            ):
+                harness.sync_global(args)
+            self.assertEqual(list(external_skills.iterdir()), [])
+            self.assertFalse((claude_home / ".harness-backups").exists())
+        finally:
+            remove_alias()
+
+    def test_sync_global_claude_skill_rejects_overlapping_roots(self) -> None:
+        config_root, _claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-overlap"
+        )
+        args.claude_home = str(config_root)
+
+        with self.assertRaisesRegex(harness.HarnessError, "overlap"):
+            harness.sync_global(args)
+
+        self.assertEqual(
+            (config_root / "skills" / "sample" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+            "# source sample\n",
+        )
+
+    def test_sync_global_default_does_not_add_claude_skills(self) -> None:
+        codex_source, _codex_home, claude_home, _skills_home, args = (
+            self.make_scoped_sync_fixture("default-excludes-claude-skills")
+        )
+        claude_source = codex_source.parent / "skills" / "sample"
+        claude_source.mkdir(parents=True)
+        (claude_source / "SKILL.md").write_text("# Claude source\n", encoding="utf-8")
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertFalse((claude_home / "skills" / "sample").exists())
+
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
         config_root = root / "config"
@@ -3302,9 +3542,13 @@ allow_local_binding = true
 
         self.assertEqual((target_skill / "ab").read_bytes(), b"c")
         self.assertFalse((target_skill / "a").exists())
-        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        backups = list((Path(args.codex_home) / "backups").glob("*/skills/sample"))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "a").read_bytes(), b"bc")
+        self.assertFalse((skills_home / ".harness-backups").exists())
+        self.assertEqual(
+            list(skills_home.rglob("SKILL.md")), [target_skill / "SKILL.md"]
+        )
 
     def test_sync_global_replaces_mismatched_empty_directories(self) -> None:
         source_skill, target_skill, skills_home, args = (
@@ -3320,9 +3564,46 @@ allow_local_binding = true
 
         self.assertTrue((target_skill / "assets").is_dir())
         self.assertFalse((target_skill / "obsolete").exists())
-        backups = list((skills_home / ".harness-backups").glob("*/sample"))
+        backups = list((Path(args.codex_home) / "backups").glob("*/skills/sample"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "obsolete").is_dir())
+
+    def test_sync_global_codex_skill_leaves_legacy_backups_untouched(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("legacy-skill-backup")
+        )
+        legacy = skills_home / ".harness-backups" / "legacy" / "sample"
+        legacy.mkdir(parents=True)
+        (legacy / "SKILL.md").write_bytes(b"legacy backup")
+        original_target = (target_skill / "SKILL.md").read_bytes()
+        (source_skill / "SKILL.md").write_bytes(b"new source")
+
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual((target_skill / "SKILL.md").read_bytes(), b"new source")
+        self.assertEqual((legacy / "SKILL.md").read_bytes(), b"legacy backup")
+        backups = list(
+            (Path(args.codex_home) / "backups").glob("*/skills/sample/SKILL.md")
+        )
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original_target)
+
+    def test_sync_global_codex_skill_refuses_overlapping_backup_home(self) -> None:
+        source_skill, target_skill, skills_home, args = (
+            self.make_sync_global_skill_fixture("overlapping-skill-backup")
+        )
+        (source_skill / "SKILL.md").write_text("new source\n", encoding="utf-8")
+        args.codex_home = str(skills_home / "codex-home")
+        args.apply = False
+        args.only = ["skill:sample"]
+
+        with self.assertRaisesRegex(harness.HarnessError, "overlaps"):
+            harness.sync_global(args)
+
+        self.assertEqual(
+            (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+        self.assertFalse(Path(args.codex_home).exists())
 
     def test_sync_global_rejects_directory_alias_before_writes(self) -> None:
         source_skill, target_skill, skills_home, args = (
@@ -3449,8 +3730,8 @@ allow_local_binding = true
             (second / "AGENTS.md").read_text(encoding="utf-8"),
             "intermediate laws\n",
         )
-        first_skill = skills_home / ".harness-backups" / first.name / "sample"
-        second_skill = skills_home / ".harness-backups" / second.name / "sample"
+        first_skill = first / "skills" / "sample"
+        second_skill = second / "skills" / "sample"
         self.assertEqual(
             (first_skill / "SKILL.md").read_text(encoding="utf-8"),
             "original skill\n",
