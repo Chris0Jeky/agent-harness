@@ -170,10 +170,14 @@ destination is validated before a write. Selectors are basenames; aliases, repar
 overlapping source/destination roots, unsupported tree entries, missing `SKILL.md`, and destination
 paths absent from the source tree fail closed. Matching destination paths may contain different
 bytes: `--apply` backs up the complete existing destination directory under
-`<claude-home>/.harness-backups/<timestamp>/skills/` before replacing it. That backup is the
-recovery contract; this lane does not infer whether changed bytes at source-owned paths were edited
-locally. Omitting `--only` retains the existing default sync set and does not add Claude-native
-skills.
+`<claude-home>/.harness-backups/<timestamp>/skills/` before replacing it. Source trees are first
+staged under the same hidden run root, outside skill discovery, and must retain their preflight
+digest. An existing live directory moves into its backup atomically, then the moved snapshot is
+validated before the staged source is promoted. A late save causes refusal and is retained in the
+live tree or recovery backup; a failed promotion restores a live copy while retaining the backup.
+This is drift detection and recovery, not lock-free writer exclusion, and the lane does not infer
+whether changed bytes at source-owned paths were edited locally. Omitting `--only` retains the
+existing default sync set and does not add Claude-native skills.
 For a dispatcher or adapter-marker candidate made in a linked worktree, see
 [safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
 the candidate as installed or live.

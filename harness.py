@@ -6166,6 +6166,21 @@ def preflight_claude_skill(source: Path, target: Path) -> tuple[str, str | None,
     return source_digest, target_digest, source_digest == target_digest
 
 
+def restore_claude_skill_from_backup(backup: Path, target: Path) -> str:
+    """Restore a failed promotion without consuming its recovery copy."""
+    if target.exists() or path_is_alias(target):
+        return f"live target preserved; recovery backup retained at {backup}"
+    try:
+        shutil.copytree(backup, target)
+        restored_digest = tree_digest(target)
+        backup_digest = tree_digest(backup)
+    except (HarnessError, OSError) as exc:
+        return f"recovery backup retained at {backup}; automatic restore failed: {exc}"
+    if restored_digest != backup_digest:
+        return f"recovery backup retained at {backup}; automatic restore did not verify"
+    return f"live target restored; recovery backup retained at {backup}"
+
+
 def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
     if same_file(source, target):
         return "unchanged"
@@ -8336,16 +8351,15 @@ def sync_global(args: argparse.Namespace) -> int:
     needs_codex_skill_backup = any(
         not equal and target.exists() for _source, target, equal in skill_states
     )
-    needs_claude_skill_backup = any(
-        not equal and target_digest is not None
-        for _, _, _, target_digest, equal in claude_skill_states
+    needs_claude_skill_stage = any(
+        not equal for _, _, _, _target_digest, equal in claude_skill_states
     )
     if default_sync or manage_agents or needs_codex_skill_backup:
         assert codex_home is not None
         backup_root = reserve_backup_root(codex_home / "backups", stamp)
     if backup_root is not None and (default_sync or skill_states):
         skill_backup = backup_root / "skills"
-    if needs_claude_skill_backup:
+    if needs_claude_skill_stage:
         assert claude_skill_backup_parent is not None
         claude_skill_backup = reserve_backup_root(claude_skill_backup_parent, stamp)
     for source, target in actions:
@@ -8372,28 +8386,100 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copytree(target, backup)
             shutil.rmtree(target)
         shutil.copytree(source, target)
-    for source, target, source_digest, target_digest, equal in claude_skill_states:
+    staged_claude_skills: dict[Path, Path] = {}
+    if needs_claude_skill_stage:
+        assert claude_skill_backup is not None
+        staging_root = claude_skill_backup / ".staged-skills"
+        for source, target, source_digest, _target_digest, equal in claude_skill_states:
+            if equal:
+                continue
+            stage = staging_root / target.name
+            stage.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, stage)
+            if tree_digest(stage) != source_digest:
+                raise HarnessError(
+                    f"Claude skill source changed while staging; refusing replacement: {source}"
+                )
+            staged_claude_skills[target] = stage
+
+        # Staging is outside live discovery. Revalidate every selected source and
+        # target before the first live directory is moved.
+        for source, target, source_digest, target_digest, equal in claude_skill_states:
+            if equal:
+                continue
+            current_source_digest, current_target_digest, _current_equal = (
+                preflight_claude_skill(source, target)
+            )
+            if (
+                current_source_digest != source_digest
+                or current_target_digest != target_digest
+            ):
+                raise HarnessError(
+                    f"Claude skill changed after preflight; refusing replacement: {target}"
+                )
+
+    for _source, target, source_digest, target_digest, equal in claude_skill_states:
         if equal:
             continue
-        current_source_digest, current_target_digest, _current_equal = (
-            preflight_claude_skill(source, target)
-        )
-        if (
-            current_source_digest != source_digest
-            or current_target_digest != target_digest
-        ):
-            raise HarnessError(
-                f"Claude skill changed after preflight; refusing replacement: {target}"
-            )
+        assert claude_skill_backup is not None
+        stage = staged_claude_skills[target]
+        backup: Path | None = None
         if target_digest is not None:
-            assert claude_skill_backup is not None
             backup = claude_skill_backup / "skills" / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(target, backup)
+            try:
+                target.rename(backup)
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot move Claude skill into its recovery backup: {target}: {exc}"
+                ) from exc
+            try:
+                moved_digest = tree_digest(backup)
+            except HarnessError as exc:
+                if not target.exists() and not path_is_alias(target):
+                    try:
+                        backup.rename(target)
+                    except OSError:
+                        pass
+                raise HarnessError(
+                    f"Claude skill changed while moving to backup; refusing replacement: "
+                    f"{target}; recovery state: {backup}"
+                ) from exc
+            if moved_digest != target_digest:
+                recovery = f"recovery backup retained at {backup}"
+                if not target.exists() and not path_is_alias(target):
+                    try:
+                        backup.rename(target)
+                        recovery = "late change restored to the live target"
+                    except OSError as exc:
+                        recovery += f"; automatic restore failed: {exc}"
+                raise HarnessError(
+                    f"Claude skill changed while moving to backup; refusing replacement: "
+                    f"{target}; {recovery}"
+                )
             print(f"claude-skill backup {backup} (before replacing {target})")
-            shutil.rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, target)
+        try:
+            stage.rename(target)
+        except OSError as exc:
+            recovery = (
+                restore_claude_skill_from_backup(backup, target)
+                if backup is not None
+                else f"staged source retained at {stage}"
+            )
+            raise HarnessError(
+                f"cannot promote staged Claude skill: {target}: {exc}; {recovery}"
+            ) from exc
+        if tree_digest(target) != source_digest:
+            recovery = (
+                f"recovery backup retained at {backup}"
+                if backup is not None
+                else "no prior target existed"
+            )
+            raise HarnessError(
+                f"Claude skill changed during promotion; inspect live target {target}; "
+                f"{recovery}"
+            )
     if manage_agents:
         assert backup_root is not None
         for (

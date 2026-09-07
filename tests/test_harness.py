@@ -231,7 +231,7 @@ class HarnessTests(unittest.TestCase):
     def make_claude_skill_sync_fixture(
         self, name: str, skill_names: tuple[str, ...] = ("sample",)
     ) -> tuple[Path, Path, SimpleNamespace]:
-        root = Path(self.temp.name) / name
+        root = Path(self.temp.name).resolve() / name
         config_root = root / "config"
         claude_home = root / "claude-home"
         for skill_name in skill_names:
@@ -3199,6 +3199,112 @@ allow_local_binding = true
         self.assertFalse(Path(args.codex_home).exists())
         self.assertFalse(Path(args.skills_home).exists())
         self.assertFalse((claude_home / "hooks").exists())
+
+    def test_sync_global_claude_skill_preserves_save_during_backup_move(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-backup-race"
+        )
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old skill\x00")
+        original_rename = Path.rename
+        raced = False
+
+        def rename_with_late_save(path: Path, destination: Path) -> Path:
+            nonlocal raced
+            if path == target and not raced:
+                (target / "saved-after-backup.txt").write_bytes(b"late save\x00")
+                raced = True
+            return original_rename(path, destination)
+
+        with mock.patch.object(
+            Path, "rename", autospec=True, side_effect=rename_with_late_save
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "changed while moving to backup"
+            ):
+                harness.sync_global(args)
+
+        self.assertTrue(raced)
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"old skill\x00")
+        self.assertEqual(
+            (target / "saved-after-backup.txt").read_bytes(), b"late save\x00"
+        )
+        self.assertEqual(
+            list((claude_home / ".harness-backups").glob("*/skills/sample")), []
+        )
+
+    def test_sync_global_claude_skill_refuses_staged_source_drift(self) -> None:
+        config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-source-drift"
+        )
+        source = config_root / "skills" / "sample"
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("old target\n", encoding="utf-8")
+        original_copytree = shutil.copytree
+
+        def copytree_with_source_drift(
+            source_path: Path,
+            destination: Path,
+            *copy_args: object,
+            **copy_kwargs: object,
+        ) -> Path:
+            result = original_copytree(
+                source_path, destination, *copy_args, **copy_kwargs
+            )
+            if source_path == source:
+                (source / "SKILL.md").write_text("changed source\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(
+            harness.shutil, "copytree", side_effect=copytree_with_source_drift
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "changed after preflight"
+            ):
+                harness.sync_global(args)
+
+        self.assertEqual(
+            (target / "SKILL.md").read_text(encoding="utf-8"), "old target\n"
+        )
+        self.assertEqual(
+            list((claude_home / ".harness-backups").glob("*/skills/sample")), []
+        )
+
+    def test_sync_global_claude_skill_promotion_failure_restores_live_copy(
+        self,
+    ) -> None:
+        _config_root, claude_home, args = self.make_claude_skill_sync_fixture(
+            "claude-skill-promotion-failure"
+        )
+        target = claude_home / "skills" / "sample"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_bytes(b"old target\x00")
+        original_rename = Path.rename
+
+        def fail_stage_promotion(path: Path, destination: Path) -> Path:
+            if ".staged-skills" in path.parts and destination == target:
+                raise OSError("synthetic promotion failure")
+            return original_rename(path, destination)
+
+        with mock.patch.object(
+            Path, "rename", autospec=True, side_effect=fail_stage_promotion
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, "cannot promote staged"):
+                harness.sync_global(args)
+
+        self.assertEqual((target / "SKILL.md").read_bytes(), b"old target\x00")
+        backups = list(
+            (claude_home / ".harness-backups").glob("*/skills/sample/SKILL.md")
+        )
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"old target\x00")
+        staged = list(
+            (claude_home / ".harness-backups").glob("*/.staged-skills/sample/SKILL.md")
+        )
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_text(encoding="utf-8"), "# source sample\n")
 
     def test_sync_global_claude_skill_preflights_all_before_writes(self) -> None:
         config_root, claude_home, args = self.make_claude_skill_sync_fixture(

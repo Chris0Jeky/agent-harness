@@ -11,8 +11,10 @@ Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on
 Source state added 2026-09-07: `sync-global` has an opt-in, repeatable
 `--only claude-skill:<name>` lane for isolated Claude-native skill deployment. Synthetic fixture
 homes prove named-only scope, all-selection preflight, complete recovery backups, refusal of unknown
-destination paths and aliases, and unchanged default selection. No live Claude home deployment is
-recorded by this source change. The same source slice implements #255's fix for future Codex skill
+destination paths and aliases, source staging/digest revalidation, late-save preservation through
+atomic directory moves, promotion-failure recovery, and unchanged default selection. The procedure
+does not claim lock-free writer exclusion. No live Claude home deployment is recorded by this source
+change. The same source slice implements #255's fix for future Codex skill
 syncs by placing their backups under the Codex backup root, outside recursive skill discovery, and
 refusing overlapping custom roots before writes. Existing legacy backup copies are deliberately
 untouched; no live-home cleanup or deployment is recorded here.
