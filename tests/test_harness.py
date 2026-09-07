@@ -111,7 +111,7 @@ class HarnessTests(unittest.TestCase):
     @staticmethod
     def valid_codex_adapter_text() -> str:
         return (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
 
     @staticmethod
@@ -834,7 +834,7 @@ class HarnessTests(unittest.TestCase):
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         subdir = repo / "nested"
@@ -1635,7 +1635,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(harness.managed_codex_floor_groups(alias_only_global)), 1)
         self.assertEqual(len(harness.repo_codex_floor_candidates(alias_only_global)), 1)
 
-        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter_path = Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
         handler = adapter["hooks"]["PreToolUse"][0]["hooks"][0]
         handler["command_windows"] = handler.pop("commandWindows")
@@ -1793,7 +1793,7 @@ class HarnessTests(unittest.TestCase):
                     harness.parse_hooks_document(document)
 
     def test_hooks_schema_validates_every_known_event(self) -> None:
-        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter_path = Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
         for event_name in harness.CODEX_HOOK_EVENT_NAMES:
             with self.subTest(event_name=event_name):
@@ -2089,7 +2089,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_relative_requirements_managed_dir(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2198,7 +2198,7 @@ class HarnessTests(unittest.TestCase):
 
     def test_doctor_rejects_malformed_sibling_project_event(self) -> None:
         repo = self.make_repo()
-        adapter_path = Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+        adapter_path = Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
         adapter["hooks"]["SessionStart"] = [
             {"hooks": [{"type": "command", "command": 7}]}
@@ -2215,7 +2215,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_sibling_global_event(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         malformed_global = (
@@ -2236,7 +2236,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_user_hook_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2254,7 +2254,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_project_hook_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         config = repo / ".codex" / "config.toml"
@@ -2270,7 +2270,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_requirements_hook_path(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2285,7 +2285,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_managed_only_hook_policy(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2301,7 +2301,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_accepts_explicit_unmanaged_hook_policy(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2315,7 +2315,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_managed_only_hook_policy(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2330,7 +2330,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_required_hook_feature_disable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2347,7 +2347,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_uses_canonical_required_hook_feature_precedence(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2364,7 +2364,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_fails_closed_when_a_pin_contests_feature_disables(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".codex" / "config.toml").write_text(
@@ -2393,7 +2393,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_still_rejects_feature_disables_when_the_pin_is_false(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2412,7 +2412,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_keeps_handler_state_blockers_under_a_requirements_pin(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         hooks_path = self.write_hooks(repo, valid_adapter).resolve()
         key = f"{hooks_path}:pre_tool_use:0:0"
@@ -2450,7 +2450,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_accepts_explicit_hook_feature_enable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2465,7 +2465,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_persisted_hook_feature_disables(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2484,7 +2484,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_project_hook_feature_disable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".codex" / "config.toml").write_text(
@@ -2500,7 +2500,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_legacy_profile_selection(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2515,7 +2515,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_ignores_project_legacy_profile_selection(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".codex" / "config.toml").write_text(
@@ -2534,7 +2534,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_inactive_legacy_profile_feature(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2566,7 +2566,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_nonboolean_project_feature_sibling(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".codex" / "config.toml").write_text(
@@ -2583,7 +2583,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_ignores_project_only_system_proxy_feature(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".codex" / "config.toml").write_text(
@@ -2599,7 +2599,7 @@ class HarnessTests(unittest.TestCase):
     def test_doctor_rejects_malformed_user_system_proxy_feature(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2720,7 +2720,7 @@ allow_local_binding = true
     def test_doctor_ignores_managed_only_key_outside_requirements(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -2734,7 +2734,7 @@ allow_local_binding = true
     def test_doctor_rejects_disabled_canonical_floor_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         hooks_path = self.write_hooks(repo, valid_adapter).resolve()
         key = f"{hooks_path}:pre_tool_use:0:0"
@@ -2752,7 +2752,7 @@ allow_local_binding = true
     def test_doctor_rejects_disabled_logical_alias_floor_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         alias = Path(self.temp.name) / "repo-alias"
@@ -2784,7 +2784,7 @@ allow_local_binding = true
         for repo in (repo_a, repo_b):
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo_b, valid_adapter)
         target = repo_b / "subdir"
@@ -2806,7 +2806,7 @@ allow_local_binding = true
     def test_doctor_rejects_same_repo_alias_with_different_ancestry(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         logical_parent = repo / "container"
@@ -2832,7 +2832,7 @@ allow_local_binding = true
     def test_doctor_ignores_unrelated_disabled_hook_state(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         user_config = '[hooks.state."C:/other/hooks.json:pre_tool_use:0:0"]\n'
@@ -3800,7 +3800,7 @@ allow_local_binding = true
         # latter, in code or in docs.
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -4021,7 +4021,7 @@ allow_local_binding = true
         repo = self.make_repo()
         valid_adapter = json.loads(
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8")
         )
         # A second, unrelated PreToolUse handler that only MENTIONS the
@@ -4508,7 +4508,7 @@ allow_local_binding = true
     def test_doctor_certifies_a_direct_adapter_from_a_subdirectory_cwd(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         subdirectory = repo / "service"
@@ -5646,14 +5646,19 @@ allow_local_binding = true
                 self.assertEqual(harness.repo_codex_floor_groups(current, pin), [])
 
     def test_repo_owns_current_pinned_codex_floor_adapter(self) -> None:
-        # agent-harness is an active Codex checkout, so it owns exactly one
-        # project floor adapter pinned to the current dispatcher. This test
-        # keeps the pin from silently drifting when dispatch.py changes.
+        # agent-harness is floorless by owner decision (2026-09-07, claude-config
+        # HUMAN_TODO q-22): it wires no project adapter of its own. The consumer
+        # adapter TEMPLATE still pins the current dispatcher, and this test keeps
+        # that pin from silently drifting when dispatch.py changes.
         repo_root = Path(harness.__file__).resolve().parent
-        adapter = repo_root / ".codex" / "hooks.json"
+        adapter = repo_root / "templates" / "codex" / "hooks.json"
         self.assertTrue(
             adapter.is_file(),
-            "agent-harness must own a .codex/hooks.json project floor adapter",
+            "agent-harness must ship templates/codex/hooks.json, the consumer floor adapter template",
+        )
+        self.assertFalse(
+            (repo_root / ".codex" / "hooks.json").exists(),
+            "agent-harness is floorless by owner decision; do not re-add .codex/hooks.json",
         )
         text = adapter.read_text(encoding="utf-8")
         pin = harness.normalized_text_sha256(
@@ -5668,8 +5673,83 @@ allow_local_binding = true
             len(harness.repo_codex_floor_groups(text, pin)),
             1,
             "adapter pin must match the current normalized dispatcher hash; "
-            "refresh .codex/hooks.json after editing templates/hooks/dispatch.py",
+            "refresh templates/codex/hooks.json after editing templates/hooks/dispatch.py",
         )
+
+    def write_floorless_tier(self, repo: Path, *, wiring: object = "none") -> Path:
+        target = repo / ".agent-harness" / "tier.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "tier": 3,
+                    "name": "workshop",
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {},
+                    "floor_wiring": wiring,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return target
+
+    def test_doctor_accepts_declared_floorless_repo_without_adapter(self) -> None:
+        # Owner decision 2026-09-07: agent-harness and claude-config run without
+        # a floor. Doctor must read that as the declared state, not as drift.
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("[ok] project Codex floor: floorless by declaration", output)
+
+    def test_doctor_still_rejects_missing_adapter_without_declaration(self) -> None:
+        # The declaration is the only thing that excuses a missing adapter; a
+        # repo that merely forgot its adapter keeps failing.
+        repo = self.make_repo()
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor: 0 project floor handler(s)", output)
+
+    def test_doctor_rejects_floorless_declaration_with_lingering_adapter(self) -> None:
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+        self.write_hooks(
+            repo,
+            (
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
+            ).read_text(encoding="utf-8"),
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] project Codex floor: tier.json declares floor_wiring: none but", output)
+
+    def test_floor_wiring_declaration_is_validated_and_merged_strictly(self) -> None:
+        base = {
+            "tier": 3,
+            "name": "workshop",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        self.assertEqual(harness.validate_tier({**base, "floor_wiring": "none"}), [])
+        self.assertIn(
+            "floor_wiring must be one of ['none']",
+            harness.validate_tier({**base, "floor_wiring": "off"}),
+        )
+        # A relaxation binds only when every co-located declaration agrees.
+        merged = harness.merge_tier_declarations(
+            [{**base, "floor_wiring": "none"}, dict(base)]
+        )
+        self.assertNotIn("floor_wiring", merged)
+        merged = harness.merge_tier_declarations(
+            [{**base, "floor_wiring": "none"}, {**base, "floor_wiring": "none"}]
+        )
+        self.assertEqual(merged.get("floor_wiring"), "none")
 
     def test_repo_floor_matches_blocking_handler_normalization(self) -> None:
         pin = "9" * 64
@@ -5927,7 +6007,7 @@ allow_local_binding = true
     def test_doctor_rejects_valid_looking_worktree_only_hook(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(linked, valid_adapter)
         result, output = self.run_doctor_with_fixture_globals(linked)
@@ -5965,7 +6045,7 @@ allow_local_binding = true
     def test_doctor_uses_identical_root_checkout_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         root_hooks = self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, valid_adapter)
@@ -5979,7 +6059,7 @@ allow_local_binding = true
     def test_doctor_audits_nested_codex_layers_from_requested_directory(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         nested = repo / "nested"
@@ -6087,7 +6167,7 @@ allow_local_binding = true
     def test_doctor_audits_nested_inline_hook_layer(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         nested = repo / "nested"
@@ -6103,7 +6183,7 @@ allow_local_binding = true
     def test_doctor_allows_nested_config_only_layer(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         config = repo / "nested" / ".codex" / "config.toml"
@@ -6119,7 +6199,7 @@ allow_local_binding = true
     def test_doctor_rejects_user_project_command_mcp_duplicate(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         nested = repo / "nested"
@@ -6169,7 +6249,7 @@ allow_local_binding = true
     def test_doctor_models_layered_mcp_enablement_and_argument_source(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         project_config = repo / ".codex" / "config.toml"
@@ -6460,7 +6540,7 @@ allow_local_binding = true
     def test_doctor_requires_canonical_root_hooks_json_adapter(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         nested = repo / "nested"
         nested.mkdir()
@@ -6485,7 +6565,7 @@ allow_local_binding = true
     def test_doctor_rejects_nondefault_user_project_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         nested = repo / "nested"
@@ -6502,7 +6582,7 @@ allow_local_binding = true
     def test_doctor_rejects_stored_profile_project_root_marker_override(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6520,7 +6600,7 @@ allow_local_binding = true
     def test_doctor_audits_mixed_case_profile_marker_when_loadable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6542,7 +6622,7 @@ allow_local_binding = true
     def test_doctor_rejects_invalid_project_root_marker_shape(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6557,7 +6637,7 @@ allow_local_binding = true
     def test_doctor_accepts_explicit_default_project_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6571,7 +6651,7 @@ allow_local_binding = true
     def test_doctor_ignores_unrelated_nested_config_key_collisions(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         unrelated_config = (
@@ -6595,7 +6675,7 @@ allow_local_binding = true
     def test_doctor_reports_absent_project_root_marker_override(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6609,7 +6689,7 @@ allow_local_binding = true
     def test_doctor_ignores_unsupported_legacy_profile_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6627,7 +6707,7 @@ allow_local_binding = true
     def test_doctor_rejects_multiple_project_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6642,7 +6722,7 @@ allow_local_binding = true
     def test_doctor_rejects_conflicting_profile_project_root_markers(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6661,7 +6741,7 @@ allow_local_binding = true
     def test_doctor_rejects_invalid_marker_config_toml(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6676,7 +6756,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_marker_config(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6691,7 +6771,7 @@ allow_local_binding = true
     def test_doctor_rejects_user_inline_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6706,7 +6786,7 @@ allow_local_binding = true
     def test_doctor_rejects_snake_case_windows_inline_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         alias_floor = (
@@ -6730,7 +6810,7 @@ allow_local_binding = true
     def test_doctor_rejects_stored_profile_inline_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6746,7 +6826,7 @@ allow_local_binding = true
     def test_doctor_audits_mixed_case_profile_floor_when_loadable(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6766,7 +6846,7 @@ allow_local_binding = true
     def test_doctor_ignores_unselectable_profile_filenames(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         unselectable_config = (
@@ -6789,7 +6869,7 @@ allow_local_binding = true
     def test_doctor_ignores_unsupported_legacy_profile_inline_hooks(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         profile_floor = self.inline_floor_config_text().replace(
@@ -6806,7 +6886,7 @@ allow_local_binding = true
     def test_doctor_fails_closed_when_profile_enumeration_is_denied(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6868,7 +6948,7 @@ allow_local_binding = true
     def test_doctor_rejects_system_hooks_json_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6883,7 +6963,7 @@ allow_local_binding = true
     def test_doctor_rejects_system_inline_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6898,7 +6978,7 @@ allow_local_binding = true
     def test_doctor_rejects_system_requirements_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -6913,7 +6993,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_static_global_toml(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         system_config = Path(self.temp.name) / "system-config.toml"
@@ -6931,7 +7011,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_static_hooks_json(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         system_hooks = Path(self.temp.name) / "hooks.json"
@@ -6949,7 +7029,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_canonical_project_hooks(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         project_hooks = self.write_hooks(repo, valid_adapter).resolve()
         original_read = harness.read_optional_bytes
@@ -6972,7 +7052,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_ignored_worktree_hooks(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         ignored_hooks = self.write_hooks(linked, valid_adapter).resolve()
@@ -6995,7 +7075,7 @@ allow_local_binding = true
     def test_doctor_rejects_unreadable_project_codex_layer(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         denied_layer = (repo / ".codex").resolve()
@@ -7017,7 +7097,7 @@ allow_local_binding = true
     def test_doctor_rejects_managed_inline_global_floor(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
 
@@ -7032,7 +7112,7 @@ allow_local_binding = true
     def test_doctor_rejects_nested_worktree_only_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, valid_adapter)
@@ -7053,7 +7133,7 @@ allow_local_binding = true
     def test_doctor_audits_mapped_nested_root_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, valid_adapter)
@@ -7071,7 +7151,7 @@ allow_local_binding = true
     def test_doctor_audits_mapped_nested_root_inline_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, valid_adapter)
@@ -7090,7 +7170,7 @@ allow_local_binding = true
     def test_doctor_rejects_ignored_worktree_inline_hook_source(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, valid_adapter)
@@ -7110,7 +7190,7 @@ allow_local_binding = true
     def test_doctor_floor_status_fails_with_divergent_worktree_copy(self) -> None:
         root, linked = self.make_linked_worktree()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(root, valid_adapter)
         self.write_hooks(linked, '{"hooks": {"different": []}}\n')
@@ -7183,7 +7263,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         with mock.patch.object(
@@ -7204,7 +7284,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         with mock.patch.object(
@@ -7229,7 +7309,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         captured: dict[str, object] = {}
@@ -7251,7 +7331,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         captured: list[object] = []
@@ -7271,7 +7351,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         captured: dict[str, object] = {}
@@ -7287,7 +7367,7 @@ allow_local_binding = true
     def test_doctor_fails_on_a_reality_mismatch(self) -> None:
         repo = self.make_repo()
         valid_adapter = (
-            Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+            Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
         ).read_text(encoding="utf-8")
         self.write_hooks(repo, valid_adapter)
         (repo / ".agent-harness").mkdir()
@@ -7319,7 +7399,7 @@ allow_local_binding = true
         self.write_hooks(
             repo,
             (
-                Path(harness.__file__).resolve().parent / ".codex" / "hooks.json"
+                Path(harness.__file__).resolve().parent / "templates" / "codex" / "hooks.json"
             ).read_text(encoding="utf-8"),
         )
         for directory, declaration in (
