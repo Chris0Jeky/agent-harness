@@ -136,6 +136,11 @@ TIER_NAMES = {
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
 FLOOR_POSTURES = frozenset({"wall", "guide"})
+# `"floor_wiring": "none"` is the owner's declaration that a repository runs
+# WITHOUT a floor (SPECS §5): no Codex adapter and no global Claude hook. It
+# binds only when every co-located declaration agrees, like the other
+# relaxation, and `doctor --repo` accepts a missing adapter only under it.
+FLOOR_WIRING_VALUES = frozenset({"none"})
 AUTHORITY_VALUES = {"free", "gated", "human-only"}
 SCAN_PATHS = (
     "AGENTS.md",
@@ -4184,7 +4189,74 @@ def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any
         merged["floor_posture"] = posture
     else:
         merged.pop("floor_posture", None)
+    if merge_floor_wiring(declarations) == "none":
+        merged["floor_wiring"] = "none"
+    else:
+        merged.pop("floor_wiring", None)
     return merged
+
+
+def merge_floor_wiring(declarations: list[dict[str, Any]]) -> str | None:
+    """`"none"` only when EVERY declaration declares it; it is a relaxation."""
+    if not declarations:
+        return None
+    if all(declaration.get("floor_wiring") == "none" for declaration in declarations):
+        return "none"
+    return None
+
+
+def declares_floorless(repo: Path) -> bool:
+    """True when every co-located tier declaration at `repo` is VALID and says
+    `floor_wiring: none`. A malformed or partial file never buys the relaxation:
+    an undeclared missing adapter must keep failing, and `{"floor_wiring": "none"}`
+    alone is not a declaration `audit` would accept."""
+    try:
+        declarations = tier_declarations(repo)
+    except (HarnessError, OSError, ValueError, UnicodeError):
+        return False
+    if not declarations:
+        return False
+    if any(validate_tier(data) for _path, data in declarations):
+        return False
+    return merge_floor_wiring([data for _path, data in declarations]) == "none"
+
+
+def claude_settings_register_floor(claude_home: Path, repo: Path) -> Path | None:
+    """The first inspectable Claude settings source — user home, project, local —
+    that statically registers a `PreToolUse` handler invoking the shared
+    dispatcher, else None. Under a floorless declaration any of them is a
+    contradiction: a floor still runs in this repo. Static registration only;
+    trust, managed and session state are not inferred. The name comparison is
+    case-insensitive: Windows resolves `DISPATCH.PY` to the same file."""
+    for source in (
+        claude_home / "settings.json",
+        repo / ".claude" / "settings.json",
+        repo / ".claude" / "settings.local.json",
+    ):
+        if _settings_file_registers_floor(source):
+            return source
+    return None
+
+
+def _settings_file_registers_floor(source: Path) -> bool:
+    try:
+        text = read_optional_text(source)
+        if text is None:
+            return False
+        data = json.loads(text)
+    except (HarnessError, OSError, UnicodeError, ValueError):
+        return False
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    groups = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    if not isinstance(groups, list):
+        return False
+    for group in groups:
+        handlers = group.get("hooks") if isinstance(group, dict) else None
+        for handler in handlers if isinstance(handlers, list) else []:
+            command = handler.get("command") if isinstance(handler, dict) else None
+            if isinstance(command, str) and "dispatch.py" in command.lower():
+                return True
+    return False
 
 
 def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
@@ -4320,6 +4392,11 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
         isinstance(posture, str) and posture in FLOOR_POSTURES
     ):
         issues.append(f"floor_posture must be one of {sorted(FLOOR_POSTURES)}")
+    wiring = data.get("floor_wiring")
+    if wiring is not None and not (
+        isinstance(wiring, str) and wiring in FLOOR_WIRING_VALUES
+    ):
+        issues.append(f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}")
     return issues
 
 
@@ -8962,10 +9039,71 @@ def doctor(args: argparse.Namespace) -> int:
                 "marker, never verified at runtime; trust is checked manually "
                 "in /hooks"
             )
+            # A repository whose owner declared it floorless (tier.json
+            # `floor_wiring: none`, SPECS §5) is expected to carry NO adapter:
+            # a missing adapter is its declared state, while a lingering one
+            # contradicts the declaration and stays a failure. The
+            # declaration never excuses a repo that merely forgot its adapter.
+            # Lifecycle-only hook sources (SessionStart, PostToolUse, Stop) are
+            # repo-owned and stay allowed; only FLOOR handlers contradict it. So
+            # does a Claude settings file (user home, project or local) that still
+            # registers the dispatcher: a
+            # floor would then run in this repo whatever the declaration says.
+            # Activation blockers are vacuous for a floor that is declared away,
+            # so they do not enter this verdict (the separate activation check
+            # still reports them); the root-marker and hook-source legs do,
+            # because the counts above are only meaningful when those passed.
+            floorless_declared = declares_floorless(logical_root)
+            claude_floor_source = (
+                claude_settings_register_floor(claude_home, logical_root)
+                if floorless_declared
+                else None
+            )
+            claude_floor_registered = claude_floor_source is not None
+            floorless_ok = (
+                floorless_declared
+                and marker_ok
+                and source_ok
+                and candidate_floor_count == 0
+                and project_floor_count == 0
+                and not claude_floor_registered
+            )
+            if floorless_ok:
+                project_detail = (
+                    "floorless by declaration (tier.json floor_wiring: none): no "
+                    "Codex floor handler and no Claude dispatcher registered in the "
+                    "user, project or local settings, which is the declared "
+                    f"state, not drift; {project_detail}"
+                )
+            elif floorless_declared and claude_floor_registered:
+                project_detail = (
+                    "tier.json declares floor_wiring: none but "
+                    f"{claude_floor_source} still registers the "
+                    "PreToolUse dispatcher, so a floor runs here regardless — remove "
+                    f"that block or withdraw the declaration; {project_detail}"
+                )
+            elif floorless_declared and (
+                candidate_floor_count > 0 or project_floor_count > 0
+            ):
+                project_detail = (
+                    "tier.json declares floor_wiring: none but a Codex floor handler "
+                    "is still present — remove it (lifecycle-only hooks may stay) or "
+                    f"withdraw the declaration; {project_detail}"
+                )
+            elif floorless_declared:
+                project_detail = (
+                    "tier.json declares floor_wiring: none, but a prerequisite check "
+                    "(Codex project root markers or hook source) failed, so the "
+                    f"declared state cannot be certified; {project_detail}"
+                )
         except (HarnessError, OSError, UnicodeError) as exc:
             project_floor_count = -1
             candidate_floor_count = -1
             current_floor_count = -1
+            floorless_declared = False
+            claude_floor_source = None
+            claude_floor_registered = False
+            floorless_ok = False
             canonical_root_floor_count = -1
             source_ok = False
             source_detail = str(exc)
@@ -8981,13 +9119,17 @@ def doctor(args: argparse.Namespace) -> int:
         checks.append(
             (
                 "project Codex floor",
-                marker_ok
-                and source_ok
-                and activation_ok
-                and candidate_floor_count == 1
-                and project_floor_count == 1
-                and current_floor_count == 1
-                and canonical_root_floor_count == 1,
+                floorless_ok
+                or (
+                    not floorless_declared
+                    and marker_ok
+                    and source_ok
+                    and activation_ok
+                    and candidate_floor_count == 1
+                    and project_floor_count == 1
+                    and current_floor_count == 1
+                    and canonical_root_floor_count == 1
+                ),
                 project_detail,
             )
         )

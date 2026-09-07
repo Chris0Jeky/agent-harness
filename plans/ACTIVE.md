@@ -34,9 +34,9 @@ that numbering and no other:
 |---|---|---|
 | P1 | producer merge | **done** — PR #267 (1.6.33) on #262 (1.6.32), #260 (1.6.31), #239 (1.6.30), #257 (1.6.29) |
 | P2 | reviewed clean-main install | **done** — claude-config PR #199 (byte-identical, smoke 2383/2383); `sync-global --apply` into `~/.claude/hooks` with backup, `doctor` canonical == deployed; Claude canary trio plus the 1.6.33 pair passed live |
-| P3 | producer exact-CWD re-trust and canaries | **NOT DONE** (Codex) — the 1.6.33 canary trio (SPECS §5.4): harmless allow, opacity allow, double-check, plus the 1.6.33 `gh repo view --help` / `gh repo delete --help` pair |
-| P4 | consumer marker refresh | **NOT DONE — blocked by BOTH P3 and P3b** |
-| P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — blocked by P4** |
+| P3 | producer exact-CWD re-trust and canaries | **VOID 2026-09-07** — the producer is floorless by owner decision (claude-config HUMAN_TODO q-22, PR #274): `.codex/hooks.json` retired to `templates/codex/hooks.json`, `tier.json` declares `floor_wiring: none`. There is no producer canary station any more. |
+| P4 | consumer marker refresh | **NOT DONE — unblocked 2026-09-07** (P3 void, P3b done); proceed one root at a time, merge-first per H-14 step 3 |
+| P5 | each consumer's exact-CWD re-trust and canaries | **NOT DONE — per root, after that root's P4 merge** |
 
 P1 and P2 are complete. Everything below is outstanding. Perform it in this sequence and never out of
 it (H-15 in `HUMAN_TODO.md` is the human-side record):
@@ -46,7 +46,8 @@ it (H-15 in `HUMAN_TODO.md` is the human-side record):
   (its ritual: `git diff --check` + `py -3 hooks/smoke_test.py`), then from clean published mains
   run `py -3 harness.py sync-global --config-root <claude-config> --apply` and confirm Doctor
   reports canonical == deployed at that version.
-- **P3 — producer, first and alone.** In a new normal Codex TUI launched from the agent-harness
+- **P3 — VOID since 2026-09-07 (owner decision: floorless producer; see the table).** The text
+  below is kept as the historical procedure only. Original: **producer, first and alone.** In a new normal Codex TUI launched from the agent-harness
   exact repository root, complete `/hooks` review and re-trust of the sole project handler, confirm
   its enabled state, run `py -3 harness.py doctor --repo .` (bare `doctor` runs only the global
   checks and skips the producer adapter, activation, and project-floor checks), then collect the
@@ -58,14 +59,14 @@ it (H-15 in `HUMAN_TODO.md` is the human-side record):
   deploying Claude session (`rm -rf` on a nonexistent outside path denied once with a key and
   allowed when acknowledged; a dynamic redirect target allowed). Claude and Codex are distinct
   runtimes; this does not prove Codex.
-- **P4/P5 — only after P3 succeeds.** The three consumer marker PRs — EvidenceDeck #21,
+- **P4/P5 — no longer gated on P3 (void); each root proves its own bytes.** The three consumer marker PRs — EvidenceDeck #21,
   collaborative-hill-lab #5, SwarmingLilMen #52 — were closed unmerged at the producer-first gate;
   their reviewed branches and heads are preserved. Reopen them one at a time, each for its own
   exact-root proof. SwarmingLilMen additionally carries a separate owner gate under its own issue
   #91.
 
-Refreshing or validating any consumer marker before P3 passes is out of order and is not
-authorized by this file. No runtime proof is inherited from deployment, from Doctor, or from the
+P3 is void since 2026-09-07; consumer marker refreshes proceed one root at a time, each root
+proving its own bytes in its own exact CWD (H-14 step 3), merge first. No runtime proof is inherited from deployment, from Doctor, or from the
 completed 1.6.26 wave.
 
 ## Active implementation

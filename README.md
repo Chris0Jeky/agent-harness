@@ -224,7 +224,10 @@ that Codex's full configuration loader accepts every inactive definition. The ch
 canonical source paths and escaped server names, never command arguments, and does not inspect
 stored profiles, system/managed policy, CLI overrides, or runtime processes.
 That floor must be the canonical root
-`.codex/hooks.json` adapter; nested config-only layers are allowed. Static validation does not
+`.codex/hooks.json` adapter — unless the repository declares `"floor_wiring": "none"` (SPECS §2), in
+which case `doctor --repo` requires the opposite: no Codex floor handler and no global Claude
+dispatcher registered in the Claude home's `settings.json`, lifecycle-only hooks allowed; nested
+config-only layers are allowed. Static validation does not
 execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
 requirements, managed hook-feature requirements, persisted canonical/legacy hook feature
 disables, and a disabled canonical handler state, plus the unsupported stored legacy `profile`
@@ -285,12 +288,13 @@ fail-closed. **Deployed state (2026-09-03):** claude-config PR #199 merged the b
 `hooks/` (smoke 2383/2383), `sync-global --apply` installed the two files into `~/.claude/hooks`
 with a backup, `doctor` proves canonical 1.6.33 == deployed 1.6.33, and the **Claude** runtime
 canary trio of SPECS §5.4 plus the 1.6.33-specific `gh … --help` pair passed live in the deploying
-session. **Deployed and canonical are both 1.6.33**; only the Codex exact-CWD re-trust and Codex
-canaries remain owed — **H-15** in `HUMAN_TODO.md` carries the evidence. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
+session. **Deployed and canonical are both 1.6.33**; the producer's own Codex re-trust and canaries are
+VOID since 2026-09-07 (the producer is floorless by owner decision, PR #274; H-15 is closed) and
+only the consumer roots' legs remain — **H-14** step 3 in `HUMAN_TODO.md` carries them. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
 current Codex consumers (EvidenceDeck PR #20, SwarmingLilMen PR #51, collaborative-hill-lab PR #4
 merged their 1.6.26 adapters, each reviewed, trusted, enabled, Doctor-green and canaried). The
-producer's exact-CWD Codex re-trust and canaries at 1.6.33, then the consumer marker refreshes, are
-human-only and strictly ordered — see **H-15** in `HUMAN_TODO.md` and issue #232; no sibling,
+consumer marker refreshes and each root's exact-CWD re-trust are
+human-only, one root at a time, merge first — see **H-14** in `HUMAN_TODO.md` and issue #232; no sibling,
 future, or changed adapter inherits prior evidence.
 
 The 2026-08-07/08 wave changed tests and documentation only (PR #240 / #110, PR #237 / #130,

@@ -154,6 +154,23 @@ class PostureResolutionTests(unittest.TestCase):
                 dispatch.load_tier(project)
             (legacy_dir / "tier.json").unlink()
             self.assertEqual(dispatch.load_tier(project)["floor_posture"], "guide")
+            # `floor_wiring` (SPECS §2, harness-only) must never trip the
+            # dispatcher's fail-closed tier reader: the key is ignored, the
+            # posture still carried.
+            (harness_dir / "tier.json").write_text(
+                json.dumps(
+                    {
+                        "tier": 2,
+                        "flags": {},
+                        "floor_posture": "guide",
+                        "floor_wiring": "none",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            merged = dispatch.load_tier(project)
+            self.assertEqual(merged["floor_posture"], "guide")
+            self.assertNotIn("floor_wiring", merged)
 
 
 class ReasonClassificationTests(unittest.TestCase):

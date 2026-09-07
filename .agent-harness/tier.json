@@ -11,6 +11,7 @@
     "dormant_production": false,
     "relaxed_work_loss_guards": false
   },
+  "floor_wiring": "none",
   "model_routing": {
     "harness_and_review": "sol",
     "slices": "terra",
@@ -20,5 +21,5 @@
     "standing_context_tokens": 6000
   },
   "human_todo": "HUMAN_TODO.md",
-  "last_reviewed": "2026-07-31"
+  "last_reviewed": "2026-09-07"
 }
