@@ -174,6 +174,11 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`; `sensitive_data`
   defaults to `wall`; everything else defaults to `guide`. Co-located and chained declarations
   merge strictest-wins (`wall` beats `guide`; a declared `guide` never relaxes T4/wave).
+- `floor_wiring` (optional): `none` — the owner's declaration that this repository runs WITHOUT a
+  floor: no `.codex/hooks.json` adapter and no global Claude `PreToolUse` hook (§5). It is a
+  relaxation, so it binds only when every co-located declaration carries it. `doctor --repo`
+  then reads a missing adapter as the declared state and a lingering one as a contradiction;
+  without the declaration a missing adapter stays a failure.
 - `public_synthetic_publication` is an optional, remote-bound relaxation for the owner-ratified
   public-source/private-runtime split. It contains exactly a literal Git remote name and GitHub
   `OWNER/REPOSITORY`. It authorizes only an explicit named-branch/`HEAD` push to that remote's
@@ -295,7 +300,11 @@ here.` / `Live successor: <path or "none">`.
 
 The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
 globally. Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
-the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. Repo-tier lifecycle
+the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. A repository's owner
+may declare it floorless (agent-harness itself and claude-config, owner decision 2026-09-07): it then
+wires no adapter and no global Claude hook, and no floor runs there — declared as tier.json
+`"floor_wiring": "none"` (§2 schema) and recorded in the repo's instruction files, not drift for a
+sync or a doctor run to repair. Repo-tier lifecycle
 hooks (`PostToolUse`, `PostToolUseFailure`, `SessionStart`, and `Stop`) are separate, repo-owned
 executables when a tier actually implements them. Never route those events through the floor
 dispatcher or stack global and project floor matchers.
