@@ -4221,13 +4221,26 @@ def declares_floorless(repo: Path) -> bool:
     return merge_floor_wiring([data for _path, data in declarations]) == "none"
 
 
-def claude_home_registers_floor(claude_home: Path) -> bool:
-    """True when `<claude_home>/settings.json` statically registers a `PreToolUse`
-    handler that invokes the shared dispatcher. Under a floorless declaration that
-    is a contradiction: a floor still runs in every repo on the host. Static
-    registration only; trust, managed and session state are not inferred."""
+def claude_settings_register_floor(claude_home: Path, repo: Path) -> Path | None:
+    """The first inspectable Claude settings source — user home, project, local —
+    that statically registers a `PreToolUse` handler invoking the shared
+    dispatcher, else None. Under a floorless declaration any of them is a
+    contradiction: a floor still runs in this repo. Static registration only;
+    trust, managed and session state are not inferred. The name comparison is
+    case-insensitive: Windows resolves `DISPATCH.PY` to the same file."""
+    for source in (
+        claude_home / "settings.json",
+        repo / ".claude" / "settings.json",
+        repo / ".claude" / "settings.local.json",
+    ):
+        if _settings_file_registers_floor(source):
+            return source
+    return None
+
+
+def _settings_file_registers_floor(source: Path) -> bool:
     try:
-        text = read_optional_text(claude_home / "settings.json")
+        text = read_optional_text(source)
         if text is None:
             return False
         data = json.loads(text)
@@ -4241,7 +4254,7 @@ def claude_home_registers_floor(claude_home: Path) -> bool:
         handlers = group.get("hooks") if isinstance(group, dict) else None
         for handler in handlers if isinstance(handlers, list) else []:
             command = handler.get("command") if isinstance(handler, dict) else None
-            if isinstance(command, str) and "dispatch.py" in command:
+            if isinstance(command, str) and "dispatch.py" in command.lower():
                 return True
     return False
 
@@ -9033,16 +9046,20 @@ def doctor(args: argparse.Namespace) -> int:
             # declaration never excuses a repo that merely forgot its adapter.
             # Lifecycle-only hook sources (SessionStart, PostToolUse, Stop) are
             # repo-owned and stay allowed; only FLOOR handlers contradict it. So
-            # does a Claude home that still registers the global dispatcher: a
+            # does a Claude settings file (user home, project or local) that still
+            # registers the dispatcher: a
             # floor would then run in this repo whatever the declaration says.
             # Activation blockers are vacuous for a floor that is declared away,
             # so they do not enter this verdict (the separate activation check
             # still reports them); the root-marker and hook-source legs do,
             # because the counts above are only meaningful when those passed.
             floorless_declared = declares_floorless(logical_root)
-            claude_floor_registered = (
-                floorless_declared and claude_home_registers_floor(claude_home)
+            claude_floor_source = (
+                claude_settings_register_floor(claude_home, logical_root)
+                if floorless_declared
+                else None
             )
+            claude_floor_registered = claude_floor_source is not None
             floorless_ok = (
                 floorless_declared
                 and marker_ok
@@ -9054,14 +9071,14 @@ def doctor(args: argparse.Namespace) -> int:
             if floorless_ok:
                 project_detail = (
                     "floorless by declaration (tier.json floor_wiring: none): no "
-                    "Codex floor handler and no global Claude dispatcher registered "
-                    f"in {claude_home / 'settings.json'}, which is the declared "
+                    "Codex floor handler and no Claude dispatcher registered in the "
+                    "user, project or local settings, which is the declared "
                     f"state, not drift; {project_detail}"
                 )
             elif floorless_declared and claude_floor_registered:
                 project_detail = (
                     "tier.json declares floor_wiring: none but "
-                    f"{claude_home / 'settings.json'} still registers the global "
+                    f"{claude_floor_source} still registers the "
                     "PreToolUse dispatcher, so a floor runs here regardless — remove "
                     f"that block or withdraw the declaration; {project_detail}"
                 )
@@ -9084,6 +9101,7 @@ def doctor(args: argparse.Namespace) -> int:
             candidate_floor_count = -1
             current_floor_count = -1
             floorless_declared = False
+            claude_floor_source = None
             claude_floor_registered = False
             floorless_ok = False
             canonical_root_floor_count = -1

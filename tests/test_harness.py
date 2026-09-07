@@ -5886,7 +5886,45 @@ allow_local_binding = true
             "[FAIL] project Codex floor: tier.json declares floor_wiring: none but",
             output,
         )
-        self.assertIn("still registers the global PreToolUse dispatcher", output)
+        self.assertIn("still registers the PreToolUse dispatcher", output)
+
+    def test_doctor_rejects_floorless_declaration_with_project_claude_floor(
+        self,
+    ) -> None:
+        # Project and local Claude settings are inspected scopes too; a handler
+        # there wires the floor for this repo whatever the home says. Case is
+        # ignored in the dispatcher name because Windows resolves it anyway.
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+        local = repo / ".claude" / "settings.local.json"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "py -3 $env:USERPROFILE/.claude/hooks/DISPATCH.PY --event pre",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(repo)
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "settings.local.json still registers the PreToolUse dispatcher", output
+        )
 
     def test_doctor_accepts_floorless_repo_with_lifecycle_only_hooks(self) -> None:
         # SPECS §5 keeps lifecycle hooks repo-owned and separate from the floor;
