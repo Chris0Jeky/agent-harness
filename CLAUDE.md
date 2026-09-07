@@ -117,7 +117,10 @@ curl/wget output binding, git push safety, secret-file mutation.
 
 `templates/codex/hooks.json` is the consumer adapter template. It was this repo's own project-local
 Codex adapter until the owner declared agent-harness and claude-config floorless on 2026-09-07
-(claude-config HUMAN_TODO q-22); `.codex/` now carries no hooks and no floor runs in this checkout
+(claude-config HUMAN_TODO q-22); `.codex/` now carries no hooks and no floor runs in this checkout.
+`.agent-harness/tier.json` declares `"floor_wiring": "none"` (SPECS §2), which is what keeps
+`doctor --repo .` green without an adapter — remove an adapter elsewhere without that declaration
+and doctor fails, by design
 (`tests/test_harness.py::test_repo_owns_current_pinned_codex_floor_adapter` pins both facts). The
 template's `commandWindows`/POSIX commands declare the normalized SHA-256 of `dispatch.py` as an
 **audit-only** marker — the runtime never verifies it (SPECS §5), so any dispatch.py change requires

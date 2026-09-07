@@ -177,8 +177,10 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
 - `floor_wiring` (optional): `none` — the owner's declaration that this repository runs WITHOUT a
   floor: no `.codex/hooks.json` adapter and no global Claude `PreToolUse` hook (§5). It is a
   relaxation, so it binds only when every co-located declaration carries it. `doctor --repo`
-  then reads a missing adapter as the declared state and a lingering one as a contradiction;
-  without the declaration a missing adapter stays a failure.
+  then reads a missing adapter as the declared state and a lingering floor handler — or a Claude
+  home `settings.json` that still registers the global dispatcher — as a contradiction;
+  lifecycle-only hooks stay allowed, and without a VALID declaration a missing adapter stays a
+  failure.
 - `public_synthetic_publication` is an optional, remote-bound relaxation for the owner-ratified
   public-source/private-runtime split. It contains exactly a literal Git remote name and GitHub
   `OWNER/REPOSITORY`. It authorizes only an explicit named-branch/`HEAD` push to that remote's
@@ -369,7 +371,8 @@ Claude global adapter schematic (Codex project adapters must use the stricter co
   Nothing exports it to the dispatcher and `dispatch.py` takes no expected-hash argument, so it
   proves only that the trusted hook *definition* was written against those dispatcher bytes.
   Consequences, which are mandatory, not advisory: changing `templates/hooks/dispatch.py` obliges
-  bumping `FLOOR_VERSION`, refreshing the marker in **every** consumer `.codex/hooks.json`, and a
+  bumping `FLOOR_VERSION`, refreshing the marker in `templates/codex/hooks.json` and in **every**
+  consumer `.codex/hooks.json`, and a
   fresh-session `/hooks` re-trust per repo in its exact CWD; a rollout PR must enumerate and
   sequence those consumers rather than let their markers go stale silently. `doctor` reports
   marker currency; runtime byte integrity and definition-hash trust are separate evidence, proved

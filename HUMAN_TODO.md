@@ -132,7 +132,9 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
        mutated even if the floor were to fail open)
   2. **Fresh global Claude proof**, separately, against the deployed 1.6.27 bytes — the same
      allow/deny pair. Claude and Codex are distinct runtimes; neither proves the other.
-  3. **Only after BOTH 1 and 2 pass**, the three consumer roots are proved one at a time:
+  3. **(Steps 1 and 2 are void since 2026-09-07: the producer and the owner's Claude home are
+     floorless, so there is no producer canary station; each consumer root proves its own
+     bytes in its own exact CWD.)** The three consumer roots are proved one at a time:
      EvidenceDeck #21, collaborative-hill-lab #5, SwarmingLilMen #52. All three marker PRs were
      closed unmerged at this gate with branches and review history preserved. SwarmingLilMen carries
      a separate owner gate under its own issue #91.
@@ -155,8 +157,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
      like valid consumer proof while proving nothing about the stale definition actually in force.
      A green banner is not evidence that the root you are standing in is current.
 
-  **Do not** reorder these, refresh or canary a consumer marker before BOTH steps 1 and 2 have
-  passed, canary any root whose marker PR has not merged, or infer any step from static deployment,
+  **Do not** reorder the per-root steps, canary any root whose marker PR has not merged, or infer any step from static deployment,
   from Doctor, or from the 1.6.26 evidence. Check the live version with
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
