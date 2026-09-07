@@ -89,7 +89,12 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   freeze-candidate baseline, and the replay-only 35-file extraction allowlist. This approves the
   manifest as internal reproducibility/privacy evidence. Clean-repository creation, name, licence,
   and release are deferred to AH-10 and are not the next owner question.
-- [ ] **H-14** — **Prove floor 1.6.27 at runtime.** This item holds ONLY the human-only actions:
+- [ ] **H-14** — **Prove floor 1.6.27 at runtime.** **Re-scoped 2026-09-07 (owner decision:
+  agent-harness and claude-config are floorless, claude-config HUMAN_TODO q-22):** steps 1 and 2
+  below are void — the producer carries no adapter any more (`.codex/hooks.json` retired to
+  `templates/codex/hooks.json`) and the global Claude floor is unwired on the owner's host. Only
+  step 3's consumer-root legs remain, for repositories that keep an adapter, and their
+  "merge first" order still binds. Original item: This item holds ONLY the human-only actions:
   every step below requires a new normal interactive session launched in an exact CWD, which an
   agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
   toggles that only a human can perform. Tracked durably as issue #232.
@@ -156,7 +161,12 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `py -3 harness.py doctor --repo .` rather than trusting a version number written here — the H-2
   line went stale four times by naming one.
 
-- [ ] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture).**
+- [x] **H-15** — **Deploy and re-trust floor 1.6.33 (guide posture). CLOSED 2026-09-07 by owner
+  decision (floorless; claude-config HUMAN_TODO q-22).** The deployment half was done and is still
+  true (canonical 1.6.33 == `~/.claude/hooks` bytes on DESKTOP-IHKOOJS, re-measured 2026-09-07);
+  the re-trust and canary half is void because no Claude floor is wired there and this repository
+  no longer carries a Codex adapter. Consumer-root re-trust for repositories that keep an adapter
+  lives in H-14. Original item:
   Canonical source moved 1.6.27 → 1.6.29 (upstreaming your 2026-08-18 claude-config decisions)
   → 1.6.30 (#201 / PR #239) → 1.6.31 (guide posture + FLOOR_ACK, your 2026-09-02 direction;
   SPECS §5.4) → 1.6.32 (PR #262, masked later segments) → **1.6.33 (2026-09-03, PR #267: one
@@ -205,7 +215,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   more — the irreversible core and the `sensitive_data` public-remote refusal are acknowledgeable
   double-checks. That repository's runtime consequence is **H-16**, not this item.
 
-- [ ] **H-16** — **Prove the guide posture inside the `~/.claude` runtime home, in a real session.**
+- [x] **H-16** — **Prove the guide posture inside the `~/.claude` runtime home, in a real session.
+  CLOSED 2026-09-07 by the same owner decision (floorless).** Kraspyon's home still carries the
+  wired hook from its 2026-09-03 state; bringing it in line (fast-forward plus dropping the
+  `PreToolUse` block) is claude-config HUMAN_TODO q-24, a human-execution item because that host is
+  not reachable from DESKTOP-IHKOOJS. Original item:
   `~/.claude` on Kraspyon is a deployment checkout of claude-config, so the posture declaration
   reaches it through the normal deployment pull rather than through any separate decision.
   **Agent lane done 2026-09-03:** that checkout was fast-forwarded `86508a1 → 1594f9c`
