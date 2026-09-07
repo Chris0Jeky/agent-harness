@@ -8,6 +8,15 @@
 Snapshot: 2026-09-02, published `main@d6392dd7959cd887bd83551bf43ddd53b96e97bf` (PR #260's merge `d6392dd`).
 Refresh Git, GitHub, deployed bytes, and live runtime evidence before relying on this snapshot.
 
+Source state added 2026-09-07: `sync-global` has an opt-in, repeatable
+`--only claude-skill:<name>` lane for isolated Claude-native skill deployment. Synthetic fixture
+homes prove named-only scope, all-selection preflight, complete recovery backups, refusal of unknown
+destination paths and aliases, and unchanged default selection. No live Claude home deployment is
+recorded by this source change. The same source slice implements #255's fix for future Codex skill
+syncs by placing their backups under the Codex backup root, outside recursive skill discovery, and
+refusing overlapping custom roots before writes. Existing legacy backup copies are deliberately
+untouched; no live-home cleanup or deployment is recorded here.
+
 **`templates/hooks/dispatch.py` moved four versions on 2026-09-02**, all through the PR lane with
 nine green checks and an independent adversarial review each: PR #257 upstreamed **1.6.29** (the
 owner's 2026-08-18 claude-config decisions 1.6.28/1.6.29, which had been authored in the consumer

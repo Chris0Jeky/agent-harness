@@ -6063,6 +6063,109 @@ def same_tree(left: Path, right: Path) -> bool:
     return right_digest is not None and left_digest == right_digest
 
 
+def ordinary_skill_tree_entries(root: Path) -> set[str] | None:
+    """Return every ordinary relative path in a validated skill tree."""
+    if path_is_alias(root):
+        raise HarnessError(f"unsafe skill tree alias: {root}")
+    try:
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise HarnessError(f"skill tree root must be an ordinary directory: {root}")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect skill tree {root}: {exc}") from exc
+
+    entries: set[str] = set()
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = list(directory.iterdir())
+        except FileNotFoundError as exc:
+            raise HarnessError(
+                f"skill tree changed during inspection: {directory}"
+            ) from exc
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect skill tree {directory}: {exc}") from exc
+        for path in children:
+            if path_is_alias(path):
+                raise HarnessError(f"unsafe skill tree alias: {path}")
+            try:
+                mode = path.lstat().st_mode
+            except OSError as exc:
+                raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
+            relative = path.relative_to(root).as_posix()
+            entries.add(relative)
+            if stat.S_ISDIR(mode):
+                pending.append(path)
+            elif not stat.S_ISREG(mode):
+                raise HarnessError(f"unsupported skill tree entry: {path}")
+    return entries
+
+
+def reject_sync_path_aliases(path: Path, label: str) -> None:
+    """Reject an alias at a selected path or any existing ancestor."""
+    logical = Path(os.path.abspath(path))
+    for candidate in (logical, *logical.parents):
+        if path_is_alias(candidate):
+            raise HarnessError(f"unsafe {label} path alias: {candidate}")
+
+
+def sync_paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether two resolved sync roots contain one another."""
+    left = left.resolve(strict=False)
+    right = right.resolve(strict=False)
+    return worktree_path_is_within(left, right) or worktree_path_is_within(right, left)
+
+
+def preflight_sync_backup_parent(
+    parent: Path, protected_roots: list[Path], label: str
+) -> None:
+    """Require a plain backup parent outside every source and live destination."""
+    reject_sync_path_aliases(parent, label)
+    try:
+        if parent.exists() and not parent.is_dir():
+            raise HarnessError(f"{label} root must be an ordinary directory: {parent}")
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect {label} root {parent}: {exc}") from exc
+    for protected in protected_roots:
+        if sync_paths_overlap(parent, protected):
+            raise HarnessError(
+                f"{label} root overlaps a managed source or destination: "
+                f"{parent}; {protected}"
+            )
+
+
+def preflight_claude_skill(source: Path, target: Path) -> tuple[str, str | None, bool]:
+    """Validate one isolated Claude skill source and destination before writes."""
+    reject_sync_path_aliases(source, "Claude skill source")
+    reject_sync_path_aliases(target, "Claude skill destination")
+    if sync_paths_overlap(source, target):
+        raise HarnessError(
+            f"Claude skill source and destination overlap: {source}; {target}"
+        )
+    source_digest = tree_digest(source)
+    if source_digest is None:
+        raise HarnessError(f"source skill tree is missing: {source}")
+    skill_entry = source / "SKILL.md"
+    if path_is_alias(skill_entry) or not skill_entry.is_file():
+        raise HarnessError(
+            f"Claude skill source is missing ordinary SKILL.md: {source}"
+        )
+    target_digest = tree_digest(target)
+    source_entries = ordinary_skill_tree_entries(source)
+    target_entries = ordinary_skill_tree_entries(target)
+    assert source_entries is not None
+    if target_entries is not None:
+        extras = sorted(target_entries - source_entries)
+        if extras:
+            raise HarnessError(
+                f"refusing Claude skill destination with unknown paths: {target}: "
+                + ", ".join(extras)
+            )
+    return source_digest, target_digest, source_digest == target_digest
+
+
 def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
     if same_file(source, target):
         return "unchanged"
@@ -7915,12 +8018,13 @@ def remove_managed_codex_floor(
 
 def sync_global_selection(
     values: list[str] | None,
-) -> tuple[bool, bool, set[str]]:
+) -> tuple[bool, bool, set[str], set[str]]:
     """Parse repeatable sync components without accepting path-like selectors."""
     if not values:
-        return True, True, set()
+        return True, True, set(), set()
     sync_agents = False
     skills: set[str] = set()
+    claude_skills: set[str] = set()
     for value in values:
         if value == "codex-agents":
             sync_agents = True
@@ -7937,21 +8041,52 @@ def sync_global_selection(
                 raise HarnessError(f"unknown sync component: {value}")
             skills.add(name)
             continue
+        if value.startswith("claude-skill:"):
+            name = value.removeprefix("claude-skill:")
+            if (
+                not name
+                or name.startswith(".")
+                or "/" in name
+                or "\\" in name
+                or Path(name).name != name
+            ):
+                raise HarnessError(f"unknown sync component: {value}")
+            claude_skills.add(name)
+            continue
         raise HarnessError(f"unknown sync component: {value}")
-    return False, sync_agents, skills
+    return False, sync_agents, skills, claude_skills
 
 
 def sync_global(args: argparse.Namespace) -> int:
-    config_root = Path(args.config_root).resolve()
+    default_sync, sync_agents, selected_skills, selected_claude_skills = (
+        sync_global_selection(getattr(args, "only", None))
+    )
+    config_root_input = Path(os.path.abspath(args.config_root))
+    if selected_claude_skills:
+        reject_sync_path_aliases(config_root_input, "Claude skill config root")
+    config_root = config_root_input.resolve()
     codex_source = config_root / "codex"
     harness_root = Path(__file__).resolve().parent
-    codex_home = Path(
-        args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")
-    ).resolve()
-    claude_home = Path(args.claude_home or Path.home() / ".claude").resolve()
-    skills_home = Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
-    default_sync, sync_agents, selected_skills = sync_global_selection(
-        getattr(args, "only", None)
+    codex_selection = default_sync or sync_agents or bool(selected_skills)
+    codex_home = (
+        Path(
+            args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        ).resolve()
+        if codex_selection
+        else None
+    )
+    claude_home_input = Path(
+        os.path.abspath(args.claude_home or Path.home() / ".claude")
+    )
+    if selected_claude_skills:
+        reject_sync_path_aliases(claude_home_input, "Claude home")
+    claude_home = (
+        claude_home_input.resolve() if default_sync or selected_claude_skills else None
+    )
+    skills_home = (
+        Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+        if default_sync or selected_skills
+        else None
     )
     required = [
         *(
@@ -7967,12 +8102,19 @@ def sync_global(args: argparse.Namespace) -> int:
             codex_source / "skills" / name / "SKILL.md"
             for name in sorted(selected_skills)
         ),
+        *(
+            config_root / "skills" / name / "SKILL.md"
+            for name in sorted(selected_claude_skills)
+        ),
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise HarnessError("missing sync sources: " + ", ".join(missing))
-    actions = (
-        [
+    actions: list[tuple[Path, Path]] = []
+    if default_sync:
+        assert codex_home is not None
+        assert claude_home is not None
+        actions = [
             (codex_source / "AGENTS.md", codex_home / "AGENTS.md"),
             (
                 harness_root / "templates" / "hooks" / "dispatch.py",
@@ -7983,11 +8125,10 @@ def sync_global(args: argparse.Namespace) -> int:
                 claude_home / "hooks" / "smoke_test.py",
             ),
         ]
-        if default_sync
-        else []
-    )
     if default_sync and (codex_source / "REPOS.md").is_file():
         actions.append((codex_source / "REPOS.md", codex_home / "REPOS.md"))
+    if default_sync or selected_skills:
+        assert skills_home is not None
     skill_actions = (
         [
             (skill, skills_home / skill.name)
@@ -8003,10 +8144,51 @@ def sync_global(args: argparse.Namespace) -> int:
     skill_states = [
         (source, target, same_tree(source, target)) for source, target in skill_actions
     ]
+    assert claude_home is not None or not selected_claude_skills
+    claude_skill_actions = [
+        (config_root / "skills" / name, claude_home / "skills" / name)
+        for name in sorted(selected_claude_skills)
+    ]
+    claude_skill_states: list[tuple[Path, Path, str, str | None, bool]] = []
+    claude_target_keys: dict[str, str] = {}
+    for source, target in claude_skill_actions:
+        target_key = worktree_path_key(target.resolve(strict=False))
+        conflicting_name = claude_target_keys.get(target_key)
+        if conflicting_name is not None:
+            raise HarnessError(
+                "Claude skill selectors collide at the destination: "
+                f"{conflicting_name} and {source.name}"
+            )
+        claude_target_keys[target_key] = source.name
+        source_digest, target_digest, equal = preflight_claude_skill(source, target)
+        claude_skill_states.append(
+            (source, target, source_digest, target_digest, equal)
+        )
+    codex_skill_backup_parent: Path | None = None
+    if default_sync or selected_skills:
+        assert codex_home is not None
+        assert skills_home is not None
+        codex_skill_backup_parent = codex_home / "backups"
+        preflight_sync_backup_parent(
+            codex_skill_backup_parent,
+            [skills_home, *(source for source, _target in skill_actions)],
+            "Codex skill backup",
+        )
+    claude_skill_backup_parent: Path | None = None
+    if selected_claude_skills:
+        assert claude_home is not None
+        claude_skill_backup_parent = claude_home / ".harness-backups"
+        preflight_sync_backup_parent(
+            claude_skill_backup_parent,
+            [path for action in claude_skill_actions for path in action],
+            "Claude skill backup",
+        )
     agent_source = codex_source / "agents"
     agent_states: list[tuple[str, Path, Path, Path, bool, bool]] = []
     stale_agent_states: list[tuple[str, Path, str]] = []
-    agent_state_path = managed_codex_agents_state_path(codex_home)
+    agent_state_path = (
+        managed_codex_agents_state_path(codex_home) if codex_home is not None else None
+    )
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
     source_agent_keys: dict[str, str] = {}
@@ -8014,8 +8196,10 @@ def sync_global(args: argparse.Namespace) -> int:
     agent_source_exists = agent_selection and (
         agent_source.exists() or path_is_alias(agent_source)
     )
-    agent_state_exists = agent_selection and (
-        agent_state_path.exists() or path_is_alias(agent_state_path)
+    agent_state_exists = (
+        agent_selection
+        and agent_state_path is not None
+        and (agent_state_path.exists() or path_is_alias(agent_state_path))
     )
     manage_agents = agent_selection and (agent_source_exists or agent_state_exists)
     if agent_source_exists:
@@ -8024,6 +8208,8 @@ def sync_global(args: argparse.Namespace) -> int:
                 f"Codex agent source must be an ordinary directory: {agent_source}"
             )
     if manage_agents:
+        assert codex_home is not None
+        assert agent_state_path is not None
         agents_home = codex_home / "agents"
         if path_is_alias(agents_home) or (
             agents_home.exists() and not agents_home.is_dir()
@@ -8079,8 +8265,9 @@ def sync_global(args: argparse.Namespace) -> int:
                 stale_agent_states.append((name, target, "preserve"))
             else:
                 stale_agent_states.append((name, target, "absent"))
-    print(f"Codex home: {codex_home}")
-    if default_sync:
+    if codex_selection:
+        print(f"Codex home: {codex_home}")
+    if default_sync or selected_claude_skills:
         print(f"Claude home: {claude_home}")
     if default_sync or skill_states:
         print(f"Skills home: {skills_home}")
@@ -8111,6 +8298,8 @@ def sync_global(args: argparse.Namespace) -> int:
         )
     for _source, target, equal in skill_states:
         print(f"{'=' if equal else '->'} {target}")
+    for _source, target, _source_digest, _target_digest, equal in claude_skill_states:
+        print(f"claude-skill {'=' if equal else '->'} {target}")
     if default_sync or sync_agents:
         if not manage_agents:
             print(f"= {codex_home / 'agents'} (no reviewed Codex agent source)")
@@ -8143,18 +8332,28 @@ def sync_global(args: argparse.Namespace) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_root: Path | None = None
     skill_backup: Path | None = None
-    if default_sync or manage_agents:
+    claude_skill_backup: Path | None = None
+    needs_codex_skill_backup = any(
+        not equal and target.exists() for _source, target, equal in skill_states
+    )
+    needs_claude_skill_backup = any(
+        not equal and target_digest is not None
+        for _, _, _, target_digest, equal in claude_skill_states
+    )
+    if default_sync or manage_agents or needs_codex_skill_backup:
+        assert codex_home is not None
         backup_root = reserve_backup_root(codex_home / "backups", stamp)
-    if default_sync:
-        skill_backup = reserve_backup_root(
-            skills_home / ".harness-backups", backup_root.name
-        )
-    elif skill_states:
-        skill_backup = reserve_backup_root(skills_home / ".harness-backups", stamp)
+    if backup_root is not None and (default_sync or skill_states):
+        skill_backup = backup_root / "skills"
+    if needs_claude_skill_backup:
+        assert claude_skill_backup_parent is not None
+        claude_skill_backup = reserve_backup_root(claude_skill_backup_parent, stamp)
     for source, target in actions:
         copy_with_backup(source, target, backup_root)
-    hooks_target = codex_home / "hooks.json"
+    hooks_target = codex_home / "hooks.json" if codex_home is not None else None
     if default_sync and current_hooks != hook_text:
+        assert hooks_target is not None
+        assert backup_root is not None
         if hooks_target.exists():
             backup_root.mkdir(parents=True, exist_ok=True)
             shutil.copy2(hooks_target, backup_root / "hooks.json")
@@ -8167,10 +8366,33 @@ def sync_global(args: argparse.Namespace) -> int:
         if equal:
             continue
         if target.exists():
+            assert skill_backup is not None
             backup = skill_backup / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(target, backup)
             shutil.rmtree(target)
+        shutil.copytree(source, target)
+    for source, target, source_digest, target_digest, equal in claude_skill_states:
+        if equal:
+            continue
+        current_source_digest, current_target_digest, _current_equal = (
+            preflight_claude_skill(source, target)
+        )
+        if (
+            current_source_digest != source_digest
+            or current_target_digest != target_digest
+        ):
+            raise HarnessError(
+                f"Claude skill changed after preflight; refusing replacement: {target}"
+            )
+        if target_digest is not None:
+            assert claude_skill_backup is not None
+            backup = claude_skill_backup / "skills" / target.name
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(target, backup)
+            print(f"claude-skill backup {backup} (before replacing {target})")
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, target)
     if manage_agents:
         assert backup_root is not None
@@ -8241,7 +8463,10 @@ def sync_global(args: argparse.Namespace) -> int:
             backup_details.append(f"backups: {backup_root}")
         if skill_backup is not None:
             backup_details.append(f"skill backups: {skill_backup}")
-        print("installed selected global components; " + "; ".join(backup_details))
+        if claude_skill_backup is not None:
+            backup_details.append(f"Claude skill backups: {claude_skill_backup}")
+        suffix = "; ".join(backup_details) if backup_details else "no backups needed"
+        print("installed selected global components; " + suffix)
     return 0
 
 
@@ -8895,7 +9120,10 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--only",
         action="append",
-        help="sync only codex-agents or one named skill:<name>; repeat as needed",
+        help=(
+            "sync only codex-agents, skill:<name>, or claude-skill:<name>; "
+            "repeat as needed"
+        ),
     )
     sync.add_argument("--apply", action="store_true")
     sync.set_defaults(func=sync_global)
