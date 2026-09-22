@@ -4050,6 +4050,49 @@ allow_local_binding = true
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "obsolete").is_dir())
 
+    def test_sync_global_codex_skill_keeps_root_when_rmtree_would_fail(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("root-rmtree-failure")
+        )
+        (source_skill / "nested").mkdir()
+        (source_skill / "nested" / "current.txt").write_text(
+            "current\n", encoding="utf-8"
+        )
+        (target_skill / "obsolete.txt").write_text("obsolete\n", encoding="utf-8")
+        (target_skill / "nested").mkdir()
+        (target_skill / "nested" / "old.txt").write_text("old\n", encoding="utf-8")
+        original_rmtree = harness.shutil.rmtree
+
+        def fail_when_live_root_is_removed(
+            path: str | os.PathLike[str], *args, **kwargs
+        ):
+            if Path(path).resolve() == target_skill.resolve():
+                raise PermissionError("Muse holds the live skill root")
+            return original_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(
+            harness.shutil, "rmtree", side_effect=fail_when_live_root_is_removed
+        ) as rmtree:
+            self.assertEqual(harness.sync_global(args), 0)
+
+        rmtree.assert_not_called()
+        self.assertTrue(target_skill.is_dir())
+        self.assertEqual(
+            (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+        self.assertEqual(
+            (target_skill / "nested" / "current.txt").read_text(encoding="utf-8"),
+            "current\n",
+        )
+        self.assertFalse((target_skill / "obsolete.txt").exists())
+        self.assertFalse((target_skill / "nested" / "old.txt").exists())
+        backups = list((Path(args.codex_home) / "backups").glob("*/skills/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            (backups[0] / "nested" / "old.txt").read_text(encoding="utf-8"),
+            "old\n",
+        )
+
     def test_sync_global_codex_skill_leaves_legacy_backups_untouched(self) -> None:
         source_skill, target_skill, skills_home, args = (
             self.make_sync_global_skill_fixture("legacy-skill-backup")
