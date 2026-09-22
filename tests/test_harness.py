@@ -4093,6 +4093,42 @@ allow_local_binding = true
             "old\n",
         )
 
+    def test_sync_global_codex_skill_rolls_back_when_stale_file_is_locked(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("stale-file-lock")
+        )
+        (source_skill / "SKILL.md").write_text("new\n", encoding="utf-8")
+        (source_skill / "current.txt").write_text("current\n", encoding="utf-8")
+        stale = target_skill / "old.txt"
+        stale.write_text("old\n", encoding="utf-8")
+        original_unlink = Path.unlink
+
+        def fail_when_stale_file_is_removed(self_path: Path, *args, **kwargs):
+            if self_path.resolve() == stale.resolve():
+                raise PermissionError("Muse holds the stale skill file")
+            return original_unlink(self_path, *args, **kwargs)
+
+        with mock.patch.object(
+            Path, "unlink", autospec=True, side_effect=fail_when_stale_file_is_removed
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"Codex skill sync failed.*live skill restored; backup retained at",
+            ):
+                harness.sync_global(args)
+
+        self.assertEqual(
+            (target_skill / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+        self.assertEqual(stale.read_text(encoding="utf-8"), "old\n")
+        self.assertFalse((target_skill / "current.txt").exists())
+        backups = list((Path(args.codex_home) / "backups").glob("*/skills/sample"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            (backups[0] / "SKILL.md").read_text(encoding="utf-8"), "# sample\n"
+        )
+        self.assertEqual((backups[0] / "old.txt").read_text(encoding="utf-8"), "old\n")
+
     def test_sync_global_codex_skill_leaves_legacy_backups_untouched(self) -> None:
         source_skill, target_skill, skills_home, args = (
             self.make_sync_global_skill_fixture("legacy-skill-backup")

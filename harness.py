@@ -6273,6 +6273,22 @@ def copy_skill_tree_over(source: Path, target: Path) -> None:
         if path.exists() or path_is_alias(path):
             remove_skill_tree_entry(path)
 
+    source_digest = tree_digest(source)
+    target_digest = tree_digest(target)
+    if source_digest is None or target_digest != source_digest:
+        raise HarnessError(
+            f"copied skill tree does not match source: {source}; {target}"
+        )
+
+
+def restore_skill_tree_from_backup(backup: Path, target: Path) -> str:
+    """Restore a failed Codex skill sync while retaining the recovery copy."""
+    try:
+        copy_skill_tree_over(backup, target)
+    except (HarnessError, OSError) as exc:
+        return f"rollback incomplete; backup retained at {backup}: {exc}"
+    return f"live skill restored; backup retained at {backup}"
+
 
 def reject_sync_path_aliases(path: Path, label: str) -> None:
     """Reject an alias at a selected path or any existing ancestor."""
@@ -9198,12 +9214,24 @@ def sync_global(args: argparse.Namespace) -> int:
     for source, target, equal in skill_states:
         if equal:
             continue
+        backup: Path | None = None
         if target.exists():
             assert skill_backup is not None
             backup = skill_backup / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(target, backup)
-        copy_skill_tree_over(source, target)
+        try:
+            copy_skill_tree_over(source, target)
+        except (HarnessError, OSError) as exc:
+            if backup is None:
+                raise HarnessError(
+                    f"Codex skill sync failed for {target}; no live backup was "
+                    f"available: {exc}"
+                ) from exc
+            rollback = restore_skill_tree_from_backup(backup, target)
+            raise HarnessError(
+                f"Codex skill sync failed for {target}: {exc}; {rollback}"
+            ) from exc
     staged_claude_skills: dict[Path, Path] = {}
     if needs_claude_skill_stage:
         assert claude_skill_backup is not None
