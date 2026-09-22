@@ -761,6 +761,28 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   detected late writes refuse replacement and remain live or backed up. Promotion failure restores
   a live copy while retaining the recovery backup. This does not claim lock-free writer exclusion.
   This selector does not expand the no-`--only` default set.
+- `harness.py sync-global --config-root <claude-config> --only bundle:muse-runtime
+  [--user-bin-home <path>] [--apply]` — previews or installs only schema-1 components in
+  `<config-root>/.agent-harness/sync-global.json` under `bundles.muse-runtime`. A component is an
+  exact ordinary `file` or `tree` source plus a destination containing a logical root
+  (`claude-home` or `user-bin-home`) and a canonical relative path. The selector is exclusive and
+  never joins the default sync set. All manifest paths, component kinds, aliases/reparse points,
+  source/target overlaps, destination collisions, source bytes, and target bytes are preflighted;
+  apply stages and digest-checks every source, then revalidates every source and target before the
+  first live move. Existing targets become complete backups. A successful install atomically
+  publishes a schema-1 receipt below
+  `<claude-home>/.harness-backups/sync-global-bundles/<run>/receipt.json`; it contains logical roots
+  and relative paths, never trusted absolute targets. The reviewed Muse manifest must exclude
+  vendor executables, runtime settings, credentials, policy, repository declarations, and
+  noncanonical launchers.
+- `harness.py sync-global --config-root <claude-config> --only bundle:muse-runtime
+  --rollback-receipt <path> [--apply]` — previews or executes receipt rollback. Before any target
+  moves, every live target must still equal its installed digest and every present-state backup
+  must equal its recorded digest. Present targets are restored and originally absent targets are
+  removed; the installed candidates are retained under a rollback recovery directory. Receipt
+  source, destination, and backup locations are re-parsed as canonical relative paths under the
+  current logical roots or receipt directory. Rollback is compare-and-swap recovery, not a claim
+  of lock-free exclusion, runtime health, or successful native Muse execution.
 - `harness.py doctor [--repo <path>]` — checks live global guidance/floor topology, core
   executables, and optionally one repo-local Codex floor definition plus the static base-user and
   active-project MCP topology. It rejects active command-backed names duplicated across those

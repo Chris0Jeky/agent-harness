@@ -42,6 +42,10 @@ WORKTREE_OWNERSHIP_MAX_SECONDS = 3600.0
 WORKTREE_OWNERSHIP_MIN_APPLY_REMAINING_SECONDS = 10.0
 MANAGED_CODEX_AGENTS_STATE_FILENAME = ".harness-sync-global-agents.json"
 MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION = 1
+SYNC_GLOBAL_BUNDLE_MANIFEST_SCHEMA_VERSION = 1
+SYNC_GLOBAL_BUNDLE_RECEIPT_SCHEMA_VERSION = 1
+SYNC_GLOBAL_MUSE_BUNDLE = "muse-runtime"
+SYNC_GLOBAL_BUNDLE_MANIFEST = Path(".agent-harness") / "sync-global.json"
 WORKTREE_GIT_CONTEXT_ENV = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -8108,15 +8112,614 @@ def remove_managed_codex_floor(
         ) from exc
 
 
+def strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting duplicate keys."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise HarnessError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def read_strict_json(path: Path, label: str) -> dict[str, Any]:
+    """Read one ordinary JSON object without accepting aliases or duplicates."""
+    reject_sync_path_aliases(path, label)
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise HarnessError(f"{label} must be an ordinary file: {path}")
+        payload = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=strict_json_object
+        )
+    except FileNotFoundError as exc:
+        raise HarnessError(f"missing {label}: {path}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise HarnessError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HarnessError(f"invalid {label}: expected an object: {path}")
+    return payload
+
+
+def sync_bundle_relative_path(value: Any, label: str) -> str:
+    """Validate a canonical, cross-platform relative path from JSON."""
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        raise HarnessError(f"unsafe {label}: {value!r}")
+    pure = PurePosixPath(value)
+    if (
+        pure.is_absolute()
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or str(pure) != value
+        or PureWindowsPath(value).drive
+        or PureWindowsPath(value).root
+    ):
+        raise HarnessError(f"unsafe {label}: {value!r}")
+    return value
+
+
+def bundle_file_digest(path: Path, label: str) -> str | None:
+    """Digest exact bytes and executable bits for one ordinary file."""
+    reject_sync_path_aliases(path, label)
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect {label} {path}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise HarnessError(f"{label} must be an ordinary file: {path}")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise HarnessError(f"cannot read {label} {path}: {exc}") from exc
+    executable = bytes(
+        int(bool(mode & bit)) for bit in (stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+    )
+    return hashlib.sha256(b"F" + executable + payload).hexdigest()
+
+
+def bundle_component_digest(kind: str, path: Path, label: str) -> str | None:
+    if kind == "file":
+        return bundle_file_digest(path, label)
+    reject_sync_path_aliases(path, label)
+    try:
+        return tree_digest(path)
+    except HarnessError as exc:
+        raise HarnessError(f"invalid {label} {path}: {exc}") from exc
+
+
+def copy_bundle_component(kind: str, source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "file":
+        shutil.copy2(source, target)
+    else:
+        shutil.copytree(source, target)
+
+
+def remove_bundle_component(kind: str, target: Path) -> None:
+    if kind == "file":
+        target.unlink()
+    else:
+        shutil.rmtree(target)
+
+
+def write_atomic_json(path: Path, payload: Mapping[str, Any], label: str) -> None:
+    """Publish JSON atomically in an already selected ordinary directory."""
+    reject_sync_path_aliases(path.parent, label)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    except (OSError, TypeError, ValueError, RecursionError) as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HarnessError(f"cannot write {label} {path}: {exc}") from exc
+
+
+def sync_bundle_roots(args: argparse.Namespace) -> dict[str, Path]:
+    """Resolve only the two logical destination roots the manifest may name."""
+    claude_input = Path(os.path.abspath(args.claude_home or Path.home() / ".claude"))
+    user_bin_input = Path(
+        os.path.abspath(
+            getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin"
+        )
+    )
+    reject_sync_path_aliases(claude_input, "bundle Claude home")
+    reject_sync_path_aliases(user_bin_input, "bundle user bin home")
+    roots = {
+        "claude-home": claude_input.resolve(strict=False),
+        "user-bin-home": user_bin_input.resolve(strict=False),
+    }
+    if worktree_path_key(roots["claude-home"]) == worktree_path_key(
+        roots["user-bin-home"]
+    ):
+        raise HarnessError("bundle destination roots must be distinct")
+    return roots
+
+
+def validate_bundle_targets(components: list[dict[str, Any]]) -> None:
+    """Reject duplicate and ancestor-overlapping live destinations."""
+    seen: dict[str, Path] = {}
+    for component in components:
+        target = component["target"]
+        target_key = worktree_path_key(target)
+        if target_key in seen:
+            raise HarnessError(
+                f"bundle destinations collide: {seen[target_key]}; {target}"
+            )
+        for earlier in seen.values():
+            if sync_paths_overlap(earlier, target):
+                raise HarnessError(f"bundle destinations overlap: {earlier}; {target}")
+        seen[target_key] = target
+
+
+def load_sync_bundle(
+    config_root_input: Path, roots: Mapping[str, Path], bundle_name: str
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Load and fully preflight one manifest-selected bundle."""
+    reject_sync_path_aliases(config_root_input, "bundle config root")
+    config_root = config_root_input.resolve(strict=False)
+    manifest_path = config_root / SYNC_GLOBAL_BUNDLE_MANIFEST
+    payload = read_strict_json(manifest_path, "bundle manifest")
+    if set(payload) != {"schema_version", "bundles"}:
+        raise HarnessError(f"invalid bundle manifest fields: {manifest_path}")
+    if payload.get("schema_version") != SYNC_GLOBAL_BUNDLE_MANIFEST_SCHEMA_VERSION:
+        raise HarnessError(f"unsupported bundle manifest schema: {manifest_path}")
+    bundles = payload.get("bundles")
+    if not isinstance(bundles, dict):
+        raise HarnessError(f"invalid bundle manifest bundles: {manifest_path}")
+    raw_bundle = bundles.get(bundle_name)
+    if raw_bundle is None:
+        raise HarnessError(f"missing bundle {bundle_name!r} in {manifest_path}")
+    if not isinstance(raw_bundle, dict) or set(raw_bundle) != {"components"}:
+        raise HarnessError(f"invalid bundle definition for {bundle_name!r}")
+    raw_components = raw_bundle.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise HarnessError(f"bundle {bundle_name!r} must contain components")
+
+    components: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_components):
+        if not isinstance(raw, dict) or set(raw) != {"kind", "source", "destination"}:
+            raise HarnessError(f"invalid bundle component {index}")
+        kind = raw.get("kind")
+        if kind not in {"file", "tree"}:
+            raise HarnessError(f"unknown component kind at index {index}: {kind!r}")
+        source_relative = sync_bundle_relative_path(raw.get("source"), "bundle source")
+        destination = raw.get("destination")
+        if not isinstance(destination, dict) or set(destination) != {"root", "path"}:
+            raise HarnessError(f"invalid bundle destination at index {index}")
+        root_name = destination.get("root")
+        if root_name not in roots:
+            raise HarnessError(
+                f"unknown destination root at index {index}: {root_name!r}"
+            )
+        destination_relative = sync_bundle_relative_path(
+            destination.get("path"), "bundle destination"
+        )
+        if destination_relative.split("/", 1)[0] == ".harness-backups":
+            raise HarnessError("bundle destination may not enter .harness-backups")
+        source = config_root.joinpath(*PurePosixPath(source_relative).parts)
+        target = roots[root_name].joinpath(*PurePosixPath(destination_relative).parts)
+        reject_sync_path_aliases(source, "bundle source")
+        reject_sync_path_aliases(target, "bundle destination")
+        if sync_paths_overlap(source, target):
+            raise HarnessError(
+                f"bundle source and destination overlap: {source}; {target}"
+            )
+        source_digest = bundle_component_digest(kind, source, "bundle source")
+        if source_digest is None:
+            raise HarnessError(f"missing bundle source: {source}")
+        target_digest = bundle_component_digest(kind, target, "bundle destination")
+        components.append(
+            {
+                "kind": kind,
+                "source_relative": source_relative,
+                "destination_root": root_name,
+                "destination_relative": destination_relative,
+                "source": source,
+                "target": target,
+                "source_digest": source_digest,
+                "target_digest": target_digest,
+            }
+        )
+    validate_bundle_targets(components)
+    for component in components:
+        for other in components:
+            if sync_paths_overlap(component["target"], other["source"]):
+                raise HarnessError(
+                    "bundle source and destination sets overlap: "
+                    f"{other['source']}; {component['target']}"
+                )
+        if sync_paths_overlap(component["target"], manifest_path):
+            raise HarnessError(
+                f"bundle destination overlaps its manifest: {component['target']}"
+            )
+    return manifest_path, components
+
+
+def restore_failed_bundle_install(applied: list[dict[str, Any]]) -> list[str]:
+    """Best-effort restoration after an install transaction fails."""
+    problems: list[str] = []
+    for component in reversed(applied):
+        kind = component["kind"]
+        target = component["target"]
+        try:
+            live_digest = bundle_component_digest(kind, target, "bundle live target")
+            if live_digest != component["source_digest"]:
+                problems.append(f"live target drift prevents restore: {target}")
+                continue
+            remove_bundle_component(kind, target)
+            backup = component.get("backup")
+            if backup is not None:
+                copy_bundle_component(kind, backup, target)
+                if (
+                    bundle_component_digest(kind, target, "restored bundle target")
+                    != component["target_digest"]
+                ):
+                    problems.append(f"restored target did not verify: {target}")
+        except (HarnessError, OSError) as exc:
+            problems.append(f"cannot restore {target}: {exc}")
+    return problems
+
+
+def apply_sync_bundle(
+    roots: Mapping[str, Path], bundle_name: str, components: list[dict[str, Any]]
+) -> Path:
+    """Stage, revalidate, install, and atomically receipt one bundle."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_parent = roots["claude-home"] / ".harness-backups" / "sync-global-bundles"
+    preflight_sync_backup_parent(
+        backup_parent,
+        [
+            *(component["source"] for component in components),
+            *(component["target"] for component in components),
+        ],
+        "bundle backup",
+    )
+    backup_root = reserve_backup_root(backup_parent, f"{stamp}-{bundle_name}")
+    staged: list[Path] = []
+    for index, component in enumerate(components):
+        stage = backup_root / "staged" / f"{index:04d}"
+        copy_bundle_component(component["kind"], component["source"], stage)
+        if (
+            bundle_component_digest(component["kind"], stage, "staged bundle source")
+            != component["source_digest"]
+        ):
+            raise HarnessError(
+                f"bundle source changed while staging: {component['source']}"
+            )
+        staged.append(stage)
+
+    # Nothing live moves until every source and destination is revalidated.
+    for component in components:
+        if (
+            bundle_component_digest(
+                component["kind"], component["source"], "bundle source"
+            )
+            != component["source_digest"]
+        ):
+            raise HarnessError(
+                f"bundle source changed after preflight: {component['source']}"
+            )
+        if (
+            bundle_component_digest(
+                component["kind"], component["target"], "bundle destination"
+            )
+            != component["target_digest"]
+        ):
+            raise HarnessError(
+                f"bundle target changed after preflight: {component['target']}"
+            )
+
+    applied: list[dict[str, Any]] = []
+    receipt_components: list[dict[str, Any]] = []
+    try:
+        for index, (component, stage) in enumerate(
+            zip(components, staged, strict=True)
+        ):
+            target = component["target"]
+            backup: Path | None = None
+            if component["target_digest"] is not None:
+                backup = backup_root / "backups" / f"{index:04d}"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                target.rename(backup)
+                if (
+                    bundle_component_digest(
+                        component["kind"], backup, "bundle recovery backup"
+                    )
+                    != component["target_digest"]
+                ):
+                    backup.rename(target)
+                    raise HarnessError(
+                        f"bundle target changed while moving to backup: {target}"
+                    )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                stage.rename(target)
+            except OSError as exc:
+                if (
+                    backup is not None
+                    and not target.exists()
+                    and not path_is_alias(target)
+                ):
+                    copy_bundle_component(component["kind"], backup, target)
+                raise HarnessError(
+                    f"cannot promote staged bundle component: {target}: {exc}"
+                ) from exc
+            installed_digest = bundle_component_digest(
+                component["kind"], target, "installed bundle target"
+            )
+            if installed_digest != component["source_digest"]:
+                raise HarnessError(f"installed bundle target did not verify: {target}")
+            component["backup"] = backup
+            applied.append(component)
+            previous: dict[str, Any] = {"state": "absent"}
+            if backup is not None:
+                previous = {
+                    "state": "present",
+                    "digest": component["target_digest"],
+                    "backup": f"backups/{index:04d}",
+                }
+            receipt_components.append(
+                {
+                    "kind": component["kind"],
+                    "source": component["source_relative"],
+                    "destination": {
+                        "root": component["destination_root"],
+                        "path": component["destination_relative"],
+                    },
+                    "installed_digest": installed_digest,
+                    "previous": previous,
+                }
+            )
+        receipt = backup_root / "receipt.json"
+        write_atomic_json(
+            receipt,
+            {
+                "schema_version": SYNC_GLOBAL_BUNDLE_RECEIPT_SCHEMA_VERSION,
+                "operation": "sync-global-bundle",
+                "bundle": bundle_name,
+                "components": receipt_components,
+            },
+            "bundle receipt",
+        )
+    except (HarnessError, OSError) as exc:
+        problems = restore_failed_bundle_install(applied)
+        suffix = f"; restore problems: {'; '.join(problems)}" if problems else ""
+        if isinstance(exc, HarnessError):
+            raise HarnessError(f"{exc}{suffix}") from exc
+        raise HarnessError(f"bundle install failed: {exc}{suffix}") from exc
+    return receipt
+
+
+def load_bundle_rollback_receipt(
+    receipt_path: Path, roots: Mapping[str, Path], bundle_name: str
+) -> list[dict[str, Any]]:
+    """Load a relative-path receipt and preflight every CAS rollback input."""
+    payload = read_strict_json(receipt_path, "bundle rollback receipt")
+    if set(payload) != {"schema_version", "operation", "bundle", "components"}:
+        raise HarnessError(f"invalid bundle rollback receipt fields: {receipt_path}")
+    if (
+        payload.get("schema_version") != SYNC_GLOBAL_BUNDLE_RECEIPT_SCHEMA_VERSION
+        or payload.get("operation") != "sync-global-bundle"
+        or payload.get("bundle") != bundle_name
+    ):
+        raise HarnessError(f"invalid bundle rollback receipt identity: {receipt_path}")
+    raw_components = payload.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise HarnessError(
+            f"invalid bundle rollback receipt components: {receipt_path}"
+        )
+    components: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_components):
+        if not isinstance(raw, dict) or set(raw) != {
+            "kind",
+            "source",
+            "destination",
+            "installed_digest",
+            "previous",
+        }:
+            raise HarnessError(f"invalid receipt component {index}")
+        kind = raw.get("kind")
+        if kind not in {"file", "tree"}:
+            raise HarnessError(f"unknown receipt component kind at index {index}")
+        sync_bundle_relative_path(raw.get("source"), "receipt source")
+        destination = raw.get("destination")
+        if not isinstance(destination, dict) or set(destination) != {"root", "path"}:
+            raise HarnessError(f"invalid receipt destination at index {index}")
+        root_name = destination.get("root")
+        if root_name not in roots:
+            raise HarnessError(f"unknown receipt destination root at index {index}")
+        destination_relative = sync_bundle_relative_path(
+            destination.get("path"), "receipt destination"
+        )
+        target = roots[root_name].joinpath(*PurePosixPath(destination_relative).parts)
+        reject_sync_path_aliases(target, "receipt destination")
+        installed_digest = raw.get("installed_digest")
+        if (
+            not isinstance(installed_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", installed_digest) is None
+        ):
+            raise HarnessError(f"invalid installed digest in receipt component {index}")
+        live_digest = bundle_component_digest(kind, target, "bundle live target")
+        if live_digest != installed_digest:
+            raise HarnessError(f"bundle live target drift prevents rollback: {target}")
+        previous = raw.get("previous")
+        if not isinstance(previous, dict) or previous.get("state") not in {
+            "present",
+            "absent",
+        }:
+            raise HarnessError(f"invalid previous state in receipt component {index}")
+        backup: Path | None = None
+        previous_digest: str | None = None
+        if previous["state"] == "present":
+            if set(previous) != {"state", "digest", "backup"}:
+                raise HarnessError(
+                    f"invalid previous backup in receipt component {index}"
+                )
+            previous_digest = previous.get("digest")
+            if (
+                not isinstance(previous_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", previous_digest) is None
+            ):
+                raise HarnessError(
+                    f"invalid previous digest in receipt component {index}"
+                )
+            backup_relative = sync_bundle_relative_path(
+                previous.get("backup"), "receipt backup"
+            )
+            backup = receipt_path.parent.joinpath(*PurePosixPath(backup_relative).parts)
+            reject_sync_path_aliases(backup, "receipt backup")
+            if (
+                bundle_component_digest(kind, backup, "bundle recovery backup")
+                != previous_digest
+            ):
+                raise HarnessError(f"bundle backup drift prevents rollback: {backup}")
+        elif set(previous) != {"state"}:
+            raise HarnessError(f"invalid absent state in receipt component {index}")
+        components.append(
+            {
+                "kind": kind,
+                "target": target,
+                "destination_root": root_name,
+                "destination_relative": destination_relative,
+                "installed_digest": installed_digest,
+                "previous_digest": previous_digest,
+                "backup": backup,
+            }
+        )
+    validate_bundle_targets(components)
+    return components
+
+
+def rollback_sync_bundle(
+    receipt_path: Path, components: list[dict[str, Any]], apply: bool
+) -> None:
+    for component in components:
+        action = "restore" if component["backup"] is not None else "remove"
+        print(f"bundle rollback {action} {component['target']}")
+    if not apply:
+        print("dry run; pass --apply to roll back")
+        return
+
+    transaction_root = receipt_path.parent / f"rollback-{uuid.uuid4().hex}"
+    reject_sync_path_aliases(transaction_root, "bundle rollback recovery")
+    transaction_root.mkdir()
+    staged: dict[int, Path] = {}
+    for index, component in enumerate(components):
+        backup = component["backup"]
+        if backup is None:
+            continue
+        stage = transaction_root / "staged" / f"{index:04d}"
+        copy_bundle_component(component["kind"], backup, stage)
+        if (
+            bundle_component_digest(component["kind"], stage, "staged rollback backup")
+            != component["previous_digest"]
+        ):
+            raise HarnessError(
+                f"bundle backup changed while staging rollback: {backup}"
+            )
+        staged[index] = stage
+
+    # Revalidate all CAS inputs again before the first target moves.
+    for component in components:
+        if (
+            bundle_component_digest(
+                component["kind"], component["target"], "bundle live target"
+            )
+            != component["installed_digest"]
+        ):
+            raise HarnessError(
+                f"bundle live target drift prevents rollback: {component['target']}"
+            )
+        if component["backup"] is not None and (
+            bundle_component_digest(
+                component["kind"], component["backup"], "bundle recovery backup"
+            )
+            != component["previous_digest"]
+        ):
+            raise HarnessError(
+                f"bundle backup drift prevents rollback: {component['backup']}"
+            )
+
+    rolled_back: list[tuple[int, dict[str, Any], Path]] = []
+    try:
+        for index, component in enumerate(components):
+            target = component["target"]
+            recovery = transaction_root / "installed" / f"{index:04d}"
+            recovery.parent.mkdir(parents=True, exist_ok=True)
+            target.rename(recovery)
+            rolled_back.append((index, component, recovery))
+            if component["backup"] is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                staged[index].rename(target)
+                if (
+                    bundle_component_digest(
+                        component["kind"], target, "rolled back bundle target"
+                    )
+                    != component["previous_digest"]
+                ):
+                    raise HarnessError(f"rolled back target did not verify: {target}")
+    except (HarnessError, OSError) as exc:
+        problems: list[str] = []
+        for _index, component, recovery in reversed(rolled_back):
+            target = component["target"]
+            try:
+                current = bundle_component_digest(
+                    component["kind"], target, "partial rollback target"
+                )
+                if current is not None:
+                    if current != component["previous_digest"]:
+                        problems.append(
+                            f"rollback target drift prevents recovery: {target}"
+                        )
+                        continue
+                    remove_bundle_component(component["kind"], target)
+                recovery.rename(target)
+            except (HarnessError, OSError) as restore_exc:
+                problems.append(f"cannot recover {target}: {restore_exc}")
+        suffix = f"; recovery problems: {'; '.join(problems)}" if problems else ""
+        raise HarnessError(f"bundle rollback failed: {exc}{suffix}") from exc
+    print(f"bundle rollback recovery: {transaction_root / 'installed'}")
+
+
+def sync_global_bundle(args: argparse.Namespace, bundle_name: str) -> int:
+    """Run the isolated manifest bundle lane or its receipt rollback."""
+    config_root_input = Path(os.path.abspath(args.config_root))
+    roots = sync_bundle_roots(args)
+    rollback_receipt = getattr(args, "rollback_receipt", None)
+    if rollback_receipt:
+        receipt_path = Path(os.path.abspath(rollback_receipt))
+        components = load_bundle_rollback_receipt(receipt_path, roots, bundle_name)
+        rollback_sync_bundle(receipt_path, components, bool(args.apply))
+        return 0
+    _manifest, components = load_sync_bundle(config_root_input, roots, bundle_name)
+    print(f"Bundle: {bundle_name}")
+    for component in components:
+        equal = component["source_digest"] == component["target_digest"]
+        print(f"bundle {'=' if equal else '->'} {component['target']}")
+    if not args.apply:
+        print("dry run; pass --apply to install")
+        return 0
+    receipt = apply_sync_bundle(roots, bundle_name, components)
+    print(f"bundle receipt: {receipt}")
+    return 0
+
+
 def sync_global_selection(
     values: list[str] | None,
-) -> tuple[bool, bool, set[str], set[str]]:
+) -> tuple[bool, bool, set[str], set[str], set[str]]:
     """Parse repeatable sync components without accepting path-like selectors."""
     if not values:
-        return True, True, set(), set()
+        return True, True, set(), set(), set()
     sync_agents = False
     skills: set[str] = set()
     claude_skills: set[str] = set()
+    bundles: set[str] = set()
     for value in values:
         if value == "codex-agents":
             sync_agents = True
@@ -8145,14 +8748,32 @@ def sync_global_selection(
                 raise HarnessError(f"unknown sync component: {value}")
             claude_skills.add(name)
             continue
+        if value == f"bundle:{SYNC_GLOBAL_MUSE_BUNDLE}":
+            bundles.add(SYNC_GLOBAL_MUSE_BUNDLE)
+            continue
         raise HarnessError(f"unknown sync component: {value}")
-    return False, sync_agents, skills, claude_skills
+    return False, sync_agents, skills, claude_skills, bundles
 
 
 def sync_global(args: argparse.Namespace) -> int:
-    default_sync, sync_agents, selected_skills, selected_claude_skills = (
-        sync_global_selection(getattr(args, "only", None))
-    )
+    (
+        default_sync,
+        sync_agents,
+        selected_skills,
+        selected_claude_skills,
+        selected_bundles,
+    ) = sync_global_selection(getattr(args, "only", None))
+    rollback_receipt = getattr(args, "rollback_receipt", None)
+    if selected_bundles:
+        if sync_agents or selected_skills or selected_claude_skills:
+            raise HarnessError(
+                "bundle selectors cannot be mixed with other sync components"
+            )
+        if len(selected_bundles) != 1:
+            raise HarnessError("select exactly one bundle")
+        return sync_global_bundle(args, next(iter(selected_bundles)))
+    if rollback_receipt:
+        raise HarnessError("--rollback-receipt requires --only bundle:muse-runtime")
     config_root_input = Path(os.path.abspath(args.config_root))
     if selected_claude_skills:
         reject_sync_path_aliases(config_root_input, "Claude skill config root")
@@ -9344,14 +9965,23 @@ def parser() -> argparse.ArgumentParser:
     )
     sync.add_argument("--codex-home")
     sync.add_argument("--claude-home")
+    sync.add_argument(
+        "--user-bin-home",
+        help="logical user-bin-home root for an explicitly selected consumer bundle",
+    )
     sync.add_argument("--skills-home")
     sync.add_argument(
         "--only",
         action="append",
         help=(
-            "sync only codex-agents, skill:<name>, or claude-skill:<name>; "
+            "sync only codex-agents, skill:<name>, claude-skill:<name>, or "
+            "bundle:muse-runtime; "
             "repeat as needed"
         ),
+    )
+    sync.add_argument(
+        "--rollback-receipt",
+        help="compare-and-swap rollback for an explicitly selected bundle receipt",
     )
     sync.add_argument("--apply", action="store_true")
     sync.set_defaults(func=sync_global)
