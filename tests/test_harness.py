@@ -3764,7 +3764,9 @@ allow_local_binding = true
         _config_root, _claude_home, _user_bin_home, args = (
             self.make_bundle_sync_fixture("bundle-receipt-path")
         )
-        receipt = Path(self.temp.name) / "unsafe-receipt.json"
+        # Resolve first: macOS puts the runner temp under /var, an alias of /private/var, and the
+        # receipt path alias check would otherwise fire before the destination check under test.
+        receipt = Path(self.temp.name).resolve() / "unsafe-receipt.json"
         receipt.write_text(
             json.dumps(
                 {
