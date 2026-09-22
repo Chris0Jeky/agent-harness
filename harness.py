@@ -6184,6 +6184,112 @@ def ordinary_skill_tree_entries(root: Path) -> set[str] | None:
     return entries
 
 
+def skill_tree_entry_kinds(root: Path) -> dict[str, str] | None:
+    """Return ordinary relative skill paths and their directory/file kinds."""
+    entries = ordinary_skill_tree_entries(root)
+    if entries is None:
+        return None
+    kinds: dict[str, str] = {}
+    for relative in entries:
+        path = root.joinpath(*PurePosixPath(relative).parts)
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise HarnessError(f"skill tree changed during inspection: {path}") from exc
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
+        if stat.S_ISDIR(mode):
+            kinds[relative] = "directory"
+        elif stat.S_ISREG(mode):
+            kinds[relative] = "file"
+        else:
+            raise HarnessError(f"unsupported skill tree entry: {path}")
+    return kinds
+
+
+def remove_skill_tree_entry(path: Path) -> None:
+    """Remove one stale skill entry without removing its live skill root."""
+    if path_is_alias(path):
+        raise HarnessError(f"unsafe skill tree alias: {path}")
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise HarnessError(f"skill tree changed during sync: {path}") from exc
+    except OSError as exc:
+        raise HarnessError(f"cannot inspect skill tree {path}: {exc}") from exc
+    if stat.S_ISREG(mode):
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise HarnessError(f"cannot remove stale skill file {path}: {exc}") from exc
+        return
+    if not stat.S_ISDIR(mode):
+        raise HarnessError(f"unsupported skill tree entry: {path}")
+    try:
+        children = list(path.iterdir())
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect stale skill directory {path}: {exc}"
+        ) from exc
+    for child in children:
+        remove_skill_tree_entry(child)
+    try:
+        path.rmdir()
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot remove stale skill directory {path}: {exc}"
+        ) from exc
+
+
+def copy_skill_tree_over(source: Path, target: Path) -> None:
+    """Copy a skill over its live root, then prune stale entries in place."""
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target)
+        return
+
+    source_kinds = skill_tree_entry_kinds(source)
+    target_kinds = skill_tree_entry_kinds(target)
+    if source_kinds is None or target_kinds is None:
+        raise HarnessError(f"skill tree changed during sync: {source}; {target}")
+
+    # copytree(..., dirs_exist_ok=True) cannot replace a file with a directory
+    # (or vice versa), so remove only conflicting nested entries first. The
+    # live skill root itself remains in place for Windows readers holding it.
+    for relative in sorted(set(source_kinds) & set(target_kinds)):
+        if source_kinds[relative] != target_kinds[relative]:
+            remove_skill_tree_entry(target / Path(*PurePosixPath(relative).parts))
+    shutil.copytree(source, target, dirs_exist_ok=True)
+
+    current_kinds = skill_tree_entry_kinds(target)
+    if current_kinds is None:
+        raise HarnessError(f"skill tree changed during sync: {target}")
+    stale = sorted(
+        set(current_kinds) - set(source_kinds),
+        key=lambda relative: (-len(PurePosixPath(relative).parts), relative),
+    )
+    for relative in stale:
+        path = target / Path(*PurePosixPath(relative).parts)
+        if path.exists() or path_is_alias(path):
+            remove_skill_tree_entry(path)
+
+    source_digest = tree_digest(source)
+    target_digest = tree_digest(target)
+    if source_digest is None or target_digest != source_digest:
+        raise HarnessError(
+            f"copied skill tree does not match source: {source}; {target}"
+        )
+
+
+def restore_skill_tree_from_backup(backup: Path, target: Path) -> str:
+    """Restore a failed Codex skill sync while retaining the recovery copy."""
+    try:
+        copy_skill_tree_over(backup, target)
+    except (HarnessError, OSError) as exc:
+        return f"rollback incomplete; backup retained at {backup}: {exc}"
+    return f"live skill restored; backup retained at {backup}"
+
+
 def reject_sync_path_aliases(path: Path, label: str) -> None:
     """Reject an alias at a selected path or any existing ancestor."""
     logical = Path(os.path.abspath(path))
@@ -9108,13 +9214,24 @@ def sync_global(args: argparse.Namespace) -> int:
     for source, target, equal in skill_states:
         if equal:
             continue
+        backup: Path | None = None
         if target.exists():
             assert skill_backup is not None
             backup = skill_backup / target.name
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(target, backup)
-            shutil.rmtree(target)
-        shutil.copytree(source, target)
+        try:
+            copy_skill_tree_over(source, target)
+        except (HarnessError, OSError) as exc:
+            if backup is None:
+                raise HarnessError(
+                    f"Codex skill sync failed for {target}; no live backup was "
+                    f"available: {exc}"
+                ) from exc
+            rollback = restore_skill_tree_from_backup(backup, target)
+            raise HarnessError(
+                f"Codex skill sync failed for {target}: {exc}; {rollback}"
+            ) from exc
     staged_claude_skills: dict[Path, Path] = {}
     if needs_claude_skill_stage:
         assert claude_skill_backup is not None
