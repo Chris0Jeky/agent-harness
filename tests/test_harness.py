@@ -3614,6 +3614,88 @@ allow_local_binding = true
         self.assertEqual(target_file.read_bytes(), b"old worker\x00")
         self.assertFalse(target_tree.exists())
 
+    def test_sync_global_bundle_restores_previous_target_when_verification_fails(
+        self,
+    ) -> None:
+        _config_root, claude_home, user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-verify-restore"
+        )
+        old_bytes = b"old worker" + bytes([0])
+        new_bytes = b"new worker" + bytes([0])
+        target_file = claude_home / "tools" / "worker.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(old_bytes)
+        real_digest = harness.bundle_component_digest
+
+        def tampered_digest(kind: str, path: Path, label: str) -> str | None:
+            if label == "installed bundle target" and path == target_file:
+                return "0" * 64
+            return real_digest(kind, path, label)
+
+        with (
+            mock.patch.object(harness, "bundle_component_digest", tampered_digest),
+            self.assertRaisesRegex(
+                harness.HarnessError, "did not verify.*unverified bytes retained"
+            ) as raised,
+        ):
+            harness.sync_global(args)
+
+        # The previous target is live again, the rejected bytes are kept, nothing was published.
+        self.assertEqual(target_file.read_bytes(), old_bytes)
+        bundle_root = claude_home / ".harness-backups" / "sync-global-bundles"
+        runs = list(bundle_root.iterdir())
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0] / "unverified" / "0000").read_bytes(), new_bytes)
+        self.assertEqual((runs[0] / "backups" / "0000").read_bytes(), old_bytes)
+        self.assertFalse((runs[0] / "receipt.json").exists())
+        self.assertFalse((user_bin_home / "muse-recipes").exists())
+        self.assertIn(f"recovery backups: {runs[0]}", str(raised.exception))
+
+    def test_sync_global_bundle_restores_earlier_components_when_a_tree_fails_to_verify(
+        self,
+    ) -> None:
+        _config_root, claude_home, user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-verify-restore-tree"
+        )
+        old_bytes = b"old worker" + bytes([0])
+        target_file = claude_home / "tools" / "worker.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(old_bytes)
+        target_tree = user_bin_home / "muse-recipes"
+        target_tree.mkdir(parents=True)
+        (target_tree / "review.md").write_text("old recipe" + chr(10), encoding="utf-8")
+        real_digest = harness.bundle_component_digest
+
+        def tampered_digest(kind: str, path: Path, label: str) -> str | None:
+            if label == "installed bundle target" and path == target_tree:
+                return "0" * 64
+            return real_digest(kind, path, label)
+
+        with (
+            mock.patch.object(harness, "bundle_component_digest", tampered_digest),
+            self.assertRaisesRegex(
+                harness.HarnessError, "did not verify.*unverified bytes retained"
+            ),
+        ):
+            harness.sync_global(args)
+
+        # The earlier file component is unwound by the outer handler, the tree inline.
+        self.assertEqual(target_file.read_bytes(), old_bytes)
+        self.assertEqual(
+            (target_tree / "review.md").read_text(encoding="utf-8"),
+            "old recipe" + chr(10),
+        )
+        runs = list(
+            (claude_home / ".harness-backups" / "sync-global-bundles").iterdir()
+        )
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(
+            (runs[0] / "unverified" / "0001" / "review.md").read_text(encoding="utf-8"),
+            "new recipe" + chr(10),
+        )
+        self.assertTrue((runs[0] / "backups" / "0001" / "review.md").exists())
+        self.assertFalse((runs[0] / "receipt.json").exists())
+
     def test_sync_global_bundle_rejects_missing_unknown_and_unsafe_manifest(
         self,
     ) -> None:
