@@ -8454,7 +8454,17 @@ def apply_sync_bundle(
                 component["kind"], target, "installed bundle target"
             )
             if installed_digest != component["source_digest"]:
-                raise HarnessError(f"installed bundle target did not verify: {target}")
+                # The unverified replacement must not stay live (#277 review, #278). Keep its
+                # bytes in the recovery tree, put the previous target back, then fail.
+                quarantine = backup_root / "unverified" / f"{index:04d}"
+                quarantine.parent.mkdir(parents=True, exist_ok=True)
+                target.rename(quarantine)
+                if backup is not None:
+                    copy_bundle_component(component["kind"], backup, target)
+                raise HarnessError(
+                    f"installed bundle target did not verify: {target}; "
+                    f"unverified bytes retained at {quarantine}"
+                )
             component["backup"] = backup
             applied.append(component)
             previous: dict[str, Any] = {"state": "absent"}
@@ -8489,7 +8499,9 @@ def apply_sync_bundle(
         )
     except (HarnessError, OSError) as exc:
         problems = restore_failed_bundle_install(applied)
-        suffix = f"; restore problems: {'; '.join(problems)}" if problems else ""
+        suffix = f"; recovery backups: {backup_root}"
+        if problems:
+            suffix += f"; restore problems: {'; '.join(problems)}"
         if isinstance(exc, HarnessError):
             raise HarnessError(f"{exc}{suffix}") from exc
         raise HarnessError(f"bundle install failed: {exc}{suffix}") from exc

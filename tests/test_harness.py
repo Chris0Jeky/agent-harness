@@ -3614,6 +3614,43 @@ allow_local_binding = true
         self.assertEqual(target_file.read_bytes(), b"old worker\x00")
         self.assertFalse(target_tree.exists())
 
+    def test_sync_global_bundle_restores_previous_target_when_verification_fails(
+        self,
+    ) -> None:
+        _config_root, claude_home, user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-verify-restore"
+        )
+        old_bytes = b"old worker" + bytes([0])
+        new_bytes = b"new worker" + bytes([0])
+        target_file = claude_home / "tools" / "worker.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(old_bytes)
+        real_digest = harness.bundle_component_digest
+
+        def tampered_digest(kind: str, path: Path, label: str) -> str | None:
+            if label == "installed bundle target" and path == target_file:
+                return "0" * 64
+            return real_digest(kind, path, label)
+
+        with (
+            mock.patch.object(harness, "bundle_component_digest", tampered_digest),
+            self.assertRaisesRegex(
+                harness.HarnessError, "did not verify.*unverified bytes retained"
+            ) as raised,
+        ):
+            harness.sync_global(args)
+
+        # The previous target is live again, the rejected bytes are kept, nothing was published.
+        self.assertEqual(target_file.read_bytes(), old_bytes)
+        bundle_root = claude_home / ".harness-backups" / "sync-global-bundles"
+        runs = list(bundle_root.iterdir())
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0] / "unverified" / "0000").read_bytes(), new_bytes)
+        self.assertEqual((runs[0] / "backups" / "0000").read_bytes(), old_bytes)
+        self.assertFalse((runs[0] / "receipt.json").exists())
+        self.assertFalse((user_bin_home / "muse-recipes").exists())
+        self.assertIn(f"recovery backups: {runs[0]}", str(raised.exception))
+
     def test_sync_global_bundle_rejects_missing_unknown_and_unsafe_manifest(
         self,
     ) -> None:
