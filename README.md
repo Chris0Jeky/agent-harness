@@ -49,6 +49,13 @@ py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only cod
 # writing the Codex globals, shared skill home, Claude hooks, or other Claude skills.
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work
 py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work --apply
+
+# Preview/apply the reviewed Muse consumer manifest, then use the emitted
+# receipt for a separate compare-and-swap rollback preview/apply.
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --apply
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --rollback-receipt C:\path\to\receipt.json
+py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --rollback-receipt C:\path\to\receipt.json --apply
 ```
 
 `worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
@@ -178,6 +185,24 @@ live tree or recovery backup; a failed promotion restores a live copy while reta
 This is drift detection and recovery, not lock-free writer exclusion, and the lane does not infer
 whether changed bytes at source-owned paths were edited locally. Omitting `--only` retains the
 existing default sync set and does not add Claude-native skills.
+
+`--only bundle:muse-runtime` is a second isolated opt-in lane. It reads schema 1 from
+`<config-root>/.agent-harness/sync-global.json`, selects only `bundles.muse-runtime.components`,
+and maps canonical relative `file` or `tree` sources to canonical relative paths under the logical
+`claude-home` or `user-bin-home` roots. Absolute, traversal, aliased, colliding, or overlapping
+paths and unsupported filesystem entries fail before live writes. The selector cannot be mixed
+with other sync components and omitting it leaves the established default sync set unchanged.
+
+Apply stages every component and revalidates every source and target before moving the first live
+target. Replaced targets move to complete recovery backups; a versioned receipt is then published
+atomically under `<claude-home>/.harness-backups/sync-global-bundles/`. The receipt stores only
+logical roots and relative paths. `--rollback-receipt` is also dry-run by default and restores or
+removes a component only while its live digest still equals the installed digest and every named
+backup still equals its recorded digest. Rolled-back installed bytes remain in the receipt's
+recovery directory. This lane deploys only the files the reviewed consumer manifest names. The
+Muse manifest contract excludes vendor executables, settings, credentials, policy, repository
+declarations, and noncanonical launchers; manifest review remains the scope gate. Deployment makes
+no runtime or canary claim.
 For a dispatcher or adapter-marker candidate made in a linked worktree, see
 [safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
 the candidate as installed or live.

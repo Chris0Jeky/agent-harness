@@ -253,6 +253,59 @@ class HarnessTests(unittest.TestCase):
         )
         return config_root, claude_home, args
 
+    def make_bundle_sync_fixture(
+        self, name: str
+    ) -> tuple[Path, Path, Path, SimpleNamespace]:
+        root = Path(self.temp.name).resolve() / name
+        config_root = root / "config"
+        claude_home = root / "claude-home"
+        user_bin_home = root / "user-bin-home"
+        source_file = config_root / "tools" / "worker.py"
+        source_tree = config_root / "muse" / "recipes"
+        source_file.parent.mkdir(parents=True)
+        source_tree.mkdir(parents=True)
+        source_file.write_bytes(b"new worker\x00")
+        (source_tree / "review.md").write_text("new recipe\n", encoding="utf-8")
+        manifest = {
+            "schema_version": 1,
+            "bundles": {
+                "muse-runtime": {
+                    "components": [
+                        {
+                            "kind": "file",
+                            "source": "tools/worker.py",
+                            "destination": {
+                                "root": "claude-home",
+                                "path": "tools/worker.py",
+                            },
+                        },
+                        {
+                            "kind": "tree",
+                            "source": "muse/recipes",
+                            "destination": {
+                                "root": "user-bin-home",
+                                "path": "muse-recipes",
+                            },
+                        },
+                    ]
+                }
+            },
+        }
+        manifest_path = config_root / ".agent-harness" / "sync-global.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        args = SimpleNamespace(
+            config_root=str(config_root),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(claude_home),
+            user_bin_home=str(user_bin_home),
+            skills_home=str(root / "skills-home"),
+            apply=True,
+            only=["bundle:muse-runtime"],
+            rollback_receipt=None,
+        )
+        return config_root, claude_home, user_bin_home, args
+
     def assert_sync_global_rejects_alias_without_writes(
         self,
         args: SimpleNamespace,
@@ -3498,6 +3551,246 @@ allow_local_binding = true
         self.assertEqual(harness.sync_global(args), 0)
 
         self.assertFalse((claude_home / "skills" / "sample").exists())
+
+    def test_sync_global_default_does_not_select_manifest_bundles(self) -> None:
+        config_root, claude_home, _user_bin_home, bundle_args = (
+            self.make_bundle_sync_fixture("default-excludes-bundles")
+        )
+        codex_source = config_root / "codex"
+        (codex_source / "skills" / "sample").mkdir(parents=True)
+        (codex_source / "AGENTS.md").write_text("laws\n", encoding="utf-8")
+        (codex_source / "skills" / "sample" / "SKILL.md").write_text(
+            "skill\n", encoding="utf-8"
+        )
+        bundle_args.only = None
+
+        self.assertEqual(harness.sync_global(bundle_args), 0)
+
+        self.assertFalse((claude_home / "tools" / "worker.py").exists())
+
+    def test_sync_global_bundle_apply_receipt_and_rollback_present_and_absent(
+        self,
+    ) -> None:
+        _config_root, claude_home, user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-round-trip"
+        )
+        target_file = claude_home / "tools" / "worker.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(b"old worker\x00")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(target_file.read_bytes(), b"new worker\x00")
+        target_tree = user_bin_home / "muse-recipes"
+        self.assertEqual(
+            (target_tree / "review.md").read_text(encoding="utf-8"),
+            "new recipe\n",
+        )
+        receipt_lines = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("bundle receipt: ")
+        ]
+        self.assertEqual(len(receipt_lines), 1)
+        receipt = Path(receipt_lines[0].removeprefix("bundle receipt: "))
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(payload["bundle"], "muse-runtime")
+        self.assertEqual(
+            [entry["previous"]["state"] for entry in payload["components"]],
+            ["present", "absent"],
+        )
+        self.assertNotIn(str(claude_home), receipt.read_text(encoding="utf-8"))
+
+        args.rollback_receipt = str(receipt)
+        args.apply = False
+        self.assertEqual(harness.sync_global(args), 0)
+        self.assertEqual(target_file.read_bytes(), b"new worker\x00")
+        self.assertTrue(target_tree.exists())
+
+        args.apply = True
+        self.assertEqual(harness.sync_global(args), 0)
+        self.assertEqual(target_file.read_bytes(), b"old worker\x00")
+        self.assertFalse(target_tree.exists())
+
+    def test_sync_global_bundle_rejects_missing_unknown_and_unsafe_manifest(
+        self,
+    ) -> None:
+        config_root, claude_home, _user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-invalid-manifest"
+        )
+        manifest = config_root / ".agent-harness" / "sync-global.json"
+        manifest.unlink()
+        with self.assertRaisesRegex(harness.HarnessError, "bundle manifest"):
+            harness.sync_global(args)
+        self.assertFalse(claude_home.exists())
+
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps({"schema_version": 1, "bundles": {}}), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(harness.HarnessError, "missing bundle"):
+            harness.sync_global(args)
+
+        for mutation, message in (
+            (("kind", "link"), "unknown component kind"),
+            (("source", "../secret"), "unsafe bundle source"),
+            (("destination.root", "codex-home"), "unknown destination root"),
+            (("destination.path", "../settings.json"), "unsafe bundle destination"),
+        ):
+            with self.subTest(mutation=mutation):
+                _config_root, _claude_home, _user_bin_home, args = (
+                    self.make_bundle_sync_fixture(f"invalid-{mutation[0]}")
+                )
+                manifest = (
+                    Path(args.config_root) / ".agent-harness" / "sync-global.json"
+                )
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                component = payload["bundles"]["muse-runtime"]["components"][0]
+                if mutation[0] == "destination.root":
+                    component["destination"]["root"] = mutation[1]
+                elif mutation[0] == "destination.path":
+                    component["destination"]["path"] = mutation[1]
+                else:
+                    component[mutation[0]] = mutation[1]
+                manifest.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(harness.HarnessError, message):
+                    harness.sync_global(args)
+
+    def test_sync_global_bundle_preflights_every_component_before_writes(self) -> None:
+        _config_root, claude_home, user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-preflight"
+        )
+        first_target = claude_home / "tools" / "worker.py"
+        first_target.parent.mkdir(parents=True)
+        first_target.write_bytes(b"old worker\x00")
+        external = Path(self.temp.name) / "external-bundle-target"
+        external.mkdir()
+        user_bin_home.mkdir()
+        alias = user_bin_home / "muse-recipes"
+        remove_alias = self.make_directory_alias(external, alias)
+        try:
+            with self.assertRaisesRegex(
+                harness.HarnessError, "unsafe bundle destination"
+            ):
+                harness.sync_global(args)
+            self.assertEqual(first_target.read_bytes(), b"old worker\x00")
+            self.assertEqual(list(external.iterdir()), [])
+            self.assertFalse((claude_home / ".harness-backups").exists())
+        finally:
+            remove_alias()
+
+    def test_sync_global_bundle_refuses_source_and_target_drift_before_install(
+        self,
+    ) -> None:
+        config_root, claude_home, _user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-drift"
+        )
+        source_file = config_root / "tools" / "worker.py"
+        target_file = claude_home / "tools" / "worker.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(b"old worker\x00")
+        original_copy2 = harness.shutil.copy2
+        changed = False
+
+        def copy_with_source_drift(
+            source: Path, target: Path, *a: object, **kw: object
+        ):
+            nonlocal changed
+            result = original_copy2(source, target, *a, **kw)
+            if Path(source) == source_file and not changed:
+                source_file.write_bytes(b"source drift\x00")
+                changed = True
+            return result
+
+        with mock.patch.object(
+            harness.shutil, "copy2", side_effect=copy_with_source_drift
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, "source changed"):
+                harness.sync_global(args)
+        self.assertEqual(target_file.read_bytes(), b"old worker\x00")
+
+        source_file.write_bytes(b"new worker\x00")
+        changed = False
+
+        def copy_with_target_drift(
+            source: Path, target: Path, *a: object, **kw: object
+        ):
+            nonlocal changed
+            result = original_copy2(source, target, *a, **kw)
+            if Path(source) == source_file and not changed:
+                target_file.write_bytes(b"target drift\x00")
+                changed = True
+            return result
+
+        with mock.patch.object(
+            harness.shutil, "copy2", side_effect=copy_with_target_drift
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, "target changed"):
+                harness.sync_global(args)
+        self.assertEqual(target_file.read_bytes(), b"target drift\x00")
+
+    def test_sync_global_bundle_rollback_refuses_live_or_backup_drift(self) -> None:
+        _config_root, claude_home, _user_bin_home, args = self.make_bundle_sync_fixture(
+            "bundle-rollback-drift"
+        )
+        target = claude_home / "tools" / "worker.py"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old worker\x00")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(harness.sync_global(args), 0)
+        receipt = Path(
+            next(
+                line.removeprefix("bundle receipt: ")
+                for line in output.getvalue().splitlines()
+                if line.startswith("bundle receipt: ")
+            )
+        )
+        args.rollback_receipt = str(receipt)
+        target.write_bytes(b"live drift\x00")
+        with self.assertRaisesRegex(harness.HarnessError, "live target drift"):
+            harness.sync_global(args)
+        target.write_bytes(b"new worker\x00")
+
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        backup_relative = payload["components"][0]["previous"]["backup"]
+        (receipt.parent / backup_relative).write_bytes(b"backup drift\x00")
+        with self.assertRaisesRegex(harness.HarnessError, "backup drift"):
+            harness.sync_global(args)
+
+    def test_sync_global_bundle_rollback_rejects_absolute_receipt_paths(self) -> None:
+        _config_root, _claude_home, _user_bin_home, args = (
+            self.make_bundle_sync_fixture("bundle-receipt-path")
+        )
+        receipt = Path(self.temp.name) / "unsafe-receipt.json"
+        receipt.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "sync-global-bundle",
+                    "bundle": "muse-runtime",
+                    "components": [
+                        {
+                            "kind": "file",
+                            "source": "tools/worker.py",
+                            "destination": {
+                                "root": "claude-home",
+                                "path": str(Path(self.temp.name) / "absolute"),
+                            },
+                            "installed_digest": "0" * 64,
+                            "previous": {"state": "absent"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        args.rollback_receipt = str(receipt)
+
+        with self.assertRaisesRegex(harness.HarnessError, "unsafe receipt destination"):
+            harness.sync_global(args)
 
     def test_sync_global_keeps_floor_project_local(self) -> None:
         root = Path(self.temp.name)
