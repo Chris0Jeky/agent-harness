@@ -8458,13 +8458,32 @@ def apply_sync_bundle(
                 # bytes in the recovery tree, put the previous target back, then fail.
                 quarantine = backup_root / "unverified" / f"{index:04d}"
                 quarantine.parent.mkdir(parents=True, exist_ok=True)
-                target.rename(quarantine)
+                problem = f"installed bundle target did not verify: {target}"
+                try:
+                    target.rename(quarantine)
+                except OSError as exc:
+                    raise HarnessError(
+                        f"{problem}; the unverified bytes are still live because they "
+                        f"could not be quarantined: {exc}"
+                    ) from exc
+                problem += f"; unverified bytes retained at {quarantine}"
                 if backup is not None:
-                    copy_bundle_component(component["kind"], backup, target)
-                raise HarnessError(
-                    f"installed bundle target did not verify: {target}; "
-                    f"unverified bytes retained at {quarantine}"
-                )
+                    try:
+                        copy_bundle_component(component["kind"], backup, target)
+                        restored = bundle_component_digest(
+                            component["kind"], target, "restored bundle target"
+                        )
+                    except (HarnessError, OSError) as exc:
+                        raise HarnessError(
+                            f"{problem}; the live target is incomplete after a failed "
+                            f"restore ({exc}); the previous version is intact at {backup}"
+                        ) from exc
+                    if restored != component["target_digest"]:
+                        raise HarnessError(
+                            f"{problem}; the restored target does not match its backup "
+                            f"at {backup}"
+                        )
+                raise HarnessError(problem)
             component["backup"] = backup
             applied.append(component)
             previous: dict[str, Any] = {"state": "absent"}
