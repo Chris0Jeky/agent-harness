@@ -4129,6 +4129,23 @@ allow_local_binding = true
         )
         self.assertEqual((backups[0] / "old.txt").read_text(encoding="utf-8"), "old\n")
 
+    def test_sync_global_codex_skill_reports_copy_failure_without_backup(self) -> None:
+        _source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("missing-target-copy-failure")
+        )
+        (target_skill / "SKILL.md").unlink()
+        target_skill.rmdir()
+        with mock.patch.object(
+            harness,
+            "copy_skill_tree_over",
+            side_effect=PermissionError("skill target is unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                harness.HarnessError,
+                r"Codex skill sync failed.*no live backup was available",
+            ):
+                harness.sync_global(args)
+
     def test_sync_global_codex_skill_leaves_legacy_backups_untouched(self) -> None:
         source_skill, target_skill, skills_home, args = (
             self.make_sync_global_skill_fixture("legacy-skill-backup")
