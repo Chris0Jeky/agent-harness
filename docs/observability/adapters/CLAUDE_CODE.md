@@ -113,12 +113,44 @@ so available usage is only an observed subtotal. Do not multiply final usage by
 attempt count or treat a final-request footprint as total cost.
 
 Tool-invocation count, execution-attempt count and delivered-job count are distinct.
-Deduplicate identical span exports by native trace/span identity and source; scope
-log identities to a known producer/process instance and sequence. Different native
-span IDs with one tool-call ID remain distinct invocation/execution observations
-unless a version-specific rule proves retransmission. Preserve deferral/resume
-causality. If identity is ambiguous, mark counts unknown rather than drop real work.
-Original job/acceptance denominators remain in #288/#296, not this adapter.
+Use the [core source-record contract](../AGENT_LOOP_SPANS.md#source-record-identity-and-conflict-handling)
+for reimports and conflicts, not an adapter-local key. Preserve deferral/resume
+causality. Original job/acceptance denominators remain in #288/#296, not this adapter.
+
+### Source-record identity mapping
+
+This documents the [#314](https://github.com/Chris0Jeky/agent-harness/issues/314)
+contract's application to Claude, not native qualification or a second schema.
+**FACT:** The guide scopes `event.sequence` to process lifetime: it continues across
+`/clear`, while a resumed session may repeat sequences in a new process. [C1]
+**INFER:** Session plus sequence therefore cannot prove original event identity.
+No content-off native process-lifetime field was qualified in this documentation
+slice; absence of a qualified mapping is not a claim that no such field can exist.
+
+Inside `attributes`, retain `agent_harness.source.name=claude_code`. Use the core's
+exact fields below; `source.*` abbreviates `agent_harness.source.*` only here.
+
+| Source observation | `source.record.identity` and required binding | Missingness and conflict treatment |
+|---|---|---|
+| Completed native span | `native_span`; stable originating `source.namespace` plus genuine trace/span IDs | Equal accepted normalized reexports count once; different safe representations at that key conflict |
+| Log with qualified lifetime and original sequence | `producer_record`; originating namespace, genuine `source.instance.id`, `source.record.id=event:<decimal-sequence>` | Sequence alone, PID/session, or importer UUID is insufficient; missing lifetime means `unavailable` |
+| Independently numbered event stream | `producer_record`; same lifetime rule, distinct stable stream prefix in record ID | The mapping must establish uniqueness across streams, not reuse another stream's `event:` prefix |
+| Span event, completion event or partial observation without stable original event identity | `unavailable`, unless a producer-scoped event identity is independently established | Associated trace/span/tool/request IDs or a filtered array position cannot identify the event |
+
+For the sequence mapping use the exact nonnegative source integer, rendered without
+leading zeros as `event:0`, `event:1`, and so on, within the core's token bound.
+Do not use an interaction counter or an ordinal invented after filtering. Namespace
+and genuine lifetime binding must survive rotation, re-export and reimport; never
+mint them retroactively to repair an old export. A capture-assigned token is allowed
+only under the core's actual-instrumented-boundary rule, not enabled by this note.
+
+A real process restart changes the lifetime scope; `/clear` alone does not. Arrival
+order cannot establish a restart, and session resume cannot establish continuity.
+Different span IDs sharing a tool-call ID remain separate source records; wrapper,
+execution and event counts still follow the semantic counting surface above.
+Conflicts and missing keys keep deduplicated totals unavailable under the core
+rules, not last-writer or success-wins. Even fully identified observed records do
+not establish complete capture or disjoint billing; unknown usage stays unknown.
 
 ## Version and content checks, not installation instructions
 
@@ -153,7 +185,10 @@ These are authored expected outcomes, not empirical integration results.
 | Same observation but cache creation absent and no zero-default contract | Input total unknown, available components retained; not 900 |
 | Two attempt events, only final usage 1200 | One logical inference, two observed attempts, total retry spend unknown; not 2400 |
 | One wrapper W, permission child P, execution child X, result event E, same call ID | One tool invocation, one execution attempt, one separate wait; not four tool calls |
-| Another export of W with same trace/span ID | Duplicate export, no additional invocation |
+| Another equal export of W with same originating namespace and native trace/span IDs | Duplicate export, no additional invocation |
+| Same source key but conflicting outcome/usage representations | Whole key group conflicting; no success-wins or last-writer total |
+| Two log events with equal session/sequence but no qualified process lifetime | Two safe observations; deduplicated event total unavailable |
+| New genuine process lifetime repeats sequence 0 in the same resumed session | Distinct source event; session/sequence cannot collapse it |
 | New native wrapper W2 for resumed call, same tool-call ID | Another observed invocation, not dropped as a duplicate; logical requested-call association retained |
 | Wrapper UNSET, execution ERROR | Failed execution remains visible; no overall success inference |
 | Only request-header ID available | Custom transport ID populated, canonical completion ID unavailable |
