@@ -1,0 +1,44 @@
+{
+  "document_kind": "authoring_template_not_execution_receipt",
+  "template_version": 0,
+  "execution_status": "NOT RUN",
+  "merge_authority": "existing_repository_policy_only",
+  "identity": {
+    "repository": null,
+    "pr_url": null,
+    "merge_base_sha": null,
+    "reviewed_head_sha": null,
+    "tested_revision_sha": null,
+    "tested_revision_kind": null,
+    "fixture_digest": null,
+    "oracle_revision": null
+  },
+  "intent": {
+    "contract_source": null,
+    "outcome": null,
+    "invariant": null,
+    "non_goals": []
+  },
+  "risk": {
+    "changed_seams": [],
+    "affected_consumers": [],
+    "data_or_authority_effects": [],
+    "recovery_plan": null
+  },
+  "planned_checks": [
+    {
+      "id": "replace-with-contract-id",
+      "oracle_class": null,
+      "expected_outcome": null,
+      "independence_and_limits": null,
+      "successful_control": null,
+      "negative_or_regression_control": null,
+      "existing_gate_reference_or_advisory": null
+    }
+  ],
+  "observations": [],
+  "retained_prior_evidence": [],
+  "review_dispositions": [],
+  "unverified_layers": ["No product, control, or native workflow trial has run."],
+  "next_action": "Fill expectations; execute applicable checks; link actual results without relabeling this template as proof."
+}
