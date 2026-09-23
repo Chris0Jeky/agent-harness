@@ -15,7 +15,7 @@ Doc hierarchy — read in this order, only as deep as needed:
 - `BOOK.md` — rationale only; never needed for routine work
 - `legacy/` — historical source material; never run anything in it
 
-This repo is tier 3 (workshop) per `.agent-harness/tier.json`: push free, merge gated.
+This repo is tier 3 (workshop) per `.agent-harness/tier.json`: push free, merge free.
 
 ## Commands
 
