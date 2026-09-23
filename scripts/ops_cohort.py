@@ -19,11 +19,31 @@ import sys
 MAX_BYTES = 4 * 1024 * 1024
 MAX_JOBS = 1000
 MAX_ATTEMPTS = 5000
-NUMBERS = ("cost", "queue_seconds", "execution_seconds", "verification_seconds", "review_seconds")
+NUMBERS = (
+    "cost",
+    "queue_seconds",
+    "execution_seconds",
+    "verification_seconds",
+    "review_seconds",
+)
 STATES = ("not_admitted", "pending", "blocked", "rejected", "accepted")
 BUCKETS = (*STATES, "stale_acceptance", "unverified_acceptance", "contradicted_acceptance")
-JOB_KEYS = {"job_id", "input_revision", "admitted", "disposition", "accepted_attempt", "attempts"}
-ATTEMPT_KEYS = {"attempt_id", "source_sha256", "verified_revision", "outcome_pass", "constraints_pass", *NUMBERS}
+JOB_KEYS = {
+    "job_id",
+    "input_revision",
+    "admitted",
+    "disposition",
+    "accepted_attempt",
+    "attempts",
+}
+ATTEMPT_KEYS = {
+    "attempt_id",
+    "source_sha256",
+    "verified_revision",
+    "outcome_pass",
+    "constraints_pass",
+    *NUMBERS,
+}
 
 
 def _pairs(pairs):
@@ -100,7 +120,9 @@ def _acceptance_bucket(job):
             raise ValueError("only accepted jobs may select an accepted attempt")
         return state
     _identity(chosen)
-    accepted = next((row for row in job["attempts"] if row["attempt_id"] == chosen), None)
+    accepted = next(
+        (row for row in job["attempts"] if row["attempt_id"] == chosen), None
+    )
     if accepted is None:
         raise ValueError("accepted attempt is absent from this job")
     if accepted["outcome_pass"] is False or accepted["constraints_pass"] is False:
@@ -142,7 +164,9 @@ def summarize_bytes(raw: bytes) -> dict:
     if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
         raise ValueError("cohort must be bounded bytes")
     try:
-        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
+        data = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant
+        )
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ValueError("invalid cohort JSON") from exc
     _keys(data, {"schema", "currency", "jobs"})
@@ -219,7 +243,9 @@ def main(argv=None):
             raw = source.read(MAX_BYTES + 1)
         result = summarize_bytes(raw)
     except (OSError, ValueError):
-        print("ops-cohort: invalid, unsupported or unavailable observations", file=sys.stderr)
+        print(
+            "ops-cohort: invalid, unsupported or unavailable observations", file=sys.stderr
+        )
         return 2
     print(json.dumps(result, sort_keys=True, indent=2, allow_nan=False))
     return 0
