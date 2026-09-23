@@ -78,9 +78,17 @@ class CohortTests(unittest.TestCase):
     def test_rejected_pending_blocked_and_not_admitted_stay_visible(self):
         jobs = [job()]
         for number, state in enumerate(("rejected", "pending", "blocked"), 2):
-            jobs.append(job(number, disposition=state, accepted_attempt=None, attempts=[]))
+            jobs.append(
+                job(number, disposition=state, accepted_attempt=None, attempts=[])
+            )
         jobs.append(
-            job(5, admitted=False, disposition="not_admitted", accepted_attempt=None, attempts=[])
+            job(
+                5,
+                admitted=False,
+                disposition="not_admitted",
+                accepted_attempt=None,
+                attempts=[],
+            )
         )
         out = self.summarize(cohort(*jobs))
         self.assertEqual(out["candidates"], 5)
@@ -97,7 +105,9 @@ class CohortTests(unittest.TestCase):
         self.assertIsNone(out["cost"]["per_accepted_job"])
 
     def test_rejected_attempt_cost_is_not_dropped(self):
-        out = self.summarize(cohort(job(), job(2, disposition="rejected", accepted_attempt=None)))
+        out = self.summarize(
+            cohort(job(), job(2, disposition="rejected", accepted_attempt=None))
+        )
         self.assertEqual(out["cost"]["per_accepted_job"], 4)
         self.assertEqual(out["review_seconds"]["per_accepted_job"], 12)
 
@@ -112,7 +122,10 @@ class CohortTests(unittest.TestCase):
             self.summarize(cohort(job(), currency=None))
 
     def test_empty_and_no_accepted_cohorts_have_undefined_rates(self):
-        for data in (cohort(), cohort(job(disposition="rejected", accepted_attempt=None))):
+        for data in (
+            cohort(),
+            cohort(job(disposition="rejected", accepted_attempt=None)),
+        ):
             out = self.summarize(data)
             self.assertIsNone(out["cost"]["per_accepted_job"])
         out = self.summarize(cohort())
@@ -120,7 +133,9 @@ class CohortTests(unittest.TestCase):
         self.assertIsNone(out["cost"]["complete_sum"])
 
     def test_stale_acceptance_is_not_counted_as_current(self):
-        out = self.summarize(cohort(job(attempts=[attempt(verified_revision="b" * 40)])))
+        out = self.summarize(
+            cohort(job(attempts=[attempt(verified_revision="b" * 40)]))
+        )
         self.assertEqual(out["jobs"]["stale_acceptance"], 1)
         self.assertEqual(out["jobs"]["accepted"], 0)
         self.assertEqual(out["accepted_per_admitted"], 0)
@@ -160,7 +175,11 @@ class CohortTests(unittest.TestCase):
     def test_nonadmitted_jobs_cannot_have_attempts_or_accepted_state(self):
         for changes in (
             {"admitted": False},
-            {"admitted": False, "disposition": "not_admitted", "accepted_attempt": None},
+            {
+                "admitted": False,
+                "disposition": "not_admitted",
+                "accepted_attempt": None,
+            },
         ):
             with self.assertRaises(ValueError):
                 self.summarize(cohort(job(**changes)))
@@ -213,6 +232,72 @@ class CohortTests(unittest.TestCase):
                 ops.summarize_bytes(raw)
         with self.assertRaises(ValueError):
             self.summarize(cohort(*[job() for _ in range(ops.MAX_JOBS + 1)]))
+
+    def test_duplicate_keys_in_otherwise_valid_cohorts_refuse(self):
+        data = cohort(job())
+        raw = json.dumps(data)
+        self.assertEqual(self.summarize(data)["jobs"]["accepted"], 1)
+        for field, value in (
+            ("currency", "USD"),
+            ("job_id", "job-1"),
+            ("attempt_id", "attempt-1"),
+        ):
+            with self.subTest(field=field):
+                member = f"{json.dumps(field)}: {json.dumps(value)}"
+                self.assertEqual(raw.count(member), 1)
+                duplicate = raw.replace(member, f"{member}, {member}", 1)
+                # Last-key-wins parsing would hide the duplicate, not fix it.
+                self.assertEqual(json.loads(duplicate), data)
+                with self.assertRaisesRegex(ValueError, "invalid cohort JSON"):
+                    ops.summarize_bytes(duplicate.encode())
+
+    def test_duplicate_key_cli_rejects_without_disclosing_input(self):
+        data = cohort(job(job_id="PRIVATE_SENTINEL"))
+        raw = json.dumps(data)
+        member = '"currency": "USD"'
+        duplicate = raw.replace(member, f"{member}, {member}", 1).encode()
+        self.assertEqual(json.loads(duplicate), data)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "observations.json"
+            path.write_bytes(duplicate)
+            result = subprocess.run(
+                [sys.executable, str(MODULE), str(path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertNotIn("PRIVATE_SENTINEL", result.stderr)
+            self.assertNotIn(str(path), result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(path.read_bytes(), duplicate)
+            self.assertEqual(list(Path(temp).iterdir()), [path])
+
+    def test_numeric_overflow_in_valid_observation_fields_refuses(self):
+        for field in ops.NUMBERS:
+            data = cohort(job(attempts=[attempt(**{field: 1.0})]))
+            raw = json.dumps(data)
+            self.assertEqual(self.summarize(data)[field]["complete_sum"], 1)
+            member = f'"{field}": 1.0'
+            self.assertEqual(raw.count(member), 1)
+            for value in ("1e999", "-1e999", "NaN", "Infinity", "-Infinity"):
+                with self.subTest(field=field, value=value):
+                    invalid = raw.replace(member, f'"{field}": {value}', 1)
+                    with self.assertRaises(ValueError):
+                        ops.summarize_bytes(invalid.encode())
+
+    def test_attempt_limit_uses_unique_otherwise_valid_observations(self):
+        attempts = [attempt(i) for i in range(1, ops.MAX_ATTEMPTS + 1)]
+        data = cohort(job(attempts=attempts))
+        raw = json.dumps(data).encode()
+        self.assertLess(len(raw), ops.MAX_BYTES)
+        self.assertEqual(ops.summarize_bytes(raw)["attempts"], ops.MAX_ATTEMPTS)
+        attempts.append(attempt(ops.MAX_ATTEMPTS + 1))
+        raw = json.dumps(data).encode()
+        self.assertLess(len(raw), ops.MAX_BYTES)
+        with self.assertRaisesRegex(ValueError, "attempts must be a bounded list"):
+            ops.summarize_bytes(raw)
 
     def test_four_clocks_are_separate_and_missing_is_preserved(self):
         out = self.summarize(cohort(job(attempts=[attempt(queue_seconds=None)])))
