@@ -44,3 +44,13 @@ limitation are recorded. Historical results are not silently promoted to current
 
 The next benchmark slice must commit or privately pin its input digest, environment, command,
 result artifact, and comparison baseline before adding a number here.
+
+## Proposed agent-operations extension
+
+[AGENT_OPS_MEASUREMENTS.md](AGENT_OPS_MEASUREMENTS.md) is the registered specification
+extension for logical-job routing outcomes, cost/supervision coverage and timed blocked-agent
+observations. This file remains the canonical measurement index and recorded-results ledger;
+the extension is not another results ledger or a session handoff. Session-specific handoffs
+remain under `handoffs/` and the relevant PR. The offline accounting implementation is
+[#296](https://github.com/Chris0Jeky/agent-harness/pull/296); it does not collect native evidence
+or justify a new numeric result here. No productivity, spend-saving or runtime claim is added.
