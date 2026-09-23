@@ -44,7 +44,7 @@ ledger. Product UX observe/judge remains in [#281](https://github.com/Chris0Jeky
 
 **FACT:** The reviewed GenAI agent/client/event/metric documents are Development,
 not Stable. Use their names only where meanings match; this local format is
-OTel-shaped, not OTLP or a claim of stable GenAI compliance. [S1][S2][S3][S4][S5]
+OTel-shaped, not OTLP or a claim of stable GenAI compliance. [S1], [S2], [S3], [S4], [S5]
 
 Choose one bounded user turn or explicit agent invocation as a loop. A standalone
 loop starts a trace; an invocation with genuine upstream context retains it.
@@ -63,7 +63,7 @@ terminal-session span. Preserve native causal relationships across resumed turns
 **FACT:** Planning inference belongs beneath `plan`, while execution of its plan
 normally belongs beside it under the invocation. OTel advises omitting `plan` when
 instrumentation cannot identify it. A logical inference span includes automatic
-retries. [S1][S2] Model-local inference can use `INTERNAL`; do not relabel remote
+retries. [S1], [S2] Model-local inference can use `INTERNAL`; do not relabel remote
 calls as local merely because a coding CLI runs on a developer machine.
 
 Names use `operation` plus a safe agent/model/tool name when available. Do not put
@@ -95,6 +95,8 @@ aggregation with a diagnostic, not stop the coding operation or a merge.
 | `agent_harness.content.capture` | `off` or `redacted`; required attribute | Off by default; redacted means explicitly permitted fields after filtering, never unrestricted raw capture |
 | `agent_harness.unavailable` | optional object: field name to reason | Reasons: `not_exposed`, `not_observed`, `not_applicable`, `redacted`, `incomplete`, `invalid`; never substitute zero |
 
+The `agent_harness.*` keys are inside `attributes`; object-valued extensions are
+local JSON only and would need an explicit translation for any future OTLP adapter.
 Events use trace/span IDs only when associated with a genuine known context. An
 uncorrelated source event can remain an event with an explicit gap. Partial native
 records are retained only as safe event observations, not fabricated completed
@@ -112,10 +114,10 @@ correlation values, not authentication tokens; credentials are never identifiers
 | `gen_ai.operation.name` | String matching the observed operation, on semantic spans |
 | `gen_ai.agent.name`, `gen_ai.tool.name` | Safe allowlisted name/category; omit unsafe raw names and record redaction |
 | `gen_ai.conversation.id` | Genuine native session/thread ID when safe; never a new UUID, trace ID or content hash fallback [S3] |
-| `gen_ai.tool.call.id` | Native model/tool-call ID, not tool name; correlate within producer/session scope [S2][S3] |
+| `gen_ai.tool.call.id` | Native model/tool-call ID, not tool name; correlate within producer/session scope [S2], [S3] |
 | `gen_ai.response.id` | Actual completion ID, not a transport request-header ID [S3] |
 | `gen_ai.provider.name` | Observed provider identity; a gateway brand alone does not prove the upstream provider |
-| `gen_ai.request.model`, `gen_ai.response.model` | Requested and observed actual model respectively; never assume actual equals requested [S2][S3] |
+| `gen_ai.request.model`, `gen_ai.response.model` | Requested and observed actual model respectively; never assume actual equals requested [S2], [S3] |
 | `error.type` | Safe low-cardinality failure category on error, `_OTHER` when a failure is known but its type is unavailable; no full exception text |
 | `agent_harness.run.id` | Existing harness run identity only when associated; standalone native runs need not pretend a harness run exists |
 | `agent_harness.repo.id`, `agent_harness.repo.revision` | Safe stable repo identity and known full commit SHA; neither is a filesystem path |
@@ -136,7 +138,7 @@ records and drill-down references, not unbounded aggregate dimensions.
 | Event | Safe payload / interpretation |
 |---|---|
 | `agent_harness.edit.applied` | Observed outcome and files-touched count when known; no diff or path list. A tool returning success is not proof the intended edit persisted |
-| `agent_harness.verify.result` | Oracle/evidence references, `agent_harness.verify.result=pass|fail|error|not_run`, original exit code if observed, tested repo/revision and dirty-state observations; no claim of overall correctness |
+| `agent_harness.verify.result` | Oracle/evidence references, `agent_harness.verify.result` from pass/fail/error/not_run, original exit code if observed, tested repo/revision and dirty-state observations; no claim of overall correctness |
 | `agent_harness.request.attempt` | Request/attempt identity and attempt number when exposed, category/status and timing; no new logical inference count for each export |
 | `agent_harness.quota.observed` | Provider, native unit/window, value, observation time and reset time if exposed; never inferred authoritative headroom |
 
@@ -151,7 +153,7 @@ child; a recovered error remains in history.
 
 **FACT:** OTel content guidance makes messages/instructions and tool arguments and
 results non-default, sensitive fields. Native Claude content gates are useful
-mapping references, not a portable privacy policy or a guarantee of redaction. [S2][S6]
+mapping references, not a portable privacy policy or a guarantee of redaction. [S2], [S6]
 
 | Data class | Default / permitted treatment |
 |---|---|
@@ -179,7 +181,7 @@ shipping them to a vendor is separate authorization, not implicit in local captu
 
 **FACT:** The reviewed registry defines input/output, cache and reasoning token
 attributes. Cache counts are parts of input totals; reasoning is part of output.
-The reviewed registry has no standard cost attribute. [S2][S3]
+The reviewed registry has no standard cost attribute. [S2], [S3]
 
 | Observation | Field / units / interpretation |
 |---|---|
@@ -189,8 +191,8 @@ The reviewed registry has no standard cost attribute. [S2][S3]
 | Latency | `duration_ms`; custom `agent_harness.latency.first_token_ms` only for actual TTFT; use `gen_ai.response.time_to_first_chunk` in seconds only for that precise source meaning |
 | Retries / rate limits | `agent_harness.request.attempt_count`: observed integer, at least one for an attempted logical request; error category/HTTP status when available; unknown attempts remain unknown |
 | Compaction | `gen_ai.conversation.compacted=true` only when reliably detected; absence is not proof it did not happen [S3] |
-| Monetary estimate | `agent_harness.cost.amount` decimal string, `.currency` explicit, `.basis=estimated|vendor_reported`, `.source` and `.pricing_as_of` when estimated; optional observations, not invoices |
-| Quota | `agent_harness.quota.value`, `.unit`, `.window`, `.observed_at`, `.reset_at` when known; preserve provider scope and whether value means used or remaining via `.kind` |
+| Monetary estimate | `agent_harness.cost.amount` nonnegative finite decimal string, `.currency` explicit, `.basis` estimated or vendor_reported, `.source` and `.pricing_as_of` when estimated; optional observations, not invoices |
+| Quota | `agent_harness.quota.value` finite nonnegative number, `.unit` and `.window` strings, `.observed_at` and `.reset_at` UTC timestamps when known; preserve provider scope and whether value means used or remaining via `.kind` |
 
 Derive diagnostics from observed request/tool records, not a new metrics SDK:
 cache-read/input ratio, calls per loop, retries/rate limits, model share, and tokens
@@ -265,8 +267,10 @@ locally before claiming its entire contents reconciled.
 
 **INFER:** Document Claude Code native mapping first because its first-party guide
 exposes concrete coding-loop boundaries. Native schemas still need normalization,
-not blind copying. Muse, OpenCode and Codex-class adapters remain targets, not
-claimed qualified integrations. No all-agent feature parity is assumed.
+not blind copying. The separate mapping deliverable is tracked in
+[#312](https://github.com/Chris0Jeky/agent-harness/issues/312). Muse, OpenCode and
+Codex-class adapters remain targets, not claimed qualified integrations. No
+all-agent feature parity is assumed.
 
 Langfuse/LangSmith/Phoenix/OpenInference may be later projections; Helicone-class
 gateways can enrich model-plane observations. No backend is selected in v0.
@@ -279,7 +283,7 @@ coverage. Require concrete source-to-field mapping and loss accounting instead.
 | Rank | Slice | Done when |
 |---|---|---|
 | P0 | This #303 contract plus README link | Source-checked definitions, privacy/cost baseline and both NOT RUN examples reviewed; docs-only diff |
-| P1 | Separate Claude native mapping note | Native field/unit/availability and loss tables distinguish tool counts, request IDs and token totals; no native qualification claim |
+| P1 | Separate Claude native mapping note, #312 | Native field/unit/availability and loss tables distinguish tool counts, request IDs and token totals; no native qualification claim |
 | P1 | Future bounded local qualification proposal | Human names safe synthetic task, runtime/version, capture route and comparison oracle; no runtime work is authorized by this table alone |
 | P2 | Later adapter implementation | Separately reviewed existing-harness seam and failure-isolation tests; no merge-gating telemetry or new accounting system |
 | P2 | Packaging under #302 | Canonical contract is settled; instructions link here, no second skill-policy home |
