@@ -263,7 +263,7 @@ attributes. Cache counts are parts of input totals; reasoning is part of output.
 The reviewed registry has no standard cost attribute. [S2], [S3]
 
 | Observation | Field / units / interpretation |
-|---|---|---|
+|---|---|
 | Input / output | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`: nonnegative integer tokens, source-defined billed counts where separately available |
 | Cache read / write | `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_write.input_tokens`: input subsets, not extra tokens to add again |
 | Reasoning | `gen_ai.usage.reasoning.output_tokens`: output subset, never inferred from text length |
@@ -358,6 +358,11 @@ score, or a session tree as proof of complete uninstrumented local edit/verify
 coverage. Require concrete source-to-field mapping and loss accounting instead.
 
 ## Landing plan and continuation
+
+The table and first-week handoff below describe the initial docs-only wave,
+completed through #310/#313. The owner's subsequent implementation request is
+tracked separately in #315, following the #314 identity amendment above; it does
+not authorize native telemetry activation or turn earlier examples into captures.
 
 | Rank | Slice | Done when |
 |---|---|---|
