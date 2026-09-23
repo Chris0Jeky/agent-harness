@@ -120,9 +120,7 @@ class CohortTests(unittest.TestCase):
         self.assertIsNone(out["cost"]["complete_sum"])
 
     def test_stale_acceptance_is_not_counted_as_current(self):
-        out = self.summarize(
-            cohort(job(attempts=[attempt(verified_revision="b" * 40)]))
-        )
+        out = self.summarize(cohort(job(attempts=[attempt(verified_revision="b" * 40)])))
         self.assertEqual(out["jobs"]["stale_acceptance"], 1)
         self.assertEqual(out["jobs"]["accepted"], 0)
         self.assertEqual(out["accepted_per_admitted"], 0)
