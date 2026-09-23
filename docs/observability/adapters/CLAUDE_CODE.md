@@ -29,6 +29,32 @@ version means version-sensitive fields remain unqualified, not that the newest
 documented behavior applies. A missing plan or execution child can be a visibility
 gap, denied operation or version difference; do not fabricate a successful span.
 
+### Source-record identity amendment (#314/#315)
+
+The following are proposed adapter-owned mappings, not claims that Claude emits
+these local fields. Follow the exact tuples in the
+[core identity contract](../AGENT_LOOP_SPANS.md#source-record-identity-and-conflict-handling).
+Native namespace/lifetime availability remains **unqualified**.
+
+| Local attribute | Required mapping behavior before claiming deduplication |
+|---|---|
+| `agent_harness.source.namespace` | Preserve one safe opaque originating producer-domain identifier across re-exports/imports; never use a per-import identifier or user/account name |
+| `agent_harness.source.record.identity` | `native_span` only for a completed span with genuine trace/span IDs and established namespace; `producer_record` only for an event with established original instance and record ID; otherwise `unavailable` |
+| `agent_harness.source.instance.id` | Bind an actual original producer lifetime before using log sequence; a PID, session ID, application version or collector lifetime is insufficient |
+| `agent_harness.source.record.id` | Preserve genuine event identity; a native sequence can map to `event:<decimal-sequence>` only within that proven lifetime; independent streams need disjoint prefixes |
+| `agent_harness.normalization.profile` | A reviewed mapping-plus-privacy revision token, preserved on re-export and changed when normalization rules change; not the native app version or local schema version |
+
+Do not infer log-event identity from the span it is attached to. A restart resets
+the lifetime before sequences may repeat. Missing profile/lifetime/namespace must
+leave counts unavailable; differing profiles on the same source key are conflicts,
+not separate keys. Synthetic labels in tests are not evidence that an installed
+native runtime exposes these capabilities.
+
+The [offline inspector](../IDENTITY_INSPECTOR.md) implements identity analysis for
+a closed content-off subset, not this entire native mapping. Several fields below
+are intentionally unsupported by that inspector. No native reader, live capture,
+normalization configuration or upstream field activation is delivered by #315.
+
 ## Native boundary to canonical record
 
 The left column names documented native records [C1]. The remaining columns are
@@ -113,8 +139,9 @@ so available usage is only an observed subtotal. Do not multiply final usage by
 attempt count or treat a final-request footprint as total cost.
 
 Tool-invocation count, execution-attempt count and delivered-job count are distinct.
-Deduplicate identical span exports by native trace/span identity and source; scope
-log identities to a known producer/process instance and sequence. Different native
+Deduplicate identical span exports by native trace/span identity and source,
+including the namespace/profile qualification above; scope log identities to a
+known producer/process instance and sequence. Different native
 span IDs with one tool-call ID remain distinct invocation/execution observations
 unless a version-specific rule proves retransmission. Preserve deferral/resume
 causality. If identity is ambiguous, mark counts unknown rather than drop real work.
