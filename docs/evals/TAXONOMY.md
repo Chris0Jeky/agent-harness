@@ -139,8 +139,9 @@ A producer verdict remains source data. Even complete HQ coverage remains
 
 ### pass@k and pass^k
 
-**FACT:** [R1](#primary-sources) defines pass@k around obtaining at least one passing
-candidate; [R2](#primary-sources) introduces pass^k for repeated-trial reliability.
+**FACT:** [R1](#primary-sources) defines pass@k as the chance that at least one of
+k independent, identically distributed trials succeeds. [R2](#primary-sources)
+defines pass^k as the chance that all k such trials succeed, averaged across tasks.
 They answer different questions: search yield versus consistent success.
 
 **INFER:** Report pass@1 beside either aggregate. Retain task population,
@@ -148,10 +149,15 @@ per-task attempts, successes, retry/selection protocol, model/tool/check version
 environment, costs, missing outcomes, and uncertainty. Never discard failed
 attempts to make the denominator more favorable.
 
-For independent, identically distributed trials of one task with success
-probability p, the corresponding probabilities are 1-(1-p)^k and p^k.
+For one task with true success probability p under those assumptions, the
+corresponding probabilities are 1-(1-p)^k and p^k; these are not instructions to
+substitute an empirical pooled success rate. For n >= k trials with c successes,
+the papers give per-task estimators 1-C(n-c,k)/C(n,k) and C(c,k)/C(n,k), respectively,
+then average across tasks. C(a,k) is the binomial coefficient, zero when a < k.
+
 Do not raise a pooled success rate across heterogeneous tasks to k and call it
-measured pass^k. Correlated trials and adaptive retries need an explicit protocol.
+measured pass^k. Correlated trials, adaptive retries, and missing outcomes need
+an explicit protocol; the formulas alone do not validate those assumptions.
 
 Neither aggregate gates an individual PR. Repetition can investigate suspected
 flakiness, but identical deterministic fixture reruns are not independent new
