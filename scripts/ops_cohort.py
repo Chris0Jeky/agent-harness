@@ -120,9 +120,7 @@ def _acceptance_bucket(job):
             raise ValueError("only accepted jobs may select an accepted attempt")
         return state
     _identity(chosen)
-    accepted = next(
-        (row for row in job["attempts"] if row["attempt_id"] == chosen), None
-    )
+    accepted = next((row for row in job["attempts"] if row["attempt_id"] == chosen), None)
     if accepted is None:
         raise ValueError("accepted attempt is absent from this job")
     if accepted["outcome_pass"] is False or accepted["constraints_pass"] is False:
