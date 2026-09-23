@@ -76,9 +76,7 @@ class ReviewEvidenceTests(unittest.TestCase):
         p = packet()
         p["identity"]["reviewed_head_sha"] = None
         p["observations"] = [observation()]
-        self.assertEqual(
-            "UNBOUND", self.summarize(p)["observations"][0]["evidence_state"]
-        )
+        self.assertEqual("UNBOUND", self.summarize(p)["observations"][0]["evidence_state"])
 
     def test_other_revision_is_not_relabelled(self):
         p = packet()
@@ -112,7 +110,9 @@ class ReviewEvidenceTests(unittest.TestCase):
         p = packet()
         p["observations"] = [observation("first", status="FAIL"), observation("second")]
         report = self.summarize(p)
-        self.assertEqual(["FAIL", "PASS"], [r["reported_status"] for r in report["observations"]])
+        self.assertEqual(
+            ["FAIL", "PASS"], [r["reported_status"] for r in report["observations"]]
+        )
         self.assertEqual(1, report["checks_with_candidate_observations"])
         self.assertIn("mixed_candidate_outcomes:persist", report["warnings"])
 
@@ -120,13 +120,20 @@ class ReviewEvidenceTests(unittest.TestCase):
         p = packet()
         p["observations"] = [observation(s, status=s) for s in ("BLOCKED", "NOT RUN", "N/A")]
         report = self.summarize(p)
-        self.assertEqual(["BLOCKED", "NOT RUN", "N/A"], [r["reported_status"] for r in report["observations"]])
-        self.assertTrue(all(r["evidence_state"] == "NOT_EXECUTED" for r in report["observations"]))
+        self.assertEqual(
+            ["BLOCKED", "NOT RUN", "N/A"],
+            [r["reported_status"] for r in report["observations"]],
+        )
+        self.assertTrue(
+            all(r["evidence_state"] == "NOT_EXECUTED" for r in report["observations"])
+        )
 
     def test_declaration_contradiction_is_visible(self):
         p = packet()
         p["observations"] = [observation()]
-        self.assertIn("not_run_declaration_has_outcome_claims", self.summarize(p)["warnings"])
+        self.assertIn(
+            "not_run_declaration_has_outcome_claims", self.summarize(p)["warnings"]
+        )
 
     def test_duplicate_check_or_observation_ids_rejected(self):
         p = packet()
@@ -140,7 +147,9 @@ class ReviewEvidenceTests(unittest.TestCase):
 
     def test_unknown_check_status_role_or_version_rejected(self):
         mutations = (
-            ("check_id", "unknown"), ("status", "LGTM"), ("role", "judge"),
+            ("check_id", "unknown"),
+            ("status", "LGTM"),
+            ("role", "judge"),
         )
         for field, value in mutations:
             p = packet()
@@ -192,7 +201,10 @@ class ReviewEvidenceCLITests(unittest.TestCase):
             path.write_bytes(raw)
             return subprocess.run(
                 [sys.executable, str(SCRIPT), str(path), *args],
-                text=True, capture_output=True, check=False, timeout=10,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
             )
 
     def test_cli_exit_is_not_a_merge_verdict(self):
@@ -213,7 +225,9 @@ class ReviewEvidenceCLITests(unittest.TestCase):
             (valid + ', "extension": NaN}').encode(),
             (valid + ', "extension": Infinity}').encode(),
             (valid + ', "extension": 1e999}').encode(),
-            b'\xff', b" " * (1024 * 1024 + 1), b'{',
+            b"\xff",
+            b" " * (1024 * 1024 + 1),
+            b"{",
         ):
             with self.subTest(prefix=raw[:20]):
                 proc = self.invoke(raw)

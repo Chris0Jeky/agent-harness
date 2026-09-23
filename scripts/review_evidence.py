@@ -36,7 +36,9 @@ def _text(value):
 
 def _identifier(value, label):
     if not _text(value) or len(value) > 128 or not value.isprintable():
-        raise ValueError(f"{label} must be a nonempty printable ID of at most 128 characters")
+        raise ValueError(
+            f"{label} must be a nonempty printable ID of at most 128 characters"
+        )
     return value
 
 
@@ -120,23 +122,27 @@ def summarize(packet: dict, expected_head: str | None = None) -> dict:
             state = "INCOMPLETE"
         elif role == "candidate":
             target = expected or reviewed
-            state = "UNBOUND" if target is None else (
-                "RECORDED" if revision == target else "OTHER_REVISION"
+            state = (
+                "UNBOUND"
+                if target is None
+                else ("RECORDED" if revision == target else "OTHER_REVISION")
             )
         else:
             state = "RECORDED"
         if role == "candidate":
             candidate_checks.add(key)
             outcomes.setdefault(key, set()).add(status)
-        rows.append({
-            "id": oid,
-            "check_id": key,
-            "role": role,
-            "reported_status": status,
-            "tested_revision_sha": revision,
-            "evidence_state": state,
-            "missing_fields": missing,
-        })
+        rows.append(
+            {
+                "id": oid,
+                "check_id": key,
+                "role": role,
+                "reported_status": status,
+                "tested_revision_sha": revision,
+                "evidence_state": state,
+                "missing_fields": missing,
+            }
+        )
     for key in sorted(outcomes):
         if {"PASS", "FAIL"}.issubset(outcomes[key]):
             warnings.append(f"mixed_candidate_outcomes:{key}")
@@ -183,7 +189,10 @@ def _finite_float(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packet", type=Path)
-    parser.add_argument("--expected-head", help="full source PR head ID; merge revisions are reported separately")
+    parser.add_argument(
+        "--expected-head",
+        help="full source PR head ID; merge revisions are reported separately",
+    )
     args = parser.parse_args(argv)
     try:
         if not args.packet.is_file():
@@ -193,8 +202,10 @@ def main(argv=None):
         if len(raw) > MAX_BYTES:
             raise ValueError("packet exceeds 1 MiB")
         data = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant, parse_float=_finite_float,
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+            parse_float=_finite_float,
         )
         report = summarize(data, expected_head=args.expected_head)
         report["input_sha256"] = hashlib.sha256(raw).hexdigest()
