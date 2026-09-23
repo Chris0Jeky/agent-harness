@@ -143,6 +143,7 @@ not authentication, and is never sufficient to establish capture completeness.
 | `agent_harness.source.namespace` | Opaque string; needed for either keyed mode | Stable namespace for the originating producer domain; preserved across re-exports and imports, distinct across unrelated producers |
 | `agent_harness.source.instance.id` | Opaque string; needed for `producer_record` | Identifies the original producer lifetime, not the importer, collector, OS PID or conversation |
 | `agent_harness.source.record.id` | Opaque string; needed for `producer_record` | Original event identity, unique within that instance and across its event streams |
+| `agent_harness.normalization.profile` | Opaque string; needed for qualified deduplication | Origin normalization profile covering mapping plus privacy revision; compared as observation metadata, never part of the source key |
 
 These identity strings and source name are case-sensitive, nonempty ASCII tokens,
 1 to 128 characters, matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`. This syntax is
@@ -168,8 +169,18 @@ For Claude log events, a qualified mapping may encode a native sequence as
 `event:<decimal-sequence>` only with a proven lifetime scope; other independently
 numbered streams need distinct prefixes. If no source lifetime can be established,
 the result is unavailable. Session IDs, provider request IDs and tool-call IDs do
-not repair that gap. The [Claude mapping](adapters/CLAUDE_CODE.md) uses these keys;
-its existing source-ordering guidance does not establish a native lifetime token.
+not repair that gap. The [Claude mapping](adapters/CLAUDE_CODE.md) documents how a
+future adapter must supply these fields; it does not establish native support for
+an original lifetime token or claim the adapter is implemented.
+
+The originating normalizer assigns `agent_harness.normalization.profile` to its
+reviewed mapping and privacy rules, changing it whenever those rules change.
+It must preserve that token on re-export; source application version and local
+schema version are not substitutes. Readers never add their own profile to old
+records. Missing profile information makes deduplication unqualified, reported
+as unavailable identity for counting even when the other key fields are present.
+Different supplied profiles under the same source key conflict even when every
+other safe field is identical. The token itself does not authenticate its meaning.
 
 Within one declared metadata profile, compare the entire accepted, content-off
 normalized observation for a source key. Ignore JSON object-key order, not missing
@@ -209,8 +220,10 @@ Authored controls, **SYNTHETIC / NOT RUN**; labels below are aliases, not captur
 | Two identical redacted observations without original identity | Two unavailable rows; deduplicated total unknown, not one or zero |
 
 The executable follow-through is separately scoped in
-[#315](https://github.com/Chris0Jeky/agent-harness/issues/315). It must document its
-accepted profile and cannot imply native capture or full v0 schema support.
+[#315](https://github.com/Chris0Jeky/agent-harness/issues/315). The
+[offline identity inspector](IDENTITY_INSPECTOR.md) documents its accepted subset,
+resource bounds, executed synthetic controls and native-qualification limitations.
+It does not imply native capture or full v0 schema support.
 
 ### Checkpoint events
 
