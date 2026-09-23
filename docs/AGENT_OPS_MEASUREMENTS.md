@@ -1,9 +1,15 @@
 # Advisory agent-operations measurements
 
-Status: proposed measurement contract and implementation handoff, 2026-09-23. No collector,
-new enforcement, installed adapter, scheduler or model-quality gate is introduced here.
+Status: proposed benchmark extension, 2026-09-23. No collector, new enforcement,
+installed adapter, scheduler or model-quality gate is introduced here.
 
 ## Ownership and compatibility
+
+[BENCHMARKS.md](BENCHMARKS.md) remains the canonical measurement index and measured-results
+ledger. This registered extension defines the proposed agent-operations cohort and its acceptance
+cases; it is not a second results ledger or session handoff. Session-specific continuation belongs
+in `handoffs/` and the relevant PR. The first offline accounting slice is tracked in
+[#296](https://github.com/Chris0Jeky/agent-harness/pull/296); it does not implement native observation.
 
 The [active build directive](../AGENT_HARNESS_AGENT_BRIEF.md) owns the workbench mission.
 [BLUEPRINT.md](../BLUEPRINT.md) and [SPECS.md](../SPECS.md) retain policy authority.
@@ -44,14 +50,17 @@ native workstation evidence. None inherits another environment's capabilities.
 | Does routing produce accepted work? | Accepted logical jobs divided by all admitted logical jobs in a fixed cohort; separately report pending, rejected and blocked counts | Pending work is not silently dropped; acceptance rubric and observer are named |
 | What happened before admission? | Candidate -> eligible -> admitted -> started -> verified -> accepted counts, with refusal reasons | Show the whole funnel so routing cannot look better by hiding difficult candidates |
 | What did accepted work consume? | Total observed cost for every attempt in the cohort divided by accepted jobs; also report observed cost coverage | If cost coverage is incomplete, total cost per accepted job is unavailable, not a lower-bound estimate presented as complete |
-| Is local/cheap routing actually cheaper to supervise? | Human/coordinator review and recovery minutes per accepted job, plus frontier usage when available | Subscription quota, currency, wall time and GPU occupancy are separate units |
-| Are agents silently blocked? | Count and duration of no-progress incidents, categorized by policy, capacity, environment, tool bootstrap, verification or cleanup uncertainty | Lifecycle started is not tool-effect completion; observer outage is a separate category |
+| Is local/cheap routing actually cheaper to supervise? | Total human/coordinator review and recovery minutes across every included attempt, divided by accepted jobs; report observed and missing supervision-time counts | If any required supervision observation is missing, complete total and per-accepted-job time are unavailable; a partial observed sum is labeled partial. Subscription quota, currency, wall time and GPU occupancy remain separate units |
+| Are agents silently blocked? | Count and duration of no-progress incidents beyond a predeclared deadline, categorized by policy, capacity, environment, tool bootstrap, verification or cleanup uncertainty | Lifecycle started is not tool-effect completion; observer outage or missing elapsed-time evidence cannot establish a stall |
 | Is coordination improving? | Duplicate assigned scope, rejected handoffs, stale-head verification, integration rework and reopened outcomes per cohort | A duplicate message is not necessarily duplicate work; use work-item/revision evidence |
 | Is backlog growing faster than review? | Ready-for-review count/age and arrival versus disposition rate over the same window | A PR being closed or merged is not sufficient proof of accepted quality |
 
 Use nullable observations, sample counts and explicit cohort boundaries. A zero denominator is
 not a zero rate. For multi-attempt jobs, do not count a later retry as a second success. Do not
-attribute account-wide usage deltas to one job when other sessions were active.
+attribute account-wide usage deltas to one job when other sessions were active. Missing review,
+recovery or other clock observations obey the same coverage rule as missing cost: they never
+silently become zero or disappear from the completeness denominator. Failed and rejected attempts
+still contribute observed burden; complete means coverage of the declared cohort, not all estate work.
 
 No single organization-health score is proposed. A dashboard with several imperfect but explained
 measurements is more useful than an opaque green badge. LLM assessments may be attached as
@@ -60,21 +69,25 @@ advisory evidence, never as merge-blocking CI or substitutes for deterministic c
 ## Blocked-agent evidence packet
 
 A future adapter should reference: last observed native lifecycle event and its timestamp;
-last verified artifact or tool effect; configured deadline; observer heartbeat; outstanding tool
-identifiers; the native result; process-cleanup evidence and its coverage; and the next condition
-that would permit safe resumption. Avoid raw prompts, host paths, personal text or command logs
-in committed evidence. Public examples must be synthetic.
+last verified artifact or tool effect; configured deadline; elapsed time on a named clock;
+observer heartbeat and observation coverage; outstanding tool identifiers; the native result;
+process-cleanup evidence and its coverage; and the next condition that would permit safe resumption.
+Avoid raw prompts, host paths, personal text or command logs in committed evidence.
+Public examples must be synthetic.
 
-Classify the boundary actually observed. For example, an alive supervisor plus a tool-start event
-and no command marker supports a suspected tool bootstrap stall. It does not prove why the vendor
-stalled or that the shell command ran. Timeout, terminated process, empty owned process group and
-rolled-back filesystem are four different facts.
+Classify only the boundary actually observed. A live supervisor, a tool-start event and no effect
+before the configured first-effect deadline mean in progress, not stalled. The same observations
+after a predeclared deadline, with continuous trustworthy observation and an elapsed-time source
+that accounts for sleep, may support a suspected tool bootstrap stall. Missing timing or observer
+coverage means unknown. None of these observations proves why the vendor stalled or that the shell
+command ran. Timeout, terminated process, empty owned process group and rolled-back filesystem
+are four different facts.
 
 Keep execution and observation failures separate. On lost observer state, retain artifacts and
 quarantine uncertain ownership before retry. A new model or higher effort cannot repair a missing
 executable, blocked policy, occupied slot or unqualified shell boundary.
 
-## First implementation slice and acceptance fixtures
+## Offline extension acceptance cases
 
 Implement a bounded, offline report over existing receipts only, after selecting the smallest
 existing benchmark/measurement seam. No agent calls, network access, scheduler, new policy engine
@@ -86,22 +99,25 @@ Do not copy that parser into a second owner without a demonstrated incompatible 
 |---|---|
 | One job, two attempts, final accepted outcome | One accepted job, both attempts charged where observed |
 | Missing usage on one attempt | Unknown cost coverage; no complete-total claim |
-| Tool started, no effect, live supervisor | Suspected tool stall; not a completed command |
+| Missing review or recovery time on one attempt | Partial supervision coverage; no complete total or per-accepted-job claim |
+| Tool started, no effect, live supervisor, before configured first-effect deadline | In progress, not a suspected stall |
+| Same observations after the configured deadline with continuous observer coverage and valid elapsed time | Suspected tool stall; not a completed command |
+| Tool started without reliable elapsed-time or observer-coverage evidence | Unknown progress; do not count a stall |
 | Heartbeat missing after sleep or observer loss | Observation gap; process state unknown |
 | Success receipt for an old head | Stale verification, not current acceptance |
 | Policy refusal or missing declaration | Explicit refusal category; no quality-failure or permission escalation |
 | Cleanup not observed | Reconciliation required before retry; preserve artifact references |
 | No accepted jobs | Undefined per-accepted-job rate, not zero |
 
-These are acceptance cases, not executed tests. The implementation PR must make them executable,
-run the repository's relevant deterministic checks, and state what native evidence remains absent.
-Then observe a small fixed cohort without changing routing. Compare against an inline baseline
-before recommending additional parallelism or a learned routing scorer.
+These are specification cases, not executed tests in this documentation PR. The implementation PR
+must identify which cases are executable and which native evidence remains absent, then run the
+relevant deterministic checks. Observe a small fixed cohort without changing routing and compare
+against an inline baseline before recommending more parallelism or a learned routing scorer.
 
 ## Research basis and cross-repository handoff
 
 The complete earlier Deep Research report was unavailable to this authoring session. This is a
-dated, source-checked design synthesis, not an imported report or measured result.
+ dated, source-checked design synthesis, not an imported report or measured result.
 
 [RouteLLM](https://arxiv.org/abs/2406.18665) (2024, revised 2025) studies learned routing between
 models on response benchmarks. It motivates testing outcome-based routing; it does not establish
