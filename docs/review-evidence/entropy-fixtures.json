@@ -1,0 +1,17 @@
+{
+  "document_kind": "synthetic_calibration_spec_not_scan_results",
+  "version": 0,
+  "execution_status": "NOT RUN",
+  "cases": [
+    {"id": "D1", "detector": "doc_drift", "input": "Mapped API contract changes an exit code; current command documentation still states the old value.", "expected_classification": "candidate", "reason": "Concrete mapped discrepancy requires verification at the actual CLI boundary."},
+    {"id": "D2", "detector": "doc_drift", "input": "Documentation has an old update date but matches the pinned contract.", "expected_classification": "no_candidate", "reason": "Age alone is not drift."},
+    {"id": "A1", "detector": "duplicate_abstraction", "input": "Two files are generated runtime adapters from one canonical source.", "expected_classification": "excluded_with_reason", "reason": "Intentional generation is not a duplicate policy owner."},
+    {"id": "A2", "detector": "duplicate_abstraction", "input": "Two hand-written parsers look similar; their semantic contracts have not been compared.", "expected_classification": "candidate_not_confirmed", "reason": "Similarity retrieves a pair; it does not prove the abstractions should be merged."},
+    {"id": "U1", "detector": "unfinished_surface", "input": "A documented empty-state view has no items and offers its intended next action.", "expected_classification": "no_candidate", "reason": "An empty state is not itself an unfinished feature."},
+    {"id": "U2", "detector": "unfinished_surface", "input": "A pinned manual observation records an enabled save action that produces neither the promised request nor durable change; setup and a successful neighboring control worked.", "expected_classification": "candidate", "reason": "Route to product reproduction and existing severity triage, not an automatic merge veto."},
+    {"id": "U3", "detector": "unfinished_surface", "input": "The required local service is unavailable before the task begins.", "expected_classification": "unknown", "reason": "Setup failure is not successful acceptance or a confirmed dead surface."},
+    {"id": "C1", "detector": "collection", "input": "Three of ten requested mapped contracts cannot be read.", "expected_classification": "partial_unknown", "expected_counts": {"requested": 10, "inspected": 7, "unavailable": 3}, "reason": "The denominator must preserve unavailable scope."},
+    {"id": "R1", "detector": "deduplication", "input": "The same repository, contract and unchanged discrepancy is observed in two scan runs.", "expected_classification": "repeat_observation", "expected_counts": {"observations": 2, "distinct_findings": 1}, "reason": "Two observations are not two newly discovered defects."}
+  ],
+  "observed_results": []
+}
