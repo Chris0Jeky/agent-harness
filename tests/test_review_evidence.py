@@ -244,7 +244,9 @@ class ReviewEvidenceCLITests(unittest.TestCase):
             row["evidence_ref"] = "https://invalid.example/never-fetch"
             p["observations"] = [row]
             proc = self.invoke(json.dumps(p).encode())
-            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(
+                0, proc.returncode, proc.stderr
+            )
             self.assertFalse(sentinel.exists())
 
 
