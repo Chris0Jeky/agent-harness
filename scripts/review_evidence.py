@@ -125,7 +125,9 @@ def summarize(packet: dict, expected_head: str | None = None) -> dict:
             state = (
                 "UNBOUND"
                 if target is None
-                else ("RECORDED" if revision == target else "OTHER_REVISION")
+                else (
+                    "RECORDED" if revision == target else "OTHER_REVISION"
+                )
             )
         else:
             state = "RECORDED"
@@ -182,7 +184,9 @@ def _reject_constant(_value):
 def _finite_float(value):
     number = float(value)
     if not math.isfinite(number):
-        raise ValueError("non-finite JSON number")
+        raise ValueError(
+            "non-finite JSON number"
+        )
     return number
 
 
