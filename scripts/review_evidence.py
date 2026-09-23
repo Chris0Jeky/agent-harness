@@ -108,15 +108,21 @@ def summarize(packet: dict, expected_head: str | None = None) -> dict:
             raise ValueError("unknown observation status")
         if not isinstance(role, str) or role not in ROLES:
             raise ValueError("unknown observation role")
-        revision = _revision(observation.get("tested_revision_sha"), "tested_revision_sha")
+        revision = _revision(
+            observation.get("tested_revision_sha"), "tested_revision_sha"
+        )
         for field in EVIDENCE_FIELDS:
             value = observation.get(field)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"observation {field} must be text or null")
-        missing = [field for field in EVIDENCE_FIELDS if not _text(observation.get(field))]
+        missing = [
+            field for field in EVIDENCE_FIELDS if not _text(observation.get(field))
+        ]
         if status in {"BLOCKED", "NOT RUN", "N/A"}:
             state = "NOT_EXECUTED"
-            if status in {"BLOCKED", "N/A"} and not _text(observation.get("actual_outcome")):
+            if status in {"BLOCKED", "N/A"} and not _text(
+                observation.get("actual_outcome")
+            ):
                 warnings.append(f"missing_nonexecution_reason:{oid}")
         elif missing:
             state = "INCOMPLETE"
@@ -125,9 +131,7 @@ def summarize(packet: dict, expected_head: str | None = None) -> dict:
             state = (
                 "UNBOUND"
                 if target is None
-                else (
-                    "RECORDED" if revision == target else "OTHER_REVISION"
-                )
+                else ("RECORDED" if revision == target else "OTHER_REVISION")
             )
         else:
             state = "RECORDED"
@@ -184,9 +188,7 @@ def _reject_constant(_value):
 def _finite_float(value):
     number = float(value)
     if not math.isfinite(number):
-        raise ValueError(
-            "non-finite JSON number"
-        )
+        raise ValueError("non-finite JSON number")
     return number
 
 
@@ -215,7 +217,9 @@ def main(argv=None):
         report["input_sha256"] = hashlib.sha256(raw).hexdigest()
     except (OSError, ValueError, RecursionError) as error:
         # Report a type, not source snippets, paths, or possibly private JSON text.
-        print(f"review-evidence: invalid input ({type(error).__name__})", file=sys.stderr)
+        print(
+            f"review-evidence: invalid input ({type(error).__name__})", file=sys.stderr
+        )
         return 2
     print(json.dumps(report, sort_keys=True, indent=2, allow_nan=False))
     return 0

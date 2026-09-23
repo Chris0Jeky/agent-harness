@@ -76,7 +76,9 @@ class ReviewEvidenceTests(unittest.TestCase):
         p = packet()
         p["identity"]["reviewed_head_sha"] = None
         p["observations"] = [observation()]
-        self.assertEqual("UNBOUND", self.summarize(p)["observations"][0]["evidence_state"])
+        self.assertEqual(
+            "UNBOUND", self.summarize(p)["observations"][0]["evidence_state"]
+        )
 
     def test_other_revision_is_not_relabelled(self):
         p = packet()
@@ -90,14 +92,21 @@ class ReviewEvidenceTests(unittest.TestCase):
         p = packet()
         control = observation(role="regression_control")
         control["tested_revision_sha"] = BASE
-        control["actual_outcome"] = "The named defect is rejected for its intended reason."
+        control["actual_outcome"] = (
+            "The named defect is rejected for its intended reason."
+        )
         p["observations"] = [control]
         report = self.summarize(p)
         self.assertEqual(0, report["checks_with_candidate_observations"])
         self.assertEqual("RECORDED", report["observations"][0]["evidence_state"])
 
     def test_missing_actual_evidence_remains_incomplete(self):
-        for field in ("command_or_action", "environment", "actual_outcome", "evidence_ref"):
+        for field in (
+            "command_or_action",
+            "environment",
+            "actual_outcome",
+            "evidence_ref",
+        ):
             with self.subTest(field=field):
                 p = packet()
                 p["observations"] = [observation()]
@@ -118,7 +127,9 @@ class ReviewEvidenceTests(unittest.TestCase):
 
     def test_blocked_not_run_and_na_are_distinct(self):
         p = packet()
-        p["observations"] = [observation(s, status=s) for s in ("BLOCKED", "NOT RUN", "N/A")]
+        p["observations"] = [
+            observation(s, status=s) for s in ("BLOCKED", "NOT RUN", "N/A")
+        ]
         report = self.summarize(p)
         self.assertEqual(
             ["BLOCKED", "NOT RUN", "N/A"],
@@ -244,9 +255,7 @@ class ReviewEvidenceCLITests(unittest.TestCase):
             row["evidence_ref"] = "https://invalid.example/never-fetch"
             p["observations"] = [row]
             proc = self.invoke(json.dumps(p).encode())
-            self.assertEqual(
-                0, proc.returncode, proc.stderr
-            )
+            self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertFalse(sentinel.exists())
 
 
