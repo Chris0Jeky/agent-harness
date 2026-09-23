@@ -127,11 +127,90 @@ correlation values, not authentication tokens; credentials are never identifiers
 | `agent_harness.phase` | `plan`, `tool`, `edit`, `verify` when meaning is known; do not infer from a successful exit alone |
 | `agent_harness.outcome` | `success`, `failure`, `cancelled`, `denied`, `unknown`; source observation separate from span status |
 
-Use a producer-scoped source record identity for deduplication. Do not treat a
-repeated tool-call ID as proof of retransmission: a retry/resume may be another
-execution of the same request. Duplicate exports and real repeated work are
-different. Keep run/session/repo/PR IDs out of metric label sets; they belong in
-records and drill-down references, not unbounded aggregate dimensions.
+Keep run/session/repo/PR IDs out of metric label sets; they belong in records and
+drill-down references, not unbounded aggregate dimensions. Record identity below
+is distinct from logical invocation, attempt, session and delivered-job identity.
+
+### Source-record identity and conflict handling
+
+This is the #314 design amendment, not native qualification. All new fields below
+are local attributes, not standard OTel attributes. Identity is an input claim,
+not authentication, and is never sufficient to establish capture completeness.
+
+| Attribute | Type / presence | Scope and mapping |
+|---|---|---|
+| `agent_harness.source.record.identity` | `native_span`, `producer_record` or `unavailable`; new normalizers emit it | Omission in an older v0 record means unavailable, never an inferred key |
+| `agent_harness.source.namespace` | Opaque string; needed for either keyed mode | Stable namespace for the originating producer domain; preserved across re-exports and imports, distinct across unrelated producers |
+| `agent_harness.source.instance.id` | Opaque string; needed for `producer_record` | Identifies the original producer lifetime, not the importer, collector, OS PID or conversation |
+| `agent_harness.source.record.id` | Opaque string; needed for `producer_record` | Original event identity, unique within that instance and across its event streams |
+
+These identity strings and source name are case-sensitive, nonempty ASCII tokens,
+1 to 128 characters, matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`. This syntax is
+not secret detection. Producers must supply safe opaque IDs; omit an unsafe ID.
+No paths, user/account names, credentials, body hashes or raw-content references
+are acceptable identity fallbacks. A capture may assign an opaque producer token
+once at the actual instrumented boundary and preserve it with every export; a
+reader must never mint a new per-import token to repair missing source identity.
+
+Use exact tuples, not ambiguous delimiter concatenation:
+
+| Mode | Source key | Applicability |
+|---|---|---|
+| `native_span` | `(source.name, source.namespace, "span", "native_span", trace_id, span_id)` | Only completed native spans with genuine valid trace/span IDs |
+| `producer_record` | `(source.name, source.namespace, "event", "producer_record", source.instance.id, source.record.id)` | Only events with established producer lifetime and original event identity |
+| `unavailable` or an absent key component | No key | Retain the safe observation, report unavailable identity; never deduplicate by payload equality |
+
+The dotted names in tuples abbreviate the full `agent_harness.*` attribute names.
+A span's optional instance metadata is not part of its native key. Do not apply a
+span key to its events: several different events may share a span and timestamp.
+A source restart must change the producer instance before a sequence can reset.
+For Claude log events, a qualified mapping may encode a native sequence as
+`event:<decimal-sequence>` only with a proven lifetime scope; other independently
+numbered streams need distinct prefixes. If no source lifetime can be established,
+the result is unavailable. Session IDs, provider request IDs and tool-call IDs do
+not repair that gap. The [Claude mapping](adapters/CLAUDE_CODE.md) uses these keys;
+its existing source-ordering guidance does not establish a native lifetime token.
+
+Within one declared metadata profile, compare the entire accepted, content-off
+normalized observation for a source key. Ignore JSON object-key order, not missing
+fields, changed status, timings, usage, normalization differences or source
+versions. Unsupported fields must be reported/refused before aggregation, not
+silently stripped until contradictory observations look equal. Do not hash raw
+records to manufacture identity. A later reader may use canonical safe-projection
+bytes for equality, but that representation is not the source key or a receipt.
+
+Identical representations of a keyed observation are repeat exports. If any two
+representations under a key differ, mark the whole key group conflicting and
+exclude every member from consistent-observation aggregation. Retain safe variants
+for inspection when permitted; no last-writer, first-writer, success-wins, or
+"fill in missing usage" merge. A mapping/privacy-version mismatch is an unresolved
+representation conflict, not proof that the native operation itself was corrupt.
+Different keys remain distinct even when their redacted payloads or call IDs match.
+
+Report received rows, keyed groups, consistent groups, duplicate rows within
+consistent groups, conflicting groups/rows and unavailable-identity rows
+separately. A deduplicated observation total is unavailable when any row lacks a
+key or any key conflicts; an empty capture does not establish complete coverage.
+Even a fully keyed input proves only the supplied-record population, never the
+number of tools/jobs, whole-run usage, billing, execution authenticity or readiness.
+Missing identity never invalidates independently recorded deterministic checks.
+
+Authored controls, **SYNTHETIC / NOT RUN**; labels below are aliases, not captures:
+
+| Input variation | Expected interpretation |
+|---|---|
+| Same span S re-imported, same namespace/trace/span and safe fields | One consistent source group; one duplicate export row |
+| Retry S2 has same tool-call ID but a different native span ID | Two source groups, not one delivered job |
+| Event sequence 7 in instances A and B after restart | Distinct event keys; no collapse across sequence reset |
+| Sequence 7 but no established original instance | Unavailable identity, even if session ID and OS PID are present |
+| Same provider/session/trace/span IDs in producer namespaces A and B | Distinct source keys; namespaces must be preserved from origin |
+| Two events on one span, same time, different original event IDs | Two event keys, not a duplicate span |
+| Three rows for S: failure, success, failure | One conflicting key, all three rows excluded from consistent totals |
+| Two identical redacted observations without original identity | Two unavailable rows; deduplicated total unknown, not one or zero |
+
+The executable follow-through is separately scoped in
+[#315](https://github.com/Chris0Jeky/agent-harness/issues/315). It must document its
+accepted profile and cannot imply native capture or full v0 schema support.
 
 ### Checkpoint events
 
@@ -279,6 +358,11 @@ score, or a session tree as proof of complete uninstrumented local edit/verify
 coverage. Require concrete source-to-field mapping and loss accounting instead.
 
 ## Landing plan and continuation
+
+The table and first-week handoff below describe the initial docs-only wave,
+completed through #310/#313. The owner's subsequent implementation request is
+tracked separately in #315, following the #314 identity amendment above; it does
+not authorize native telemetry activation or turn earlier examples into captures.
 
 | Rank | Slice | Done when |
 |---|---|---|
