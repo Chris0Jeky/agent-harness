@@ -79,8 +79,12 @@ def measure(root: Path) -> dict:
         reason = "unavailable_input"
     else:
         try:
-            data = json.loads(loaded[".agent-harness/tier.json"], object_pairs_hook=_unique)
-            if not isinstance(data, dict) or not isinstance(data.get("authority"), dict):
+            data = json.loads(
+                loaded[".agent-harness/tier.json"], object_pairs_hook=_unique
+            )
+            if not isinstance(data, dict) or not isinstance(
+                data.get("authority"), dict
+            ):
                 raise ValueError("invalid contract")
             declared = data["authority"]
             clauses = _clauses(loaded["CLAUDE.md"])
@@ -102,7 +106,9 @@ def measure(root: Path) -> dict:
             and isinstance(target, str)
             and target in VALUES
         )
-        state = "unknown" if not known else ("match" if source == target else "candidate")
+        state = (
+            "unknown" if not known else ("match" if source == target else "candidate")
+        )
         rows.append(
             {
                 "contract": f"authority.{key}",

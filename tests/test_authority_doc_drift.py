@@ -7,7 +7,10 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "authority_doc_drift.py"
-LINE = "This repo is tier 3 (workshop) per `.agent-harness/tier.json`: push free, merge {}.\n"
+LINE = (
+    "This repo is tier 3 (workshop) per `.agent-harness/tier.json`: "
+    "push free, merge {}.\n"
+)
 
 
 class AuthorityDocDriftTests(unittest.TestCase):
@@ -21,14 +24,16 @@ class AuthorityDocDriftTests(unittest.TestCase):
         self.contract = self.root / ".agent-harness" / "tier.json"
         self.doc = self.root / "CLAUDE.md"
         self.contract.write_text(
-            json.dumps({"authority": {"push": "free", "merge": "free"}}), encoding="utf-8"
+            json.dumps({"authority": {"push": "free", "merge": "free"}}),
+            encoding="utf-8",
         )
         self.doc.write_text(LINE.format("gated"), encoding="utf-8")
 
     def test_named_stale_clause_is_candidate_not_a_gate(self):
         report = self.measure(self.root)
         self.assertEqual(
-            {"requested": 2, "inspected": 2, "candidate": 1, "unknown": 0}, report["counts"]
+            {"requested": 2, "inspected": 2, "candidate": 1, "unknown": 0},
+            report["counts"],
         )
         self.assertEqual("candidate", report["observations"][1]["status"])
         self.assertIsNone(report["merge_verdict"])
@@ -48,12 +53,18 @@ class AuthorityDocDriftTests(unittest.TestCase):
         self.assertIsNone(report["inputs"]["CLAUDE.md"])
 
     def test_missing_or_renamed_clause_is_unknown(self):
-        self.doc.write_text("New wording; no supported mapped clause.\n", encoding="utf-8")
+        self.doc.write_text(
+            "New wording; no supported mapped clause.\n", encoding="utf-8"
+        )
         self.assertEqual(2, self.measure(self.root)["counts"]["unknown"])
 
     def test_ambiguous_clauses_are_unknown(self):
-        self.doc.write_text(LINE.format("gated") + LINE.format("free"), encoding="utf-8")
-        self.assertEqual("ambiguous_or_unmapped_clause", self.measure(self.root)["reason"])
+        self.doc.write_text(
+            LINE.format("gated") + LINE.format("free"), encoding="utf-8"
+        )
+        self.assertEqual(
+            "ambiguous_or_unmapped_clause", self.measure(self.root)["reason"]
+        )
 
     def test_code_fenced_example_is_not_live_prose(self):
         self.doc.write_text(
