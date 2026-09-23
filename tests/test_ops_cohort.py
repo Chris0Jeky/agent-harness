@@ -79,7 +79,9 @@ class CohortTests(unittest.TestCase):
         jobs = [job()]
         for number, state in enumerate(("rejected", "pending", "blocked"), 2):
             jobs.append(job(number, disposition=state, accepted_attempt=None, attempts=[]))
-        jobs.append(job(5, admitted=False, disposition="not_admitted", accepted_attempt=None, attempts=[]))
+        jobs.append(
+            job(5, admitted=False, disposition="not_admitted", accepted_attempt=None, attempts=[])
+        )
         out = self.summarize(cohort(*jobs))
         self.assertEqual(out["candidates"], 5)
         self.assertEqual(out["admitted"], 4)
@@ -118,7 +120,9 @@ class CohortTests(unittest.TestCase):
         self.assertIsNone(out["cost"]["complete_sum"])
 
     def test_stale_acceptance_is_not_counted_as_current(self):
-        out = self.summarize(cohort(job(attempts=[attempt(verified_revision="b" * 40)])))
+        out = self.summarize(
+            cohort(job(attempts=[attempt(verified_revision="b" * 40)]))
+        )
         self.assertEqual(out["jobs"]["stale_acceptance"], 1)
         self.assertEqual(out["jobs"]["accepted"], 0)
         self.assertEqual(out["accepted_per_admitted"], 0)
@@ -137,29 +141,43 @@ class CohortTests(unittest.TestCase):
         self.assertEqual(out["jobs"]["accepted"], 0)
 
     def test_duplicate_jobs_attempts_and_receipts_refuse(self):
-        cases = [cohort(job(), job()),
-                 cohort(job(), job(2, attempts=[attempt(1)])),
-                 cohort(job(), job(2, attempts=[attempt(2, source_sha256="1".zfill(64))]))]
+        cases = [
+            cohort(job(), job()),
+            cohort(job(), job(2, attempts=[attempt(1)])),
+            cohort(job(), job(2, attempts=[attempt(2, source_sha256="1".zfill(64))])),
+        ]
         for data in cases:
             with self.subTest(data=data), self.assertRaises(ValueError):
                 self.summarize(data)
 
     def test_acceptance_reference_must_point_to_own_attempt(self):
-        for data in (cohort(job(accepted_attempt="absent")),
-                     cohort(job(accepted_attempt="attempt-2"), job(2)),
-                     cohort(job(disposition="pending"))):
+        for data in (
+            cohort(job(accepted_attempt="absent")),
+            cohort(job(accepted_attempt="attempt-2"), job(2)),
+            cohort(job(disposition="pending")),
+        ):
             with self.assertRaises(ValueError):
                 self.summarize(data)
 
     def test_nonadmitted_jobs_cannot_have_attempts_or_accepted_state(self):
-        for changes in ({"admitted": False},
-                        {"admitted": False, "disposition": "not_admitted", "accepted_attempt": None}):
+        for changes in (
+            {"admitted": False},
+            {"admitted": False, "disposition": "not_admitted", "accepted_attempt": None},
+        ):
             with self.assertRaises(ValueError):
                 self.summarize(cohort(job(**changes)))
 
     def test_all_observation_fields_are_required_and_nullable(self):
-        for key in ("cost", "queue_seconds", "execution_seconds", "verification_seconds", "review_seconds",
-                    "outcome_pass", "constraints_pass", "verified_revision"):
+        for key in (
+            "cost",
+            "queue_seconds",
+            "execution_seconds",
+            "verification_seconds",
+            "review_seconds",
+            "outcome_pass",
+            "constraints_pass",
+            "verified_revision",
+        ):
             row = attempt()
             del row[key]
             with self.subTest(key=key), self.assertRaises(ValueError):
@@ -170,21 +188,29 @@ class CohortTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.summarize(cohort(job(attempts=[attempt(cost=value)])))
         with self.assertRaises(ValueError):
-            self.summarize(cohort(job(attempts=[attempt(1, cost=1e308), attempt(2, cost=1e308)])))
+            self.summarize(
+                cohort(job(attempts=[attempt(1, cost=1e308), attempt(2, cost=1e308)]))
+            )
 
     def test_unknown_keys_ids_and_digests_refuse_without_echo(self):
-        for data in (cohort(job(), secret="PRIVATE_SENTINEL"),
-                     cohort(job(job_id="PRIVATE SENTINEL")),
-                     cohort(job(attempts=[attempt(source_sha256="wrong")])),
-                     cohort(job(input_revision="short")),
-                     cohort(job(), currency="credits")):
+        for data in (
+            cohort(job(), secret="PRIVATE_SENTINEL"),
+            cohort(job(job_id="PRIVATE SENTINEL")),
+            cohort(job(attempts=[attempt(source_sha256="wrong")])),
+            cohort(job(input_revision="short")),
+            cohort(job(), currency="credits"),
+        ):
             with self.assertRaises(ValueError) as caught:
                 self.summarize(data)
             self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
 
     def test_duplicate_json_keys_and_payload_limits(self):
-        for raw in (b'{"schema":1,"schema":2}', b' ' * (ops.MAX_BYTES + 1),
-                    b'[' * 80 + b'0' + b']' * 80, b'\xff'):
+        for raw in (
+            b'{"schema":1,"schema":2}',
+            b" " * (ops.MAX_BYTES + 1),
+            b"[" * 80 + b"0" + b"]" * 80,
+            b"\xff",
+        ):
             with self.assertRaises(ValueError):
                 ops.summarize_bytes(raw)
         with self.assertRaises(ValueError):
@@ -221,15 +247,23 @@ class CohortTests(unittest.TestCase):
             path = Path(temp) / "observations.json"
             path.write_text(json.dumps(cohort(job())), encoding="utf-8")
             before = path.read_bytes()
-            result = subprocess.run([sys.executable, str(MODULE), str(path)],
-                                    capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [sys.executable, str(MODULE), str(path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["jobs"]["accepted"], 1)
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(list(Path(temp).iterdir()), [path])
             path.write_text("PRIVATE_SENTINEL", encoding="utf-8")
-            result = subprocess.run([sys.executable, str(MODULE), str(path)],
-                                    capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [sys.executable, str(MODULE), str(path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             self.assertEqual(result.returncode, 2)
             self.assertEqual(result.stdout, "")
             self.assertNotIn("PRIVATE_SENTINEL", result.stderr)
