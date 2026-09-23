@@ -65,6 +65,7 @@ jobs:
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
+          scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
@@ -85,6 +86,7 @@ jobs:
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
+          scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
@@ -105,6 +107,7 @@ jobs:
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
+          scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
