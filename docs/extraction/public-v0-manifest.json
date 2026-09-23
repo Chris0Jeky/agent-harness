@@ -133,7 +133,7 @@
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "33de2eb3ccee6f1926a644e124f92623ae5b3d17b9ccf70e8b4b364ba97760d5"
+      "sha256": "19ab089efac792f5c6d7142e6b928deff440bf30477a370812cf140481fc2325"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
@@ -143,7 +143,7 @@
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
       "kind": "fixture",
-      "sha256": "bd0fdc10831d33550b1961666591d27c542552c94122cbda5992056fa45e8189"
+      "sha256": "023e59ef7a11433296a83b65a8daa0b904d0a98041db7f700e587f4d0750197b"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/reference_candidate.py",

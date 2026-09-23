@@ -8,6 +8,27 @@ import subprocess
 import sys
 import time
 
+STARTED_CHILD = """
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+state_path = Path(sys.argv[1])
+pending_path = state_path.with_suffix(".pending")
+pending_path.write_text(
+    json.dumps({
+        "pid": os.getpid(),
+        "isolated": sys.flags.isolated,
+        "site_loaded": "site" in sys.modules,
+    }),
+    encoding="ascii",
+)
+pending_path.replace(state_path)
+time.sleep(5)
+"""
+
 SET_PGRP_CHILD = """
 import json
 import os
@@ -19,10 +40,13 @@ state_path = Path(sys.argv[1])
 trigger_path = Path(sys.argv[2])
 ack_path = Path(sys.argv[3])
 os.setpgrp()
-state_path.write_text(
+pending_path = state_path.with_suffix(".pending")
+pending_path.write_text(
     json.dumps(
         {
             "pid": os.getpid(),
+            "isolated": sys.flags.isolated,
+            "site_loaded": "site" in sys.modules,
             "ppid": os.getppid(),
             "pgid": os.getpgrp(),
             "sid": os.getsid(0),
@@ -30,6 +54,7 @@ state_path.write_text(
     ),
     encoding="ascii",
 )
+pending_path.replace(state_path)
 deadline = time.monotonic() + 20
 while not trigger_path.is_file():
     if time.monotonic() >= deadline:
@@ -64,6 +89,8 @@ if mode in {"setpgrp-exit", "setpgrp-timeout"}:
     child = subprocess.Popen(
         [
             sys.executable,
+            "-I",
+            "-S",
             "-c",
             SET_PGRP_CHILD,
             str(state_path),
@@ -84,11 +111,18 @@ if mode in {"setpgrp-exit", "setpgrp-timeout"}:
         for row in rows:
             print(json.dumps(row, sort_keys=True, separators=(",", ":")))
 elif mode in {"descendant-exit", "descendant-timeout"}:
+    pid_path = Path(sys.argv[2])
+    state_path = pid_path.with_suffix(".json")
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(5)"],
+        [sys.executable, "-I", "-S", "-c", STARTED_CHILD, str(state_path)],
         close_fds=False,
     )
-    Path(sys.argv[2]).write_text(str(child.pid), encoding="ascii")
+    pid_path.write_text(str(child.pid), encoding="ascii")
+    deadline = time.monotonic() + 5
+    while not state_path.is_file():
+        if child.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("group child did not publish its startup state")
+        time.sleep(0.01)
     if mode == "descendant-timeout":
         time.sleep(5)
     else:
