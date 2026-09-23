@@ -88,7 +88,22 @@ class ProcessSourceTests(unittest.TestCase):
                 cases.append(
                     "test_completed_parent_does_not_contain_a_setpgrp_descendant"
                 )
-            with mock.patch.dict(os.environ, {"PYTHONPATH": str(directory)}):
+            run_process = policy_sources._run_policy_process
+
+            def fixture_environment(argv, input_bytes, **kwargs):
+                # Keep the host (including the Windows wrapper) uncontaminated.
+                # Only the synthetic policy and its children receive this trap.
+                self.assertNotEqual(str(directory), os.environ.get("PYTHONPATH"))
+                kwargs["environment"] = {
+                    **os.environ,
+                    **(kwargs.get("environment") or {}),
+                    "PYTHONPATH": str(directory),
+                }
+                return run_process(argv, input_bytes, **kwargs)
+
+            with mock.patch.object(
+                policy_sources, "_run_policy_process", side_effect=fixture_environment
+            ):
                 for name in cases:
                     with self.subTest(case=name):
                         outcome = unittest.TestResult()

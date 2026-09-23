@@ -133,7 +133,7 @@
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "19ab089efac792f5c6d7142e6b928deff440bf30477a370812cf140481fc2325"
+      "sha256": "e24023580b8f9c2173dc9e9fdf3844400a90844407ee589ddaef1ab35bd946de"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
