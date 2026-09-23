@@ -64,11 +64,12 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
+          scripts/review_evidence.py tests/test_review_evidence.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Check Black formatting
         run: >-
-          python -m black --check
+          python -m black --check --diff
           harness.py tests/test_harness.py tests/test_curl_option_arity.py
           tests/test_dispatch_as_hook.py
           tests/test_double_quote_escapes.py tests/test_git_editor_terminal_flows.py
@@ -82,6 +83,7 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
+          scripts/review_evidence.py tests/test_review_evidence.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Compile Python sources
@@ -100,6 +102,7 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
+          scripts/review_evidence.py tests/test_review_evidence.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
   replay-fast:
