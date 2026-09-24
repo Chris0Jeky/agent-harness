@@ -1,0 +1,28 @@
+pair,arm_a,fixed_a,cost_a,pts_per_dollar_a,dollars_per_pt_a,arm_b,fixed_b,cost_b,pts_per_dollar_b,dollars_per_pt_b,winner_pts_per_dollar
+Astra-6 max vs Sol-5.6 max,Astra-6 max,45.0,33.03,1.3624,0.734,Sol-5.6 max,43.5,95.35,0.4562,2.192,Astra-6 max
+Sol-6 max vs Sol-5.6 med,Sol-6 max,29.3,9.33,3.1404,0.3184,Sol-5.6 med,29.0,15.77,1.8389,0.5438,Sol-6 max
+Luna-6 max vs Luna-5.6 max,Luna-6 max,18.3,0.52,35.1923,0.0284,Luna-5.6 max,31.3,3.15,9.9365,0.1006,Luna-6 max
+ladder,GPT-5.6 Luna,13,0.57,22.807,0.0438,high,,,,,featured=False n=1
+ladder,GPT-5.6 Luna,4,0.1,40.0,0.025,low,,,,,featured=False n=1
+ladder,GPT-5.6 Luna,31.3,3.15,9.9365,0.1006,max,,,,,featured=True n=3
+ladder,GPT-5.6 Luna,9,0.33,27.2727,0.0367,medium,,,,,featured=False n=1
+ladder,GPT-5.6 Luna,23,2.5,9.2,0.1087,xhigh,,,,,featured=False n=1
+ladder,GPT-5.6 Sol,34,33.92,1.0024,0.9976,high,,,,,featured=False n=1
+ladder,GPT-5.6 Sol,43.5,95.35,0.4562,2.192,max,,,,,featured=True n=2
+ladder,GPT-5.6 Sol,29,15.77,1.8389,0.5438,medium,,,,,featured=False n=1
+ladder,GPT-5.6 Sol,39,52.75,0.7393,1.3526,xhigh,,,,,featured=False n=1
+ladder,GPT-6 Astra,35,20.6,1.699,0.5886,high,,,,,featured=False n=1
+ladder,GPT-6 Astra,27,11.69,2.3097,0.433,low,,,,,featured=False n=1
+ladder,GPT-6 Astra,45,33.03,1.3624,0.734,max,,,,,featured=True n=3
+ladder,GPT-6 Astra,34,15.78,2.1546,0.4641,medium,,,,,featured=False n=1
+ladder,GPT-6 Astra,43,24.22,1.7754,0.5633,xhigh,,,,,featured=True n=1
+ladder,GPT-6 Luna,9,0.13,69.2308,0.0144,high,,,,,featured=False n=1
+ladder,GPT-6 Luna,4,0.2,20.0,0.05,low,,,,,featured=False n=1
+ladder,GPT-6 Luna,18.3,0.52,35.1923,0.0284,max,,,,,featured=True n=3
+ladder,GPT-6 Luna,4,0.06,66.6667,0.015,medium,,,,,featured=False n=1
+ladder,GPT-6 Luna,14,0.39,35.8974,0.0279,xhigh,,,,,featured=False n=1
+ladder,GPT-6 Sol,20,4.16,4.8077,0.208,high,,,,,featured=True n=1
+ladder,GPT-6 Sol,6,1.08,5.5556,0.18,low,,,,,featured=False n=1
+ladder,GPT-6 Sol,29.3,9.33,3.1404,0.3184,max,,,,,featured=True n=3
+ladder,GPT-6 Sol,14,2.39,5.8577,0.1707,medium,,,,,featured=False n=1
+ladder,GPT-6 Sol,25,7.67,3.2595,0.3068,xhigh,,,,,featured=True n=1
