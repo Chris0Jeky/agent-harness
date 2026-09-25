@@ -147,7 +147,10 @@ def _read_jsonl_bytes(value: bytes, label: str) -> list[object]:
     for line_number, line in enumerate(split_jsonl_records(text), start=1):
         try:
             records.append(json.loads(line, object_pairs_hook=_unique_json_object))
-        except json.JSONDecodeError as exc:
+        except ReplayInputError:
+            # Preserve the existing duplicate-key diagnostic.
+            raise
+        except ValueError as exc:
             raise ReplayInputError(
                 f"{label} line {line_number} is not valid JSON"
             ) from exc
@@ -207,7 +210,10 @@ def _load_recorded_source(raw_path: str) -> LoadedPolicySource:
         )
         manifest = validate_recorded_manifest(manifest_value)
         decision_bytes = path.read_bytes()
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ReplayInputError, ValidationError):
+        # Structural validation already has its own bounded input diagnostic.
+        raise
+    except (OSError, ValueError) as exc:
         raise ReplayInputError(
             "recorded source or sidecar is not readable JSON"
         ) from exc

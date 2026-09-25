@@ -790,13 +790,7 @@ class RecordedDecisionSource:
                 manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
             )
             manifest = validate_recorded_manifest(manifest_value)
-        except (
-            OSError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            _DuplicateJsonKeyError,
-            ValidationError,
-        ) as exc:
+        except (OSError, ValueError) as exc:
             failure = SourceFailure(
                 "recording-manifest-invalid",
                 f"Recorded manifest is invalid: {exc.__class__.__name__}.",

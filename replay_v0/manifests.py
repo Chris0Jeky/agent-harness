@@ -231,7 +231,10 @@ def load_corpus_manifest(path: str | Path) -> LoadedCorpusManifest:
         raw_value = json.loads(
             manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_object
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ManifestError:
+        # Do not replace the more specific duplicate-key diagnostic.
+        raise
+    except ValueError as exc:
         raise ManifestError("Corpus manifest is not valid UTF-8 JSON") from exc
     manifest = validate_corpus_manifest(raw_value)
 
