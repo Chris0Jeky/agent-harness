@@ -181,7 +181,7 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                 cli, "_publish_report_set", wraps=cli._publish_report_set
             ) as publish:
                 self.assertEqual(0, cli.main(self.with_output(data[2], alias)))
-            self.assertEqual(target.resolve(), publish.call_args.args[0])
+            self.assertEqual(alias, publish.call_args.args[0])
             self.assertTrue((target / "report.json").is_file())
             self.assertFalse(list(data[1][1].glob(".replay-output-*")))
 

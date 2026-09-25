@@ -12,8 +12,9 @@ unchanged and covered by the original replay contract test.
 
 Unrelated siblings, including names sharing a string prefix with the policy root,
 remain supported. Output aliases and policy-root ancestors are resolved before
-comparison. Report staging and publication use the validated resolved location;
-the reproduction command retains the caller's original argument. Recorded-only
+comparison. Publication and the reproduction command retain the caller's
+original path spelling after validation; existing path-sensitive publication
+behavior is unchanged. Recorded-only
 comparisons have no process-root restriction. Unsupported policy-directory
 symlinks remain unsupported by the existing tree hasher; this guard does not
 relax that separate contract.

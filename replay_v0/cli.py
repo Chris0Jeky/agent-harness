@@ -492,7 +492,7 @@ def _validated_output_path(
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise ReplayInputError("output boundary could not be resolved") from exc
-    return output
+    return Path(raw_path)
 
 
 def _run_replay(args: argparse.Namespace) -> int:
