@@ -294,6 +294,34 @@ class ProbeBinaryTests(unittest.TestCase):
         self.assertTrue(resolved, failure)
         self.assertEqual(stdout, "probe ok")
 
+    # --- the per-environment cache ------------------------------------------
+
+    def test_same_command_resolves_per_injected_path_without_clearing(self) -> None:
+        first = self.root / "first"
+        second = self.root / "second"
+        executable = "gh.exe" if os.name == "nt" else "gh"
+        first_image = plant(first, executable)
+        second_image = plant(second, executable)
+        pathext = os.pathsep.join(WINDOWS_PATHEXT)
+        first_env = self.env(first, pathext=pathext)
+        second_env = self.env(second, pathext=pathext)
+        self.assertSamePath(harness.resolve_probe_binary("gh", first_env), first_image)
+        self.assertSamePath(
+            harness.resolve_probe_binary("gh", second_env), second_image
+        )
+        self.assertSamePath(harness.resolve_probe_binary("gh", first_env), first_image)
+
+    def test_negative_lookup_stays_cached_until_reset(self) -> None:
+        tools = self.root / "tools"
+        tools.mkdir()
+        env = self.env(tools, pathext=os.pathsep.join(WINDOWS_PATHEXT))
+        self.assertIsNone(harness.resolve_probe_binary("gh", env))
+        executable = "gh.exe" if os.name == "nt" else "gh"
+        expected = plant(tools, executable)
+        self.assertIsNone(harness.resolve_probe_binary("gh", env))
+        harness.reset_probe_binary_cache()
+        self.assertSamePath(harness.resolve_probe_binary("gh", env), expected)
+
     @unittest.skipUnless(os.name == "nt", "taskkill is the Windows branch")
     def test_terminate_process_tree_resolves_taskkill(self) -> None:
         if harness.resolve_probe_binary("taskkill") is None:
