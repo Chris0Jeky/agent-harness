@@ -4458,6 +4458,12 @@ def _pruned_scan_files(root: Path) -> Iterator[Path]:
             return
     except OSError:
         return
+    try:
+        marker = root / ".git"
+        if marker.is_file() or marker.is_dir() or marker.is_symlink():
+            return
+    except OSError:
+        pass
     stack: list[Path] = [root]
     while stack:
         current = stack.pop()
