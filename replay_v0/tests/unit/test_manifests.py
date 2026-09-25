@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import copy
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
+
+import replay_v0.cli as cli
 
 from replay_v0.digests import sha256_bytes
 from replay_v0.manifests import (
@@ -123,6 +128,7 @@ class CorpusManifestTests(unittest.TestCase):
         for invalid_path in (
             "/private/events.jsonl",
             "../events.jsonl",
+            "events\0.jsonl",
             "C:\\events.jsonl",
             ".",
         ):
@@ -136,6 +142,171 @@ class CorpusManifestTests(unittest.TestCase):
         duplicate["files"].append(dict(duplicate["files"][0]))
         with self.assertRaisesRegex(ManifestError, "duplicate path"):
             validate_corpus_manifest(duplicate)
+
+    def make_link(self, link: Path, target: Path) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target.is_dir())
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"host cannot create the required symlink: {exc}")
+
+    def write_manifest(self, root: Path, relative: str, data: bytes) -> Path:
+        manifest = {
+            "schema_version": "corpus-manifest.v1",
+            "corpus_id": "boundary-v0",
+            "event_count": 1,
+            "files": [{"path": relative, "sha256": sha256_bytes(data)}],
+        }
+        path = root / "corpus-manifest.json"
+        path.write_bytes(json.dumps(manifest).encode("utf-8"))
+        return path
+
+    def test_external_file_and_directory_links_are_rejected_before_read(self) -> None:
+        for directory_link in (False, True):
+            with self.subTest(directory_link=directory_link):
+                with tempfile.TemporaryDirectory() as raw_directory:
+                    outer = Path(raw_directory)
+                    root = outer / "corpus"
+                    # A sibling prefix is not containment.
+                    external = outer / "corpus-sibling"
+                    root.mkdir()
+                    external.mkdir()
+                    data = b"external bytes must not be read\n"
+                    target = external / "events.jsonl"
+                    target.write_bytes(data)
+                    relative = (
+                        "alias/events.jsonl" if directory_link else "events.jsonl"
+                    )
+                    self.make_link(
+                        root / ("alias" if directory_link else "events.jsonl"),
+                        external if directory_link else target,
+                    )
+                    manifest = self.write_manifest(root, relative, data)
+                    with mock.patch(
+                        "replay_v0.manifests.sha256_file", return_value="a" * 64
+                    ) as digest:
+                        with self.assertRaisesRegex(ManifestError, "outside corpus"):
+                            build_corpus_manifest(
+                                corpus_id="boundary-v0",
+                                event_count=1,
+                                base_directory=root,
+                                files=[relative],
+                            )
+                        digest.assert_not_called()
+                    read_bytes = Path.read_bytes
+                    with mock.patch.object(
+                        Path, "read_bytes", autospec=True, side_effect=read_bytes
+                    ) as read:
+                        with self.assertRaisesRegex(ManifestError, "outside corpus"):
+                            load_corpus_manifest(manifest)
+                        self.assertEqual([mock.call(manifest)], read.call_args_list)
+
+    def test_resolved_escape_is_rejected_without_host_symlink_support(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            outer = Path(raw_directory)
+            root, outside = outer / "corpus", outer / "corpus-sibling/events.jsonl"
+            with (
+                mock.patch.object(Path, "resolve", side_effect=[root, outside]),
+                mock.patch(
+                    "replay_v0.manifests.sha256_file", return_value="a" * 64
+                ) as digest,
+            ):
+                with self.assertRaisesRegex(ManifestError, "outside corpus"):
+                    build_corpus_manifest(
+                        corpus_id="boundary-v0",
+                        event_count=1,
+                        base_directory=root,
+                        files=["events.jsonl"],
+                    )
+                digest.assert_not_called()
+
+    def test_in_tree_aliases_and_aliased_base_keep_exact_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            outer = Path(raw_directory)
+            root = outer / "corpus"
+            nested = root / "data"
+            nested.mkdir(parents=True)
+            data = b'{"event_id":"one"}\n'
+            target = nested / "events.jsonl"
+            target.write_bytes(data)
+            self.make_link(root / "events.jsonl", target)
+            self.make_link(root / "alias", nested)
+            alias_base = outer / "base-alias"
+            self.make_link(alias_base, root)
+            paths = ["events.jsonl", "alias/events.jsonl", "data/events.jsonl"]
+            manifest = build_corpus_manifest(
+                corpus_id="boundary-v0",
+                event_count=1,
+                base_directory=alias_base,
+                files=paths,
+            )
+            manifest_path = alias_base / "corpus-manifest.json"
+            manifest_path.write_bytes(manifest_json_bytes(manifest))
+            loaded = load_corpus_manifest(manifest_path)
+            self.assertEqual({name: data for name in paths}, dict(loaded.file_bytes))
+
+    def test_non_file_corpus_entry_fails_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            (root / "directory").mkdir()
+            manifest = self.write_manifest(root, "directory", b"")
+            with self.assertRaisesRegex(ManifestError, "regular file"):
+                load_corpus_manifest(manifest)
+            with mock.patch(
+                "replay_v0.manifests.sha256_file", return_value="a" * 64
+            ) as digest:
+                with self.assertRaisesRegex(ManifestError, "regular file"):
+                    build_corpus_manifest(
+                        corpus_id="boundary-v0",
+                        event_count=1,
+                        base_directory=root,
+                        files=["directory"],
+                    )
+                digest.assert_not_called()
+
+    def assert_cli_rejects_path(self, nul_path: bool) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            outer = Path(raw_directory)
+            root = outer / "corpus"
+            root.mkdir()
+            target = outer / "outside.jsonl"
+            target.write_bytes(b"{}\n")
+            relative = "events\0.jsonl" if nul_path else "events.jsonl"
+            if not nul_path:
+                self.make_link(root / relative, target)
+            self.write_manifest(root, relative, b"{}\n")
+            output = outer / "output"
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(cli, "_load_policy_source") as load_policy,
+                redirect_stderr(stderr),
+            ):
+                code = cli.main(
+                    [
+                        "replay",
+                        "--corpus",
+                        str(root),
+                        "--baseline",
+                        "process:unused-baseline",
+                        "--candidate",
+                        "process:unused-candidate",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            self.assertEqual(2, code)
+            self.assertTrue(stderr.getvalue().startswith("replay input invalid:"))
+            expected = "relative POSIX path" if nul_path else "outside corpus"
+            self.assertIn(expected, stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertNotIn(str(target), stderr.getvalue())
+            load_policy.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_nul_path_exits_two_without_policy_or_reports(self) -> None:
+        self.assert_cli_rejects_path(True)
+
+    def test_external_path_exits_two_without_policy_or_reports(self) -> None:
+        self.assert_cli_rejects_path(False)
 
 
 class RunManifestTests(unittest.TestCase):

@@ -73,7 +73,7 @@
     {
       "path": "replay_v0/manifests.py",
       "kind": "source",
-      "sha256": "21b01edf9bac6879213bac72b2ea85c8cf7bc2b8b56165f220870c862f0c6957"
+      "sha256": "ac47fc3f955fe637e757bed28df86987286bd942692461419f9e39ec75d686e9"
     },
     {
       "path": "replay_v0/policy_sources.py",
@@ -173,7 +173,7 @@
     {
       "path": "replay_v0/tests/unit/test_manifests.py",
       "kind": "test",
-      "sha256": "6f2ded5b806f06e964664956614d2bde2819af95dc1ccb78fe0e34b648443c7a"
+      "sha256": "5e5c76d2c6df8398aa2576cf37b393e4b2146c9ccb20b6a458cddbd7c8c9ad57"
     },
     {
       "path": "replay_v0/tests/unit/test_recorded_source.py",
