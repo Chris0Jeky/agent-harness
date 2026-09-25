@@ -64,6 +64,7 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
           replay_v0/tests/contract/test_cli_inputs.py
+          replay_v0/tests/contract/test_wrapper_marker.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
@@ -87,6 +88,7 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
           replay_v0/tests/contract/test_cli_inputs.py
+          replay_v0/tests/contract/test_wrapper_marker.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
@@ -110,6 +112,7 @@ jobs:
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
           replay_v0/tests/contract/test_cli_inputs.py
+          replay_v0/tests/contract/test_wrapper_marker.py
           scripts/generate_curl_option_arity_fixture.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
