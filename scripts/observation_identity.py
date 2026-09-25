@@ -213,6 +213,36 @@ def _file_stamp(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _same_after_open(before: os.stat_result, opened: os.stat_result) -> bool:
+    """Cross-API (lstat vs fstat) identity for the TOCTOU open check.
+    POSIX st_ctime is last-metadata-change time, so exact equality detects replacement.
+    Windows st_ctime is creation (birth) time with no content-change signal beyond
+    dev/ino/mode/size/mtime, and path lstat vs handle fstat can disagree by ~1ms on
+    the same stable file. Exclude creation time only here on Windows; POSIX keeps the
+    full stamp and the handle-vs-handle check after the read keeps the full stamp.
+    """
+    return (
+        _file_stamp(before) == _file_stamp(opened)
+        if os.name != "nt"
+        else (
+            (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            == (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_mode,
+                opened.st_size,
+                opened.st_mtime_ns,
+            )
+        )
+    )
+
+
 def read_records(path: Path) -> list[dict[str, Any]]:
     """Read one bounded regular local file. No directories, stdin or raw logs."""
     fd = None
@@ -224,7 +254,10 @@ def read_records(path: Path) -> list[dict[str, Any]]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         fd = os.open(path, flags)
         opened = os.fstat(fd)
-        require(stat.S_ISREG(opened.st_mode) and _file_stamp(opened) == _file_stamp(before), "input_changed")
+        require(
+            stat.S_ISREG(opened.st_mode) and _same_after_open(before, opened),
+            "input_changed",
+        )
         with os.fdopen(fd, "rb") as stream:
             fd = None
             payload = stream.read(MAX_INPUT_BYTES + 1)
