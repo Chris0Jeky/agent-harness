@@ -1,0 +1,57 @@
+name: BH3 fixture
+
+on:
+  pull_request:
+    paths:
+      - 'fixtures/bughunt-micro/**'
+      - '.github/workflows/bughunt-micro.yml'
+      - 'requirements-dev.txt'
+  push:
+    branches: [main]
+    paths:
+      - 'fixtures/bughunt-micro/**'
+      - '.github/workflows/bughunt-micro.yml'
+      - 'requirements-dev.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bh3-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture:
+    name: BH3 controls (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+      - name: Install approved development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Prove the scorer with controlled fixtures, not model calls
+        run: python -m unittest discover -s fixtures/bughunt-micro/oracle -p "test_score.py" -v
+      # The app is intentionally buggy and the golden patch binds its exact bytes.
+      # Lint/format the oracle; compile and behavior-test the planted app instead.
+      - name: Lint oracle code
+        run: >-
+          python -m ruff check fixtures/bughunt-micro/oracle
+          fixtures/bughunt-micro/tests/test_oracle.py
+      - name: Check oracle formatting
+        run: >-
+          python -m black --check fixtures/bughunt-micro/oracle
+          fixtures/bughunt-micro/tests/test_oracle.py
+      - name: Compile all fixture Python
+        run: >-
+          python -m py_compile fixtures/bughunt-micro/src/app.py
+          fixtures/bughunt-micro/tests/test_oracle.py
+          fixtures/bughunt-micro/oracle/score.py
+          fixtures/bughunt-micro/oracle/test_score.py

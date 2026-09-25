@@ -2,11 +2,13 @@
 
 While bugs are present, these fail. After fixes/golden.patch, all pass.
 """
+
 from __future__ import annotations
 
 import datetime as dt
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -39,8 +41,11 @@ def test_BUG04_missing_return_none():
 
 def test_BUG05_case_insensitive_config(tmp_path: Path):
     (tmp_path / "App.Config").write_text("x=1\n", encoding="utf-8")
-    found = app.resolve_config(tmp_path, "app.config")
-    assert found.name.lower() == "app.config"
+    # Force the listing fallback even on a case-insensitive filesystem.
+    # The exact-match fast path otherwise conceals BUG-05 on Windows/macOS.
+    with mock.patch.object(Path, "exists", return_value=False):
+        found = app.resolve_config(tmp_path, "app.config")
+    assert found == tmp_path / "App.Config"
 
 
 def test_BUG06_timezone_aware_deadline():
