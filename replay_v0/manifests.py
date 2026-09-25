@@ -89,7 +89,7 @@ def _require_positive_count(value: object, label: str) -> int:
 def _require_relative_path(value: object, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ManifestError(f"{label}: expected a relative POSIX path")
-    if "\\" in value or ":" in value or value.startswith("/"):
+    if "\0" in value or "\\" in value or ":" in value or value.startswith("/"):
         raise ManifestError(f"{label}: expected a relative POSIX path")
     candidate = PurePosixPath(value)
     if (
@@ -100,6 +100,25 @@ def _require_relative_path(value: object, label: str) -> str:
     ):
         raise ManifestError(f"{label}: expected a normalized relative POSIX path")
     return value
+
+
+def _resolve_corpus_file(base: Path, relative_path: str) -> Path:
+    """Resolve an ordinary in-tree file before reading its bytes.
+
+    This path check does not replace caller-owned storage isolation or prevent
+    every concurrent rename/link race. Policy-tree alias rules are unchanged.
+    """
+    label = f"Corpus file {relative_path!r}"
+    try:
+        resolved_base = base.resolve(strict=True)
+        target = base.joinpath(*PurePosixPath(relative_path).parts).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ManifestError(f"{label} could not be resolved") from exc
+    if not target.is_relative_to(resolved_base):
+        raise ManifestError(f"{label} resolves outside corpus directory")
+    if not target.is_file():
+        raise ManifestError(f"{label} is not a regular file")
+    return target
 
 
 def _require_timestamp(value: object, label: str) -> str:
@@ -173,7 +192,7 @@ def build_corpus_manifest(
         relative_path = _require_relative_path(
             raw_path, f"CorpusManifest.files[{index}].path"
         )
-        target = base.joinpath(*PurePosixPath(relative_path).parts)
+        target = _resolve_corpus_file(base, relative_path)
         try:
             digest = sha256_file(target)
         except OSError as exc:
@@ -218,7 +237,7 @@ def load_corpus_manifest(path: str | Path) -> LoadedCorpusManifest:
 
     captured_files: list[tuple[str, bytes]] = []
     for entry in manifest["files"]:
-        target = manifest_path.parent.joinpath(*PurePosixPath(entry["path"]).parts)
+        target = _resolve_corpus_file(manifest_path.parent, entry["path"])
         try:
             captured_bytes = target.read_bytes()
         except OSError as exc:
