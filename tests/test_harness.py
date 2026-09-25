@@ -6357,6 +6357,7 @@ allow_local_binding = true
         repo = self.make_repo()
         self.write_floorless_tier(repo)
         claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
         claude_home.mkdir(exist_ok=True)
         (claude_home / "settings.json").write_text(
             json.dumps(
@@ -6368,7 +6369,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "python ~/.claude/hooks/dispatch.py --event pre",
+                                        "command": f'python "{dispatcher}" --event pre',
                                     }
                                 ],
                             }
@@ -6396,6 +6397,7 @@ allow_local_binding = true
         # ignored in the dispatcher name because Windows resolves it anyway.
         repo = self.make_repo()
         self.write_floorless_tier(repo)
+        dispatcher = Path(self.temp.name) / "claude-home" / "hooks" / "dispatch.py"
         local = repo / ".claude" / "settings.local.json"
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(
@@ -6408,7 +6410,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "py -3 $env:USERPROFILE/.claude/hooks/DISPATCH.PY --event pre",
+                                        "command": f'py -3 "{str(dispatcher).replace("dispatch.py", "DISPATCH.PY")}" --event pre',
                                     }
                                 ],
                             }
@@ -6424,6 +6426,45 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn(
             "settings.local.json still registers the PreToolUse dispatcher", output
+        )
+
+    def test_claude_settings_register_floor_matches_only_controlled_dispatcher(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True, exist_ok=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        user_source = claude_home / "settings.json"
+        foreign = "python /tmp/foreign/dispatch.py --event pre"
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": foreign}],
+                    }
+                ]
+            },
+        )
+        self.assertIsNone(harness.claude_settings_register_floor(claude_home, repo))
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        controlled = f'python3 "{windows_dispatcher}" --event pre'
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": controlled}],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            harness.claude_settings_register_floor(claude_home, repo), user_source
         )
 
     def test_doctor_accepts_floorless_repo_with_lifecycle_only_hooks(self) -> None:

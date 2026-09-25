@@ -4237,12 +4237,14 @@ def claude_settings_register_floor(claude_home: Path, repo: Path) -> Path | None
         repo / ".claude" / "settings.json",
         repo / ".claude" / "settings.local.json",
     ):
-        if _settings_file_registers_floor(source):
+        if _settings_file_registers_floor(
+            source, claude_home / "hooks" / "dispatch.py"
+        ):
             return source
     return None
 
 
-def _settings_file_registers_floor(source: Path) -> bool:
+def _settings_file_registers_floor(source: Path, dispatcher: Path) -> bool:
     try:
         text = read_optional_text(source)
         if text is None:
@@ -4258,7 +4260,9 @@ def _settings_file_registers_floor(source: Path) -> bool:
         handlers = group.get("hooks") if isinstance(group, dict) else None
         for handler in handlers if isinstance(handlers, list) else []:
             command = handler.get("command") if isinstance(handler, dict) else None
-            if isinstance(command, str) and "dispatch.py" in command.lower():
+            if isinstance(command, str) and claude_command_points_to_dispatcher(
+                command, dispatcher
+            ):
                 return True
     return False
 
