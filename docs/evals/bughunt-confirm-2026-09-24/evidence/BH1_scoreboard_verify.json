@@ -1,0 +1,294 @@
+{
+  "frozen_at": "2026-09-24T13:09:10.350320+01:00",
+  "meta_updated": "2026-09-23",
+  "file_hashes": {
+    "benchmark.json": "d58f9add7926f471b694cb4809cb12559ab9d2a1af88cb5efe096b0e875766fb",
+    "CLAIM_CHECKS.json": "926104f2955b10b3eeae8dc8df97319610885669d8b915ab11d10cad516d4fe4",
+    "KEY_RUNS.json": "9f1375733e52c93b0f11a235df117dc5e19a833e57ab3b55b3f86ccc18b61418",
+    "CLAIMS.md": "954101748b6f31af16218bf3e6773b0ee56c61e488021e7937a2fa5b0fb84953"
+  },
+  "benchmark_sha256_expected": "d58f9add7926f471b694cb4809cb12559ab9d2a1af88cb5efe096b0e875766fb",
+  "benchmark_sha256_match": true,
+  "selected_arms": {
+    "Astra-6 max": {
+      "id": "GPT-6 Astra (max effort) - mean of 3",
+      "model": "GPT-6 Astra",
+      "effort": "max",
+      "n": 3,
+      "fixed": 45.0,
+      "cost_usd": 33.03,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-14",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-6 Astra (max effort) - mean of 3",
+        "bench_fixed": 45,
+        "bench_cost": 33.03,
+        "key_id": "GPT-6 Astra (max effort) - mean of 3",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Sol-5.6 max": {
+      "id": "GPT-5.6 Sol (max effort) - mean of 2",
+      "model": "GPT-5.6 Sol",
+      "effort": "max",
+      "n": 2,
+      "fixed": 43.5,
+      "cost_usd": 95.35,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-16",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-5.6 Sol (max effort) - mean of 2",
+        "bench_fixed": 43.5,
+        "bench_cost": 95.35,
+        "key_id": "GPT-5.6 Sol (max effort) - mean of 2",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Opus-5.5 max": {
+      "id": "Opus 5.5 (max effort) - mean of 3",
+      "model": "Opus 5.5",
+      "effort": "max",
+      "n": 3,
+      "fixed": 41.7,
+      "cost_usd": 58.53,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-23",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "Opus 5.5 (max effort) - mean of 3",
+        "bench_fixed": 41.7,
+        "bench_cost": 58.53,
+        "key_id": "Opus 5.5 (max effort) - mean of 3",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Sol-6 max": {
+      "id": "GPT-6 Sol (max effort) - mean of 3",
+      "model": "GPT-6 Sol",
+      "effort": "max",
+      "n": 3,
+      "fixed": 29.3,
+      "cost_usd": 9.33,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-23",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-6 Sol (max effort) - mean of 3",
+        "bench_fixed": 29.3,
+        "bench_cost": 9.33,
+        "key_id": "GPT-6 Sol (max effort) - mean of 3",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Sol-5.6 med": {
+      "id": "GPT-5.6 Sol (medium effort)",
+      "model": "GPT-5.6 Sol",
+      "effort": "medium",
+      "n": 1,
+      "fixed": 29.0,
+      "cost_usd": 15.77,
+      "cost_kind": "list",
+      "featured": false,
+      "date": "2026-09-06",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-5.6 Sol (medium effort)",
+        "bench_fixed": 29,
+        "bench_cost": 15.77,
+        "key_id": "GPT-5.6 Sol (medium effort)",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Luna-6 max": {
+      "id": "GPT-6 Luna (max effort) - mean of 3",
+      "model": "GPT-6 Luna",
+      "effort": "max",
+      "n": 3,
+      "fixed": 18.3,
+      "cost_usd": 0.52,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-23",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-6 Luna (max effort) - mean of 3",
+        "bench_fixed": 18.3,
+        "bench_cost": 0.52,
+        "key_id": "GPT-6 Luna (max effort) - mean of 3",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    },
+    "Luna-5.6 max": {
+      "id": "GPT-5.6 Luna (max effort) - mean of 3",
+      "model": "GPT-5.6 Luna",
+      "effort": "max",
+      "n": 3,
+      "fixed": 31.3,
+      "cost_usd": 3.15,
+      "cost_kind": "list",
+      "featured": true,
+      "date": "2026-09-22",
+      "source": "KEY_RUNS",
+      "cross_check": {
+        "bench_id": "GPT-5.6 Luna (max effort) - mean of 3",
+        "bench_fixed": 31.3,
+        "bench_cost": 3.15,
+        "key_id": "GPT-5.6 Luna (max effort) - mean of 3",
+        "fixed_delta": 0.0,
+        "cost_delta": 0.0
+      }
+    }
+  },
+  "arms_vs_ledger": [
+    {
+      "alias": "Astra-6 max",
+      "id": "GPT-6 Astra (max effort) - mean of 3",
+      "fixed": 45.0,
+      "cost_usd": 33.03,
+      "expected_fixed": 45.0,
+      "expected_cost": 33.03,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Sol-5.6 max",
+      "id": "GPT-5.6 Sol (max effort) - mean of 2",
+      "fixed": 43.5,
+      "cost_usd": 95.35,
+      "expected_fixed": 43.5,
+      "expected_cost": 95.35,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Opus-5.5 max",
+      "id": "Opus 5.5 (max effort) - mean of 3",
+      "fixed": 41.7,
+      "cost_usd": 58.53,
+      "expected_fixed": 41.7,
+      "expected_cost": 58.53,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Sol-6 max",
+      "id": "GPT-6 Sol (max effort) - mean of 3",
+      "fixed": 29.3,
+      "cost_usd": 9.33,
+      "expected_fixed": 29.3,
+      "expected_cost": 9.33,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Sol-5.6 med",
+      "id": "GPT-5.6 Sol (medium effort)",
+      "fixed": 29.0,
+      "cost_usd": 15.77,
+      "expected_fixed": 29.0,
+      "expected_cost": 15.77,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Luna-6 max",
+      "id": "GPT-6 Luna (max effort) - mean of 3",
+      "fixed": 18.3,
+      "cost_usd": 0.52,
+      "expected_fixed": 18.3,
+      "expected_cost": 0.52,
+      "score_match": true,
+      "cost_match": true
+    },
+    {
+      "alias": "Luna-5.6 max",
+      "id": "GPT-5.6 Luna (max effort) - mean of 3",
+      "fixed": 31.3,
+      "cost_usd": 3.15,
+      "expected_fixed": 31.3,
+      "expected_cost": 3.15,
+      "score_match": true,
+      "cost_match": true
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "description": "Astra max leads planted-bug score",
+      "computed": {
+        "astra_fixed": 45.0,
+        "next_featured_openai_claude": 43.5
+      },
+      "expected": "Astra max mean >= next featured OpenAI/Claude arm",
+      "pass": true,
+      "details": "Astra 45.0 vs Sol-5.6 max 43.5 / Opus 41.7"
+    },
+    {
+      "id": "C2",
+      "description": "Sol-6 max large absolute drop vs 5.6 Sol max",
+      "computed": {
+        "sol6": 29.3,
+        "sol56": 43.5,
+        "delta": -14.2
+      },
+      "expected": "\u0394(Sol-6 max \u2212 Sol-5.6 max) \u2264 \u221210",
+      "pass": true,
+      "details": "\u0394=-14.2"
+    },
+    {
+      "id": "C3",
+      "description": "Sol-6 max \u2248 GPT-5.6 Sol medium",
+      "computed": {
+        "sol6": 29.3,
+        "sol56med": 29.0,
+        "abs_gap": 0.3
+      },
+      "expected": "|Sol-6 max \u2212 5.6 Sol medium| \u2264 2",
+      "pass": true,
+      "details": "gap=0.3"
+    },
+    {
+      "id": "C5-score",
+      "description": "Opus 5.5 max near frontier ceiling (score proximity)",
+      "computed": {
+        "opus": 41.7,
+        "astra": 45.0,
+        "abs_gap": 3.3
+      },
+      "expected": "|Opus\u2212Astra| \u2264 5",
+      "pass": true,
+      "details": "gap=3.3"
+    },
+    {
+      "id": "C7-score",
+      "description": "Luna-6 max worse absolute score than Luna-5.6 max",
+      "computed": {
+        "luna6": 18.3,
+        "luna56": 31.3
+      },
+      "expected": "Luna-6 max \u224818.3 < Luna-5.6 max \u224831.3",
+      "pass": true,
+      "details": "18.3 vs 31.3"
+    }
+  ],
+  "arm_score_pass": true,
+  "arm_cost_pass": true,
+  "overall_pass": true,
+  "tolerances": {
+    "score": 0.1,
+    "cost_usd": 0.05
+  },
+  "protocol": "EVAL_PROTOCOL \u00a7A BH1"
+}
