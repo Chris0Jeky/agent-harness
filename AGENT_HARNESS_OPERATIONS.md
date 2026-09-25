@@ -369,7 +369,7 @@ python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 ```
 
 - **CONSTRAINT:** The unit-plus-contract portion of both runner interfaces is the fast lane and must complete in under 60 seconds without network access or live legacy execution.
-- **CONSTRAINT:** Required CI checks before merging extraction work are `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
+- **CONSTRAINT:** Required CI checks before merging extraction work are the repository-wide `Verify (ubuntu-latest)`, `Verify (windows-latest)`, and `Verify (macos-latest)` matrix jobs plus `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, and `operations-contract`.
 - **CONSTRAINT:** `replay-fast` and `replay-tests` use the authoritative dependency-free `unittest` lanes. `operations-contract` installs the approved development requirements and proves the declared Pytest commands remain compatible.
 
 # Historical replay-v0 task accounting
