@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from time import monotonic
@@ -4451,6 +4451,59 @@ def budget_issues(repo: Path, tier: int) -> list[str]:
     return issues
 
 
+def _pruned_scan_files(root: Path) -> Iterator[Path]:
+    """Yield scannable files under `root`, pruning nested Git checkouts."""
+    try:
+        if root.is_symlink():
+            return
+    except OSError:
+        return
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as handle:
+                entries = list(handle)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            entry_path = Path(entry.path)
+            if is_dir:
+                if entry.name == ".git":
+                    continue
+                try:
+                    if entry.is_symlink():
+                        continue
+                except OSError:
+                    continue
+                marker = entry_path / ".git"
+                try:
+                    nested = marker.is_file() or marker.is_dir() or marker.is_symlink()
+                except OSError:
+                    nested = False
+                if nested:
+                    continue
+                stack.append(entry_path)
+            else:
+                if entry.name == ".git":
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=True):
+                        continue
+                except OSError:
+                    continue
+                try:
+                    if entry.stat(follow_symlinks=True).st_size > 1_000_000:
+                        continue
+                except OSError:
+                    continue
+                yield entry_path
+
+
 def stale_path_issues(repo: Path) -> list[str]:
     needles = ("C:/Users/jekyt", "C:\\Users\\jekyt")
     issues: list[str] = []
@@ -4462,7 +4515,7 @@ def stale_path_issues(repo: Path) -> list[str]:
         elif path.is_dir():
             candidates.extend(
                 p
-                for p in path.rglob("*")
+                for p in _pruned_scan_files(path)
                 if p.is_file() and p.stat().st_size <= 1_000_000
             )
     for path in candidates:
