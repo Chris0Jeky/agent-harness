@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -95,6 +96,17 @@ def _parse_fail_on(value: str) -> tuple[str, ...]:
     return tuple(choices)
 
 
+def _parse_timeout(value: str) -> float:
+    message = "timeout must be finite, greater than 0 and at most 86400 seconds"
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(message) from exc
+    if not math.isfinite(timeout) or not 0 < timeout <= 86400:
+        raise argparse.ArgumentTypeError(message)
+    return timeout
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m replay_v0.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -110,7 +122,7 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_FAIL_ON,
         metavar="CLASS[,CLASS...]",
     )
-    replay.add_argument("--timeout", type=float, default=30.0)
+    replay.add_argument("--timeout", type=_parse_timeout, default=30.0)
 
     validate = subparsers.add_parser("validate", help="validate a charter corpus")
     validate.add_argument("--corpus", required=True)
@@ -313,7 +325,7 @@ def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
         source=source,
         identity={
             "kind": "process",
-            "id": lexical_policy_path.stem,
+            "id": f"process-{identity_sha256}",
             "sha256": identity_sha256,
         },
     )
