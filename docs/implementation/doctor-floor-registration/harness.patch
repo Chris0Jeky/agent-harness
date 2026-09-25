@@ -1,0 +1,72 @@
+--- a/harness.py
++++ b/harness.py
+@@ -4230,19 +4230,50 @@
+     that statically registers a `PreToolUse` handler invoking the shared
+     dispatcher, else None. Under a floorless declaration any of them is a
+     contradiction: a floor still runs in this repo. Static registration only;
+-    trust, managed and session state are not inferred. The name comparison is
+-    case-insensitive: Windows resolves `DISPATCH.PY` to the same file."""
++    trust, managed and session state are not inferred. Absolute paths use the
++    existing host-aware matcher; supported home spellings name the inspected
++    shared dispatcher rather than an arbitrary file with its basename."""
+     for source in (
+         claude_home / "settings.json",
+         repo / ".claude" / "settings.json",
+         repo / ".claude" / "settings.local.json",
+     ):
+-        if _settings_file_registers_floor(source):
++        if _settings_file_registers_floor(source, claude_home / "hooks" / "dispatch.py"):
+             return source
+     return None
+ 
+ 
+-def _settings_file_registers_floor(source: Path) -> bool:
++def _claude_floor_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
++    """Match the inspected dispatcher, including established home spellings.
++
++    This is static reference recognition, not shell execution or environment
++    expansion. Windows home forms keep Windows case semantics even when the
++    settings are inspected on POSIX; ordinary absolute paths remain host-aware.
++    """
++    candidate = strip_shell_comments(command).replace("\\", "/")
++    expected = str(dispatcher.resolve()).replace("\\", "/")
++    left = r"(?P<before>^|[\s\"'=])"
++    right = r"(?=$|[\s\"';|&])"
++    forms = (
++        (r"(?:~|\$HOME|\$\{HOME\})/\.claude/hooks/dispatch\.py", 0),
++        (
++            r"(?:\$env:USERPROFILE|%USERPROFILE%)/\.claude/hooks/dispatch\.py",
++            re.IGNORECASE,
++        ),
++    )
++    for path_pattern, flags in forms:
++        # Replace only a complete supported reference. Do not expand arbitrary
++        # variables, embedded paths, concatenations, or dispatcher suffixes.
++        candidate = re.sub(
++            left + path_pattern + right,
++            lambda match: match.group("before") + expected,
++            candidate,
++            flags=flags,
++        )
++    return claude_command_points_to_dispatcher(candidate, dispatcher)
++
++
++def _settings_file_registers_floor(source: Path, dispatcher: Path) -> bool:
+     try:
+         text = read_optional_text(source)
+         if text is None:
+@@ -4257,8 +4288,12 @@
+     for group in groups:
+         handlers = group.get("hooks") if isinstance(group, dict) else None
+         for handler in handlers if isinstance(handlers, list) else []:
+-            command = handler.get("command") if isinstance(handler, dict) else None
+-            if isinstance(command, str) and "dispatch.py" in command.lower():
++            if not isinstance(handler, dict) or handler.get("type") != "command":
++                continue
++            command = handler.get("command")
++            if isinstance(command, str) and _claude_floor_command_points_to_dispatcher(
++                command, dispatcher
++            ):
+                 return True
+     return False
+ 

@@ -1,0 +1,13 @@
+{
+  "preimage_git_blob": "99040e7e1c77ebee4bf01f3cf630f6e306bae051",
+  "postimage_git_blob": "b7ddebaa44dff8f7d2be1b534ff7039f25ed9419",
+  "preimage_sha256": "ea3256a5300e8161d130693f01d1909dffaaaba60b479f5d030fbbd3d2007aa4",
+  "postimage_sha256": "bb93022dd63b5f24593204333476e7d35144475b888bc71e2a1102bd5ad6d47d",
+  "changed_file": "harness.py",
+  "observed_red_failures": 26,
+  "new_test_methods": 7,
+  "focused_tests_passed": 121,
+  "local_python": "3.13.5",
+  "production_patch_applied_in_this_commit": false,
+  "supported_host_qualification": false
+}
