@@ -1,0 +1,78 @@
+{
+  "fixture": "bughunt-micro",
+  "planted_total": 10,
+  "oracle": "deterministic (pytest + rg fingerprints)",
+  "bugs": [
+    {
+      "id": "BUG-01",
+      "title": "off-by-one window_sum",
+      "function": "window_sum",
+      "fingerprint_rg": "end \\+ 1",
+      "test": "test_BUG01_off_by_one_window_sum"
+    },
+    {
+      "id": "BUG-02",
+      "title": "wrong comparison is_eligible",
+      "function": "is_eligible",
+      "fingerprint_rg": "score > threshold",
+      "test": "test_BUG02_wrong_comparison_eligible_at_threshold"
+    },
+    {
+      "id": "BUG-03",
+      "title": "swapped args scale_offset",
+      "function": "scale_offset",
+      "fingerprint_rg": "\\(x \\+ offset\\) \\* scale",
+      "test": "test_BUG03_swapped_args_scale_offset"
+    },
+    {
+      "id": "BUG-04",
+      "title": "missing return None",
+      "function": "first_nonempty",
+      "fingerprint_rg": "missing `return found`",
+      "test": "test_BUG04_missing_return_none",
+      "note": "implicit None; nonempty path fails"
+    },
+    {
+      "id": "BUG-05",
+      "title": "case-sensitive path resolve_config",
+      "function": "resolve_config",
+      "fingerprint_rg": "p\\.name == name",
+      "test": "test_BUG05_case_insensitive_config"
+    },
+    {
+      "id": "BUG-06",
+      "title": "timezone/unit mishandle hours_until",
+      "function": "hours_until",
+      "fingerprint_rg": "total_seconds\\(\\) / 60",
+      "test": "test_BUG06_timezone_aware_deadline"
+    },
+    {
+      "id": "BUG-07",
+      "title": "SQL string concat build_user_query",
+      "function": "build_user_query",
+      "fingerprint_rg": "WHERE name = '\\{username\\}'",
+      "test": "test_BUG07_query_uses_placeholder"
+    },
+    {
+      "id": "BUG-08",
+      "title": "incorrect default limit=0",
+      "function": "paginate",
+      "fingerprint_rg": "limit: int = 0",
+      "test": "test_BUG08_default_limit_ten"
+    },
+    {
+      "id": "BUG-09",
+      "title": "empty list ZeroDivisionError",
+      "function": "safe_mean",
+      "fingerprint_rg": "sum\\(values\\) / len\\(values\\)",
+      "test": "test_BUG09_empty_list_mean"
+    },
+    {
+      "id": "BUG-10",
+      "title": "wrong HTTP status 200 for created",
+      "function": "create_response",
+      "fingerprint_rg": "\"status\": 200, \"body\": \"created\"",
+      "test": "test_BUG10_created_status_201"
+    }
+  ]
+}
