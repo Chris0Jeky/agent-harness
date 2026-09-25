@@ -88,6 +88,30 @@ class ProcessIdentifierTests(unittest.TestCase):
             for row in (first, timeout, changed):
                 self.assertEqual("process-" + row["sha256"], row["id"])
 
+    def test_label_migration_preserves_semantic_digest_and_run_id(self):
+        with fixtures.CliTests().fixture("same") as data:
+            _directory, corpus_path, _recording, candidate = data
+            identity = cli._load_process_source(
+                f"{sys.executable},{candidate}", 30.0
+            ).identity
+            old_identity = {**identity, "id": candidate.stem}
+            corpus = cli._load_charter_corpus(str(corpus_path))
+            common = {
+                "generated_at": "1970-01-01T00:00:00Z",
+                "baseline": old_identity,
+                "corpus": {
+                    "id": corpus.corpus_id,
+                    "manifest_sha256": corpus.manifest_sha256,
+                    "event_count": corpus.event_count,
+                },
+                "fail_on": cli.DEFAULT_FAIL_ON,
+            }
+            old = cli.build_run_manifest(candidate=old_identity, **common)
+            current = cli.build_run_manifest(candidate=identity, **common)
+            self.assertNotEqual(old["candidate"]["id"], current["candidate"]["id"])
+            self.assertEqual(old["candidate"]["sha256"], current["candidate"]["sha256"])
+            self.assertEqual(old["run_id"], current["run_id"])
+
 
 class TimeoutInputTests(unittest.TestCase):
     @staticmethod

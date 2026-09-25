@@ -15,12 +15,14 @@ parent tree, executable, timeout and other bound inputs still contribute to
 that digest. Distinct names are not collapsed by lossy sanitization. This is
 not a location-independent content ID or authentication of an execution.
 
-**Compatibility:** IDs and derived run IDs change for all process sources,
-including previously accepted filenames. The identity SHA-256 calculation,
-manifest schema, recorded-source IDs and validation of existing reports are
-unchanged. Compare archived and new results using their declared inputs rather
-than assuming the old stem-based label remains stable. Commas and multiline
-argv values remain outside the existing process-reference grammar (#142).
+**Compatibility:** Process-source labels change, including previously accepted
+filename stems. For identical semantic inputs, the existing identity SHA-256
+and derived run ID remain stable: `derive_run_id()` uses the source digests,
+not either source label. Manifest bytes change because the label is recorded;
+that is not a new semantic run. The manifest schema, recorded-source IDs and
+validation of existing reports are unchanged. Correlate archived and new runs
+using their run IDs and declared semantic inputs, not the former stem label.
+Commas and multiline argv values remain outside the existing grammar (#142).
 
 ## CLI wait input
 
