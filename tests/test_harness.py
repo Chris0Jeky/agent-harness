@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4318,6 +4319,98 @@ allow_local_binding = true
             (second_skill / "SKILL.md").read_text(encoding="utf-8"),
             "intermediate skill\n",
         )
+
+    @unittest.skipUnless(
+        sys.platform == "win32", "requires case-insensitive Windows destination"
+    )
+    def test_sync_global_codex_skill_case_only_rename(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("skill-case-only-rename")
+        )
+        upper_directory = source_skill / "Docs"
+        upper_directory.mkdir()
+        upper = upper_directory / "Guide.py"
+        upper.write_text("print('v1')\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+
+        temporary_directory = source_skill / "case-rename-temp"
+        lower_directory = source_skill / "docs"
+        upper_directory.rename(temporary_directory)
+        temporary_directory.rename(lower_directory)
+        upper = lower_directory / "Guide.py"
+        temporary_file = lower_directory / "case-rename-temp.py"
+        lower = lower_directory / "guide.py"
+        upper.rename(temporary_file)
+        temporary_file.rename(lower)
+        lower.write_text("print('v2')\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            sorted(entry.name for entry in target_skill.iterdir()),
+            sorted(entry.name for entry in source_skill.iterdir()),
+        )
+        target_directory = target_skill / "docs"
+        self.assertEqual(
+            sorted(entry.name for entry in target_directory.iterdir()),
+            sorted(entry.name for entry in lower_directory.iterdir()),
+        )
+        self.assertEqual(
+            (target_directory / "guide.py").read_text(encoding="utf-8"),
+            lower.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+
+    @unittest.skipUnless(os.name != "nt", "requires POSIX directory modes")
+    def test_sync_global_codex_skill_restrictive_dir_prunes_stale(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("skill-restrictive-dir")
+        )
+        nested_source = source_skill / "locked"
+        nested_source.mkdir()
+        (nested_source / "keep.txt").write_text("keep\n", encoding="utf-8")
+        os.chmod(nested_source, 0o555)
+        nested_target = target_skill / "locked"
+        nested_target.mkdir(exist_ok=True)
+        (nested_target / "stale.txt").write_text("stale\n", encoding="utf-8")
+        backup_root = Path(args.codex_home) / "backups"
+        try:
+            self.assertEqual(harness.sync_global(args), 0)
+            self.assertFalse((nested_target / "stale.txt").exists())
+            self.assertEqual(
+                (nested_target / "keep.txt").read_text(encoding="utf-8"), "keep\n"
+            )
+            self.assertEqual(stat.S_IMODE(nested_target.stat().st_mode), 0o555)
+
+            os.chmod(nested_source, 0o755)
+            (nested_source / "keep.txt").unlink()
+            os.chmod(nested_source, 0o555)
+            self.assertEqual(harness.sync_global(args), 0)
+
+            self.assertFalse((nested_target / "keep.txt").exists())
+            self.assertEqual(
+                harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+            )
+            self.assertEqual(stat.S_IMODE(nested_target.stat().st_mode), 0o555)
+        finally:
+            for root in (source_skill, target_skill, backup_root):
+                if not root.exists():
+                    continue
+                directories = [root]
+                try:
+                    directories.extend(
+                        path for path in root.rglob("*") if path.is_dir()
+                    )
+                except OSError:
+                    pass
+                for directory in sorted(
+                    directories, key=lambda path: len(path.parts), reverse=True
+                ):
+                    try:
+                        os.chmod(directory, 0o755)
+                    except OSError:
+                        pass
 
     @staticmethod
     def wrapper_adapter_text(pin: str, posix_wrapper: str, windows_wrapper: str) -> str:
