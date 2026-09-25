@@ -139,8 +139,7 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                                 f"{sys.executable},{data[1][index] / 'policy.py'}", 30.0
                             )
                             reserved = data[3] / (
-                                "replay-process-inputs-"
-                                + loaded.source.snapshot_identity
+                                "replay-process-inputs-" + loaded.source.snapshot_identity
                             )
                             output = reserved / "reports" if nested else reserved
                             self.assert_rejected(data, output)
