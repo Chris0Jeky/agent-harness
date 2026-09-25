@@ -174,9 +174,7 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
             target.mkdir()
             alias = data[0] / "reports-alias"
             self.make_link(alias, target)
-            with mock.patch.object(
-                cli, "_publish_report_set", wraps=cli._publish_report_set
-            ) as publish:
+            with mock.patch.object(cli, "_publish_report_set", wraps=cli._publish_report_set) as publish:
                 self.assertEqual(0, cli.main(self.with_output(data[2], alias)))
             self.assertEqual(alias, publish.call_args.args[0])
             self.assertTrue((target / "report.json").is_file())
