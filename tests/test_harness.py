@@ -333,10 +333,11 @@ class HarnessTests(unittest.TestCase):
         as_json: bool = False,
         config_root: Path | None = None,
         guidance_reference: tuple[bool, str] | None = None,
+        claude_home_path: Path | None = None,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
-        claude_home = root / "claude-home"
+        claude_home = claude_home_path or root / "claude-home"
         skills_home = root / "skills-home"
         (codex_home / "AGENTS.md").parent.mkdir(exist_ok=True)
         (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
@@ -770,6 +771,48 @@ class HarnessTests(unittest.TestCase):
                     f'python3 "{different_case}"', dispatcher
                 )
             )
+
+    def test_claude_dispatcher_identity_recognizes_controlled_home_aliases(
+        self,
+    ) -> None:
+        fake_home = (Path(self.temp.name) / "user-home").resolve()
+        claude_home = fake_home / ".claude"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        aliases = (
+            "python ~/.claude/hooks/dispatch.py --event pre",
+            "python $HOME/.claude/hooks/dispatch.py --event pre",
+            "python ${HOME}/.claude/hooks/dispatch.py --event pre",
+        )
+        with mock.patch.object(Path, "home", return_value=fake_home):
+            for command in aliases:
+                with self.subTest(command=command):
+                    with mock.patch.object(harness.os, "name", "posix"):
+                        self.assertTrue(
+                            harness.claude_command_points_to_dispatcher(
+                                command, dispatcher
+                            )
+                        )
+            windows_aliases = (
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre",
+                "powershell -Command Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'",
+            )
+            for command in windows_aliases:
+                with self.subTest(command=command):
+                    with mock.patch.object(harness.os, "name", "nt"):
+                        self.assertTrue(
+                            harness.claude_command_points_to_dispatcher(
+                                command, dispatcher
+                            )
+                        )
+            foreign_dispatcher = (
+                Path(self.temp.name) / "other" / ".claude" / "hooks" / "dispatch.py"
+            )
+            with mock.patch.object(harness.os, "name", "posix"):
+                self.assertFalse(
+                    harness.claude_command_points_to_dispatcher(
+                        aliases[1], foreign_dispatcher
+                    )
+                )
 
     def test_claude_hook_topology_invalid_unreadable_unknown_and_linked_are_unproven(
         self,
@@ -6357,6 +6400,7 @@ allow_local_binding = true
         repo = self.make_repo()
         self.write_floorless_tier(repo)
         claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
         claude_home.mkdir(exist_ok=True)
         (claude_home / "settings.json").write_text(
             json.dumps(
@@ -6368,7 +6412,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "python ~/.claude/hooks/dispatch.py --event pre",
+                                        "command": f'python "{dispatcher}" --event pre',
                                     }
                                 ],
                             }
@@ -6388,14 +6432,57 @@ allow_local_binding = true
         )
         self.assertIn("still registers the PreToolUse dispatcher", output)
 
+    def test_doctor_rejects_floorless_declaration_with_home_anchored_dispatcher(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+        fake_home = (Path(self.temp.name) / "user-home").resolve()
+        claude_home = fake_home / ".claude"
+        settings = claude_home / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": 'python "$HOME/.claude/hooks/dispatch.py" --event pre',
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(Path, "home", return_value=fake_home):
+            result, output = self.run_doctor_with_fixture_globals(
+                repo, claude_home_path=claude_home
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] project Codex floor: tier.json declares floor_wiring: none but",
+            output,
+        )
+        self.assertIn("still registers the PreToolUse dispatcher", output)
+
     def test_doctor_rejects_floorless_declaration_with_project_claude_floor(
         self,
     ) -> None:
         # Project and local Claude settings are inspected scopes too; a handler
-        # there wires the floor for this repo whatever the home says. Case is
-        # ignored in the dispatcher name because Windows resolves it anyway.
+        # there wires the floor for this repo whatever the home says. Preserve
+        # the current host's filesystem case semantics in this path fixture.
         repo = self.make_repo()
         self.write_floorless_tier(repo)
+        dispatcher = Path(self.temp.name) / "claude-home" / "hooks" / "dispatch.py"
         local = repo / ".claude" / "settings.local.json"
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(
@@ -6408,7 +6495,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "py -3 $env:USERPROFILE/.claude/hooks/DISPATCH.PY --event pre",
+                                        "command": f'py -3 "{str(dispatcher).replace("dispatch.py", "DISPATCH.PY") if os.name == "nt" else dispatcher}" --event pre',
                                     }
                                 ],
                             }
@@ -6424,6 +6511,45 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn(
             "settings.local.json still registers the PreToolUse dispatcher", output
+        )
+
+    def test_claude_settings_register_floor_matches_only_controlled_dispatcher(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True, exist_ok=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        user_source = claude_home / "settings.json"
+        foreign = "python /tmp/foreign/dispatch.py --event pre"
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": foreign}],
+                    }
+                ]
+            },
+        )
+        self.assertIsNone(harness.claude_settings_register_floor(claude_home, repo))
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        controlled = f'python3 "{windows_dispatcher}" --event pre'
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": controlled}],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            harness.claude_settings_register_floor(claude_home, repo), user_source
         )
 
     def test_doctor_accepts_floorless_repo_with_lifecycle_only_hooks(self) -> None:
