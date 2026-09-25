@@ -2506,9 +2506,54 @@ def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
     # This is intentionally a token check, not a shell parser: static Doctor
     # can identify the exact controlled path but cannot prove what a shell will
     # execute. The boundaries reject a path merely embedded in another token.
-    return bool(
-        re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate)
-    )
+    if re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate):
+        return True
+    return _claude_command_uses_default_home_dispatcher(command, dispatcher)
+
+
+def _claude_command_uses_default_home_dispatcher(
+    command: str, dispatcher: Path
+) -> bool:
+    """Recognize HOME spellings only when they identify the default Claude home."""
+    try:
+        expected = str(dispatcher.resolve()).replace("\\", "/")
+        default_dispatcher = str(
+            (Path.home() / ".claude" / "hooks" / "dispatch.py").resolve()
+        ).replace("\\", "/")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    windows = os.name == "nt"
+    if windows:
+        expected = expected.casefold()
+        default_dispatcher = default_dispatcher.casefold()
+    if expected != default_dispatcher:
+        return False
+
+    normalized = command.replace("\\", "/")
+    dispatcher_suffix = r"/\.claude/hooks/dispatch\.py"
+    home_variables = [r"\$HOME", r"\$\{HOME\}"]
+    if windows:
+        home_variables.extend((r"\$env:USERPROFILE", r"\$\{env:USERPROFILE\}"))
+    flags = re.IGNORECASE if windows else 0
+
+    # Tilde expansion does not occur inside shell quotes. Environment
+    # variables do expand inside double quotes, but not single quotes.
+    patterns = [
+        rf"(?:^|\s)~{dispatcher_suffix}(?=$|[\s;|&])",
+    ]
+    for variable in home_variables:
+        patterns.extend(
+            (
+                rf"(?:^|\s){variable}{dispatcher_suffix}(?=$|[\s;|&])",
+                rf'"{variable}{dispatcher_suffix}"(?=$|[\s;|&])',
+            )
+        )
+    if windows:
+        patterns.extend(
+            rf"(?:^|\s)join-path\s+{variable}\s+'\.claude/hooks/dispatch\.py'(?=$|[\s;|&])"
+            for variable in home_variables
+        )
+    return any(re.search(pattern, normalized, flags=flags) for pattern in patterns)
 
 
 def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
