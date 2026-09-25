@@ -159,9 +159,7 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                     line for line in markdown.splitlines() if line.startswith("    [")
                 )
                 reproduction = json.loads(argv_line)
-                self.assertEqual(
-                    [sys.executable, "-m", "replay_v0.cli"], reproduction[:3]
-                )
+                self.assertEqual([sys.executable, "-m", "replay_v0.cli"], reproduction[:3])
                 self.assertEqual(0, cli.main(reproduction[3:]))
                 reports.append((output / "run-manifest.json").read_bytes())
             self.assertEqual(reports[0], reports[1])
