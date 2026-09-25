@@ -654,7 +654,9 @@ def _evaluate_decision_lines(
     for line_number, line in enumerate(lines, start=1):
         try:
             raw_value = json.loads(line, object_pairs_hook=_unique_json_object)
-        except (json.JSONDecodeError, _DuplicateJsonKeyError):
+        except ValueError:
+            # JSON syntax, duplicate keys, and decoder integer limits are
+            # invalid source evidence, not uncaught runner exceptions.
             failures.append(
                 SourceFailure(
                     f"{code_prefix}-json-invalid",
