@@ -336,7 +336,11 @@ def _run_policy_process(
             raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
         stdout = _read_process_stream(stdout_stream)
         stderr = _read_process_stream(stderr_stream)
-        if returncode == 127 and stderr.startswith(_WINDOWS_EXEC_FAILURE_PREFIX):
+        if (
+            os.name == "nt"
+            and returncode == 127
+            and stderr.startswith(_WINDOWS_EXEC_FAILURE_PREFIX)
+        ):
             raise OSError("policy process executable could not start")
         return subprocess.CompletedProcess(list(argv), returncode, stdout, stderr)
 
