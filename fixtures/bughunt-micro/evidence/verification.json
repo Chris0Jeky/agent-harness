@@ -9,7 +9,7 @@
   },
   "maintainer_controls": {
     "command": "python -m unittest discover -s fixtures/bughunt-micro/oracle -p test_score.py -v",
-    "tests": 13,
+    "tests": 14,
     "failures": 0,
     "errors": 0,
     "skips": 0
@@ -25,7 +25,7 @@
         "bugs/MANIFEST.json": "301498679f0d8321bdab519aec42bc0eff08754494660be551f1f6ae5ef1f7b6",
         "tests/test_oracle.py": "7b7b3522f3ae5f10f4e24401b0a3d6f9dfd34ea6685b1927680800097dabe533",
         "src/app.py": "6cb57a6117803613f3735a6463a190f6f6ed2f1754435e584aca12fb0148905f",
-        "oracle/score.py": "f833e0296fff4b60a00c067addb04797293c3745383a258ca1be56d51644c9fb"
+        "oracle/score.py": "ce36b5d814438af494f572472c7756d525dd3b75df073b69caf59301bcad6c22"
       },
       "check_exit": 1
     },
@@ -39,7 +39,7 @@
         "bugs/MANIFEST.json": "301498679f0d8321bdab519aec42bc0eff08754494660be551f1f6ae5ef1f7b6",
         "tests/test_oracle.py": "7b7b3522f3ae5f10f4e24401b0a3d6f9dfd34ea6685b1927680800097dabe533",
         "src/app.py": "98fe6243c8fb2cddd2005a6c14e8b4f84714252ac763d6fb83d03b4701583576",
-        "oracle/score.py": "f833e0296fff4b60a00c067addb04797293c3745383a258ca1be56d51644c9fb"
+        "oracle/score.py": "ce36b5d814438af494f572472c7756d525dd3b75df073b69caf59301bcad6c22"
       },
       "check_exit": 0
     }
@@ -48,5 +48,9 @@
     "src/app.py": "6cb57a6117803613f3735a6463a190f6f6ed2f1754435e584aca12fb0148905f",
     "bugs/MANIFEST.json": "301498679f0d8321bdab519aec42bc0eff08754494660be551f1f6ae5ef1f7b6",
     "fixes/golden.patch": "751fee2c2d8c88524e2167c1aa280a4e7c705bf3f1c3f93eeea07ac111aa139a"
-  }
+  },
+  "review_regression": "Timestamp-valid stale app bytecode must not replace hashed source; old scorer produced 0/10, fixed scorer produces 1/10 for the one-bug repair.",
+  "retained_attempts": [
+    "The first fresh-cache full local run was interrupted by the foreground tool limit during its last test; it is not counted as a passing run."
+  ]
 }

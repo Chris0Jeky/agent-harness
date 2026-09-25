@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -89,6 +91,33 @@ class ScoreContractTests(unittest.TestCase):
             f"raise RuntimeError({fake!r})\n", encoding="utf-8"
         )
         self.assert_invalid()
+
+    def test_existing_bytecode_cannot_replace_the_hashed_source(self):
+        source = self.root / "src/app.py"
+        original = source.read_bytes()
+        timestamp = source.stat()
+        py_compile.compile(
+            str(source),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+        # Keep the size and timestamp valid for the old .pyc header.
+        changed = original.replace(
+            b"return score > threshold", b"return score>= threshold"
+        )
+        self.assertNotEqual(original, changed)
+        self.assertEqual(len(original), len(changed))
+        source.write_bytes(changed)
+        os.utime(source, ns=(timestamp.st_atime_ns, timestamp.st_mtime_ns))
+        code, result = self.score()
+        self.assertEqual((1, 1, 10), (code, result["passed"], result["total"]))
+        self.assertTrue(result["valid"])
+        bug = next(row for row in result["per_bug"] if row["id"] == "BUG-02")
+        self.assertTrue(bug["passed"])
+        self.assertEqual(
+            hashlib.sha256(changed).hexdigest(),
+            result["inputs_sha256"]["src/app.py"],
+        )
 
     def test_empty_manifest_cannot_pass_vacuously(self):
         manifest = self.manifest()

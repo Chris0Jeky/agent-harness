@@ -119,6 +119,8 @@ def score(root: Path = ROOT) -> dict:
                     sys.executable,
                     "-I",
                     "-B",
+                    "-X",
+                    f"pycache_prefix={temporary / 'bytecode'}",
                     "-m",
                     "pytest",
                     "-c",

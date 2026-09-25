@@ -45,10 +45,12 @@ input mutation, and runner failure are invalid evidence, not a zero-point run
 or an all-fixed result. Console text never awards points. Regex fingerprints
 are diagnostic only, not a second judge.
 
-Pytest runs with isolated Python, an explicit minimal configuration, no
-conftest files or external plugin autoload, and no inherited pytest selection
-options. A 30-second runner timeout is a fixture limit, not a production-agent
-budget. The case-folding test explicitly exercises the listing fallback so a
+Pytest runs with isolated Python, a fresh bytecode-cache prefix, an explicit
+minimal configuration, no conftest files or external plugin autoload, and no
+inherited pytest selection options. Existing `.pyc` files cannot replace the
+hashed candidate source, even when its size and timestamp are unchanged. A
+30-second runner timeout is a fixture limit, not a production-agent budget.
+The case-folding test explicitly exercises the listing fallback so a
 case-insensitive filesystem does not hide BUG-05.
 
 ## Verification and limits
