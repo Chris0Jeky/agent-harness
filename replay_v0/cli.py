@@ -462,10 +462,44 @@ def _publish_report_set(
             shutil.rmtree(staging_root, ignore_errors=True)
 
 
+def _validated_output_path(
+    raw_path: str, sources: tuple[LoadedPolicySource, ...]
+) -> Path:
+    """Keep runner reports outside bound process trees and reserved snapshots."""
+
+    try:
+        output = Path(raw_path).resolve()
+        for loaded in sources:
+            if loaded.kind != "process":
+                continue
+            source = loaded.source
+            if (
+                source.policy_tree_binding is None
+                or source.snapshot_parent is None
+                or source.snapshot_identity is None
+            ):
+                raise ReplayInputError("process source output boundary is unavailable")
+            policy_root = source.policy_tree_binding[0].resolve(strict=True)
+            snapshot_root = (
+                source.snapshot_parent
+                / f"replay-process-inputs-{source.snapshot_identity}"
+            ).resolve()
+            if output.is_relative_to(policy_root):
+                raise ReplayInputError("output overlaps a bound process-policy tree")
+            if output.is_relative_to(snapshot_root):
+                raise ReplayInputError("output overlaps a reserved process snapshot")
+    except ReplayInputError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ReplayInputError("output boundary could not be resolved") from exc
+    return output
+
+
 def _run_replay(args: argparse.Namespace) -> int:
     corpus = _load_charter_corpus(args.corpus)
     baseline = _load_policy_source(args.baseline, args.timeout)
     candidate = _load_policy_source(args.candidate, args.timeout)
+    output = _validated_output_path(args.output, (baseline, candidate))
     run_manifest = build_run_manifest(
         generated_at=_generated_at(),
         baseline=baseline.identity,
@@ -511,7 +545,6 @@ def _run_replay(args: argparse.Namespace) -> int:
     reproduction_argv = _reproduction_argv(args)
     reproduction_shell = "powershell" if os.name == "nt" else "posix-sh"
 
-    output = Path(args.output)
     try:
         _publish_report_set(
             output,
