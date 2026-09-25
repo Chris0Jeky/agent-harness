@@ -110,6 +110,8 @@ def main():
     if log:
         with open(log, "a", encoding="utf-8") as handle:
             handle.write(origin + "\\t" + " ".join([tool, *args]) + "\\n")
+    if args == ["fixture-startup-state"]:
+        answer(f"{sys.flags.isolated}:{int('site' in sys.modules)}")
     if tool == "git":
         if args[:1] == ["config"] and args[-1:] == ["push.recurseSubmodules"]:
             answer("no")
@@ -135,6 +137,9 @@ class DispatchAsHookTests(unittest.TestCase):
     def write_shims(self, directory: Path) -> None:
         """Fake `git` / `gh`, the only ones on the child's PATH.
 
+        Only these stdlib stand-ins use isolated, no-site Python. Ambient startup
+        imports must not consume the production probe deadline before they run.
+
         On Windows they are `.cmd` files, so this lane also exercises the
         resolver's PATHEXT route and the shim-argv gate that route requires —
         though what the resolver PREFERS is proven by
@@ -148,7 +153,7 @@ class DispatchAsHookTests(unittest.TestCase):
                 script = directory / f"{tool}.cmd"
                 script.write_text(
                     "@echo off\r\n"
-                    f'"{sys.executable}" "{helper}" {tool} "%~f0" %*\r\n'
+                    f'"{sys.executable}" -I -S "{helper}" {tool} "%~f0" %*\r\n'
                     "exit /b %ERRORLEVEL%\r\n",
                     encoding="utf-8",
                 )
@@ -156,7 +161,7 @@ class DispatchAsHookTests(unittest.TestCase):
                 script = directory / tool
                 script.write_text(
                     "#!/bin/sh\n"
-                    f'exec "{sys.executable}" "{helper}" {tool} "$0" "$@"\n',
+                    f'exec "{sys.executable}" -I -S "{helper}" {tool} "$0" "$@"\n',
                     encoding="utf-8",
                 )
                 script.chmod(0o755)
@@ -249,6 +254,21 @@ class DispatchAsHookTests(unittest.TestCase):
         hook = json.loads(completed.stdout)["hookSpecificOutput"]
         self.assertEqual(hook["permissionDecision"], "deny", completed.stdout)
         return hook["permissionDecisionReason"]
+
+    def test_probe_shims_do_not_import_ambient_python_startup(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            self.write_shims(directory)
+            with (
+                patch.dict(os.environ, {"PATH": str(directory)}),
+                patch.dict(dispatch._PROBE_BINARY_CACHE, {}, clear=True),
+            ):
+                for tool in ("git", "gh"):
+                    with self.subTest(tool=tool):
+                        result = dispatch.command_output(
+                            [tool, "fixture-startup-state"], str(directory)
+                        )
+                        self.assertEqual("1:0", result)
 
     def test_rest_private_answer_allows_the_push(self):
         completed, probes = self.run_hook("git push origin main", "rest-private")
@@ -366,7 +386,7 @@ class ProbeBinaryResolutionTests(unittest.TestCase):
     def test_every_image_is_tried_before_any_script_shim(self):
         """The ordering rule, asserted without a Windows filesystem.
 
-        A `.CMD` runs under `cmd.exe`, which re-parses the command line, so a
+        A `.CMD` runs under `cmd.exe`, which re-parses argv under `cmd.exe`, so a
         directory early on PATH must not be able to promote a shim over a real
         image sitting further along it.
         """
