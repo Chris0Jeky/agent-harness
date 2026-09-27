@@ -104,7 +104,7 @@ py -3 scripts\outcome_ledger.py metrics --ledger "$L\ledger.jsonl"
 
 ## First baseline (B-015, 2026-09-27)
 
-Measured over the owner's live runs root at 18:15Z, with PR states fetched the same minute. The
+Measured over the owner's live runs root on 2026-09-27 at about 18:00Z; the ledger's provenance label is `--observed-at 2026-09-27T18:15:00Z`, and PR states were fetched in the same run. The
 ledger stays private; its sha256 was
 `adb1b90fb1ed045e107dbf5f3521034ae3b7c4dca33704069b3ea389e69b3da1`. Numbers are over all splits
 (`--unseal "B-015 baseline"`), because this is the baseline record, not a tuning run.

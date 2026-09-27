@@ -253,6 +253,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
   Do the same on the Codex side if you keep a Codex root there. Until that is done, the runtime home
   is level on paper and unproven in practice — do not describe it as verified.
+- [ ] **H-17** — **Decide server-side default-branch protection (issue #356).** Measured 2026-09-27: no Claude session runs the deny floor, only six Codex roots do, and none of the floored public repositories (SwarmingLilMen, collaborative-hill-lab, Pulseboard) nor agent-harness itself protects `main` server-side. A ruleset with `non_fast_forward` and `deletion` guards irreversible history for every runtime with zero command false positives. It is a GitHub settings change, so it needs your explicit yes, per repository or for the list. Agents may then apply it with the command in #356 and, once it is live, propose retiring the client floor's history families (a T4-class `dispatch.py` change). Close when your decision is recorded and, if yes, each ruleset is read back via `gh api repos/Chris0Jeky/<repo>/rulesets`.
 
 ## Changelog
 

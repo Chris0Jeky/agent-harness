@@ -69,6 +69,15 @@ P3 is void since 2026-09-07; consumer marker refreshes proceed one root at a tim
 proving its own bytes in its own exact CWD (H-14 step 3), merge first. No runtime proof is inherited from deployment, from Doctor, or from the
 completed 1.6.26 wave.
 
+## 2026-09-27 evals lanes: learning from outcomes, proving gates
+
+| Lane | PRs | Outcome |
+|---|---|---|
+| Outcome ledger over swarm receipts (#299/E1) | #354, #360 | **MERGED** `59db399`, `8434156`. #354's round 1 fixed 1 HIGH + 4 MEDIUM; its single reopen fixed one HIGH regression the fix introduced; Codex P2s closed by #360. |
+| Merge-gate model and checker (claude-config #432) | #355, #361 | **MERGED** `92d5795`, `91a31b9`. Round 1 found the spec trusted the table's own bookkeeping (three mutants certified lawful); fixed with an event-driven observer. A repo-wide raw-check guard turned CI red once (the model's `check()`), fixed by renaming. |
+
+Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; none of the floored public repositories, nor this one, protects `main` server-side. Proposal: default-branch rulesets first, then shrink the client floor to local destruction.
+
 ## Active implementation
 
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
