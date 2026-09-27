@@ -458,8 +458,8 @@ from gone.
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
   tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
   the law set shipped (the last two folded 2026-07-26). `doctor --config-root <claude-config>`
-  separately exact-byte checks the supplied source `CLAUDE.md` and `codex/AGENTS.md` against
-  their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
+  separately exact-byte checks the supplied source `CLAUDE.md`, `rules/laws.md` and
+  `codex/AGENTS.md` against their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
   the clean, published `main` of the harness origin's `claude-config` sibling. A missing,
   unreadable, or noncanonical source is `UNPROVEN`; a readable mismatch fails. This document
   itself asserts nothing about deployment.
