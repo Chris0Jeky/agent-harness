@@ -463,7 +463,8 @@ def _publish_report_set(
 
 
 def _validated_output_path(
-    raw_path: str, sources: tuple[LoadedPolicySource, ...]
+    raw_path: str,
+    sources: tuple[LoadedPolicySource, ...],
 ) -> Path:
     """Keep runner reports outside bound process trees and reserved snapshots."""
 
