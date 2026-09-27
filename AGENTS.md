@@ -30,7 +30,8 @@ section you need.
 ## Verify
 
 While iterating, run the tests for the module you changed. Before pushing, run the full set
-below once; rerun it only after a further change or a failure.
+below once, and
+rerun it after any further change.
 
 ```powershell
 py -3 -m unittest discover -s tests -v
