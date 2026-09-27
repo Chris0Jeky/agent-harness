@@ -139,7 +139,7 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
-FLOOR_POSTURES = frozenset({"wall", "guide"})
+FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
 # `"floor_wiring": "none"` is the owner's declaration that a repository runs
 # WITHOUT a floor (SPECS §5): no Codex adapter and no global Claude hook. It
 # binds only when every co-located declaration agrees, like the other
@@ -4268,7 +4268,8 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
 
     `wall` binds when any declaration sets it — or leaves it unset while
     declaring `sensitive_data`, whose default wall is a vote; `guide` binds
-    only when at least one declaration sets it and none says `wall`.
+    only when at least one declaration sets it and none says `wall`; `core`
+    binds only when nothing stricter is declared.
     """
     votes = set()
     for declaration in declarations:
@@ -4281,6 +4282,8 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
         return "wall"
     if "guide" in votes:
         return "guide"
+    if "core" in votes:
+        return "core"
     return None
 
 
