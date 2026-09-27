@@ -250,9 +250,12 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
             link = roots[1] / "input.txt"
             self.file_link(link, shared)
             original = Path.resolve
+            canonical_link = link.parent.resolve() / link.name
+            injected = []
 
             def fail_target(path, *args, **kwargs):
-                if path == link:
+                if path == canonical_link:
+                    injected.append(path)
                     raise OSError(f"private target {directory}")
                 return original(path, *args, **kwargs)
 
@@ -260,6 +263,7 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                 Path, "resolve", autospec=True, side_effect=fail_target
             ):
                 self.assert_rejected(data, directory / "reports")
+            self.assertEqual([canonical_link], injected)
 
     def test_real_cli_overlap_returns_two_before_candidate_can_run(self):
         with self.fixture() as data:
