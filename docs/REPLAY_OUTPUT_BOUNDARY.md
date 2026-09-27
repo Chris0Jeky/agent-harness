@@ -14,10 +14,10 @@ Unrelated siblings, including names sharing a string prefix with the policy root
 remain supported. Output aliases and policy-root ancestors are resolved before
 comparison. Publication and the reproduction command retain the caller's
 original path spelling after validation; existing path-sensitive publication
-behavior is unchanged. Recorded-only
-comparisons have no process-root restriction. Unsupported policy-directory
-symlinks remain unsupported by the existing tree hasher; this guard does not
-relax that separate contract.
+behavior is unchanged. Recorded-only comparisons have no process-root restriction.
+Policy-root directory aliases are resolved by the loader as described in
+`REPLAY_POLICY_ROOT_ALIASES.md`; directory links inside a bound tree remain unsupported
+by the tree hasher. This guard does not relax that separate contract.
 
 ## Controls
 
@@ -39,3 +39,15 @@ This is a resolved-path preflight, not a concurrent-filesystem sandbox, inode or
 hard-link isolation, or prevention of writes performed by a policy itself.
 It does not restrict all recorded-source directories or change snapshot naming,
 process launching, cleanup, policy verdicts, schemas or merge authority.
+
+## File-link inputs
+
+The bound policy tree may contain supported file symlinks to external files.
+Report publication must not replace any of those bound target files, even when
+the output directory is a sibling rather than a descendant of the policy root.
+Before either process runs, the preflight checks resolved file-link targets
+against all three emitted artifact paths. Alias chains and aliased output
+parents do not change that rule. An unresolvable link target fails input
+validation with a bounded diagnostic. External links to files not replaced by
+publication, including other files inside the report directory, remain allowed.
+This is still a preflight check, not protection against concurrent link changes.

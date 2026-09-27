@@ -29,9 +29,8 @@ class PolicyRootAliasTests(unittest.TestCase):
             self.link(alias, policy.parent)
             snapshots = directory / "snapshots"
             snapshots.mkdir()
-            with mock.patch.object(
-                cli.tempfile, "gettempdir", return_value=str(snapshots)
-            ):
+            path = str(snapshots)
+            with mock.patch.object(cli.tempfile, "gettempdir", return_value=path):
                 yield directory, corpus, recording, policy, alias, snapshots
 
     def load(self, path):
@@ -182,9 +181,7 @@ class PolicyRootAliasTests(unittest.TestCase):
     def test_snapshot_overlap_still_rejects_alias_root_without_copy_or_launch(self):
         with self.fixture() as data:
             _directory, _corpus, _recording, policy, alias, _snapshots = data
-            with mock.patch.object(
-                cli.tempfile, "gettempdir", return_value=str(alias)
-            ):
+            with mock.patch.object(cli.tempfile, "gettempdir", return_value=str(alias)):
                 source = self.load(alias / policy.name).source
             before = sha256_tree(policy.parent)
             with mock.patch.object(policy_sources, "_run_policy_process") as run:
@@ -219,7 +216,7 @@ class PolicyRootAliasTests(unittest.TestCase):
             directory, corpus, recording, policy, alias, snapshots = data
             original_resolve = Path.resolve
 
-            def fail_parent(path, *args, **kwargs):
+            def fail_root(path, *args, **kwargs):
                 if path == alias.absolute():
                     raise OSError(f"private path {directory}")
                 return original_resolve(path, *args, **kwargs)
@@ -231,9 +228,7 @@ class PolicyRootAliasTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 redirect_stderr(stderr),
-                mock.patch.object(
-                    Path, "resolve", autospec=True, side_effect=fail_parent
-                ),
+                mock.patch.object(Path, "resolve", autospec=True, side_effect=fail_root),
                 mock.patch.object(policy_sources, "_run_policy_process") as run,
             ):
                 self.assertEqual(2, cli.main(args))
@@ -279,7 +274,7 @@ class PolicyRootAliasTests(unittest.TestCase):
             bound_policy = policy.parent.resolve() / policy.name
             retargeted = []
 
-            def retarget_at_file_hash(path):
+            def retarget_at_hash(path):
                 if not retargeted:
                     self.assertEqual(bound_policy, path)
                     alias.unlink()
@@ -287,9 +282,7 @@ class PolicyRootAliasTests(unittest.TestCase):
                     retargeted.append(True)
                 return original_hash(path)
 
-            with mock.patch.object(
-                cli, "sha256_file", side_effect=retarget_at_file_hash
-            ):
+            with mock.patch.object(cli, "sha256_file", side_effect=retarget_at_hash):
                 linked = self.load(alias / policy.name)
             self.assertEqual([True], retargeted)
             self.assertEqual(direct.identity, linked.identity)

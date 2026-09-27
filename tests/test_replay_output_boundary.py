@@ -192,6 +192,75 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
             self.assertEqual(0, cli.main(self.with_output(args, data[0] / "reports")))
             self.assertFalse(list(data[0].glob("*.launched")))
 
+    def file_link(self, link, target):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"host cannot create a file symlink: {exc}")
+
+    def test_bound_file_links_to_each_report_are_rejected_before_either_launch(self):
+        names = ("report.json", "report.md", "run-manifest.json")
+        for source_index in (0, 1):
+            for name in names:
+                with self.subTest(source=source_index, artifact=name):
+                    with self.fixture(True) as data:
+                        output = data[0] / "reports"
+                        output.mkdir()
+                        (output / name).write_bytes(b"bound input sentinel")
+                        nested = data[1][source_index] / "nested"
+                        nested.mkdir()
+                        self.file_link(nested / "input.txt", output / name)
+                        self.assert_rejected(data, output)
+
+    def test_link_chain_and_aliased_output_cannot_hide_bound_report_input(self):
+        with self.fixture() as data:
+            output = data[0] / "reports"
+            output.mkdir()
+            report = output / "report.json"
+            report.write_bytes(b"bound input sentinel")
+            target_alias = data[0] / "report-target-alias"
+            self.file_link(target_alias, report)
+            self.file_link(data[1][1] / "input.txt", target_alias)
+            output_alias = data[0] / "reports-alias"
+            self.make_link(output_alias, output)
+            self.assert_rejected(data, output_alias)
+
+    def test_unmodified_file_links_outside_and_inside_report_directory_still_work(self):
+        with self.fixture() as data:
+            directory, roots, args, snapshots = data
+            output = directory / "reports"
+            output.mkdir()
+            targets = (directory / "shared.txt", output / "unchanged.txt")
+            for index, target in enumerate(targets):
+                target.write_text(f"input {index}", encoding="utf-8")
+                self.file_link(roots[1] / f"input-{index}.txt", target)
+            before = cli.sha256_tree(roots[1])
+            self.assertEqual(0, cli.main(args))
+            self.assertEqual(before, cli.sha256_tree(roots[1]))
+            self.assertEqual("input 0", targets[0].read_text("utf-8"))
+            self.assertEqual("input 1", targets[1].read_text("utf-8"))
+            self.assertTrue((output / "report.json").is_file())
+            self.assertEqual([], list(snapshots.iterdir()))
+
+    def test_unresolvable_bound_link_target_fails_without_launch_or_mutation(self):
+        with self.fixture() as data:
+            directory, roots, _args, _snapshots = data
+            shared = directory / "shared.txt"
+            shared.write_bytes(b"bound input sentinel")
+            link = roots[1] / "input.txt"
+            self.file_link(link, shared)
+            original = Path.resolve
+
+            def fail_target(path, *args, **kwargs):
+                if path == link:
+                    raise OSError(f"private target {directory}")
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(
+                Path, "resolve", autospec=True, side_effect=fail_target
+            ):
+                self.assert_rejected(data, directory / "reports")
+
     def test_real_cli_overlap_returns_two_before_candidate_can_run(self):
         with self.fixture() as data:
             directory, roots, args, _snapshots = data

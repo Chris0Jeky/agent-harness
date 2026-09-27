@@ -521,6 +521,15 @@ def _validated_output_path(
                 raise ReplayInputError("output overlaps a bound process-policy tree")
             if output.is_relative_to(snapshot_root):
                 raise ReplayInputError("output overlaps a reserved process snapshot")
+            report_targets = {
+                (output / name).resolve()
+                for name in ("report.json", "report.md", "run-manifest.json")
+            }
+            for entry in policy_root.rglob("*"):
+                if entry.is_symlink() and entry.resolve(strict=True) in report_targets:
+                    raise ReplayInputError(
+                        "output overlaps a bound process-policy file target"
+                    )
     except ReplayInputError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
