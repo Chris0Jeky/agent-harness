@@ -189,7 +189,8 @@ class PolicyRootAliasTests(unittest.TestCase):
                 self.assertEqual(2, cli.main(args))
             run.assert_not_called()
             self.assertIn(
-                "process executable or policy file could not be read", stderr.getvalue()
+                "process executable or policy file could not be read",
+                stderr.getvalue(),
             )
             self.assertNotIn(str(directory), stderr.getvalue())
             self.assertEqual(before, sha256_tree(policy.parent))
@@ -209,9 +210,7 @@ class PolicyRootAliasTests(unittest.TestCase):
                             corpus, recording, alias / policy.name, output
                         )
                         stderr = io.StringIO()
-                        with redirect_stderr(stderr), mock.patch.object(
-                            policy_sources, "_run_policy_process"
-                        ) as run:
+                        with redirect_stderr(stderr), mock.patch.object(policy_sources, "_run_policy_process") as run:
                             self.assertEqual(2, cli.main(args))
                         run.assert_not_called()
                         self.assertIn("output overlaps", stderr.getvalue())
@@ -270,9 +269,7 @@ class PolicyRootAliasTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 redirect_stderr(stderr),
-                mock.patch.object(
-                    Path, "resolve", autospec=True, side_effect=fail_root
-                ),
+                mock.patch.object(Path, "resolve", autospec=True, side_effect=fail_root),
                 mock.patch.object(policy_sources, "_run_policy_process") as run,
             ):
                 self.assertEqual(2, cli.main(args))
@@ -295,9 +292,7 @@ class PolicyRootAliasTests(unittest.TestCase):
                     corpus, recording, alias / policy.name, output
                 )
                 stderr = io.StringIO()
-                with redirect_stderr(stderr), mock.patch.object(
-                    policy_sources, "_run_policy_process"
-                ) as run:
+                with redirect_stderr(stderr), mock.patch.object(policy_sources, "_run_policy_process") as run:
                     self.assertEqual(2, cli.main(args))
                 run.assert_not_called()
                 self.assertIn("replay input invalid:", stderr.getvalue())
