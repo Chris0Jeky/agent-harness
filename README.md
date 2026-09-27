@@ -112,7 +112,10 @@ pull request and push to `main`; workflow actions are pinned to immutable commit
 a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
 `dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
 template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
-`human_todo` against a file that exists. A repo that vendors nothing says so rather than
+`human_todo` against a file that exists, and default-branch server-side history protection
+(`non_fast_forward` + `deletion` ruleset or classic equivalent) when the effective floor
+posture is `core` — reported as `advisory` when missing, never a failure (issue #356).
+A repo that vendors nothing says so rather than
 emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
 repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),

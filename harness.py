@@ -5437,6 +5437,203 @@ def sensitive_data_findings(
     return findings
 
 
+# Floor 1.7.0 (issue #356) moved default-branch history below T4/wave_mode for
+# a non-sensitive repo out of the client-side deny floor: the `core` posture no
+# longer intercepts force-push or branch deletion, because that history is
+# meant to be protected server-side by a GitHub repository ruleset
+# (`non_fast_forward` + `deletion`) or classic branch protection. The audit leg
+# below measures that premise.
+EFFECTIVE_FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
+BRANCH_PROTECTION_CHECK = "default-branch history protection vs the floor posture"
+
+
+def effective_floor_posture(tier_data: dict) -> str:
+    """Effective floor posture for one merged tier declaration.
+
+    Mirrors `dispatch.floor_posture`'s structure: T4 and `wave_mode` are walls
+    whatever is declared; below that a declared `floor_posture` binds; without
+    one, `sensitive_data` keeps the wall. The default differs on purpose:
+    dispatch on this base still defaults to "guide", while the 1.7.0 contract
+    (issue #356) is "core" — which no longer intercepts force-push or branch
+    deletion client-side — and "core" binds here when declared.
+    """
+    tier = tier_data.get("tier", 1)
+    flags = tier_data.get("flags", {}) or {}
+    if tier >= 4 or bool(flags.get("wave_mode")):
+        return "wall"
+    sensitive = bool(flags.get("sensitive_data"))
+    declared = tier_data.get("floor_posture")
+    if declared == "core" and sensitive:
+        return "guide"  # a sensitive repository never runs core (review of #363)
+    if declared in EFFECTIVE_FLOOR_POSTURES:
+        return declared
+    if sensitive:
+        return "wall"
+    return "core"
+
+
+def default_branch_protection_findings(
+    repo: Path,
+    tier_data: dict,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict]:
+    """Measure server-side default-branch history protection under `core`.
+
+    Applies only when the effective floor posture is "core" — where the deny
+    floor no longer intercepts force-push or branch deletion client-side — or
+    when the owner declares `"floor_wiring": "none"` (no floor at all, so no
+    client-side interception either). Any other posture still intercepts, so
+    there is nothing server-side to measure and the leg emits nothing.
+
+    The `origin` remote is resolved with the same helpers as
+    `sensitive_data_findings`; a non-GitHub or missing origin is out of scope
+    and also emits nothing. Otherwise three `gh` probes, each host-pinned like
+    `github_visibility`, read the default branch, its branch ruleset, and —
+    only when the ruleset lacks both rules — classic branch protection. Every
+    emitted status is `ok`, `advisory` (owner preference: a missing
+    server-side rule never fails the audit) or `UNPROVEN`, never `MISMATCH`.
+    An `--offline` run refuses the network probes through the runner and
+    reports `UNPROVEN`, like the other reality checks.
+    """
+    if (
+        effective_floor_posture(tier_data) != "core"
+        and tier_data.get("floor_wiring") != "none"
+    ):
+        return []
+    resolved, rows = configured_remote_urls(repo, command_runner, deadline)
+    if not resolved or not rows:
+        return []
+    origin_urls: list[str] = []
+    for name, url, direction in rows:
+        if name == "origin" and url not in origin_urls:
+            if direction == "push":
+                origin_urls.insert(0, url)
+            else:
+                origin_urls.append(url)
+    slug = ""
+    for url in origin_urls:
+        slug = github_repo_slug(url)
+        if slug:
+            break
+    if not slug:
+        return []
+    rest_path = github_rest_repo_path(slug)
+    if not rest_path:
+        return []
+    branch_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}",
+        "--jq",
+        ".default_branch",
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, branch_argv, repo, deadline
+    )
+    branch = output.strip() if resolved else ""
+    if not branch or branch.lower() == "null":
+        if resolved:
+            answer = redact_probe_text(branch[:24]) or "<no output>"
+            evidence = (
+                f"`{' '.join(branch_argv)}` answered {answer!r}, "
+                "which is not a branch"
+            )
+        else:
+            evidence = probe_failure_note(branch_argv, failure)
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug}: default branch is unmeasured (offline, "
+                "unauthenticated, rate-limited, or gh is absent) — "
+                f"{evidence}",
+            )
+        ]
+    rules_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/rules/branches/{branch}",
+        "--jq",
+        '[.[].type]|join(",")',
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, rules_argv, repo, deadline
+    )
+    if not resolved:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug} branch {branch}: branch rules are unmeasured (offline, "
+                "unauthenticated, rate-limited, or gh is absent) — "
+                f"{probe_failure_note(rules_argv, failure)}",
+            )
+        ]
+    rule_types = [part.strip() for part in output.split(",")]
+    if "non_fast_forward" in rule_types and "deletion" in rule_types:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_OK,
+                f"{slug} default branch {branch} blocks force-push and deletion "
+                "server-side (ruleset rules non_fast_forward, deletion) — "
+                f"evidence: `{' '.join(rules_argv)}` -> {output.strip()}",
+            )
+        ]
+    rules_text = output.strip() or "<none>"
+    protection_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/branches/{branch}/protection",
+        "--jq",
+        "[.allow_force_pushes.enabled, .allow_deletions.enabled]"
+        '|map(tostring)|join(",")',
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, protection_argv, repo, deadline
+    )
+    if resolved and output.strip() == "false,false":
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_OK,
+                f"{slug} default branch {branch} blocks force-push and deletion "
+                "server-side (classic branch protection denies both) — "
+                f"evidence: `{' '.join(protection_argv)}` -> false,false",
+            )
+        ]
+    if resolved:
+        answer = redact_probe_text(output.strip()[:24]) or "<no output>"
+        protection_evidence = (
+            f"`{' '.join(protection_argv)}` answered {answer!r}, "
+            "which leaves force-push or deletion allowed"
+        )
+    else:
+        protection_evidence = probe_failure_note(protection_argv, failure)
+    return [
+        reality_finding(
+            BRANCH_PROTECTION_CHECK,
+            REALITY_ADVISORY,
+            f"{slug} default branch {branch} has no server-side rule blocking "
+            f"force-push and deletion (ruleset rules: {rules_text}; "
+            f"{protection_evidence}) — the `core` floor does not intercept "
+            "either client-side, so protect it with "
+            f"`gh api -X POST repos/{rest_path}/rulesets` creating ruleset "
+            "'protect-default-branch' (target branch, enforcement active, "
+            "conditions ref_name include ~DEFAULT_BRANCH, rules "
+            "non_fast_forward + deletion); see issue #356 for the body",
+        )
+    ]
+
+
 def human_todo_findings(
     repo: Path, tier: int, tier_data: dict[str, Any]
 ) -> list[dict[str, str]]:
@@ -5900,6 +6097,11 @@ def reality_findings(
         deadline = monotonic() + REALITY_BUDGET_SECONDS
     findings = sensitive_data_findings(
         repo, tier_data, command_runner=command_runner, deadline=deadline
+    )
+    findings.extend(
+        default_branch_protection_findings(
+            repo, tier_data, command_runner=command_runner, deadline=deadline
+        )
     )
     findings.extend(
         vendored_floor_findings(

@@ -60,6 +60,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
@@ -89,6 +90,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
@@ -118,6 +120,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
