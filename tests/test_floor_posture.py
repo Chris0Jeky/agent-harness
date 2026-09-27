@@ -472,11 +472,31 @@ class CorePostureTests(unittest.TestCase):
             "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x "
             "rm --recursive --force /srv/outside"
         )
-        for command in (long_rm, "rm --rec --f /srv/x", "rm -v --force x"):
+        for command in (
+            long_rm,
+            "rm --rec --f /srv/x",
+            "rm -v --force x",
+            # Review of #372: every abbreviation, later short clusters, and a
+            # backslash-newline continuation.
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm --r /srv/x",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm -v -rf /srv/x",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm /srv/x -rf",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm \\\n"
+            "  --recursive /srv/x",
+            "/bin/rm --no-preserve-root -r /srv/x",
+        ):
             with self.subTest(long_rm=command):
                 self.assertTrue(dispatch.command_carries_core_hint(command))
                 self.assertTrue(dispatch.command_carries_charter_hint(command))
-        for command in ("git rm --cached x", "rm --verbose x", "rm x; ls --reverse"):
+        for command in (
+            "git rm --cached x",
+            "rm --verbose x",
+            "rm x; ls --reverse",
+            # A command-position rm only: `--rm` flags and `-rm-` path parts
+            # are not an rm (review of #372).
+            "docker run --rm --read-only img",
+            "git push origin fix/floor-rm-long-flags --force-with-lease",
+        ):
             with self.subTest(not_long_rm=command):
                 self.assertFalse(dispatch.command_carries_core_hint(command))
         # A downloader name needs a word start (round-2 verification, LOW).

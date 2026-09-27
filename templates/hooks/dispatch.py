@@ -13194,10 +13194,13 @@ _HINT_SPAN = r"(?:[^|;&\n]|\\\n)*"
 _CHARTER_HINT = re.compile(
     r"--force|\bgit\b" + _HINT_SPAN + r"\bpush\b|\bpush\b" + _HINT_SPAN + r"\s\+[\w/]"
     r"|\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
-    # GNU long options and their unambiguous abbreviations (`--recursive`,
-    # `--rec`, `--force`), anywhere in the rm's segment (Codex P1 on
-    # claude-config#461). Linear: one lazy scan of at most 256 characters per `rm`.
-    r"|\brm\b[^|;&\n]{0,256}?\s--(?:re|f)[a-z]*\b"
+    # A recursive/force flag ANYWHERE in a command-position rm's arguments:
+    # GNU long options and every abbreviation (`--r`, `--rec`, `--force`) and
+    # later short clusters (`rm -v -rf x`, `rm x -rf`), across backslash-newline
+    # continuations (Codex P1 on claude-config#461; review of #372). Linear:
+    # one lazy scan of at most 256 characters per `rm`.
+    r"|(?<![\w.-])rm(?:\.exe)?\b(?:[^|;&\n]|\\\r?\n){0,256}?"
+    r"\s-(?:-[rf][a-z]*|[a-z]*[rf][a-z]*)\b"
     r"|\bunlink\b|\bshred\b|-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
     r"|\|\s*(?:\S*[\\/])?(?:(?:"
@@ -13259,7 +13262,8 @@ _CORE_REASON = re.compile(
 # the core hint can never double-check a command guide lets through.
 _CORE_HINT = re.compile(
     r"\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
-    r"|\brm\b[^|;&\n]{0,256}?\s--(?:re|f)[a-z]*\b"
+    r"|(?<![\w.-])rm(?:\.exe)?\b(?:[^|;&\n]|\\\r?\n){0,256}?"
+    r"\s-(?:-[rf][a-z]*|[a-z]*[rf][a-z]*)\b"
     # find's single-dash `-delete`, not git's `--delete` (a ref, not a file).
     r"|\bunlink\b|\bshred\b|(?<![\w-])-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b"
