@@ -8699,6 +8699,14 @@ class RealityCheckTests(unittest.TestCase):
         self.claude_home = self.root / "claude-home"
         (self.harness_root / "templates" / "hooks").mkdir(parents=True)
         (self.claude_home / "hooks").mkdir(parents=True)
+        # These tests pin the OTHER reality legs and their probe counts; the
+        # default-branch protection leg (issue #356) has its own module,
+        # tests/test_audit_branch_protection.py, so it is isolated here.
+        protection = mock.patch.object(
+            harness, "default_branch_protection_findings", return_value=[]
+        )
+        protection.start()
+        self.addCleanup(protection.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
