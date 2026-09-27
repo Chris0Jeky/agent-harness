@@ -68,7 +68,7 @@ after the final fix round, triage what arrives once, then ship or park.
 **Superseded (2026-07-26, issue #92):** the zero-skip rule this section used to state is
 replaced by the bounded pipeline — one review round + one fix round; fix commits only for
 confirmed CRITICAL/HIGH defects; everything else a tracked issue or a one-line decline, never
-a silent drop. Global CLAUDE.md law 2 is the home (mirrored in SPECS §1).
+a silent drop. Global law 2 (claude-config `rules/laws.md`) is the home; SPECS §1 points there.
 
 ## The redesign, ratified
 
