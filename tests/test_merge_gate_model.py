@@ -70,6 +70,10 @@ class ExhaustiveTests(unittest.TestCase):
             "uncounted_review": ("illegal_merge", "review rounds"),
             "changes_reopen": ("illegal_merge", "review rounds"),
             "conflict_keeps_review": ("illegal_merge", "reviewed"),
+            # #359: observer hardening and law 2g's semantic retarget
+            "semantic_retarget_keeps_review": ("illegal_merge", "reviewed"),
+            "early_critical": ("illegal_merge", "review rounds"),
+            "tick_before_push": ("illegal_merge", "aged"),
         }
         self.assertEqual(set(expected), set(model.MUTANTS))
         for mutant, (kind, fragment) in expected.items():
@@ -227,6 +231,16 @@ class LawScenarioTests(unittest.TestCase):
         )
         self.assertEqual(state.phase, "Merged")
 
+    def test_a_semantic_retarget_needs_a_fresh_review_but_keeps_aging(self):
+        state = run(HAPPY + ["tick", "retarget_semantic", "proof_pass", "publish"])
+        self.assertEqual((state.phase, state.reviewed, state.age), ("Review", False, 1))
+        state = run(
+            HAPPY
+            + ["tick", "retarget_semantic", "proof_pass", "publish", "review_pass"]
+            + ["ci_green", "tick", "tick", "evaluate", "merge"]
+        )
+        self.assertEqual(state.phase, "Merged")
+
     def test_a_conflicting_refresh_needs_a_fresh_review(self):
         state = run(HAPPY + AGED + ["refresh_conflict", "proof_pass", "publish"])
         self.assertEqual((state.phase, state.reviewed, state.age), ("Review", False, 0))
@@ -264,8 +278,27 @@ class CliTests(unittest.TestCase):
         first = list(model.random_traces(20, seed=3))
         self.assertEqual(first, list(model.random_traces(20, seed=3)))
         for trace in first:
-            state = run(trace["events"], trace["authority"])
+            state = model.initial(trace["authority"])
+            self.assertEqual(len(trace["refused"]), len(trace["events"]) + 1)
+            for index, event in enumerate(trace["events"] + [None]):
+                for refused in trace["refused"][index]:
+                    self.assertIsNone(model.step(state, refused))
+                if event is not None:
+                    state = model.step(state, event)
+                    self.assertEqual(state.phase, trace["phases"][index])
             self.assertEqual(state._asdict(), trace["final"])
+
+    def test_counters_are_checked_on_raw_successors(self):
+        """Violations are read from the uncollapsed successor, which terminal collapse would hide."""
+        result = model.model_check(frozenset({"third_round"}))
+        self.assertTrue(
+            any(
+                v["kind"] == "state" and "review rounds" in v["detail"]
+                and v["detail"].endswith(("after review_changes", "after review_critical"))
+                for v in result["violations"]
+            ),
+            result["violations"][:3],
+        )  # fmt: skip
 
     def test_all_mutants_cli_exits_zero_only_when_every_mutant_is_caught(self):
         out = io.StringIO()

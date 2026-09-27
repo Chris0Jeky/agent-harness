@@ -64,6 +64,7 @@ EVENTS = (
     "retarget",
     "refresh_merge",
     "refresh_conflict",
+    "retarget_semantic",
     "evaluate",
     "merge",
     "postmerge_start",
@@ -86,6 +87,9 @@ MUTANTS = {
     "uncounted_review": "a passing review does not count as a round",
     "changes_reopen": "requested changes set the CRITICAL reopen flag",
     "conflict_keeps_review": "a conflicting base refresh keeps the review",
+    "semantic_retarget_keeps_review": "a semantically interacting retarget keeps the review",
+    "early_critical": "a CRITICAL in the first round opens the reopen allowance",
+    "tick_before_push": "the head ages before it is pushed and publish keeps that age",
 }
 
 
@@ -98,7 +102,8 @@ class State(NamedTuple):
     logic: int = 0
     pushed_head: int = -1
     ready: bool = False  # published ready-for-review, never draft (law 2e)
-    # table bookkeeping (the spec below re-derives each from identities instead)
+    # table bookkeeping; the spec never trusts these (an event-driven observer re-derives
+    # each, and the evidence identities below must agree with it)
     proven: bool = False
     ci: str = "none"  # none | pending | green | red
     reviewed: bool = False
@@ -169,6 +174,8 @@ def step(s, event, mutants=frozenset()):
         if event in ("worker_fail", "lease_expired"):
             return s._replace(phase="Tasked")
         return None
+    if p in ("Proving", "Proven") and event == "tick" and "tick_before_push" in mutants:
+        return s._replace(age=min(s.age + 1, AGE_MINUTES))
     if p == "Proving":
         if event == "proof_pass":
             return s._replace(phase="Proven", proven=True, proven_for=(s.head, s.base))
@@ -183,7 +190,12 @@ def step(s, event, mutants=frozenset()):
             ready=s.ready or "draft_merge" not in mutants,
             pushed_head=s.head,
             ci="pending" if pushed or s.ci != "green" else s.ci,
-            age=0 if pushed and "age_kept_on_push" not in mutants else s.age,
+            age=(
+                0
+                if pushed
+                and not {"age_kept_on_push", "tick_before_push"} & set(mutants)
+                else s.age
+            ),
             age_head=s.head if pushed else s.age_head,
         )
         if s.reviewed:
@@ -220,7 +232,9 @@ def step(s, event, mutants=frozenset()):
             if rounds < allowed:
                 return _enter_fixing(s, review_rounds=rounds, reopened=reopen)
             return s._replace(phase="Parked", review_rounds=rounds)
-        if event == "review_critical" and s.review_rounds >= 1:
+        if event == "review_critical" and (
+            s.review_rounds >= 1 or "early_critical" in mutants
+        ):
             rounds = s.review_rounds + 1
             if not s.reopened:
                 return _enter_fixing(s, review_rounds=rounds, reopened=True)
@@ -266,9 +280,21 @@ def _published_event(s, event, mutants):
         return s._replace(ci="green", ci_for=(s.head, s.base))
     if event == "ci_red" and s.ci == "pending":
         return _enter_fixing(s, ci="red")
-    if event in ("retarget", "refresh_merge", "refresh_conflict"):
+    if event in ("retarget", "retarget_semantic", "refresh_merge", "refresh_conflict"):
         if s.refreshes >= MAX_REFRESHES:
             return s._replace(phase="Parked")
+        if event == "retarget_semantic":
+            # Same head, new base that interacts with the change: law 2g owes a review.
+            keep_review = "semantic_retarget_keeps_review" in mutants
+            return s._replace(
+                phase="Proving",
+                base=s.base + 1,
+                logic=s.logic + (0 if keep_review else 1),
+                refreshes=s.refreshes + 1,
+                proven=False,
+                ci="none",
+                reviewed=s.reviewed and keep_review,
+            )
         if event == "retarget":
             keep = "retarget_keeps_proof" in mutants
             return s._replace(
@@ -295,8 +321,12 @@ REVIEW_VERDICTS = frozenset({"review_pass", "review_changes", "review_critical"}
 HEAD_EVENTS = frozenset(
     {"worker_ok", "fix_logic", "fix_mechanical", "refresh_merge", "refresh_conflict"}
 )
-BASE_EVENTS = frozenset({"retarget", "refresh_merge", "refresh_conflict"})
-LOGIC_EVENTS = frozenset({"worker_ok", "fix_logic", "refresh_conflict"})
+BASE_EVENTS = frozenset(
+    {"retarget", "retarget_semantic", "refresh_merge", "refresh_conflict"}
+)
+LOGIC_EVENTS = frozenset(
+    {"worker_ok", "fix_logic", "refresh_conflict", "retarget_semantic"}
+)
 OBSERVED_ROUND_CAP = MAX_REVIEW_ROUNDS + 2
 
 
@@ -309,6 +339,7 @@ class Observer(NamedTuple):
     reviewed: bool = False
     proven: bool = False
     green: bool = False
+    unpushed: bool = False  # a head exists that has not been published yet
 
 
 def observe(o, event):
@@ -317,8 +348,15 @@ def observe(o, event):
     moved = head_moved or event in BASE_EVENTS
     return Observer(
         rounds=min(o.rounds + (event in REVIEW_VERDICTS), OBSERVED_ROUND_CAP),
-        criticals=min(o.criticals + (event == "review_critical"), 2),
-        age=0 if head_moved else min(o.age + (event == "tick"), AGE_MINUTES),
+        # law 2d: only a CRITICAL introduced by fixes, i.e. after a first round, reopens
+        criticals=min(o.criticals + (event == "review_critical" and o.rounds >= 1), 2),
+        # aging counts from the push of the current head, never from before it
+        age=(
+            0
+            if head_moved or (event == "publish" and o.unpushed)
+            else min(o.age + (event == "tick"), AGE_MINUTES)
+        ),
+        unpushed=head_moved or (o.unpushed and event != "publish"),
         reviewed=(
             False if event in LOGIC_EVENTS else o.reviewed or event == "review_pass"
         ),
@@ -561,24 +599,35 @@ def model_check(mutants=frozenset()):
 
 
 def random_traces(count, seed, authority=None, max_steps=200, mutants=frozenset()):
-    """Seeded random walks: a conformance corpus an implementation must replay identically."""
+    """Seeded random walks: a conformance corpus an implementation must replay identically.
+
+    Each trace carries, per step, the phase reached and the events the model refuses
+    in the state before that step (and in the final state), so a permissive
+    implementation that accepts a disabled event fails the corpus, not just a
+    strict one that rejects an enabled event.
+    """
     rng = random.Random(seed)
     for number in range(count):
         state = initial(authority or rng.choice(AUTHORITIES))
-        events = []
+        events, phases, refused = [], [], []
         for _ in range(max_steps):
-            enabled = [
-                e for e in EVENTS if step(state, e, mutants) not in (None, state)
-            ]
+            outcomes = {e: step(state, e, mutants) for e in EVENTS}
+            refused.append(sorted(e for e, nxt in outcomes.items() if nxt is None))
+            enabled = [e for e, nxt in outcomes.items() if nxt not in (None, state)]
             if not enabled:
                 break
             event = rng.choice(enabled)
             events.append(event)
-            state = step(state, event, mutants)
+            state = outcomes[event]
+            phases.append(state.phase)
+        else:
+            refused.append(sorted(e for e in EVENTS if step(state, e, mutants) is None))
         yield {
             "trace": number,
             "authority": state.authority,
             "events": events,
+            "phases": phases,
+            "refused": refused,
             "final": state._asdict(),
         }
 
