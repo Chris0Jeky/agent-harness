@@ -473,6 +473,36 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(records[f"lane/{self.real_id}"]["verdict"], "confirmed")
         self.assertEqual(records["lane/turn/20260926T120000"]["items"], 0)
 
+    def test_non_scalar_dimensions_degrade_to_null_and_metrics_still_run(self):
+        self.root.put(
+            "lane",
+            "008",
+            "app--odd3",
+            receipt(recipe=["x"], effort={"a": 1}, runtime=[1]),
+        )
+        path = self.root.path / "lane" / "coordinator" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["turns"][0]["kind"] = ["triage"]
+        state["turns"][0]["runtime"] = {"r": 1}
+        state["items"][self.fake_id]["decided_by"] = ["codex"]
+        path.write_text(json.dumps(state), encoding="utf-8")
+        records, _ = self.run_extract()
+        odd = records["lane/008/app--odd3"]
+        self.assertEqual(
+            (odd["recipe"], odd["effort"], odd["runtime"]), (None, None, None)
+        )
+        self.assertIn("jobs", ledger.metrics(records, "all"))
+
+    def test_a_repeated_finding_in_one_receipt_is_one_sighting(self):
+        self.root.put(
+            "lane", "009", "app--dup", receipt(findings=[self.real, self.real])
+        )
+        records, _ = self.run_extract()
+        self.assertEqual(
+            records[f"lane/{self.real_id}"]["sightings"],
+            ["lane/001/app--st-bh1", "lane/009/app--dup"],
+        )
+
     def test_a_failing_overlay_rolls_back_to_receipt_only_findings(self):
         original = ledger._overlay
 
@@ -618,6 +648,24 @@ class MetricsTests(unittest.TestCase):
         rediscovery = ledger.metrics(records, "dev", self.AS_OF)["rediscovery"]
         self.assertEqual(rediscovery["refuted_rediscovered_after_verdict"], 1)
         self.assertEqual(rediscovery["repeat_sightings"], 2)
+
+    def test_first_retained_sighting_after_the_verdict_counts(self):
+        records = self.records(
+            {
+                "verdict": "refuted",
+                "decided_at": "2026-09-26T12:00:00+00:00",
+                "sightings": ["j/late"],
+            }
+        )
+        records["j/late"] = {
+            "type": "job", "id": "j/late", "mode": "lens", "recipe": "bug-hunt",
+            "runtime": "muse", "effort": "high", "status": "completed",
+            "elapsed_seconds": 1.0, "findings": 1, "terminal_reason": None,
+            "started_at": "2026-09-27T01:00:00+00:00",
+        }  # fmt: skip
+        rediscovery = ledger.metrics(records, "dev", self.AS_OF)["rediscovery"]
+        self.assertEqual(rediscovery["refuted_rediscovered_after_verdict"], 1)
+        self.assertNotIn("repeat_sightings", rediscovery)
 
 
 class FetchTests(unittest.TestCase):
