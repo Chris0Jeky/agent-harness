@@ -5457,7 +5457,10 @@ def effective_floor_posture(tier_data: dict) -> str:
     (issue #356) is "core" — which no longer intercepts force-push or branch
     deletion client-side — and "core" binds here when declared.
     """
-    tier = tier_data.get("tier", 1)
+    # A malformed tier is reported by audit's own validation, never a crash
+    # here (review of #369, M3): the merge passes an invalid raw value through.
+    tier = tier_data.get("tier")
+    tier = tier if tier in TIER_NAMES else 1
     flags = tier_data.get("flags", {}) or {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
@@ -5616,8 +5619,23 @@ def default_branch_protection_findings(
             f"`{' '.join(protection_argv)}` answered {answer!r}, "
             "which leaves force-push or deletion allowed"
         )
+    elif "branch not protected" in failure.lower():
+        protection_evidence = (
+            f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
+        )
     else:
-        protection_evidence = probe_failure_note(protection_argv, failure)
+        # Only GitHub's own "Branch not protected" proves absence; a missing
+        # admin scope, a rate limit or an expired budget measured nothing
+        # (review of #369, M2).
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug} branch {branch}: rulesets lack non_fast_forward and "
+                f"deletion ({rules_text}) and classic protection is unmeasured "
+                f"— {probe_failure_note(protection_argv, failure)}",
+            )
+        ]
     return [
         reality_finding(
             BRANCH_PROTECTION_CHECK,
@@ -6099,17 +6117,19 @@ def reality_findings(
         repo, tier_data, command_runner=command_runner, deadline=deadline
     )
     findings.extend(
-        default_branch_protection_findings(
-            repo, tier_data, command_runner=command_runner, deadline=deadline
-        )
-    )
-    findings.extend(
         vendored_floor_findings(
             repo,
             harness_root,
             claude_home,
             command_runner=command_runner,
             deadline=deadline,
+        )
+    )
+    # Advisory-only, so it spends the shared budget AFTER the legs that can
+    # MISMATCH (review of #369, M1).
+    findings.extend(
+        default_branch_protection_findings(
+            repo, tier_data, command_runner=command_runner, deadline=deadline
         )
     )
     findings.extend(human_todo_findings(repo, tier, tier_data))

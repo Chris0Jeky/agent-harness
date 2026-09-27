@@ -178,16 +178,40 @@ class BranchProtectionFindingTests(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, detail)
 
-    def test_advisory_when_classic_probe_fails(self):
+    def test_advisory_when_classic_protection_is_absent(self):
         _, findings = self.run_protection(
             make_tier_data(),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
                 RULES_ARGV: (True, "deletion"),
+                PROTECTION_ARGV: (False, "", "gh: Branch not protected (HTTP 404)"),
             },
         )
         self.assertEqual([item["status"] for item in findings], ["advisory"])
         self.assertIn("gh api -X POST", findings[0]["detail"])
+
+    def test_unproven_when_classic_probe_fails_for_another_reason(self):
+        # Review of #369 (M2): a missing admin scope measured nothing.
+        for failure in ("", "gh: Resource not accessible by integration (HTTP 403)"):
+            with self.subTest(failure=failure):
+                _, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, "deletion"),
+                        PROTECTION_ARGV: (False, "", failure),
+                    },
+                )
+                self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+                self.assertNotIn("gh api -X POST", findings[0]["detail"])
+
+    def test_a_malformed_tier_never_crashes_the_leg(self):
+        # Review of #369 (M3): the merge passes an invalid raw tier through.
+        for tier in ("3", None, 9):
+            with self.subTest(tier=tier):
+                data = make_tier_data()
+                data["tier"] = tier
+                self.assertEqual(harness.effective_floor_posture(data), "core")
 
     def test_unproven_when_default_branch_is_unanswered(self):
         runner, findings = self.run_protection(make_tier_data(), {})
@@ -310,8 +334,11 @@ class BranchProtectionFindingTests(unittest.TestCase):
                 deadline=None,
             )
             labels = [item["check"] for item in findings]
-            self.assertIn("history protection", labels[0])
-            self.assertIn("vendored", labels[1])
+            # Review of #369 (M1): the advisory-only leg runs after the
+            # vendored leg, which can MISMATCH and must get the budget first.
+            vendored = next(i for i, x in enumerate(labels) if "vendored" in x)
+            history = next(i for i, x in enumerate(labels) if "history protection" in x)
+            self.assertLess(vendored, history)
 
 
 if __name__ == "__main__":
