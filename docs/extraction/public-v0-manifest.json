@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "54b38dc2e60ad98525139b77ac677a02b5bd142ce4ce0743b56bdd3c00c6f99b"
+      "sha256": "c2bb79dce59b98cf4d3b9e58f35a2ed04f88dc2aecf042752fb5977c009de423"
     },
     {
       "path": "replay_v0/compare.py",
