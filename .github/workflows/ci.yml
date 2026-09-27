@@ -160,7 +160,7 @@ jobs:
       - name: Run replay lint and formatting checks
         run: |
           python -m ruff check replay_v0
-          python -m black --check replay_v0
+          python -m black --check --diff replay_v0
 
   replay-tests:
     name: replay-tests
