@@ -37,8 +37,9 @@ judged against. It lives outside both producers so neither can grade itself.
 Every record has `provenance {producer, source, source_sha256, observed_at}`. With `--prior`,
 a record the runs root no longer holds is carried forward with `carried: true`. A finding whose
 receipt survives but whose coordinator item was pruned keeps the prior ledger's richer label
-(item table beats turn outcome beats none) and its PR fields, marked `labels_carried: true`; a
-fresher item-table label always wins. A record whose content changed names the prior content
+(a decided item beats a turn verdict, which beats a pending item, which beats none) and its PR
+fields, marked `labels_carried: true`. A live item-table observation is never overridden, and PR
+states are re-joined after the merge so carried PR URLs are observed too. A record whose content changed names the prior content
 digest in `supersedes`. Reusing `--prior` on every run is what makes the ledger outlive the
 coordinator's 30-day item pruning and 200-turn window.
 

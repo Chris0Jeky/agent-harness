@@ -380,12 +380,21 @@ def extract(root, observed_at, pr_states=None):
                     summary["coordinated_lanes"] += 1
         for finding in lane_findings.values():
             records[finding["id"]] = finding
-    for record in records.values():
-        if record["type"] == "finding" and record["pr_url"] and pr_states:
-            record["pr"] = pr_states.get(record["pr_url"])
+    join_pr_states(records, pr_states)
     summary["findings"] = sum(1 for r in records.values() if r["type"] == "finding")
     summary["turns"] = sum(1 for r in records.values() if r["type"] == "turn")
     return records, {"counts": dict(sorted(summary.items())), "problems": problems}
+
+
+def join_pr_states(records, pr_states):
+    """Attach observed PR states by URL; run again after merge_prior for carried URLs."""
+    if not pr_states:
+        return
+    for record in records.values():
+        if record["type"] == "finding" and record.get("pr_url"):
+            state = pr_states.get(record["pr_url"])
+            if isinstance(state, dict):
+                record["pr"] = state
 
 
 def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summary):
@@ -530,11 +539,21 @@ def load_ledger(path):
     return records
 
 
+DECIDED_STATUSES = frozenset(s for s, v in VERDICTS.items() if v != "pending")
+
+
 def _label_rank(record):
-    """How much coordinator knowledge a finding carries: item table > turn outcome > none."""
+    """Order label evidence: decided item > turn verdict > pending item > none.
+
+    A turn's fix/drop/defer is what moves an item out of pending, so a turn-derived
+    verdict outranks an older pending item label and is never overwritten by it.
+    """
     if not record.get("coordinated"):
         return 0
-    return 1 if record.get("status_raw") == "pruned" else 2
+    status = record.get("status_raw")
+    if status == "pruned":
+        return 2
+    return 3 if status in DECIDED_STATUSES else 1
 
 
 def merge_prior(current, prior):
@@ -553,8 +572,12 @@ def merge_prior(current, prior):
             carried += 1
             continue
         if new["type"] == "finding" and old.get("type") == "finding":
-            if _label_rank(old) > _label_rank(new):
+            # A live item-table observation is current truth and is never overridden.
+            live = new.get("status_raw") not in (None, "pruned")
+            if not live and _label_rank(old) > _label_rank(new):
+                worker = new.get("worker")
                 new.update({field: old.get(field) for field in LABEL_FIELDS})
+                new["worker"] = new["worker"] or worker
                 new["labels_carried"] = True
             for field in PR_FIELDS:
                 if new.get(field) is None and old.get(field) is not None:
@@ -959,6 +982,7 @@ def main(argv=None):
             )
             if args.prior:
                 records, carried = merge_prior(records, load_ledger(args.prior))
+                join_pr_states(records, pr_states)
                 summary["counts"]["carried_from_prior"] = carried
             summary["records"] = write_ledger(records, args.out, args.runs_root)
             summary["out"] = str(args.out)

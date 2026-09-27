@@ -386,6 +386,52 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(merged[f"lane/{self.real_id}"]["verdict"], "confirmed")
         self.assertTrue(merged[f"lane/{self.real_id}"]["coordinated"])
 
+    def set_status(self, fid, status):
+        path = self.root.path / "lane" / "coordinator" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["items"][fid]["status"] = status
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_a_stale_pending_label_never_overwrites_a_later_turn_verdict(self):
+        self.set_status(self.fake_id, "classified")
+        prior, _ = self.run_extract()
+        self.assertEqual(prior[f"lane/{self.fake_id}"]["verdict"], "pending")
+        self.prune(self.fake_id)  # the drop turn decided it, then the item aged out
+        current, _ = self.run_extract()
+        merged, _ = ledger.merge_prior(current, prior)
+        fake = merged[f"lane/{self.fake_id}"]
+        self.assertEqual((fake["verdict"], fake["status_raw"]), ("refuted", "pruned"))
+        self.assertNotIn("labels_carried", fake)
+
+    def test_a_live_item_is_never_overridden_by_a_prior_decision(self):
+        prior, _ = self.run_extract()  # real is fixing
+        self.set_status(self.real_id, "classified")  # its worker parked; re-triage
+        current, _ = self.run_extract()
+        merged, _ = ledger.merge_prior(current, prior)
+        self.assertEqual(merged[f"lane/{self.real_id}"]["verdict"], "pending")
+
+    def test_carried_pr_urls_join_fresh_pr_states(self):
+        prior, _ = self.run_extract()
+        self.prune(self.real_id)
+        path = self.root.path / "lane" / "coordinator" / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["items"].pop("w-1")
+        state["turns"] = []
+        path.write_text(json.dumps(state), encoding="utf-8")
+        states = {
+            "https://github.com/o/app/pull/7": {
+                "state": "MERGED",
+                "merged_at": "2026-09-01T00:00:00Z",
+            }
+        }
+        current, _ = self.run_extract(states)
+        self.assertIsNone(current[f"lane/{self.real_id}"]["pr_url"])
+        merged, _ = ledger.merge_prior(current, prior)
+        ledger.join_pr_states(merged, states)
+        real = merged[f"lane/{self.real_id}"]
+        self.assertEqual(real["pr_url"], "https://github.com/o/app/pull/7")
+        self.assertEqual(real["pr"]["state"], "MERGED")
+
     def test_a_fresher_item_label_still_wins_over_the_prior(self):
         prior, _ = self.run_extract()
         path = self.root.path / "lane" / "coordinator" / "state.json"
