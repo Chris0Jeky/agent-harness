@@ -36,7 +36,18 @@ Contract (BLUEPRINT §2, SPECS §5-6):
              opacity). Every other deny, and every ask, becomes a DOUBLE-CHECK: the
              floor denies once with a FLOOR_ACK key bound to that exact command and reason,
              and the identical command re-run with the trailing comment `# FLOOR_ACK=<key>`
-             proceeds. The default below T4/wave for a non-sensitive repository.
+             proceeds. The default below T4/wave for a non-sensitive repository
+             until 1.7.0; still what a sensitive repository's declared `core` renders as.
+    core  -> (owner decision 2026-09-27, issue #356; the default below T4/wave for a
+             non-sensitive repository since 1.7.0) default-branch history is guarded
+             SERVER-side by rulesets, so the client floor keeps only LOCAL destruction:
+             a destructive delete outside the project or through an unresolved operand,
+             a secret-file mutation, downloaded program text run directly, and privilege
+             elevation. Those render exactly as under guide; every other verdict
+             (force-push, git config execution, ref deletion, work-loss asks, launchers,
+             pure opacity) proceeds unless the command text carries a core hint or one
+             of its segments earns a core verdict. Core never denies what guide allows,
+             and a sensitive_data repository never runs it (a declared core -> guide).
   A `wall` posture ignores every acknowledgement. The `dispatcher error` fail-closed deny
   is never scaled. Codex has no ask channel, so guide is strictly kinder to it than the
   old blanket ask->deny; the wall mapping keeps that old behaviour.
@@ -59,7 +70,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.6.33 (2026-09-03)"
+FLOOR_VERSION = "1.7.0 (2026-09-27)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -9296,7 +9307,7 @@ def read_tier_file(path: str) -> dict:
     posture = data.get("floor_posture")
     if posture is not None and posture not in _FLOOR_POSTURES:
         raise ValueError(
-            'tier.json floor_posture must be "wall" or "guide" when present'
+            'tier.json floor_posture must be "wall", "guide" or "core" when present'
         )
     result = {"tier": tier, "flags": flags}
     if publication is not None:
@@ -9310,8 +9321,9 @@ def merge_floor_postures(configs: list) -> str | None:
     """Strictest declared posture across co-located or chained declarations.
 
     `wall` binds when any declaration sets it; `guide` binds only when at least
-    one declaration sets it and none says `wall`; otherwise nothing is declared
-    and the tier decides (`floor_posture`).
+    one declaration sets it and none says `wall`; `core` binds only when it is
+    the loosest thing declared and nothing stricter is; otherwise nothing is
+    declared and the tier decides (`floor_posture`).
     """
     declared = set()
     for cfg in configs:
@@ -9326,6 +9338,8 @@ def merge_floor_postures(configs: list) -> str | None:
         return "wall"
     if "guide" in declared:
         return "guide"
+    if "core" in declared:
+        return "core"
     return None
 
 
@@ -13130,7 +13144,7 @@ def check(
 # self-unstick) and #62 (re-tier the opacity class) in one seam: the analyzer's
 # verdict is computed exactly as before, then RENDERED by posture.
 
-_FLOOR_POSTURES = ("wall", "guide")
+_FLOOR_POSTURES = ("wall", "guide", "core")
 
 # A trailing shell comment is the acknowledgement carrier because it is inert
 # in bash and PowerShell alike and cannot alter what the command does. It is
@@ -13212,6 +13226,57 @@ _CHARTER_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# The core posture (owner decision 2026-09-27, issue #356). Default-branch
+# history is protected server-side by repository rulesets, which see every
+# runtime and cannot be defeated by shell opacity, so below T4/wave the client
+# floor keeps only what no server can protect: LOCAL destruction. A reason is
+# core when it names a destructive delete outside the project or through an
+# unresolved operand, a secret-looking target, downloaded program text run
+# directly, privilege elevation, or a sensitive_data repository's publication
+# guard (a declared tightening overlay is never relaxed by a posture). The
+# table is matched against the analyzer's own reason text, so every deny
+# literal is pinned by tests/test_floor_posture.py; an unrecognised NEW reason
+# proceeds under core, and that is the tradeoff the owner chose.
+_CORE_REASON = re.compile(
+    r"outside the project|filesystem/home root|with no clear target"
+    r"|with an empty target|relative target after leaving the project"
+    r"|dynamic delete|recursive-delete|recursive remove-item|\brm -rf\b"
+    r"|enumerate and delete|piping into remove-item|find execution/deletion"
+    r"|secret|straight into a shell|downloader output"
+    r"|privilege/identity elevation|^sensitive_data repo:",
+    re.IGNORECASE,
+)
+
+# The core hint: the charter hint's local-destruction vocabulary only (delete
+# verbs, privilege heads, program text piped or substituted from a download,
+# secret-looking names). Git push and force spellings, gh publication, nested
+# program text and work-loss spellings are deliberately absent -- they are the
+# families core gives up. Every alternative here is also in `_CHARTER_HINT`, so
+# the core hint can never double-check a command guide lets through.
+_CORE_HINT = re.compile(
+    r"\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
+    # find's single-dash `-delete`, not git's `--delete` (a ref, not a file).
+    r"|\bunlink\b|\bshred\b|(?<![\w-])-delete\b"
+    r"|\b(?:" + _HINT_PRIVILEGE + r")\b"
+    r"|\|\s*(?:\S*[\\/])?(?:(?:"
+    + _HINT_PRIVILEGE
+    + r"|env)\s+)?(?:"
+    + _HINT_INTERPRETERS
+    + r")(?:\.exe)?(?![\w.-])"
+    r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
+    # Program text an evaluator runs from a named downloader: backticks, a
+    # path-qualified downloader, `iex (irm ...)` (review of PR #363, MEDIUM).
+    # Each match starts with a charter-hint alternative. The span already eats
+    # path characters, so the downloader only needs a word-start guard; an
+    # `\S*` path group here backtracked quadratically (30k chars: 3.7s).
+    r"|(?:\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s))"
+    + _HINT_SPAN
+    + r"(?<![\w-])(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
+    r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
+    r"|\.netrc|\.npmrc|\.pypirc",
+    re.IGNORECASE,
+)
+
 # A command is checked as ONE text, and the analyzer returns its FIRST deny.
 # When that deny is opacity, a LATER segment (`; git reset --hard`,
 # `&& gh repo create x --public`) is never analysed. The hint above catches
@@ -13230,8 +13295,20 @@ def masked_segment_verdict(
     checker,
     remote_cache: dict | None = None,
     remote_deadline: float | None = None,
+    accepts=None,
 ):
-    """The first non-opacity verdict among the command's segments, or None."""
+    """The first verdict among the command's segments that ``accepts`` keeps, or None.
+
+    ``accepts(decision, reason)`` defaults to the guide rule (an ask, or a deny
+    that is not pure opacity); the core posture passes ``verdict_is_core``.
+    """
+    if accepts is None:
+
+        def accepts(decision, reason):
+            return decision == "ask" or (
+                decision == "deny" and not reason_is_pure_opacity(reason)
+            )
+
     # Join backslash-newline continuations BEFORE splitting on newlines, as
     # the whole-command path does, so `git reset \` + `--hard` is one segment.
     joined = remove_shell_line_continuations(command)
@@ -13260,9 +13337,7 @@ def masked_segment_verdict(
             )
         except Exception:  # a fragment the analyzer cannot parse is not evidence
             continue
-        if decision == "ask" or (
-            decision == "deny" and not reason_is_pure_opacity(reason)
-        ):
+        if accepts(decision, reason):
             return decision, reason
     return None
 
@@ -13273,18 +13348,26 @@ def floor_posture(tier_cfg: dict) -> str:
     T4 and wave_mode are walls whatever is declared (other agents' work is in
     the blast radius). Below that an explicit `floor_posture` declaration binds;
     without one, `sensitive_data` keeps the wall (BLUEPRINT §2: tightening
-    overlays) and everything else guides.
+    overlays) and everything else runs the core posture (1.7.0, issue #356).
+    A `sensitive_data` repository never runs core: a declared `core` renders
+    as `guide` there, because the analyzer returns its FIRST deny and a given-up
+    push verdict (an opaque refspec, a force spelling) can precede the public-
+    remote privacy check, so core would let a public leak through (review of
+    PR #363, HIGH).
     """
     tier = tier_cfg.get("tier", 1)
     flags = tier_cfg.get("flags", {}) or {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
+    sensitive = bool(flags.get("sensitive_data"))
     declared = tier_cfg.get("floor_posture")
+    if declared == "core" and sensitive:
+        return "guide"
     if declared in _FLOOR_POSTURES:
         return declared
-    if bool(flags.get("sensitive_data")):
+    if sensitive:
         return "wall"
-    return "guide"
+    return "core"
 
 
 def split_floor_ack(command: str) -> tuple[str, str | None]:
@@ -13314,6 +13397,24 @@ def reason_is_pure_opacity(reason: str) -> bool:
     return bool(_OPACITY_REASON.search(reason)) and not _OPACITY_EXCLUDED.search(reason)
 
 
+def verdict_is_core(decision: str, reason: str) -> bool:
+    """Whether the core posture keeps this verdict on the double-check path.
+
+    An ask is a work-loss confirmation, never core. Pure opacity is never core,
+    so the core posture can never double-check what guide lets through.
+    """
+    return (
+        decision == "deny"
+        and bool(_CORE_REASON.search(reason))
+        and not reason_is_pure_opacity(reason)
+    )
+
+
+def command_carries_core_hint(command: str) -> bool:
+    """Whether the command text, quotes included, spells a local-destruction action."""
+    return bool(_CORE_HINT.search(command)) or bool(_SECRET_PATH.search(command))
+
+
 def command_carries_charter_hint(command: str) -> bool:
     """Whether the command text, quotes included, spells a charter action."""
     return bool(_CHARTER_HINT.search(command)) or bool(_SECRET_PATH.search(command))
@@ -13329,15 +13430,23 @@ def apply_floor_posture(
 ) -> tuple[str, str]:
     """Render the analyzer's verdict under the effective posture.
 
-    `masked` is the first non-opacity verdict the analyzer gives one of the
-    command's LATER segments (`masked_segment_verdict`), consulted only when
-    the whole-command verdict is pure opacity.
+    `masked` is the verdict `masked_segment_verdict` found in one of the
+    command's LATER segments: under guide the first non-opacity verdict,
+    consulted only when the whole-command verdict is pure opacity; under core
+    the first core verdict, consulted whenever the whole verdict is not core.
     """
     if decision == "allow":
         return decision, reason
-    if floor_posture(tier_cfg) == "wall":
+    posture = floor_posture(tier_cfg)
+    if posture == "wall":
         return decision, reason
-    if decision == "deny" and reason_is_pure_opacity(reason):
+    if posture == "core":
+        if not verdict_is_core(decision, reason):
+            if masked is not None:
+                reason = f"{reason} A later segment: {masked[1]}"
+            elif not command_carries_core_hint(command):
+                return "allow", ""
+    elif decision == "deny" and reason_is_pure_opacity(reason):
         if masked is not None:
             reason = f"{reason} A later segment: {masked[1]}"
         elif not command_carries_charter_hint(command):
@@ -13482,10 +13591,21 @@ def main():
             _remote_deadline=remote_deadline,
         )
         masked = None
-        if (
-            decision == "deny"
-            and reason_is_pure_opacity(reason)
-            and floor_posture(tier_cfg) != "wall"
+        posture = floor_posture(tier_cfg)
+        if posture == "guide" and decision == "deny" and reason_is_pure_opacity(reason):
+            masked = masked_segment_verdict(
+                command,
+                tier_cfg,
+                project_dir,
+                payload_cwd or env_project_dir,
+                check,
+                remote_cache,
+                remote_deadline,
+            )
+        elif (
+            posture == "core"
+            and decision != "allow"
+            and not verdict_is_core(decision, reason)
         ):
             masked = masked_segment_verdict(
                 command,
@@ -13495,6 +13615,7 @@ def main():
                 check,
                 remote_cache,
                 remote_deadline,
+                accepts=verdict_is_core,
             )
         decision, reason = apply_floor_posture(
             decision, reason, command, ack, tier_cfg, masked

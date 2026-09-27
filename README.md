@@ -276,8 +276,16 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.33: 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
+Current state (2026-09-27): canonical source is **1.7.0**, the **core posture** (SPECS §5.4,
+owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a
+non-sensitive repository. Default-branch history is protected server-side by rulesets, so the
+client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes outside the
+project or through an unresolved operand, secret-file mutation, downloaded program text run
+directly, and privilege elevation. Force-push, ref deletion, git config execution, work-loss and
+pure opacity proceed. A `sensitive_data` repository never runs core (its declared `core` renders
+as `guide`), and `guide`/`wall` stay declarable. The deployed copy and the consumer markers
+follow in the SPECS §5.3 rollout order. History before 1.7.0 (2026-09-03): the immutable
+`floor-v1-final` tag preserves 1.6.21, and 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
 T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
 double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive

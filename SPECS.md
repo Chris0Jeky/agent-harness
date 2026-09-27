@@ -50,10 +50,11 @@ This repository's own deltas from the global merge rules:
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
-- `floor_posture` (optional): `wall` | `guide` — how the deny floor RENDERS its verdicts
-  (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`; `sensitive_data`
-  defaults to `wall`; everything else defaults to `guide`. Co-located and chained declarations
-  merge strictest-wins (`wall` beats `guide`; a declared `guide` never relaxes T4/wave).
+- `floor_posture` (optional): `wall` | `guide` | `core` — how the deny floor RENDERS its
+  verdicts (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`;
+  `sensitive_data` defaults to `wall`; everything else defaults to `core` (since 1.7.0; `guide`
+  before). Co-located and chained declarations merge strictest-wins (`wall` beats `guide` beats
+  `core`; no declared posture relaxes T4/wave).
 - `floor_wiring` (optional): `none` — the owner's declaration that this repository runs WITHOUT a
   floor: no `.codex/hooks.json` adapter and no global Claude `PreToolUse` hook (§5). It is a
   relaxation, so it binds only when every co-located declaration carries it. `doctor --repo`
@@ -420,24 +421,42 @@ re-trust and canaries → consumer marker refresh → each consumer's exact-CWD 
 Consumer marker updates and their runtime validation are separate reviewed rollout work; neither a
 producer PR nor a standalone scratch audit performs them.
 
-### §5.4 Posture and FLOOR_ACK (owner decision 2026-09-02; #21 slices #26 / #62)
+### §5.4 Posture and FLOOR_ACK (owner decisions 2026-09-02 and 2026-09-27; #21 slices #26 / #62; #356)
 
 The analyzer's verdict (`check()`: allow / ask / deny) is computed exactly as before and then
 RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_posture`):
 
-| Analyzer verdict | `wall` | `guide` |
-|---|---|---|
-| allow | allow | allow |
-| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
-| any other deny — the charter: force spellings, `rm -rf` outside the project, secret-file mutation, pipe-to-shell, sudo, remote-ref destruction, `sensitive_data` publication | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` |
-| ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes |
-| dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable |
+| Analyzer verdict | `wall` | `guide` | `core` |
+|---|---|---|---|
+| allow | allow | allow | allow |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) | **allow**, unless the command carries a CORE hint (`dispatch._CORE_HINT`: the charter hint's deletion verbs, privilege heads, downloaded program text piped or substituted into an interpreter, and secret-looking names — never git push/force, gh, nested program text or work-loss spellings) or a later segment earns a core verdict: then double-check |
+| a CORE deny (`dispatch.verdict_is_core`): `rm -rf`/`Remove-Item` outside the project or at a root, an unresolved delete operand, `find -delete`, pipe-to-Remove-Item, a secret-looking target, downloaded program text run directly, privilege elevation (a `sensitive_data` repository never runs `core`; see below) | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` | **double-check**, same mechanism |
+| any other deny — force spellings, `+refspec`, remote-ref destruction, git config/environment execution, launchers, T4 work-loss spellings, and the git pathspec-file opacity guide keeps as guarded (`git rm --pathspec-from-file`) | deny | **double-check** | **allow**, unless the command carries a core hint or a later segment earns a core verdict: then double-check |
+| ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes | **allow**, with the same core-hint and later-segment exception |
+| dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable | deny — never scaled |
 
 - Effective posture: T4 or `wave_mode` → `wall`, whatever is declared. Otherwise a declared
-  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `guide`. In the merge across
-  co-located and chained declarations an undeclared `sensitive_data` declaration VOTES `wall`, so
-  a nested or co-located `guide` cannot relax an outer tightening overlay; only the same
-  declaration saying both `sensitive_data` and `guide` is the owner's explicit choice.
+  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `core` (1.7.0). In the merge
+  across co-located and chained declarations an undeclared `sensitive_data` declaration VOTES
+  `wall`, so a nested or co-located `guide` or `core` cannot relax an outer tightening overlay;
+  only the same declaration saying both `sensitive_data` and a posture is the owner's explicit
+  choice. A `sensitive_data` repository never runs `core`: a declared `core` renders as `guide`
+  there, because the analyzer returns its FIRST deny and a given-up push verdict (an opaque
+  refspec, a force spelling) can precede the public-remote privacy check (review of #363).
+- Why `core` (owner decision 2026-09-27, issue #356): default-branch history is protected
+  SERVER-side by repository rulesets (`non_fast_forward` + `deletion`, no bypass actors) on every
+  repository that runs the floor. A ruleset sees every runtime — Claude, Codex, the Muse swarm,
+  Grok and humans — and has no parser to fool, while the client floor ran in six Codex roots and
+  paid the #21 false-positive tax for history families the server now covers. So below T4/wave
+  the client keeps only what no server can protect: local destruction. Security given up, by the
+  owner's explicit productivity-first choice: a force-push to a NON-default branch (recoverable
+  from the reflog and the PR record, and nothing merges without the gate), local work-loss
+  (`reset --hard`, `clean -fdx`, `checkout -- .`, `worktree remove --force`), git
+  config/environment execution laundering, and non-sensitive publication (`gh repo create
+  --public`). Invariant, test-pinned: `core` never denies what `guide` allows.
+- Under `core` the masked-segment re-check runs whenever the whole-command verdict is not core
+  (not only for opacity), and keeps the first CORE verdict among the later segments, sharing the
+  invocation's remote cache and deadline.
 - The key is the first 10 hex characters of SHA-256 over `<reason>\n<command without the marker>`,
   so it binds to that exact command AND verdict: a corrected command, or the same command denied
   for a new reason, is a fresh double-check. The marker is a trailing shell comment
@@ -447,12 +466,18 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 - `smoke_test.py` pins the ANALYZER under an explicit `wall` fixture and the posture layer in its
   own `floor-posture` section; `tests/test_floor_posture.py` asserts every deny literal in
   `dispatch.py` classifies deliberately — a reason the opacity table does not recognise stays on
-  the double-check path, never on allow.
+  the double-check path under `guide`. Under `core` the direction flips by design: only a reason
+  the core table recognises is double-checked, so a NEW deny site that should be core must add its
+  wording to `_CORE_REASON` (the test pins every current core family by its reason text).
 - What this is not: a wall. Below T4/wave the floor is, by owner decision, a speed bump: the
   irreversible core is protected by one deliberate re-read of the exact command, not by refusal.
   A repository that wants the old walls declares `"floor_posture": "wall"`.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
+
+This matrix pins the ANALYZER (every fixture declares `wall`). How a verdict renders below
+T4/wave is §5.4's posture table: under the default `core` posture the history families below are
+guarded server-side instead and proceed on the client.
 
 MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +main`,
 `rm -rf /`, `rm -rf ~`, `rm -rf` outside repo/scratch, `... | Remove-Item`, `... | del`,
