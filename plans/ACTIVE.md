@@ -76,7 +76,7 @@ completed 1.6.26 wave.
 | Outcome ledger over swarm receipts (#299/E1) | #354, #360 | **MERGED** `59db399`, `8434156`. #354's round 1 fixed 1 HIGH + 4 MEDIUM; its single reopen fixed one HIGH regression the fix introduced; Codex P2s closed by #360. |
 | Merge-gate model and checker (claude-config #432) | #355, #361 | **MERGED** `92d5795`, `91a31b9`. Round 1 found the spec trusted the table's own bookkeeping (three mutants certified lawful); fixed with an event-driven observer. A repo-wide raw-check guard turned CI red once (the model's `check()`), fixed by renaming. |
 
-Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; none of the floored public repositories, nor this one, protects `main` server-side. Owner decision 2026-09-27 (H-17, closed): default-branch rulesets are live on six repositories; the client floor shrinks to local destruction next.
+Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; before the decision, none of the floored public repositories, nor this one, protected `main` server-side. Owner decision 2026-09-27 (H-17, closed): default-branch rulesets are live on six repositories; the client floor shrinks to local destruction next.
 
 ## Active implementation
 
@@ -97,8 +97,9 @@ floor PRs of 2026-09-02.
 | guide posture / FLOOR_ACK | **#260** | **MERGED `d6392dd`** as floor 1.6.31 after two review rounds (the second closed the masked-charter-spelling hole). |
 | masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
-No implementation lane is open and nothing is queued; the outstanding work is the Codex half of the
-rollout above (H-15) and the runtime-home posture proof (H-16). Closing H-15 does not close H-16.
+Queued (2026-09-27): the client floor's local-destruction `core` posture and its consumer rollout (#356,
+owner decision recorded under H-17). Also outstanding: the Codex half of the rollout above (H-15). H-16
+closed on 2026-09-07.
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is
 its code and tests only; the shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`,
