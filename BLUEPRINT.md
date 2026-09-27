@@ -441,7 +441,7 @@ selected scripts — NOT caches/history) with a private remote, plus scheduled b
 from gone.
 
 - **Global CLAUDE.md** (ratified 2026-07-26, issue #92; the claude-config repo is the
-  canonical home and SPECS §1 the in-repo reference mirror): the universal laws once re-earned
+  only home; SPECS §1 points there — the in-repo mirror was pruned for drift, #358): the universal laws once re-earned
   per repo as duplicate memory files — never merge red CI, bounded reviews (one round + one
   fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,

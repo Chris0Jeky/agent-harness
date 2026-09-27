@@ -2,148 +2,28 @@
 
 Last Updated: 2026-07-26 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
-## §1 Global `~/.claude/CLAUDE.md` — the shipped law set
+## §1 Global laws — pointer, not a mirror
 
-Ratified 2026-07-26 (issue #92; mirrored from claude-config branch `policy/autonomy-first`,
-tip `734d007`). The claude-config repo (`~/.claude`, its own T3 repo) is the CANONICAL home;
-this section is a dated reference mirror so the harness repo reads stand-alone. On any drift,
-claude-config wins and this copy is the bug — refresh the mirror, never fork it. The named
-models inside the mirror belong to claude-config's file; this repo's own routing text (§8)
-still names no routing-tier assignments (its one model mention is the declared family-wide
-Haiku ban). The per-repo memory duplicates the law set graduated are deleted — the last two in
-this repo's own memory were folded 2026-07-26. `doctor --config-root <claude-config>` measures
-the source `CLAUDE.md` against deployed `~/.claude/CLAUDE.md` and source `codex/AGENTS.md`
-against deployed `~/.codex/AGENTS.md` as separate exact-byte checks. The supplied directory must
-be the clean, published `main` checkout of the harness origin's `claude-config` sibling, with
-both guidance paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable
-byte mismatch fails. This mirror itself still asserts nothing about deployment.
+The global law set lives in the claude-config repository, and it is the only copy. Claude loads
+`rules/laws.md`, deployed as `~/.claude/rules/laws.md`; Codex reads the same contract as
+`codex/AGENTS.md`, and claude-config's `tests/check-law-parity.ps1` keeps those two in step. This
+section used to hold a dated verbatim mirror (ratified 2026-07-26, issue #92). The mirror drifted
+from laws 2f/2g, and the drift misled a review (issue #358), so law 8 pruned it. A "global law N"
+or "CLAUDE.md law N" pointer means law N of that file; a bare "law N" in BLUEPRINT.md means
+BLUEPRINT §0's own twelve laws, which are numbered differently.
 
-```markdown
-# Global laws — all repos, all tiers
+`doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
+byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, and source
+`codex/AGENTS.md` against `~/.codex/AGENTS.md`. The supplied directory must be the clean,
+published `main` checkout of the harness origin's `claude-config` sibling, with both guidance
+paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable byte mismatch
+fails.
 
-Blueprint: the active sibling `agent-harness/BLUEPRINT.md` checkout · Estate registry: `~/.claude/ESTATE.md`
-
-**What the harness is for.** The harness guards against catastrophe, not against capability.
-Hard walls exist only for the irreversible: secret exposure, destroyed work, rewritten shared
-history, public leaks. Everything reversible is yours to do autonomously — tiers scale
-*verification* with blast radius, they never subtract autonomy. A small or new repo runs free;
-a production repo earns extra checks. An autonomous session is judged by finished tasks, and
-when ceremony and throughput conflict outside the irreversible core, throughput wins and the
-ceremony is the bug — file it as an issue and keep working. Declared authority
-(`tier.json`) and the irreversible core are never ceremony.
-
-## Non-negotiable
-
-1. Never merge a PR with failing CI. Investigate every failure; never dismiss as flaky.
-2. Every PR gets one real review — and no review loops. Post findings on the PR; triage every
-   comment once (bots included). Fix only what blocks a merge: confirmed correctness, security, or data-loss defects (CRITICAL/HIGH). Then
-   one verification pass scoped to the fix diff. Everything else — style, MEDIUM/LOW, ideas,
-   out-of-scope findings — becomes a tracked issue or a one-line decline on the thread, never a
-   fix-commit cascade and never a silent drop; explicitly classify informational / non-finding
-   notices without inventing a commit. Two rounds is the ceiling: after them, ship or park —
-   only a new CRITICAL introduced by the fixes reopens the pipeline — once, and only for that
-   defect; a second reopen parks the PR. Never pause mid-pipeline
-   to ask whether to continue — the answer is yes. Publish ready-for-review, never parked in
-   draft: draft only while the work is still being written, marked ready the moment it is
-   complete, never merged from draft — a draft PR does not invite the bot reviewers. At T3+
-   request the Codex review (Codex only, never Copilot) at ready-for-review and once more
-   after the final fix round; triage its comments by the same severity bar (optional below
-   T3 — but comments that do arrive get the same one-pass triage). Operational detail: the
-   `review-and-ship` skill.
-3. Never claim done/verified without running the thing that proves it. Always state what was
-   NOT verified. Close work with: changed / verified / NOT verified / residual risk.
-4. GitHub hygiene: "Closes #N" fires even quoted or negated — verify issue links after body
-   edits. Never `--delete-branch` a stacked base PR (cascade-closes children unreopenably).
-   In a PR stack, merge the oldest first, never the newest; after a base lands, retarget its
-   children and confirm via the API before merging them.
-5. Surface the repo's human-action file (HUMAN_TODO.md or its declared alias — see ESTATE.md)
-   in every summary. Apply [`CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo`](CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo)
-   for evidence and completion. When items accumulate or the human asks to be guided, walk the
-   backlog via the `guided-walkthrough` skill (numbered q-N items: context + suggested action +
-   step-by-step guide for human-only ones).
-6. Questions: batch true blockers into ONE question; otherwise proceed on a named assumption
-   ("Assumption: X. Reason: Y. Reversible by Z.").
-7. Worktrees: guard preamble is the first action; `$WT_PROJECT_DIR` paths only; create with
-   `--detach origin/main`, never branch refs, then `git switch -c <branch>` before committing —
-   a detached worktree's commits are held only by its own HEAD and die with its removal; plain
-   `git worktree remove` only, never `--force`: a refusal means work is still in there;
-   coordinator verifies main is clean after waves.
-8. Structure arrives with the second item. Don't build speculative scaffolding. When a lesson
-   recurs, promote it up the enforcement ladder (memory → CLAUDE.md → skill → hook → CI →
-   structure) to the cheapest layer that actually enforces it — and prune the old copy.
-9. Before working in an unfamiliar repo: check `~/.claude/ESTATE.md` (junk wrappers and
-   frozen snapshots exist) and the repo's `.agent-harness/tier.json` — a legacy
-   `.claude/tier.json` survives in some older repos, and where both exist the strictest
-   declaration binds (higher tier, union of tightening overlays; a work-loss guard relaxes
-   only when every declaration agrees). Authority is declared, not negotiated. An unregistered
-   repo with no production signals (deploys, other users or published consumers, money,
-   sensitive data) runs at
-   sandbox autonomy — do the work, propose a tier in the handoff; with such signals, propose
-   the tier first.
-10. Weak-model rails: if you are not the top routed model, never merge, never edit canonical
-    docs, the deny floor, or gates. Open PRs and let the gate decide.
-11. Every gate loop terminates. Two review rounds (law 2); three genuinely different attempts
-    at a red check; one re-measure of a disputed fact; a task parks at roughly twice its
-    budget. Then ship what is sound, park what is
-    not — tracked issue plus a one-line handoff — and move to the next task. Circling a gate
-    is not diligence; it is the failure mode this law exists to stop.
-12. Mission first. Harness, floor, gate, and doc work happens when it IS the mission, never as
-    a detour from it — friction found mid-task becomes a one-line tracked issue, not a fix.
-    A session that polishes evidence but finishes nothing has failed, whatever its rigor.
-
-## Tier ladder (by blast radius)
-
-T0 tombstone · T1 sandbox · T2 daily driver · T3 workshop · T4 live wire
-Tiers add verification, never permission: T1/T2 ship on green checks, T3 adds one bounded
-independent review, T4 runs the repo's full declared gate.
-Overlays tighten posture regardless of tier: `sensitive_data`, `wave_mode`,
-`dormant_production`. Details in the blueprint.
-
-## Working style
-
-- **Commit in small, logical increments as you work** — standing authorization; don't wait to be
-  asked, and don't bundle unrelated changes. No `Co-Authored-By` / "Generated with" trailers
-  (`includeCoAuthoredBy:false` is the settings default — keep it off in every repo).
-- **Publish autonomously; merge within your tier's gate.** Standing authorization covers pushing
-  scoped branches, opening ready-for-review PRs after relevant local checks, and merging once the
-  tier's gate is met: **T1/T2** — proving checks green at the head and comments triaged; that is
-  the whole gate, no independent review and no waiting required. **T3** — plus one independent
-  review pass at the current head (bot or agent), bounded per law 2. **T4** — the repo's declared
-  full gate. These are per-tier defaults — a repo's declared `.agent-harness/tier.json`
-  authority binds over them (`merge: gated` / `human-only` means exactly that at any tier, and
-  floor/dispatcher changes stay T4-class everywhere). Evidence is scoped, not global: a head
-  change re-proves what changed — re-run the checks that exercise it; a fresh review round is
-  owed only when the fixes went beyond the reviewed findings or touched new logic. A base
-  change counts as a head change: a retarget or a landed stack base moves the merge base while
-  the head SHA stays put — re-prove CI and review against the new base before merging. Where no
-  CI exists, proving checks are the narrowest commands that exercise the change plus the repo's
-  declared gate ritual; a run that never reads the changed files is not a green.
-- **Never squash-merge — preserve full commit history and count.** Merge PRs with a merge commit
-  (`gh pr merge --merge`, or the GitHub "Create a merge commit" option), never `--squash`. Rebase is
-  acceptable (keeps the count) but a merge commit is preferred (original SHAs + a merge marker).
-  Squash-merge was disabled repo-side across the estate (2026-07-18); if a repo re-enables it, turn
-  it back off. `atlasan/series_tools_python` still needs an admin to disable it.
-- **Right-size compute cheapest-dial-first (effort → model → agent count).** The standard:
-  **Opus 5 low** is the generalist default; **Opus 5 high** for code implementation, reviews, and
-  anything else judgment-heavy — Opus 5 costs what Opus 4.8 did, is far more effective, and per
-  *successful* task at low effort is level with Sonnet. **Sonnet 4.6 medium/high** is therefore for work
-  genuinely *beneath* Opus 5 low, not a way to save money (**never Haiku** — quality too low; no
-  agent pin, CLI flag, config key or env var may select it — `tests/check-agent-models.ps1` enforces
-  all four); avoid Sonnet 5 as a
-  default. **Fable 5 at high or xhigh** for the really difficult calls that need the most
-  intelligence — reserved by value, not rationed by access. Start
-  **inline**; fan out only when regions are disjoint / context >20k / an independent lens is needed;
-  right-size fleets (≤3–5; ≤8–12 for a sweep) — never a reflexive fleet. Full ladder: the
-  `model-effort-routing` skill.
-
-## Machine
-
-Windows quirks and environment fixes live in `~/.claude/MACHINE.md` — read it before fighting
-a tool failure that smells environmental (git resolution, PowerShell chaining, vitest OOM).
-Its "RAM & MCP hygiene" section binds long or looped sessions on this box: never declare the
-same MCP server at two scopes (user + project = two gateways, not one), and a relaunching loop
-sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-config repo).
-```
+This repository's own deltas from the global merge rules:
+- `templates/hooks/dispatch.py` changes are T4-class whatever this repository's tier. They need the
+  smoke suite, the unit tests, and an independent read-only review, per CLAUDE.md's change rules.
+- Everything else follows the global laws at this repository's declared tier (T3 workshop, push
+  and merge free).
 
 ## §2 `.agent-harness/tier.json` schema
 
@@ -860,7 +740,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - **Where the model name may live (the derivation contract).** The `model-effort-routing` skill
   is the SOURCE: it alone defines which named model fills `default`. Prose — this spec, the
   blueprint, the scheduled-routine description — carries the tier name and points at the skill,
-  never a model name (the §1 mirror's QUOTED text is the one exemption — see §13). Agent definitions are the ONE permitted DERIVED copy, because `model:` in
+  never a model name (§1 no longer quotes the law text, so there is no exemption). Agent definitions are the ONE permitted DERIVED copy, because `model:` in
   `~/.claude/agents/gardener.md` is a machine-read field that cannot hold an indirection. Being
   permitted, that copy is governed rather than trusted:
   1. Changing which model fills a tier in the skill is NOT DONE until every agent definition
@@ -919,10 +799,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
   `model-effort-routing` (effort→model→fan-out ladder and fleet caps ≤3–5 / ≤8–12), and
   `review-and-ship` (the §14 bounded review pipeline in executable form). These are
   the single home for their behavior — in particular, `model-effort-routing` is the ONLY place that
-  names models and their effort bindings (the dated §1 mirror QUOTES claude-config's file,
-  which names models in its working style — a quotation, not a second home: the skill stays
-  authoritative for model names even where the mirror's text disagrees, and claude-config stays
-  authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
+  names models and their effort bindings (claude-config's `rules/laws.md` also names models in
+  its working style; the skill stays authoritative for model names where the two disagree, and
+  claude-config stays authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
   and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
   at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
@@ -935,7 +814,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 BLUEPRINT §1's T3 "bounded review pipeline" slot is filled by the `review-and-ship` skill,
 shipped from claude-config for both runtimes. Reference, don't restate: the skill file is the
-single home for the step-by-step, and law 2 of the §1 mirror plus BLUEPRINT law 11 are the
+single home for the step-by-step, and global law 2 (claude-config `rules/laws.md`) plus BLUEPRINT law 11 are the
 law it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
 commits only; the rest tracked or declined on the thread), one fix round verified against the
 fix diff — at T3+ the re-requested Codex review after that fix round IS the verification pass,
