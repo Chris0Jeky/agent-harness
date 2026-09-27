@@ -112,8 +112,9 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     replay = subparsers.add_parser("replay", help="compare two policy sources")
-    replay.add_argument("--baseline", required=True)
-    replay.add_argument("--candidate", required=True)
+    source_help = "recorded:<path>, process:<argv>, or process-json:<JSON-array>"
+    replay.add_argument("--baseline", required=True, help=source_help)
+    replay.add_argument("--candidate", required=True, help=source_help)
     replay.add_argument("--corpus", required=True)
     replay.add_argument("--output", required=True)
     replay.add_argument(
@@ -243,12 +244,36 @@ def _load_recorded_source(raw_path: str) -> LoadedPolicySource:
     )
 
 
-def _load_process_source(raw_argv: str, timeout: float) -> LoadedPolicySource:
-    argv = raw_argv.split(",")
-    if len(argv) < 2 or any(not item or "\r" in item or "\n" in item for item in argv):
-        raise ReplayInputError(
-            "process source must be a comma-separated argv ending in a policy file"
+def _load_process_source(
+    raw_argv: str, timeout: float, *, json_argv: bool = False
+) -> LoadedPolicySource:
+    if json_argv:
+        try:
+            argv = json.loads(raw_argv)
+        except (ValueError, RecursionError) as exc:
+            raise ReplayInputError("process-json source is not valid JSON") from exc
+    else:
+        # Do not guess JSON from brackets or reinterpret legacy quoting.
+        argv = raw_argv.split(",")
+    if (
+        not isinstance(argv, list)
+        or len(argv) < 2
+        or any(
+            not isinstance(item, str)
+            or not item
+            or any(character in item for character in "\0\r\n")
+            for item in argv
         )
+    ):
+        raise ReplayInputError(
+            "process source requires at least two nonempty, single-line argv strings "
+            "without NUL, ending in a policy file"
+        )
+    try:
+        for item in argv:
+            item.encode("utf-8")
+    except UnicodeError as exc:
+        raise ReplayInputError("process argv must contain valid Unicode text") from exc
     policy_path = Path(argv[-1])
     if not policy_path.is_file():
         raise ReplayInputError("process source must end in a readable policy file")
@@ -341,13 +366,16 @@ def _load_policy_source(value: str, timeout: float) -> LoadedPolicySource:
     kind, separator, payload = value.partition(":")
     if not separator or not payload:
         raise ReplayInputError(
-            "policy source must use recorded:<path> or process:<argv>"
+            "policy source must use recorded:<path>, process:<argv>, "
+            "or process-json:<JSON-array>"
         )
     if kind == "recorded":
         return _load_recorded_source(payload)
-    if kind == "process":
-        return _load_process_source(payload, timeout)
-    raise ReplayInputError("policy source kind must be recorded or process")
+    if kind in {"process", "process-json"}:
+        return _load_process_source(payload, timeout, json_argv=kind == "process-json")
+    raise ReplayInputError(
+        "policy source kind must be recorded, process, or process-json"
+    )
 
 
 def _generated_at() -> str:

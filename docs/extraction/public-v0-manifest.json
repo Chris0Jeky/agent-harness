@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "029653f9d1843bb1b910b6e55cda57e52b3402b589aa612577e6648a3b1efe30"
+      "sha256": "54b38dc2e60ad98525139b77ac677a02b5bd142ce4ce0743b56bdd3c00c6f99b"
     },
     {
       "path": "replay_v0/compare.py",
@@ -83,7 +83,7 @@
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "d02afd659f429b57d9a8eb5395ea90b3f40c34fa96541b821b55f568c7099ae5"
+      "sha256": "15f5ed21bdfd9eff92e5aa46de97acd24cb211669feadb2aa3991e97b79b6398"
     },
     {
       "path": "replay_v0/reports.py",

@@ -123,9 +123,9 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
         with self.fixture() as data:
             alias = data[0] / "policy-alias"
             self.make_link(alias, data[0])
-            data[2][data[2].index("--candidate") + 1] = (
-                f"process:{sys.executable},{alias / 'candidate-policy/policy.py'}"
-            )
+            data[2][
+                data[2].index("--candidate") + 1
+            ] = f"process:{sys.executable},{alias / 'candidate-policy/policy.py'}"
             self.assert_rejected(data, data[1][1])
 
     def test_snapshot_roots_and_their_descendants_are_reserved_for_both_sources(self):
@@ -139,7 +139,8 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                                 f"{sys.executable},{data[1][index] / 'policy.py'}", 30.0
                             )
                             reserved = data[3] / (
-                                "replay-process-inputs-" + loaded.source.snapshot_identity
+                                "replay-process-inputs-"
+                                + loaded.source.snapshot_identity
                             )
                             output = reserved / "reports" if nested else reserved
                             self.assert_rejected(data, output)
