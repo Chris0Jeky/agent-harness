@@ -203,7 +203,7 @@ class ReplayProcessArgvTests(unittest.TestCase):
     def test_json_is_supported_for_both_process_sources(self):
         with fixtures.CliTests().fixture("same") as data:
             directory, corpus, recording, candidate = data
-            policy_root = directory / "policies"
+            policy_root = directory / "json-policy-sources"
             policy_root.mkdir()
             policy = policy_root / "entry,point.py"
             candidate.rename(policy)
