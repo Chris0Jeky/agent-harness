@@ -513,6 +513,10 @@ class CorePostureTests(unittest.TestCase):
         # so many `rm` words on one line stay linear (1.7.1).
         dispatch.command_carries_core_hint("rm a " * 20000 + "b " * 50000)
         dispatch.command_carries_charter_hint("rm a " * 20000 + "b " * 50000)
+        # Round-2 verification of #372: a trailing `[a-z]*\\b` after the flag
+        # backtracked quadratically on a long letter run (20k chars: 3.2s).
+        dispatch.command_carries_core_hint("rm x -" + "r" * 40000 + "1")
+        dispatch.command_carries_core_hint("rm " * 80 + "x -" + "r" * 20000 + "1")
         self.assertLess(time.perf_counter() - started, 2.0)
         self.assertFalse(
             dispatch.command_carries_core_hint("git push --force origin main")

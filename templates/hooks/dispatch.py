@@ -13200,7 +13200,7 @@ _CHARTER_HINT = re.compile(
     # continuations (Codex P1 on claude-config#461; review of #372). Linear:
     # one lazy scan of at most 256 characters per `rm`.
     r"|(?<![\w.-])rm(?:\.exe)?\b(?:[^|;&\n]|\\\r?\n){0,256}?"
-    r"\s-(?:-[rf][a-z]*|[a-z]*[rf][a-z]*)\b"
+    r"\s-(?:-[rf]|[a-z]*[rf])"
     r"|\bunlink\b|\bshred\b|-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
     r"|\|\s*(?:\S*[\\/])?(?:(?:"
@@ -13263,7 +13263,7 @@ _CORE_REASON = re.compile(
 _CORE_HINT = re.compile(
     r"\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
     r"|(?<![\w.-])rm(?:\.exe)?\b(?:[^|;&\n]|\\\r?\n){0,256}?"
-    r"\s-(?:-[rf][a-z]*|[a-z]*[rf][a-z]*)\b"
+    r"\s-(?:-[rf]|[a-z]*[rf])"
     # find's single-dash `-delete`, not git's `--delete` (a ref, not a file).
     r"|\bunlink\b|\bshred\b|(?<![\w-])-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b"
