@@ -21,6 +21,7 @@ Contract: docs/evals/OUTCOME_LEDGER.md.
 
 import argparse
 from collections import Counter, defaultdict
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -30,6 +31,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 SCHEMA = "outcome-ledger/v1"
 PR_STATES_SCHEMA = "outcome-ledger/pr-states/v1"
@@ -55,6 +57,20 @@ VERDICTS = {
 TURN_DECISIONS = {"fix": "confirmed", "drop": "refuted", "defer": "deferred"}
 PUBLICATION = ("published", "merged", "rejected", "deferred")
 TERMINAL_PR = {"merged", "rejected"}
+STRUCTURE_ERRORS = (TypeError, AttributeError, KeyError, ValueError)
+# Finding fields that only a coordinator observation can supply.
+LABEL_FIELDS = (
+    "coordinated",
+    "status_raw",
+    "verdict",
+    "class",
+    "judge",
+    "judge_verified",
+    "decided_at",
+    "reason",
+    "worker",
+)
+PR_FIELDS = ("pr_url", "publication", "worker_verify", "pr")
 
 
 class LedgerError(Exception):
@@ -166,6 +182,10 @@ def split_for(cluster):
 def _clip(value, limit):
     text = str(value or "")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _list(value):
+    return value if isinstance(value, list) else []
 
 
 def _int_or_none(value):
@@ -296,16 +316,29 @@ def extract(root, observed_at, pr_states=None):
                 problems.append({"path": str(path), "error": _clip(exc, 200)})
                 summary["unreadable_receipts"] += 1
                 continue
-            job_record = _job_record(lane, wave, job, path, sha, data, observed_at)
+            try:
+                job_record = _job_record(lane, wave, job, path, sha, data, observed_at)
+                report = (
+                    data.get("report") if isinstance(data.get("report"), dict) else {}
+                )
+                raws = [
+                    raw
+                    for raw in _list(report.get("findings"))
+                    if isinstance(raw, dict) and raw.get("claim")
+                ]
+                if data.get("mode") != "lens":
+                    raws = []
+                staged = [
+                    (coordinator_finding_id(job_record["repo"], raw), raw)
+                    for raw in raws
+                ]
+            except STRUCTURE_ERRORS as exc:
+                problems.append({"path": str(path), "error": _clip(exc, 200)})
+                summary["unreadable_receipts"] += 1
+                continue
             records[job_record["id"]] = job_record
             summary["jobs"] += 1
-            if data.get("mode") != "lens":
-                continue
-            report = data.get("report") if isinstance(data.get("report"), dict) else {}
-            for raw in report.get("findings") or []:
-                if not isinstance(raw, dict) or not raw.get("claim"):
-                    continue
-                fid = coordinator_finding_id(job_record["repo"], raw)
+            for fid, raw in staged:
                 finding = lane_findings.get(fid)
                 if finding is None:
                     finding = _new_finding(
@@ -327,17 +360,24 @@ def extract(root, observed_at, pr_states=None):
                 problems.append({"path": str(state_path), "error": _clip(exc, 200)})
                 summary["unreadable_states"] += 1
             else:
-                summary["coordinated_lanes"] += 1
-                _overlay(
-                    lane,
-                    cstate,
-                    lane_findings,
-                    records,
-                    state_path,
-                    sha,
-                    observed_at,
-                    summary,
-                )
+                before = (copy.deepcopy(lane_findings), dict(records), summary.copy())
+                try:
+                    _overlay(
+                        lane,
+                        cstate,
+                        lane_findings,
+                        records,
+                        state_path,
+                        sha,
+                        observed_at,
+                        summary,
+                    )
+                except STRUCTURE_ERRORS as exc:
+                    lane_findings, records, summary = before
+                    problems.append({"path": str(state_path), "error": _clip(exc, 200)})
+                    summary["unreadable_states"] += 1
+                else:
+                    summary["coordinated_lanes"] += 1
         for finding in lane_findings.values():
             records[finding["id"]] = finding
     for record in records.values():
@@ -351,13 +391,15 @@ def extract(root, observed_at, pr_states=None):
 def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summary):
     items = cstate["items"]
     turn_verdicts = {}
-    published = {}
-    for index, turn in enumerate(cstate.get("turns") or []):
+    for index, turn in enumerate(_list(cstate.get("turns"))):
         if not isinstance(turn, dict):
             continue
-        attempts = [a for a in turn.get("attempts") or [] if isinstance(a, dict)]
+        attempts = [a for a in _list(turn.get("attempts")) if isinstance(a, dict)]
         outcome = turn.get("outcome") if isinstance(turn.get("outcome"), dict) else {}
-        turn_id = f"{lane}/turn/{Path(str(turn.get('dir') or '')).name or index}"
+        name = re.split(r"[\\/]", str(turn.get("dir") or ""))[-1]
+        if not name and turn.get("started"):
+            name = f"{turn.get('started')}-{turn.get('kind')}"
+        turn_id = f"{lane}/turn/{name or index}"
         records[turn_id] = {
             "type": "turn",
             "id": turn_id,
@@ -369,7 +411,7 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
             "status": turn.get("status"),
             "started": turn.get("started"),
             "seconds": turn.get("seconds"),
-            "items": len(turn.get("items") or []),
+            "items": len(_list(turn.get("items"))),
             "attempts": len(attempts),
             "faults": sorted({str(a.get("fault")) for a in attempts if a.get("fault")}),
             "timed_out": any(a.get("timed_out") is True for a in attempts),
@@ -381,15 +423,12 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
             "provenance": _provenance(path, sha, observed_at),
         }
         for decision, verdict in TURN_DECISIONS.items():
-            for fid in outcome.get(decision) or []:
+            for fid in _list(outcome.get(decision)):
                 turn_verdicts[str(fid)] = (
                     verdict,
                     turn.get("runtime"),
                     turn.get("finished"),
                 )
-        for decision in PUBLICATION:
-            for wid in outcome.get(decision) or []:
-                published[str(wid)] = decision
     by_finding_worktree = {}
     for wid, item in items.items():
         if (
@@ -426,17 +465,7 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
         )
         if finding["verdict"] == "pending":
             finding["judge"] = None
-        pair = by_finding_worktree.get(fid)
-        if pair:
-            wid, worktree = pair
-            finding.update(
-                {
-                    "pr_url": worktree.get("pr_url"),
-                    "publication": str(worktree.get("status")),
-                    "worker_verify": worktree.get("verify"),
-                    "worker": finding["worker"] or worktree.get("entry"),
-                }
-            )
+        _attach_worktree(finding, by_finding_worktree.get(fid))
         turn_verdicts.pop(fid, None)
     # Items the coordinator already pruned survive in its turn outcomes.
     for fid, (verdict, runtime, finished) in sorted(turn_verdicts.items()):
@@ -452,7 +481,22 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
                 "decided_at": finished,
             }
         )
+        _attach_worktree(finding, by_finding_worktree.get(fid))
         summary["verdicts_from_turns"] += 1
+
+
+def _attach_worktree(finding, pair):
+    if not pair:
+        return
+    _, worktree = pair
+    finding.update(
+        {
+            "pr_url": worktree.get("pr_url"),
+            "publication": str(worktree.get("status")),
+            "worker_verify": worktree.get("verify"),
+            "worker": finding["worker"] or worktree.get("entry"),
+        }
+    )
 
 
 # -- ledger file --------------------------------------------------------------
@@ -462,7 +506,7 @@ def _digest(record):
     body = {
         k: v
         for k, v in record.items()
-        if k not in ("provenance", "supersedes", "carried")
+        if k not in ("provenance", "supersedes", "carried", "labels_carried")
     }
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[
         :16
@@ -476,14 +520,30 @@ def load_ledger(path):
             if not line.strip():
                 continue
             record = json.loads(line)
-            if not isinstance(record, dict) or record.get("type") not in TYPE_ORDER:
+            if (
+                not isinstance(record, dict)
+                or record.get("type") not in TYPE_ORDER
+                or not isinstance(record.get("id"), str)
+            ):
                 raise LedgerError(f"{path}:{number}: not an outcome-ledger record")
             records[record["id"]] = record
     return records
 
 
+def _label_rank(record):
+    """How much coordinator knowledge a finding carries: item table > turn outcome > none."""
+    if not record.get("coordinated"):
+        return 0
+    return 1 if record.get("status_raw") == "pruned" else 2
+
+
 def merge_prior(current, prior):
-    """Carry prior records the swarm has since pruned; note what current supersedes."""
+    """Carry what the swarm has since pruned; note what current supersedes.
+
+    A whole record the runs root no longer holds is carried. A finding whose receipt
+    survives but whose coordinator item was pruned keeps the prior, richer label and
+    PR fields instead of being downgraded by a weaker current observation.
+    """
     merged = dict(current)
     carried = 0
     for record_id, old in prior.items():
@@ -491,7 +551,15 @@ def merge_prior(current, prior):
         if new is None:
             merged[record_id] = dict(old, carried=True)
             carried += 1
-        elif _digest(new) != _digest(old):
+            continue
+        if new["type"] == "finding" and old.get("type") == "finding":
+            if _label_rank(old) > _label_rank(new):
+                new.update({field: old.get(field) for field in LABEL_FIELDS})
+                new["labels_carried"] = True
+            for field in PR_FIELDS:
+                if new.get(field) is None and old.get(field) is not None:
+                    new[field] = old[field]
+        if _digest(new) != _digest(old):
             new["supersedes"] = _digest(old)
     return merged, carried
 
@@ -543,15 +611,20 @@ def load_pr_states(path):
 PR_URL = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 
 
-def fetch_pr_states(urls, runner=None):
+def fetch_pr_states(urls, runner=None, pace=None, now=None):
     """Observe PR state and revert evidence over GitHub REST via ``gh api``.
 
     A revert is recognised only by GitHub's own revert-PR body ("Reverts
-    owner/repo#N") on a merged PR; anything else leaves ``reverted`` false with
-    ``revert_checked`` true, and a failed probe leaves it null.
+    owner/repo#N", searched ``in:body``) on a merged PR; no hit leaves
+    ``reverted`` false and a failed probe leaves it null. Each entry records its
+    own ``observed_at``: maturation needs the revert check made at least seven
+    days after the merge. The real runner is paced under the search rate limit.
     """
+    pace = pace if pace is not None else (2.1 if runner is None else 0)
     runner = runner or _gh_api
+    now = now or _now
     prs = {}
+    searched = False
     for url in sorted(set(urls)):
         match = PR_URL.fullmatch(url)
         if not match:
@@ -560,6 +633,8 @@ def fetch_pr_states(urls, runner=None):
         owner, repo, number = match.groups()
         try:
             pull = runner(f"repos/{owner}/{repo}/pulls/{number}")
+            if not isinstance(pull, dict):
+                raise ValueError("pull response is not an object")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             prs[url] = {"state": None, "error": _clip(exc, 200)}
             continue
@@ -570,13 +645,20 @@ def fetch_pr_states(urls, runner=None):
             "merged_at": merged_at,
             "reverted": None,
             "revert_url": None,
+            "observed_at": now(),
         }
         if merged_at:
             query = (
-                f'repo:{owner}/{repo} is:pr is:merged "Reverts {owner}/{repo}#{number}"'
+                f"repo:{owner}/{repo} is:pr is:merged in:body "
+                f'"Reverts {owner}/{repo}#{number}"'
             )
+            if searched and pace:
+                time.sleep(pace)
+            searched = True
             try:
                 found = runner("search/issues?q=" + _quote(query))
+                if not isinstance(found, dict):
+                    raise ValueError("search response is not an object")
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 entry["error"] = _clip(exc, 200)
             else:
@@ -673,11 +755,14 @@ def metrics(records, split="dev", as_of=None):
     }
     findings = [f for f in all_findings if split == "all" or f.get("split") == split]
     jobs = {r["id"]: r for r in records.values() if r["type"] == "job"}
-    judged = [f for f in findings if f["coordinated"]]
+    coordinated = [f for f in findings if f["coordinated"]]
+    decided_findings = [
+        f for f in coordinated if f["verdict"] in ("confirmed", "refuted")
+    ]
 
     maturation = dt.timedelta(days=MATURATION_DAYS)
     closure = Counter()
-    for finding in judged:
+    for finding in coordinated:
         closure["collected"] += 1
         pr = finding.get("pr") or {}
         merged_at = _parse_time(pr.get("merged_at"))
@@ -697,13 +782,20 @@ def metrics(records, split="dev", as_of=None):
                 closure["terminal"] += 1
             if merged:
                 closure["merged"] += 1
+                checked_at = _parse_time(pr.get("observed_at"))
                 if pr.get("reverted") is True:
                     closure["reverted"] += 1
-                elif merged_at and as_of - merged_at >= maturation:
-                    if pr.get("reverted") is False:
-                        closure["merged_matured"] += 1
-                    else:
-                        closure["merged_revert_unchecked"] += 1
+                elif (
+                    merged_at
+                    and checked_at
+                    and pr.get("reverted") is False
+                    and checked_at - merged_at >= maturation
+                ):
+                    closure["merged_matured"] += 1
+                elif merged_at and as_of - merged_at < maturation:
+                    closure["merged_maturing"] += 1
+                else:
+                    closure["merged_revert_unchecked"] += 1
             if rejected and not merged:
                 closure["rejected"] += 1
 
@@ -779,10 +871,15 @@ def metrics(records, split="dev", as_of=None):
         "as_of": as_of.isoformat(timespec="seconds"),
         "holdout_manifest": manifest,
         "findings": _verdict_block(findings),
-        "judged_fraction": round(len(judged) / len(findings), 3) if findings else None,
-        "precision_by_recipe": _group(judged, lambda f: (_origin(f, "recipe"),)),
+        "coordinated_fraction": (
+            round(len(coordinated) / len(findings), 3) if findings else None
+        ),
+        "decided_fraction": (
+            round(len(decided_findings) / len(findings), 3) if findings else None
+        ),
+        "precision_by_recipe": _group(coordinated, lambda f: (_origin(f, "recipe"),)),
         "precision_by_repo_recipe_runtime": _group(
-            judged,
+            coordinated,
             lambda f: (
                 f["repo"],
                 _origin(f, "recipe"),
@@ -790,7 +887,9 @@ def metrics(records, split="dev", as_of=None):
                 _origin(f, "effort"),
             ),
         ),
-        "precision_by_judge": _group(judged, lambda f: (f.get("judge") or "(none)",)),
+        "precision_by_judge": _group(
+            coordinated, lambda f: (f.get("judge") or "(none)",)
+        ),
         "closure": dict(
             sorted(closure.items()),
             closure_rate=(

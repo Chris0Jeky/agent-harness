@@ -35,14 +35,20 @@ judged against. It lives outside both producers so neither can grade itself.
 | `finding` | `<lane>/<item id>` | origin job (recipe/runtime/model/effort/base SHA), `fingerprint`, `cluster`, `split`, verdict, judge, worker, PR URL, publication, joined PR state, sightings |
 
 Every record has `provenance {producer, source, source_sha256, observed_at}`. With `--prior`,
-records the swarm has since pruned are carried forward with `carried: true`, and a record whose
-content changed names the prior content digest in `supersedes`.
+a record the runs root no longer holds is carried forward with `carried: true`. A finding whose
+receipt survives but whose coordinator item was pruned keeps the prior ledger's richer label
+(item table beats turn outcome beats none) and its PR fields, marked `labels_carried: true`; a
+fresher item-table label always wins. A record whose content changed names the prior content
+digest in `supersedes`. Reusing `--prior` on every run is what makes the ledger outlive the
+coordinator's 30-day item pruning and 200-turn window.
 
 Verdicts from coordinator status: `new`/`classified` -> `pending`, `fixing` -> `confirmed`,
 `dropped` -> `refuted`, `deferred` -> `deferred`; any other status is kept in `status_raw` and
 labelled `unknown`, never guessed. An item already pruned from the table recovers its verdict
-from the retained turn outcomes (`status_raw: pruned`). Findings from lanes with no coordinator
-are `unjudged`.
+from the retained turn outcomes (`status_raw: pruned`) and still joins its worktree and PR.
+Findings from lanes with no coordinator are `unjudged`. A receipt or state file that is
+unreadable, or whose coordinator overlay fails, is listed under `problems` and the lane falls back
+to receipt-only findings; wrong-typed fields degrade to nulls rather than aborting the run.
 
 `fingerprint` is autonomy-v2 C8's identity: sha256 of repo | recipe | normalised path | line
 bucket (`line // 20`) | first 12 normalised claim words, truncated to 12 hex. The coordinator
@@ -51,8 +57,10 @@ recipe.
 
 ## Sealed hold-out
 
-`split` is a salted hash of `cluster`, 20% hold-out. Keying on the recipe-free cluster keeps one
-defect found by two recipes on one side, so tuning cannot leak across. `metrics` reads only `dev`
+`split` is a salted hash of `cluster`, 20% hold-out. Keying on the recipe-free cluster keeps a
+finding re-reported by another recipe with the same path, line bucket and first twelve
+normalised claim words on one side. It does not catch the same defect described in different
+words or 20+ lines apart; that leakage is bounded, not excluded. `metrics` reads only `dev`
 unless `--split holdout|all` comes with `--unseal REASON`, which is echoed in the output. Every
 metrics run prints a `holdout_manifest` (cluster count and digest of the hold-out cluster set,
 no labels), so a tuning run can show which hold-out it never read. The set grows as the swarm
@@ -62,10 +70,14 @@ finds more; compare digests only between runs over the same ledger.
 
 - **Precision** = confirmed / (confirmed + refuted), with `beta = [1 + confirmed, 1 + refuted]`
   for a Thompson sampler, by recipe, by repo x recipe x runtime x effort, and by judge.
+- **Coordinated fraction** = findings that reached a coordinator (any status) / all findings;
+  **decided fraction** = confirmed + refuted / all findings. The `precision_by_*` groups cover
+  coordinated findings and show pending/deferred counts beside the decided ones.
 - **Closure rate** = terminal findings / coordinated findings. Terminal: refuted, or confirmed
   with its PR merged or closed unmerged.
-- **Matured merge**: merged at least 7 days before `--as-of` and `reverted: false`. A merge whose
-  revert was never checked is `merged_revert_unchecked`, not matured.
+- **Matured merge**: `reverted: false` observed at least 7 days after the merge (each PR entry
+  records its own `observed_at`). Merged less than 7 days before `--as-of` is
+  `merged_maturing`; anything else unproven is `merged_revert_unchecked`, never matured.
 - **Rediscovery**: repeat sightings, and sightings of a refuted finding in jobs that started after
   the verdict (the waste C8 verdict memory removes).
 - **Jobs** by mode x recipe x runtime x effort: failure rate, elapsed p50/p90, findings per job,
@@ -76,8 +88,9 @@ finds more; compare digests only between runs over the same ledger.
 ## PR state and reverts
 
 `fetch-pr-states` is the one networked step: GitHub REST through `gh api`, one pull read per PR
-and one search per merged PR. A revert is recognised only by GitHub's own revert-PR body
-("Reverts owner/repo#N") on a merged PR. A failed probe leaves the state null with the error.
+and one search per merged PR, paced under the search rate limit. A revert is recognised only by
+GitHub's own revert-PR body ("Reverts owner/repo#N", searched `in:body`) on a merged PR. A failed
+probe or a non-object response leaves the state null with the error.
 `extract --pr-states` joins that file on PR URL.
 
 ```powershell
@@ -90,23 +103,25 @@ py -3 scripts\outcome_ledger.py metrics --ledger "$L\ledger.jsonl"
 
 ## First baseline (B-015, 2026-09-27)
 
-Measured over the owner's live runs root at 17:30Z. The ledger stays private; its sha256 was
-`d07274637ddd0392487b83841a6418926fcc7fa58c37761529c6e6107160da4e`. Numbers are over all splits
+Measured over the owner's live runs root at 18:15Z, with PR states fetched the same minute. The
+ledger stays private; its sha256 was
+`adb1b90fb1ed045e107dbf5f3521034ae3b7c4dca33704069b3ea389e69b3da1`. Numbers are over all splits
 (`--unseal "B-015 baseline"`), because this is the baseline record, not a tuning run.
 
-- 1,133 jobs, 18 coordinator turns across 3 coordinated lanes, 3,350 findings. Every coordinator
+- 1,148 jobs, 18 coordinator turns across 3 coordinated lanes, 3,417 findings. Every coordinator
   item joined to its receipt (`unjoined_items` 0).
-- **88.4% of findings were never judged** (2,962 in lanes without a coordinator); 319 more are
-  pending triage. Judged fraction 11.6%.
+- **88.6% of findings never reached a coordinator** (3,029 in lanes without one). Coordinated
+  fraction 11.4%; **decided fraction 2.0%** (67 findings), with 319 still pending triage.
 - Judge-agreed precision 0.343 (23 confirmed / 44 refuted). By recipe: **bug-hunt 0.818 (9/11),
   test-gaps 0.333 (12/36), review-range 0.25 (1/4), doc-drift 0.062 (1/16).**
 - By judge: muse 0.526, codex 0.286, grok 0.25. Confounded by which lanes each judged, so it is
   a calibration question, not a ranking.
-- Job failure rate by effort: high 1.6% (16/998), xhigh 3.6% (3/84), **max 21.2% (7/33)**,
+- Job failure rate by effort: high 1.6% (16/1,013), xhigh 3.6% (3/84), **max 21.2% (7/33)**,
   mostly stream idle timeouts and missing terminal events.
-- Closure 0.142 (55/388). All 11 swarm PRs merged on 2026-09-27; the coordinator still recorded
-  them as `published`. None has matured yet.
+- Closure 0.142 (55/388). All 11 swarm PRs merged on 2026-09-27 while the coordinator still
+  recorded them as `published`; all 11 are `merged_maturing`.
 
 What this means for routing: doc-drift lenses cost triage turns for almost no confirmed
 defects, and `max` effort buys a failure rate thirteen times that of `high`. Both are small
-samples; the Beta parameters say how small.
+samples; the Beta parameters say how small. The largest lever is not precision but throughput
+of judgment: 98% of findings carry no verdict yet.
