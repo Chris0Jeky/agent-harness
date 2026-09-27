@@ -28,13 +28,19 @@ a direct source; resolving a parent does not switch to a symlinked file's parent
 
 Report output inside the bound policy root or a reserved snapshot remains input
 invalid before either policy launches. Snapshot recursion protection and cleanup
-remain unchanged. Parent traversal after an alias follows filesystem lookup;
-lexically cancelling `alias/..` can select the wrong tree and is not used.
+remain unchanged. Parent traversal follows the host's path lookup, not a portable
+promise that `alias/..` selects the alias target's parent. On POSIX the test proves
+that physical traversal. On Windows native lookup can normalize `..` first; the
+Windows control proves which file and parent are selected independently of the
+loader, then requires input-invalid without execution when that selected tree
+contains an unsupported directory link. No custom lexical cancellation is added
+to the loader, and the tree-content restrictions are not relaxed.
 
 `tests/test_replay_policy_root_alias.py` covers direct/alias identity and decision
 parity, both source positions, exact structured reproduction, file aliases,
-retargeting during and after binding, changed inputs, parent traversal, report
-and snapshot overlap, interior directory links, broken/cyclic roots, bounded
-resolution errors, unchanged original trees and cleanup. Tests create real
-synthetic links and skip only when host symlink creation is unavailable.
+retargeting during and after binding, changed inputs, native parent traversal,
+report and snapshot overlap, interior directory links, broken/cyclic roots,
+asserted resolution-error injection, unchanged original trees and cleanup.
+Tests use real synthetic links. The two traversal contracts run on their named
+platforms; link controls skip when the host cannot create the required symlink.
 Windows may require symlink privilege. No native-model qualification is implied.

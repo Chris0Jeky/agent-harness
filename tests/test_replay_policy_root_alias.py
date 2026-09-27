@@ -139,6 +139,9 @@ class PolicyRootAliasTests(unittest.TestCase):
             self.assertEqual([], list(snapshots.iterdir()))
             self.assertTrue(policy.is_symlink())
 
+    @unittest.skipIf(
+        os.name == "nt", "POSIX traversal follows the directory alias before '..'"
+    )
     def test_parent_traversal_uses_the_filesystem_not_lexical_collapsing(self):
         with self.fixture() as data:
             directory, _corpus, _recording, policy, alias, snapshots = data
@@ -156,6 +159,43 @@ class PolicyRootAliasTests(unittest.TestCase):
             self.assertFalse(result.failures)
             effects = [d["effect"] for d in result.decisions]
             self.assertEqual(["deny", "allow"], effects)
+            self.assertEqual([], list(snapshots.iterdir()))
+
+    @unittest.skipUnless(os.name == "nt", "requires native Windows path lookup")
+    def test_windows_parent_traversal_rejects_the_selected_link_containing_tree(self):
+        with self.fixture() as data:
+            directory, corpus, recording, policy, alias, snapshots = data
+            inner = policy.parent / "inner"
+            inner.mkdir()
+            alias.unlink()
+            self.link(alias, inner)
+            other = directory / policy.name
+            other.write_text(
+                fixtures.CliTests.policy_script("regression"), encoding="utf-8"
+            )
+            spelled = alias / ".." / policy.name
+            # Establish the real host lookup independently of the replay loader.
+            self.assertEqual(other.read_bytes(), spelled.read_bytes())
+            self.assertEqual(directory.resolve(), spelled.parent.resolve(strict=True))
+            before = sha256_tree(policy.parent)
+            other_before = other.read_bytes()
+            output = directory / "reports"
+            args = fixtures.CliTests.replay_args(corpus, recording, spelled, output)
+            stderr = io.StringIO()
+            with (
+                redirect_stderr(stderr),
+                mock.patch.object(policy_sources, "_run_policy_process") as run,
+            ):
+                self.assertEqual(2, cli.main(args))
+            run.assert_not_called()
+            self.assertIn(
+                "process executable or policy file could not be read", stderr.getvalue()
+            )
+            self.assertNotIn(str(directory), stderr.getvalue())
+            self.assertEqual(before, sha256_tree(policy.parent))
+            self.assertEqual(other_before, other.read_bytes())
+            self.assertTrue(alias.is_symlink())
+            self.assertFalse(output.exists())
             self.assertEqual([], list(snapshots.iterdir()))
 
     def test_alias_outputs_are_rejected_before_either_source_launches(self):
@@ -215,9 +255,11 @@ class PolicyRootAliasTests(unittest.TestCase):
         with self.fixture() as data:
             directory, corpus, recording, policy, alias, snapshots = data
             original_resolve = Path.resolve
+            injected = []
 
             def fail_root(path, *args, **kwargs):
                 if path == alias.absolute():
+                    injected.append(path)
                     raise OSError(f"private path {directory}")
                 return original_resolve(path, *args, **kwargs)
 
@@ -228,10 +270,13 @@ class PolicyRootAliasTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 redirect_stderr(stderr),
-                mock.patch.object(Path, "resolve", autospec=True, side_effect=fail_root),
+                mock.patch.object(
+                    Path, "resolve", autospec=True, side_effect=fail_root
+                ),
                 mock.patch.object(policy_sources, "_run_policy_process") as run,
             ):
                 self.assertEqual(2, cli.main(args))
+            self.assertEqual([alias.absolute()], injected)
             run.assert_not_called()
             self.assertNotIn(str(directory), stderr.getvalue())
             self.assertFalse(output.exists())
