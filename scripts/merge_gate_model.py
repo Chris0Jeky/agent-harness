@@ -18,9 +18,12 @@ instead of re-deriving the laws from prose.
 - no cycle through non-terminal states (only state-preserving no-ops repeat);
 - every reachable state can still reach a terminal or owner-decision state.
 
-The spec functions never read the transition table's bookkeeping flags, and
-``--mutant`` swaps in a seeded defect so the checker's teeth are themselves
-tested. Contract: docs/evals/MERGE_GATE_MODEL.md.
+The spec does not trust the table's bookkeeping: an event-driven observer
+automaton, run in product with the table, re-derives review rounds, CRITICAL
+reopens, aging, review, proof and CI from the event stream alone, and the spec
+also demands the table's evidence identities agree. ``--mutant`` swaps in a
+seeded defect so the checker's teeth are themselves tested.
+Contract: docs/evals/MERGE_GATE_MODEL.md.
 """
 
 import argparse
@@ -60,6 +63,7 @@ EVENTS = (
     "ci_red",
     "retarget",
     "refresh_merge",
+    "refresh_conflict",
     "evaluate",
     "merge",
     "postmerge_start",
@@ -78,6 +82,10 @@ MUTANTS = {
     "retarget_keeps_proof": "a retarget keeps the proof and CI of the old base",
     "gated_merges": "gated authority merges autonomously",
     "draft_merge": "publish leaves the PR in draft",
+    "age_kept_on_push": "publishing a new head keeps the previous head's age",
+    "uncounted_review": "a passing review does not count as a round",
+    "changes_reopen": "requested changes set the CRITICAL reopen flag",
+    "conflict_keeps_review": "a conflicting base refresh keeps the review",
 }
 
 
@@ -175,7 +183,7 @@ def step(s, event, mutants=frozenset()):
             ready=s.ready or "draft_merge" not in mutants,
             pushed_head=s.head,
             ci="pending" if pushed or s.ci != "green" else s.ci,
-            age=0 if pushed else s.age,
+            age=0 if pushed and "age_kept_on_push" not in mutants else s.age,
             age_head=s.head if pushed else s.age_head,
         )
         if s.reviewed:
@@ -203,12 +211,14 @@ def step(s, event, mutants=frozenset()):
                 phase="AgeGate",
                 reviewed=True,
                 reviewed_logic=s.logic,
-                review_rounds=s.review_rounds + 1,
+                review_rounds=s.review_rounds
+                + (0 if "uncounted_review" in mutants else 1),
             )
         if event == "review_changes":
             rounds = s.review_rounds + 1
+            reopen = s.reopened or "changes_reopen" in mutants
             if rounds < allowed:
-                return _enter_fixing(s, review_rounds=rounds)
+                return _enter_fixing(s, review_rounds=rounds, reopened=reopen)
             return s._replace(phase="Parked", review_rounds=rounds)
         if event == "review_critical" and s.review_rounds >= 1:
             rounds = s.review_rounds + 1
@@ -256,7 +266,7 @@ def _published_event(s, event, mutants):
         return s._replace(ci="green", ci_for=(s.head, s.base))
     if event == "ci_red" and s.ci == "pending":
         return _enter_fixing(s, ci="red")
-    if event in ("retarget", "refresh_merge"):
+    if event in ("retarget", "refresh_merge", "refresh_conflict"):
         if s.refreshes >= MAX_REFRESHES:
             return s._replace(phase="Parked")
         if event == "retarget":
@@ -268,8 +278,12 @@ def _published_event(s, event, mutants):
                 proven=s.proven and keep,
                 ci=s.ci if keep else "none",
             )
-        # A merge commit from the base is a new pushed head with unchanged logic.
-        return _new_head(s, False, mutants, counted=False)._replace(
+        # A merge commit from the base is a new pushed head. Law 2g keeps the review
+        # unless the new base brings a conflict, semantic interaction or new logic.
+        logic_changed = (
+            event == "refresh_conflict" and "conflict_keeps_review" not in mutants
+        )
+        return _new_head(s, logic_changed, mutants, counted=False)._replace(
             base=s.base + 1, refreshes=s.refreshes + 1
         )
     return None
@@ -277,9 +291,55 @@ def _published_event(s, event, mutants):
 
 # -- the independent spec -------------------------------------------------------
 
+REVIEW_VERDICTS = frozenset({"review_pass", "review_changes", "review_critical"})
+HEAD_EVENTS = frozenset(
+    {"worker_ok", "fix_logic", "fix_mechanical", "refresh_merge", "refresh_conflict"}
+)
+BASE_EVENTS = frozenset({"retarget", "refresh_merge", "refresh_conflict"})
+LOGIC_EVENTS = frozenset({"worker_ok", "fix_logic", "refresh_conflict"})
+OBSERVED_ROUND_CAP = MAX_REVIEW_ROUNDS + 2
 
-def merge_violations(s, successor):
-    """Why merging from ``s`` breaks the laws; empty when the merge is lawful."""
+
+class Observer(NamedTuple):
+    """What the event stream alone says, independent of the table's bookkeeping."""
+
+    rounds: int = 0
+    criticals: int = 0
+    age: int = 0
+    reviewed: bool = False
+    proven: bool = False
+    green: bool = False
+
+
+def observe(o, event):
+    """Advance the observer on an event the table accepted. Bounded, so the product is finite."""
+    head_moved = event in HEAD_EVENTS
+    moved = head_moved or event in BASE_EVENTS
+    return Observer(
+        rounds=min(o.rounds + (event in REVIEW_VERDICTS), OBSERVED_ROUND_CAP),
+        criticals=min(o.criticals + (event == "review_critical"), 2),
+        age=0 if head_moved else min(o.age + (event == "tick"), AGE_MINUTES),
+        reviewed=(
+            False if event in LOGIC_EVENTS else o.reviewed or event == "review_pass"
+        ),
+        proven=(
+            False
+            if moved
+            else (o.proven or event == "proof_pass") and event != "proof_fail"
+        ),
+        green=(
+            False if moved else (o.green or event == "ci_green") and event != "ci_red"
+        ),
+    )
+
+
+def merge_violations(s, successor, o):
+    """Why merging from ``s`` breaks the laws; empty when the merge is lawful.
+
+    Each rule needs both the observer's event-derived fact and the table's evidence
+    identity to agree, so neither a bookkeeping slip nor a stale identity certifies.
+    Authority and ready-for-review are inputs: configuration and a publish effect.
+    """
     reasons = []
     current = (s.head, s.base)
     if s.authority != "free":
@@ -288,15 +348,15 @@ def merge_violations(s, successor):
         reasons.append("PR is not published ready-for-review")
     if s.pushed_head != s.head:
         reasons.append("head was never pushed")
-    if s.proven_for != current:
+    if not o.proven or s.proven_for != current:
         reasons.append("no proof for the exact head and base")
-    if s.ci_for != current:
+    if not o.green or s.ci_for != current:
         reasons.append("no green CI for the exact head and base")
-    if s.reviewed_logic != s.logic:
+    if not o.reviewed or s.reviewed_logic != s.logic:
         reasons.append("current logic was never reviewed")
-    if s.age_head != s.head or s.age < AGE_MINUTES:
+    if o.age < AGE_MINUTES or s.age_head != s.head:
         reasons.append("head has not aged three minutes")
-    if s.review_rounds > MAX_REVIEW_ROUNDS + (1 if s.reopened else 0):
+    if o.rounds > MAX_REVIEW_ROUNDS + min(o.criticals, 1):
         reasons.append("review rounds exceed the ceiling")
     if successor.merged_head != s.head:
         reasons.append("merged SHA is not the head")
@@ -353,39 +413,43 @@ def canonical(s):
 
 
 class Graph:
+    """Reachable (canonical state, observer) nodes: the table in product with its observer."""
+
     def __init__(self, mutants=frozenset(), authorities=AUTHORITIES):
         self.parent = {}
         self.edges = defaultdict(list)
-        self.merges = []
+        self.merges = []  # (node, raw successor): the table step into Merged
+        self.raw_violations = []  # (node, reason) seen on a successor before collapsing
         queue = deque()
         for authority in authorities:
-            start = initial(authority)
+            start = (initial(authority), Observer())
             self.parent[start] = None
             queue.append(start)
         while queue:
-            state = queue.popleft()
+            node = queue.popleft()
+            state, obs = node
             for event in EVENTS:
                 raw = step(state, event, mutants)
                 if raw is None:
                     continue  # disabled
                 if raw.phase == "Merged" and state.phase != "Merged":
-                    self.merges.append(
-                        (state, raw)
-                    )  # the spec reads the uncollapsed pair
-                successor = canonical(raw)
-                if successor == state:
+                    self.merges.append((node, raw))
+                for reason in state_violations(raw):
+                    self.raw_violations.append((node, f"{reason} after {event}"))
+                successor = (canonical(raw), observe(obs, event))
+                if successor == node:
                     continue  # a state-preserving no-op
-                self.edges[state].append((event, successor))
+                self.edges[node].append((event, successor))
                 if successor not in self.parent:
-                    self.parent[successor] = (state, event)
+                    self.parent[successor] = (node, event)
                     queue.append(successor)
 
-    def trace(self, state):
+    def trace(self, node):
         events = []
-        while self.parent[state] is not None:
-            state, event = self.parent[state]
+        while self.parent[node] is not None:
+            node, event = self.parent[node]
             events.append(event)
-        return state.authority, events[::-1]
+        return node[0].authority, events[::-1]
 
 
 def _cycles(graph):
@@ -442,13 +506,21 @@ def check(mutants=frozenset()):
             {"kind": kind, "detail": detail, "authority": authority, "trace": events}
         )
 
-    for state in graph.parent:
-        for reason in state_violations(state):
-            add("state", state, reason)
-    for state, successor in graph.merges:
-        reasons = merge_violations(state, successor)
+    for node, reason in graph.raw_violations:
+        add("state", node, reason)
+    for node, successor in graph.merges:
+        reasons = merge_violations(node[0], successor, node[1])
         if reasons:
-            add("illegal_merge", state, "; ".join(reasons))
+            add("illegal_merge", node, "; ".join(reasons))
+    for authority in AUTHORITIES:
+        if authority == "free" and not any(
+            node[0].authority == authority for node, _ in graph.merges
+        ):
+            add(
+                "liveness",
+                (initial(authority), Observer()),
+                "free authority can never merge",
+            )
     for component in _cycles(graph):
         entry = min(component, key=lambda s: len(graph.trace(s)[1]))
         add(
@@ -456,7 +528,7 @@ def check(mutants=frozenset()):
             entry,
             f"{len(component)} states repeat with no counter progress",
         )
-    settled = {s for s in graph.parent if s.phase in TERMINAL | WAITING_ON_OWNER}
+    settled = {n for n in graph.parent if n[0].phase in TERMINAL | WAITING_ON_OWNER}
     reverse = defaultdict(list)
     for state, edges in graph.edges.items():
         for _, successor in edges:
@@ -474,7 +546,7 @@ def check(mutants=frozenset()):
             min(trapped, key=lambda s: len(graph.trace(s)[1])),
             "cannot reach a terminal state",
         )
-    phases = sorted({s.phase for s in graph.parent})
+    phases = sorted({n[0].phase for n in graph.parent})
     merges = len(graph.merges)
     return {
         "mutants": sorted(mutants),
@@ -515,8 +587,8 @@ def mermaid():
     """Phase-level diagram of the reachable graph, for the contract doc."""
     graph = Graph()
     edges = defaultdict(set)
-    for state, out in graph.edges.items():
-        for event, successor in out:
+    for (state, _), out in graph.edges.items():
+        for event, (successor, _) in out:
             if successor.phase != state.phase:
                 edges[(state.phase, successor.phase)].add(event)
     lines = ["stateDiagram-v2", "  [*] --> Candidate"]

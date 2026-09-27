@@ -65,6 +65,11 @@ class ExhaustiveTests(unittest.TestCase):
             "retarget_keeps_proof": ("illegal_merge", "proof"),
             "gated_merges": ("illegal_merge", "authority"),
             "draft_merge": ("illegal_merge", "ready-for-review"),
+            # the review's slip-throughs: table bookkeeping the observer re-derives
+            "age_kept_on_push": ("illegal_merge", "aged"),
+            "uncounted_review": ("illegal_merge", "review rounds"),
+            "changes_reopen": ("illegal_merge", "review rounds"),
+            "conflict_keeps_review": ("illegal_merge", "reviewed"),
         }
         self.assertEqual(set(expected), set(model.MUTANTS))
         for mutant, (kind, fragment) in expected.items():
@@ -87,33 +92,77 @@ class ExhaustiveTests(unittest.TestCase):
         )
         state = run(violation["trace"], violation["authority"], mutants)
         self.assertEqual(state.phase, "MergeReady")
+        obs = model.Observer()
+        for event in violation["trace"]:
+            obs = model.observe(obs, event)
         merged = model.step(state, "merge", mutants)
-        self.assertTrue(model.merge_violations(state, merged))
+        self.assertIn(
+            "head has not aged three minutes",
+            model.merge_violations(state, merged, obs),
+        )
 
 
 class AbstractionTests(unittest.TestCase):
+    MUTANT_SETS = [frozenset()] + [frozenset({m}) for m in model.MUTANTS]
+
+    def walks(self, mutants, count=60):
+        """Yield (state, observer, event, successor) along seeded walks, final states included."""
+        for trace in model.random_traces(count, seed=7, max_steps=80, mutants=mutants):
+            state, obs = model.initial(trace["authority"]), model.Observer()
+            for event in trace["events"] + [None]:
+                successor = None if event is None else model.step(state, event, mutants)
+                yield state, obs, event, successor
+                if event is not None:
+                    state, obs = successor, model.observe(obs, event)
+
     def test_canonical_states_preserve_every_spec_verdict(self):
         """The finite abstraction must never change whether a merge or state is lawful."""
-        mutant_sets = [frozenset()] + [frozenset({m}) for m in model.MUTANTS]
-        for mutants in mutant_sets:
-            for trace in model.random_traces(
-                150, seed=7, max_steps=80, mutants=mutants
-            ):
-                state = model.initial(trace["authority"])
-                for event in trace["events"]:
-                    successor = model.step(state, event, mutants)
-                    if successor.phase == "Merged" and state.phase != "Merged":
-                        self.assertEqual(
-                            model.merge_violations(state, successor),
-                            model.merge_violations(
-                                model.canonical(state), model.canonical(successor)
-                            ),
-                        )
+        for mutants in self.MUTANT_SETS:
+            for state, obs, event, successor in self.walks(mutants):
+                if (
+                    successor
+                    and successor.phase == "Merged"
+                    and state.phase != "Merged"
+                ):
+                    self.assertEqual(
+                        model.merge_violations(state, successor, obs),
+                        model.merge_violations(
+                            model.canonical(state), model.canonical(successor), obs
+                        ),
+                    )
+                if state.phase not in model.TERMINAL:
                     self.assertEqual(
                         model.state_violations(state),
                         model.state_violations(model.canonical(state)),
                     )
-                    state = successor
+
+    def test_canonical_commutes_with_step(self):
+        """Exploring canonical states reaches exactly the canonical images of real ones."""
+        for mutants in self.MUTANT_SETS:
+            for state, _, _, _ in self.walks(mutants, count=20):
+                collapsed = model.canonical(state)
+                for event in model.EVENTS:
+                    concrete = model.step(state, event, mutants)
+                    abstract = model.step(collapsed, event, mutants)
+                    self.assertEqual(concrete is None, abstract is None)
+                    if concrete is not None:
+                        self.assertEqual(
+                            model.canonical(concrete), model.canonical(abstract)
+                        )
+
+    def test_liveness_fails_when_free_authority_can_never_merge(self):
+        original = model.step
+
+        def owner_only(state, event, mutants=frozenset()):
+            result = original(state, event, mutants)
+            if result is not None and result.phase == "MergeReady":
+                return result._replace(phase="OwnerBlocked")
+            return result
+
+        model.step = owner_only
+        self.addCleanup(setattr, model, "step", original)
+        result = model.check()
+        self.assertTrue(any(v["kind"] == "liveness" for v in result["violations"]))
 
 
 class LawScenarioTests(unittest.TestCase):
@@ -177,6 +226,15 @@ class LawScenarioTests(unittest.TestCase):
             + ["evaluate", "merge"]
         )
         self.assertEqual(state.phase, "Merged")
+
+    def test_a_conflicting_refresh_needs_a_fresh_review(self):
+        state = run(HAPPY + AGED + ["refresh_conflict", "proof_pass", "publish"])
+        self.assertEqual((state.phase, state.reviewed, state.age), ("Review", False, 0))
+        spent = HAPPY[:5] + [
+            "review_changes", "fix_logic", "proof_pass", "publish", "review_pass",
+        ]  # fmt: skip
+        parked = run(spent + ["refresh_conflict", "proof_pass", "publish"])
+        self.assertEqual(parked.phase, "Parked")  # no round left to review it
 
     def test_a_refresh_merge_commit_is_a_new_head_that_ages_again(self):
         state = run(

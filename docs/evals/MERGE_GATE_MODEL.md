@@ -14,11 +14,12 @@ The durable control plane imports nothing from here; it replays the conformance 
 ## What `check` proves
 
 For all four merge authorities (`free`, `gated`, `human-only`, `none`), every reachable state is
-explored: 28,965 states, 80,636 transitions and 108 merge edges at this commit, in about two
-seconds.
+explored in product with an observer (below): 35,491 nodes, 105,818 transitions and 126 merge
+edges at this commit, in about two seconds.
 
-1. **No illegal merge.** Every merge edge satisfies `merge_violations`, a spec written
-   independently of the transition table's bookkeeping flags. It requires:
+1. **No illegal merge.** Every merge edge satisfies `merge_violations`. Each of its rules needs
+   two facts to agree: the observer's event-derived fact, and the table's evidence identity for
+   the exact head, base or logic version. It requires:
    - authority `free`, and the PR published ready-for-review;
    - a proof and green CI for the exact `(head, base)` pair;
    - a review of the current logic version;
@@ -27,24 +28,44 @@ seconds.
    - the merged SHA equal to the head.
 2. **Review ceiling.** Rounds never exceed two, plus the single reopen that law 2d grants a new
    CRITICAL introduced by fixes.
-3. **Bounded counters.** Worker attempts are at most 3, fixes at most 3 (law 11's three
-   genuinely different attempts), base refreshes at most 3, and review rounds as above.
+3. **Bounded counters.** Worker attempts are at most 3, fixes at most 3, base refreshes at most
+   3, and review rounds as above. Counters are checked on every successor before terminal
+   states are collapsed.
 4. **No unbounded cycle.** Every strongly connected component of the non-terminal graph is a
    single state. Only state-preserving no-ops repeat, so every loop consumes a bounded counter.
 5. **No trap.** Every reachable state can reach `Closed`, `Parked`, `DeadLetter` or the
    owner-decision state `OwnerBlocked`.
+6. **Liveness.** `free` authority can reach a merge at all, so a table that routes everything
+   to the owner cannot pass as "safe".
 
-`check --all-mutants` proves that the checker has teeth. Eight seeded defects must each fail,
+**The observer.** A table's own counters cannot be trusted to grade the table: an uncounted
+review round, or an age that survives a push, would otherwise look lawful. The observer is a
+small automaton driven only by the accepted event stream:
+- review verdicts and CRITICAL reopens are counted;
+- aging restarts when a head-changing event fires;
+- review is cleared by a logic-changing event;
+- proof and CI are cleared by a head or base change.
+
+It is bounded, so the product with the table stays finite. Two facts remain inputs rather than
+observations: authority (configuration) and ready-for-review (a publish effect).
+
+`check --all-mutants` proves that the checker has teeth. Twelve seeded defects must each fail,
 with the expected violation:
 - `no_age_gate`, `stale_review`, `third_round` and `unbounded_fixes`;
-- `merge_on_red`, `retarget_keeps_proof`, `gated_merges` and `draft_merge`.
+- `merge_on_red`, `retarget_keeps_proof`, `gated_merges` and `draft_merge`;
+- `age_kept_on_push`, `uncounted_review`, `changes_reopen` and `conflict_keeps_review`.
+
+The last four are bookkeeping slips that the first version of this checker certified as
+lawful. A fresh-context review found them, and the observer now catches them.
 
 A new invariant belongs with a mutant it catches.
 
 **The abstraction.** Heads, bases and logic versions only increase, so evidence for an older one
 can never become current again. The checker therefore stores each evidence identity as current
 or stale, which is what makes the graph finite. A test replays seeded random walks, with and
-without each mutant, and asserts that the abstraction never changes any spec verdict.
+without each mutant. It asserts two things: the abstraction never changes a spec verdict, and
+`canonical(step(s, e)) == canonical(step(canonical(s), e))` for every event. The second is the
+property the exhaustive search relies on.
 
 ## Rules the checker forced into the open
 
@@ -56,7 +77,9 @@ Writing the laws as a machine surfaced cases the prose leaves implicit:
   run of the checker found this path as a ceiling violation.
 - **Retarget versus refresh.** A retarget moves the base under the same head. It needs fresh
   proof and CI, but it keeps the review and the aging clock. A merge-commit refresh is a new
-  pushed head: it keeps the review (no logic change), and its aging restarts (law 2f).
+  pushed head, so its aging restarts (law 2f). It keeps the review *unless* the new base brings
+  a conflict, semantic interaction or new logic: law 2g's exception is the `refresh_conflict`
+  event. Such a refresh after the last round parks.
 - **Base churn must be bounded.** Without a refresh counter, "base moved, re-prove" is an
   unbounded cycle. The model parks after three refreshes. The laws name no such bound; the
   control plane should adopt one or name its own.
@@ -85,14 +108,14 @@ stateDiagram-v2
   AgeGate --> Fixing: ci_red
   AgeGate --> MergeReady: evaluate
   AgeGate --> OwnerBlocked: evaluate
-  AgeGate --> Parked: ci_red, refresh_merge, retarget
-  AgeGate --> Proving: refresh_merge, retarget
+  AgeGate --> Parked: ci_red, refresh_conflict, refresh_merge, retarget
+  AgeGate --> Proving: refresh_conflict, refresh_merge, retarget
   Candidate --> Tasked: lease
   Fixing --> Parked: fix_failed
   Fixing --> Proving: fix_logic, fix_mechanical
   MergeReady --> Merged: merge
-  MergeReady --> Parked: refresh_merge, retarget
-  MergeReady --> Proving: refresh_merge, retarget
+  MergeReady --> Parked: refresh_conflict, refresh_merge, retarget
+  MergeReady --> Proving: refresh_conflict, refresh_merge, retarget
   Merged --> PostMerge: postmerge_start
   OwnerBlocked --> Closed: owner_answer
   PostMerge --> Closed: postmerge_pass
@@ -108,8 +131,8 @@ stateDiagram-v2
   Revert --> OwnerBlocked: revert_irreversible
   Review --> AgeGate: review_pass
   Review --> Fixing: ci_red, review_changes, review_critical
-  Review --> Parked: ci_red, refresh_merge, retarget, review_changes, review_critical
-  Review --> Proving: refresh_merge, retarget
+  Review --> Parked: ci_red, refresh_conflict, refresh_merge, retarget, review_changes, review_critical
+  Review --> Proving: refresh_conflict, refresh_merge, retarget
   Running --> Proving: worker_ok
   Running --> Tasked: lease_expired, worker_fail
   Tasked --> DeadLetter: start
@@ -118,6 +141,15 @@ stateDiagram-v2
   DeadLetter --> [*]
   Parked --> [*]
 ```
+
+## Deliberately conservative
+
+- **One fix budget per PR, not per red check.** Review-driven, proof-driven and CI-driven fixes
+  share the three attempts. The law bounds attempts at a red check; the model parks sooner,
+  never later.
+- **A mechanical fix to requested changes still costs a review round.** Requested changes are
+  not a review of the fixed code, so the fix is reviewed. This spends throughput to keep
+  "reviewed" meaning reviewed.
 
 ## Limits
 
