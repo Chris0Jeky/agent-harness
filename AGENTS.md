@@ -3,11 +3,15 @@
 This repository is the runtime-neutral source for the tier model, safety floor, and portable
 bootstrap/audit tooling used across Codex and Claude repositories.
 
-## Read first
+## Where to look
+
+Read what the task needs, not the whole stack; these files are large, so search them for the
+section you need.
 
 - `README.md` for executable commands and current shipped state.
-- `BLUEPRINT.md` for durable policy and `SPECS.md` for schemas and budgets.
-- Read `BOOK.md` only when the rationale behind a policy is needed.
+- `BLUEPRINT.md` when a change touches durable policy: the tier ladder, laws, regions or routing.
+- `SPECS.md` when a change touches a schema, a budget, hook wiring or the deny-floor matrix.
+- `BOOK.md` only when the rationale behind a policy is needed.
 - Never run anything in `legacy/`; those scripts are historical source material.
 
 ## Change rules
@@ -24,6 +28,9 @@ bootstrap/audit tooling used across Codex and Claude repositories.
 - Add a test with every new enforcement or migration behavior.
 
 ## Verify
+
+While iterating, run the tests for the module you changed. Before pushing, run the full set
+below once; rerun it only after a further change or a failure.
 
 ```powershell
 py -3 -m unittest discover -s tests -v
