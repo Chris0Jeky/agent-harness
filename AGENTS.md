@@ -9,7 +9,8 @@ Read what the task needs, not the whole stack; these files are large, so search 
 section you need.
 
 - `README.md` for executable commands and current shipped state.
-- `BLUEPRINT.md` when a change touches durable policy: the tier ladder, laws, regions or routing.
+- `BLUEPRINT.md` when a change touches durable policy: the tier ladder, laws, regions, routing,
+  or the deny floor.
 - `SPECS.md` when a change touches a schema, a budget, hook wiring or the deny-floor matrix.
 - `BOOK.md` only when the rationale behind a policy is needed.
 - Never run anything in `legacy/`; those scripts are historical source material.
@@ -17,7 +18,9 @@ section you need.
 ## Change rules
 
 - `templates/hooks/dispatch.py` is shared infrastructure. Any change requires its smoke suite,
-  harness unit tests, and an independent read-only review.
+  harness unit tests, and an independent read-only review. It is feature-frozen (BLUEPRINT.md,
+  "FEATURE-FROZEN"): only false-positive fixes, the ratified #21 slices and SPECS §6 charter
+  repairs may change it; a newly found bypass family becomes one line in `FLOOR_LIMITATIONS.md`.
 - Keep `harness.py` dependency-free and portable across Windows/macOS/Linux.
 - Do not hard-code a user profile. Discover `$HOME`, `$CODEX_HOME`, and Git roots at runtime.
 - `seed` must be write-once. `sync-global` must show a dry-run and back up overwritten files.
