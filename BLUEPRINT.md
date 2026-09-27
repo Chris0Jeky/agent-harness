@@ -312,8 +312,8 @@ server-side. The owner approved default-branch rulesets (`non_fast_forward`, `de
 of them and chose to shrink the client floor to LOCAL destruction, trading some security for
 throughput. Since 1.7.0 the default below T4/`wave_mode` for a non-sensitive repository is
 `floor_posture: core`: destructive deletes outside the project, secret-file mutation, downloaded
-program text run directly, privilege elevation and `sensitive_data` publication stay
-double-checks; force-push, ref deletion, git config execution, work-loss and launcher verdicts
+program text run directly and privilege elevation stay double-checks (a `sensitive_data`
+repository never runs `core`: its declared `core` renders as `guide`); force-push, ref deletion, git config execution, work-loss and launcher verdicts
 proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any repo can declare
 `guide` or `wall` to get the old rendering back.
 

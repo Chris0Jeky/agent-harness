@@ -36,17 +36,18 @@ Contract (BLUEPRINT §2, SPECS §5-6):
              opacity). Every other deny, and every ask, becomes a DOUBLE-CHECK: the
              floor denies once with a FLOOR_ACK key bound to that exact command and reason,
              and the identical command re-run with the trailing comment `# FLOOR_ACK=<key>`
-             proceeds. The default below T4/wave for a non-sensitive repository.
+             proceeds. The default below T4/wave for a non-sensitive repository
+             until 1.7.0; still what a sensitive repository's declared `core` renders as.
     core  -> (owner decision 2026-09-27, issue #356; the default below T4/wave for a
              non-sensitive repository since 1.7.0) default-branch history is guarded
              SERVER-side by rulesets, so the client floor keeps only LOCAL destruction:
              a destructive delete outside the project or through an unresolved operand,
-             a secret-file mutation, downloaded program text run directly, privilege
-             elevation, and a sensitive_data repository's publication guards. Those
-             render exactly as under guide; every other verdict (force-push, git
-             config execution, ref deletion, work-loss asks, launchers, pure opacity)
-             proceeds unless the command text carries a core hint or one of its
-             segments earns a core verdict. Core never denies what guide allows.
+             a secret-file mutation, downloaded program text run directly, and privilege
+             elevation. Those render exactly as under guide; every other verdict
+             (force-push, git config execution, ref deletion, work-loss asks, launchers,
+             pure opacity) proceeds unless the command text carries a core hint or one
+             of its segments earns a core verdict. Core never denies what guide allows,
+             and a sensitive_data repository never runs it (a declared core -> guide).
   A `wall` posture ignores every acknowledgement. The `dispatcher error` fail-closed deny
   is never scaled. Codex has no ask channel, so guide is strictly kinder to it than the
   old blanket ask->deny; the wall mapping keeps that old behaviour.
@@ -13263,6 +13264,12 @@ _CORE_HINT = re.compile(
     + _HINT_INTERPRETERS
     + r")(?:\.exe)?(?![\w.-])"
     r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
+    # Program text an evaluator runs from a download, however the download is
+    # spelled: backticks, a path-qualified downloader, `iex (irm ...)` (review
+    # of PR #363, MEDIUM). Each match starts with a charter-hint alternative.
+    r"|(?:\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s))"
+    + _HINT_SPAN
+    + r"(?:\S*[\\/])?(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
     r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
     r"|\.netrc|\.npmrc|\.pypirc",
     re.IGNORECASE,
@@ -13340,15 +13347,23 @@ def floor_posture(tier_cfg: dict) -> str:
     the blast radius). Below that an explicit `floor_posture` declaration binds;
     without one, `sensitive_data` keeps the wall (BLUEPRINT §2: tightening
     overlays) and everything else runs the core posture (1.7.0, issue #356).
+    A `sensitive_data` repository never runs core: a declared `core` renders
+    as `guide` there, because the analyzer returns its FIRST deny and a given-up
+    push verdict (an opaque refspec, a force spelling) can precede the public-
+    remote privacy check, so core would let a public leak through (review of
+    PR #363, HIGH).
     """
     tier = tier_cfg.get("tier", 1)
     flags = tier_cfg.get("flags", {}) or {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
+    sensitive = bool(flags.get("sensitive_data"))
     declared = tier_cfg.get("floor_posture")
+    if declared == "core" and sensitive:
+        return "guide"
     if declared in _FLOOR_POSTURES:
         return declared
-    if bool(flags.get("sensitive_data")):
+    if sensitive:
         return "wall"
     return "core"
 
