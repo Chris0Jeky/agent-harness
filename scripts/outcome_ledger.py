@@ -184,6 +184,11 @@ def _clip(value, limit):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _scalar(value):
+    """A grouping dimension: a string, number or boolean, else null."""
+    return value if isinstance(value, (str, int, float, bool)) else None
+
+
 def _list(value):
     return value if isinstance(value, list) else []
 
@@ -219,11 +224,11 @@ def _job_record(lane, wave, job, path, sha, data, observed_at):
         "job": job,
         "repo": repo,
         "entry": entry or None,
-        "mode": data.get("mode"),
-        "recipe": data.get("recipe"),
-        "runtime": data.get("runtime"),
-        "model": data.get("model"),
-        "effort": data.get("effort"),
+        "mode": _scalar(data.get("mode")),
+        "recipe": _scalar(data.get("recipe")),
+        "runtime": _scalar(data.get("runtime")),
+        "model": _scalar(data.get("model")),
+        "effort": _scalar(data.get("effort")),
         "status": data.get("status"),
         "terminal_reason": _clip(data.get("terminal_reason"), 200) or None,
         "exit_code": _int_or_none(data.get("exit_code")),
@@ -346,7 +351,10 @@ def extract(root, observed_at, pr_states=None):
                     )
                     finding["provenance"] = _provenance(path, sha, observed_at)
                     lane_findings[fid] = finding
-                if len(finding["sightings"]) < MAX_SIGHTINGS:
+                if (
+                    len(finding["sightings"]) < MAX_SIGHTINGS
+                    and job_record["id"] not in finding["sightings"]
+                ):
                     finding["sightings"].append(job_record["id"])
         state_path = lane_dir / "coordinator" / "state.json"
         if state_path.is_file():
@@ -413,10 +421,10 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
             "type": "turn",
             "id": turn_id,
             "lane": lane,
-            "kind": turn.get("kind"),
-            "class": turn.get("class"),
-            "repo": turn.get("repo"),
-            "runtime": turn.get("runtime"),
+            "kind": _scalar(turn.get("kind")),
+            "class": _scalar(turn.get("class")),
+            "repo": _scalar(turn.get("repo")),
+            "runtime": _scalar(turn.get("runtime")),
             "status": turn.get("status"),
             "started": turn.get("started"),
             "seconds": turn.get("seconds"),
@@ -435,7 +443,7 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
             for fid in _list(outcome.get(decision)):
                 turn_verdicts[str(fid)] = (
                     verdict,
-                    turn.get("runtime"),
+                    _scalar(turn.get("runtime")),
                     turn.get("finished"),
                 )
     by_finding_worktree = {}
@@ -465,7 +473,7 @@ def _overlay(lane, cstate, lane_findings, records, path, sha, observed_at, summa
                 "status_raw": status,
                 "verdict": VERDICTS.get(status, "unknown"),
                 "class": item.get("class"),
-                "judge": item.get("decided_by") or item.get("classified_by"),
+                "judge": _scalar(item.get("decided_by") or item.get("classified_by")),
                 "judge_verified": item.get("verified"),
                 "decided_at": item.get("decided"),
                 "reason": _clip(item.get("reason"), 600) or None,
@@ -832,7 +840,7 @@ def metrics(records, split="dev", as_of=None):
         if finding["verdict"] == "refuted" and decided:
             after = [
                 s
-                for s in sightings[1:]
+                for s in sightings
                 if (_parse_time((jobs.get(s) or {}).get("started_at")) or decided)
                 > decided
             ]
