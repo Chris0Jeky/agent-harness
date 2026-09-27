@@ -417,6 +417,47 @@ class InputTests(unittest.TestCase):
                 with self.assertRaises(oi.InputError):
                     oi.read_records(path)
 
+    def test_stable_file_passes_identity_on_repeated_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.jsonl"
+            path.write_text(json.dumps(event()), encoding="utf-8")
+            for _ in range(50):
+                result = oi.inspect_records(oi.read_records(path))
+                self.assertEqual(result["received_records"], 1)
+                self.assertEqual(result["consistent_records"], 1)
+
+    def test_windows_creation_skew_is_not_a_change_but_content_change_is(self):
+        base = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=33188,
+            st_size=10,
+            st_mtime_ns=100,
+            st_ctime_ns=200,
+        )
+        skewed = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=33188,
+            st_size=10,
+            st_mtime_ns=100,
+            st_ctime_ns=1200000,
+        )
+        changed = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=33188,
+            st_size=11,
+            st_mtime_ns=100,
+            st_ctime_ns=200,
+        )
+        with mock.patch.object(oi.os, "name", "nt"):
+            self.assertTrue(oi._same_after_open(base, skewed))
+            self.assertFalse(oi._same_after_open(base, changed))
+        with mock.patch.object(oi.os, "name", "posix"):
+            self.assertFalse(oi._same_after_open(base, skewed))
+            self.assertFalse(oi._same_after_open(base, changed))
+
     def test_regular_hard_link_has_no_special_identity_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "input.jsonl"

@@ -1254,6 +1254,79 @@ class HarnessTests(unittest.TestCase):
             ],
         )
 
+    def test_stale_path_issues_prunes_nested_worktree_checkouts(self) -> None:
+        repo = self.make_repo()
+        stale = "C:/Users/jekyt/source/repo"
+        nested = repo / ".claude" / "worktrees" / "nested"
+        nested.mkdir(parents=True)
+        (nested / ".git").write_text(
+            f"gitdir: {stale}/.git/worktrees/nested\n", encoding="utf-8"
+        )
+        (nested / "harness.py").write_text(f"# copied from {stale}\n", encoding="utf-8")
+        dir_checkout = repo / ".claude" / "worktrees" / "dir-checkout"
+        (dir_checkout / ".git").mkdir(parents=True)
+        (dir_checkout / ".git" / "config").write_text(
+            f"[core]\n\tworktree = {stale}\n", encoding="utf-8"
+        )
+        (dir_checkout / "copied.py").write_text(
+            f"# copied from {stale}\n", encoding="utf-8"
+        )
+        ordinary = repo / ".claude" / "settings.json"
+        ordinary.parent.mkdir(parents=True, exist_ok=True)
+        ordinary.write_text(f'{{"note": "{stale}"}}\n', encoding="utf-8")
+
+        issues = harness.stale_path_issues(repo)
+
+        self.assertTrue(any("settings.json" in issue for issue in issues))
+        self.assertFalse(any("nested" in issue for issue in issues))
+        self.assertFalse(any("dir-checkout" in issue for issue in issues))
+
+    def test_stale_path_issues_skips_scan_root_that_is_worktree_file(self) -> None:
+        repo = self.make_repo()
+        stale = "C:/Users/jekyt/source/repo"
+        checkout_root = repo / ".claude"
+        checkout_root.mkdir(parents=True, exist_ok=True)
+        (checkout_root / ".git").write_text(
+            f"gitdir: {stale}/.git/worktrees/root-checkout\n", encoding="utf-8"
+        )
+        (checkout_root / "root-stale.py").write_text(
+            f"# copied from {stale}\n", encoding="utf-8"
+        )
+        ordinary_root = repo / ".agents"
+        ordinary_root.mkdir(parents=True, exist_ok=True)
+        (ordinary_root / "note.json").write_text(
+            f'{{"note": "{stale}"}}\n', encoding="utf-8"
+        )
+
+        issues = harness.stale_path_issues(repo)
+
+        self.assertTrue(any("note.json" in issue for issue in issues))
+        self.assertFalse(any("root-stale.py" in issue for issue in issues))
+
+    def test_stale_path_issues_skips_scan_root_that_is_directory_checkout(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        stale = "C:/Users/jekyt/source/repo"
+        checkout_root = repo / ".codex"
+        (checkout_root / ".git").mkdir(parents=True, exist_ok=True)
+        (checkout_root / ".git" / "config").write_text(
+            f"[core]\n\tworktree = {stale}\n", encoding="utf-8"
+        )
+        (checkout_root / "root-copied.py").write_text(
+            f"# copied from {stale}\n", encoding="utf-8"
+        )
+        ordinary_root = repo / ".agents"
+        ordinary_root.mkdir(parents=True, exist_ok=True)
+        (ordinary_root / "ordinary.json").write_text(
+            f'{{"note": "{stale}"}}\n', encoding="utf-8"
+        )
+
+        issues = harness.stale_path_issues(repo)
+
+        self.assertTrue(any("ordinary.json" in issue for issue in issues))
+        self.assertFalse(any("root-copied.py" in issue for issue in issues))
+
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
         (repo / "AGENTS.md").write_text(
