@@ -276,6 +276,28 @@ class BranchProtectionFindingTests(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(runner.gh_calls(), [])
 
+    def test_a_non_github_push_url_is_out_of_scope(self):
+        # Codex P1 on #369: pushes go elsewhere, so the GitHub fetch repository
+        # says nothing about them.
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {},
+            remote_rows=(
+                "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+                "origin\thttps://git.example.invalid/acme/widgets.git (push)"
+            ),
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_unproven_when_remotes_cannot_be_enumerated(self):
+        runner = ArgvRunner({REMOTE_ARGV: (False, "", "git: not found")})
+        findings = harness.default_branch_protection_findings(
+            Path("."), make_tier_data(), command_runner=runner, deadline=None
+        )
+        self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+        self.assertEqual(runner.gh_calls(), [])
+
     def test_missing_origin_is_out_of_scope(self):
         runner, findings = self.run_protection(
             make_tier_data(),

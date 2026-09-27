@@ -5506,22 +5506,26 @@ def default_branch_protection_findings(
     ):
         return []
     resolved, rows = configured_remote_urls(repo, command_runner, deadline)
-    if not resolved or not rows:
-        return []
-    origin_urls: list[str] = []
-    for name, url, direction in rows:
-        if name == "origin" and url not in origin_urls:
-            if direction == "push":
-                origin_urls.insert(0, url)
-            else:
-                origin_urls.append(url)
-    slug = ""
-    for url in origin_urls:
-        slug = github_repo_slug(url)
-        if slug:
-            break
-    if not slug:
-        return []
+    if not resolved:
+        # A leg that emits nothing reads as "does not apply"; a remote list git
+        # never produced is unmeasured (review of #369).
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                "the configured remotes could not be enumerated, so origin's "
+                "default-branch protection is unmeasured",
+            )
+        ]
+    # Only where pushes GO: a non-GitHub push URL with a GitHub fetch URL must
+    # not be measured through the fetch repository (Codex P1 on #369).
+    push_urls = [
+        url for name, url, direction in rows if name == "origin" and direction == "push"
+    ]
+    slugs = [github_repo_slug(url) for url in push_urls]
+    if not slugs or not all(slugs):
+        return []  # no origin, or a push destination off GitHub: out of scope
+    slug = slugs[0]
     rest_path = github_rest_repo_path(slug)
     if not rest_path:
         return []

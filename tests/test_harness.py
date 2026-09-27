@@ -8699,6 +8699,14 @@ class RealityCheckTests(unittest.TestCase):
         self.claude_home = self.root / "claude-home"
         (self.harness_root / "templates" / "hooks").mkdir(parents=True)
         (self.claude_home / "hooks").mkdir(parents=True)
+        # These tests pin the OTHER reality legs and their probe counts; the
+        # default-branch protection leg (issue #356) has its own module,
+        # tests/test_audit_branch_protection.py, so it is isolated here.
+        protection = mock.patch.object(
+            harness, "default_branch_protection_findings", return_value=[]
+        )
+        protection.start()
+        self.addCleanup(protection.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -9751,12 +9759,7 @@ class RealityCheckTests(unittest.TestCase):
     def test_repo_without_the_overlay_never_touches_the_network(self) -> None:
         repo = self.make_repo(sensitive_data=False)
         runner = FakeCommandRunner()
-        # The default-branch protection leg probes a `core` repo's origin on
-        # purpose (issue #356); it has its own tests, so isolate this leg.
-        with mock.patch.object(
-            harness, "default_branch_protection_findings", return_value=[]
-        ):
-            result = self.audit(repo, runner)
+        result = self.audit(repo, runner)
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.statuses(result, "remote visibility"), [])
 
@@ -10374,11 +10377,7 @@ class RealityCheckTests(unittest.TestCase):
     def test_repo_without_vendored_hooks_spawns_no_reference_probe(self) -> None:
         repo = self.make_repo()
         runner = FakeCommandRunner()
-        # Isolate from the default-branch protection leg (issue #356).
-        with mock.patch.object(
-            harness, "default_branch_protection_findings", return_value=[]
-        ):
-            result = self.audit(repo, runner)
+        result = self.audit(repo, runner)
         self.assertEqual(runner.calls, [])
         # The leg still reports: "nothing vendored" must be distinguishable
         # from "this check never ran".
