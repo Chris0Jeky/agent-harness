@@ -76,7 +76,7 @@ completed 1.6.26 wave.
 | Outcome ledger over swarm receipts (#299/E1) | #354, #360 | **MERGED** `59db399`, `8434156`. #354's round 1 fixed 1 HIGH + 4 MEDIUM; its single reopen fixed one HIGH regression the fix introduced; Codex P2s closed by #360. |
 | Merge-gate model and checker (claude-config #432) | #355, #361 | **MERGED** `92d5795`, `91a31b9`. Round 1 found the spec trusted the table's own bookkeeping (three mutants certified lawful); fixed with an event-driven observer. A repo-wide raw-check guard turned CI red once (the model's `check()`), fixed by renaming. |
 
-Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; none of the floored public repositories, nor this one, protects `main` server-side. Proposal: default-branch rulesets first, then shrink the client floor to local destruction.
+Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; none of the floored public repositories, nor this one, protects `main` server-side. Owner decision 2026-09-27 (H-17, closed): default-branch rulesets are live on six repositories; the client floor shrinks to local destruction next.
 
 ## Active implementation
 

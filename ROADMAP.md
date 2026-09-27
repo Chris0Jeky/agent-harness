@@ -66,7 +66,7 @@ explicit:
   universal parser redesign.
 - #152/#156/#177 closed through bounded PRs #174/#176/#187; #153 closed via PR #159.
 
-**2026-09-27 delta (not a full re-count).** The 64-issue census above is the 2026-08-08 snapshot and a full re-mapping is owed. This session's issues: **#356** (move irreversible-history protection server-side, shrink the client floor to local destruction) -> AH-3; **#358** (SPECS.md's restated merge law drifted from laws 2f/2g) -> AH-8; #357 and #359 were opened and closed in the same session by PRs #360 and #361.
+**2026-09-27 delta (not a full re-count).** The 64-issue census above is the 2026-08-08 snapshot and a full re-mapping is owed. This session's issues: **#356** (move irreversible-history protection server-side, shrink the client floor to local destruction; rulesets live on six repositories 2026-09-27) -> AH-3; **#358** (SPECS.md's restated merge law drifted from laws 2f/2g) -> AH-8; #357 and #359 were opened and closed in the same session by PRs #360 and #361.
 
 ## Open PR ownership
 
