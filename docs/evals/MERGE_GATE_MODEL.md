@@ -14,7 +14,7 @@ The durable control plane imports nothing from here; it replays the conformance 
 ## What `check` proves
 
 For all four merge authorities (`free`, `gated`, `human-only`, `none`), every reachable state is
-explored in product with an observer (below): 38,163 nodes, 118,940 transitions and 126 merge
+explored in product with an observer (below): 50,542 nodes, 153,356 transitions and 198 merge
 edges at this commit, in about two seconds.
 
 1. **No illegal merge.** Every merge edge satisfies `merge_violations`. Each of its rules needs
@@ -41,8 +41,10 @@ edges at this commit, in about two seconds.
 **The observer.** A table's own counters cannot be trusted to grade the table: an uncounted
 review round, or an age that survives a push, would otherwise look lawful. The observer is a
 small automaton driven only by the accepted event stream:
-- review verdicts are counted, and a CRITICAL counts toward the reopen only after a first round
-  (the model's reading of law 2d's "introduced by the fixes"; see Limits);
+- review verdicts are counted, and a CRITICAL counts toward the reopen only when it is
+  "introduced by the fixes" (law 2d): after a first round, and with a fix since that round's
+  verdict. A CRITICAL on a round that reviewed only a base change cannot reopen; the table
+  refuses it too, so such a round can only pass or park;
 - aging restarts when a head-changing event fires and again when that head is published, so a
   head never ages before its push;
 - review is cleared by a logic-changing event;
@@ -51,17 +53,18 @@ small automaton driven only by the accepted event stream:
 It is bounded, so the product with the table stays finite. Two facts remain inputs rather than
 observations: authority (configuration) and ready-for-review (a publish effect).
 
-`check --all-mutants` proves that the checker has teeth. Fifteen seeded defects must each fail,
+`check --all-mutants` proves that the checker has teeth. Sixteen seeded defects must each fail,
 with the expected violation:
 - `no_age_gate`, `stale_review`, `third_round` and `unbounded_fixes`;
 - `merge_on_red`, `retarget_keeps_proof`, `gated_merges` and `draft_merge`;
 - `age_kept_on_push`, `uncounted_review`, `changes_reopen` and `conflict_keeps_review`;
-- `semantic_retarget_keeps_review`, `early_critical` and `tick_before_push`.
+- `semantic_retarget_keeps_review`, `early_critical`, `tick_before_push` and `unfixed_critical`.
 
 The third group are bookkeeping slips that the first version of this checker certified as
 lawful. A fresh-context review found them, and the observer now catches them. The last group
-came from the second review round (#359); each fails only because of the observer rule it pins
-(removing that rule lets the mutant through, which was checked).
+came from the second review round (#359) and the review of its fix (#361). Each fails only because
+of the observer rule it pins; removing that rule lets the mutant through, which was checked for
+`tick_before_push` and `unfixed_critical`.
 
 A new invariant belongs with a mutant it catches.
 
@@ -168,10 +171,5 @@ stateDiagram-v2
   establish.
 - One PR at a time. Stacked-PR ordering (law 4), post-merge late-comment reconciliation (law 2h)
   and cross-PR interference are not modelled.
-- The reopen is granted to any CRITICAL after a first round. A CRITICAL raised on a round that
-  reviewed only a base change (`retarget_semantic`, `refresh_conflict`) therefore also opens it,
-  although no fix introduced it. Merged code is still proven, reviewed and aged; only the round
-  ceiling stretches by the law's one reopen. Requiring a fix since the last verdict would be the
-  strict reading.
 - The bounds are the laws' where the laws name one. The refresh bound and the dead-letter
   attempt count are this model's proposals.

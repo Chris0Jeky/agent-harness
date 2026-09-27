@@ -74,6 +74,7 @@ class ExhaustiveTests(unittest.TestCase):
             "semantic_retarget_keeps_review": ("illegal_merge", "reviewed"),
             "early_critical": ("illegal_merge", "review rounds"),
             "tick_before_push": ("illegal_merge", "aged"),
+            "unfixed_critical": ("illegal_merge", "review rounds"),
         }
         self.assertEqual(set(expected), set(model.MUTANTS))
         for mutant, (kind, fragment) in expected.items():
@@ -202,6 +203,16 @@ class LawScenarioTests(unittest.TestCase):
         )
         self.assertEqual(run(reopened + ["review_critical"]).phase, "Parked")
         self.assertFalse(enabled(run(HAPPY[:5]), "review_critical"))
+
+    def test_a_critical_on_a_base_change_round_cannot_reopen(self):
+        """Law 2d reopens only for a CRITICAL introduced by the fixes (Codex, #361)."""
+        state = run(
+            HAPPY[:5] + ["review_pass", "ci_green", "retarget_semantic"]
+            + ["proof_pass", "publish"]
+        )  # fmt: skip
+        self.assertEqual((state.phase, state.review_rounds), ("Review", 1))
+        self.assertFalse(enabled(state, "review_critical"))
+        self.assertEqual(model.step(state, "review_changes").phase, "Parked")
 
     def test_logic_change_after_the_last_round_parks_but_a_mechanical_fix_ships(self):
         rounds_spent = HAPPY[:5] + [

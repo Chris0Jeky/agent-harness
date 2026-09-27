@@ -89,6 +89,7 @@ MUTANTS = {
     "conflict_keeps_review": "a conflicting base refresh keeps the review",
     "semantic_retarget_keeps_review": "a semantically interacting retarget keeps the review",
     "early_critical": "a CRITICAL in the first round opens the reopen allowance",
+    "unfixed_critical": "a CRITICAL on a round with no fix since the last verdict reopens",
     "tick_before_push": "a new head ages from its creation, before it is pushed",
 }
 
@@ -119,6 +120,7 @@ class State(NamedTuple):
     refreshes: int = 0
     review_rounds: int = 0
     reopened: bool = False
+    fixed_since_verdict: bool = False  # a fix landed after the last review verdict
     merged_head: int = -1
     reverted: bool = False
 
@@ -208,9 +210,9 @@ def step(s, event, mutants=frozenset()):
         return s._replace(phase="Review")
     if p == "Fixing":
         if event == "fix_logic":
-            return _new_head(s, True, mutants)
+            return _new_head(s, True, mutants)._replace(fixed_since_verdict=True)
         if event == "fix_mechanical":
-            return _new_head(s, False, mutants)
+            return _new_head(s, False, mutants)._replace(fixed_since_verdict=True)
         if event == "fix_failed":
             return s._replace(phase="Parked")
         return None
@@ -220,6 +222,8 @@ def step(s, event, mutants=frozenset()):
             return shared
     if p == "Review":
         allowed = _rounds_allowed(s, mutants)
+        fixed = s.fixed_since_verdict
+        s = s._replace(fixed_since_verdict=False) if event in REVIEW_VERDICTS else s
         if event == "review_pass":
             return s._replace(
                 phase="AgeGate",
@@ -234,9 +238,10 @@ def step(s, event, mutants=frozenset()):
             if rounds < allowed:
                 return _enter_fixing(s, review_rounds=rounds, reopened=reopen)
             return s._replace(phase="Parked", review_rounds=rounds)
-        if event == "review_critical" and (
-            s.review_rounds >= 1 or "early_critical" in mutants
-        ):
+        # law 2d: only a CRITICAL introduced by the fixes reopens, so it needs a round
+        # behind it and a fix since that round's verdict
+        introduced = s.review_rounds >= 1 and (fixed or "unfixed_critical" in mutants)
+        if event == "review_critical" and (introduced or "early_critical" in mutants):
             rounds = s.review_rounds + 1
             if not s.reopened:
                 return _enter_fixing(s, review_rounds=rounds, reopened=True)
@@ -326,6 +331,7 @@ HEAD_EVENTS = frozenset(
 BASE_EVENTS = frozenset(
     {"retarget", "retarget_semantic", "refresh_merge", "refresh_conflict"}
 )
+FIX_EVENTS = frozenset({"fix_logic", "fix_mechanical"})
 LOGIC_EVENTS = frozenset(
     {"worker_ok", "fix_logic", "refresh_conflict", "retarget_semantic"}
 )
@@ -342,6 +348,7 @@ class Observer(NamedTuple):
     proven: bool = False
     green: bool = False
     unpushed: bool = False  # a head exists that has not been published yet
+    fixed: bool = False  # a fix event since the last review verdict
 
 
 def observe(o, event):
@@ -351,7 +358,10 @@ def observe(o, event):
     return Observer(
         rounds=min(o.rounds + (event in REVIEW_VERDICTS), OBSERVED_ROUND_CAP),
         # law 2d: only a CRITICAL introduced by fixes, i.e. after a first round, reopens
-        criticals=min(o.criticals + (event == "review_critical" and o.rounds >= 1), 2),
+        criticals=min(
+            o.criticals + (event == "review_critical" and o.rounds >= 1 and o.fixed), 2
+        ),
+        fixed=event in FIX_EVENTS or (o.fixed and event not in REVIEW_VERDICTS),
         # aging counts from the push of the current head, never from before it
         age=(
             0
