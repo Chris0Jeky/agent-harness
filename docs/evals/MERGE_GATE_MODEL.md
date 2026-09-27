@@ -14,7 +14,7 @@ The durable control plane imports nothing from here; it replays the conformance 
 ## What `check` proves
 
 For all four merge authorities (`free`, `gated`, `human-only`, `none`), every reachable state is
-explored in product with an observer (below): 35,491 nodes, 105,818 transitions and 126 merge
+explored in product with an observer (below): 50,542 nodes, 153,356 transitions and 198 merge
 edges at this commit, in about two seconds.
 
 1. **No illegal merge.** Every merge edge satisfies `merge_violations`. Each of its rules needs
@@ -41,29 +41,37 @@ edges at this commit, in about two seconds.
 **The observer.** A table's own counters cannot be trusted to grade the table: an uncounted
 review round, or an age that survives a push, would otherwise look lawful. The observer is a
 small automaton driven only by the accepted event stream:
-- review verdicts and CRITICAL reopens are counted;
-- aging restarts when a head-changing event fires;
+- review verdicts are counted, and a CRITICAL counts toward the reopen only when it is
+  "introduced by the fixes" (law 2d): after a first round, and with a fix since that round's
+  verdict. A CRITICAL on a round that reviewed only a base change cannot reopen; the table
+  refuses it too, so such a round can only pass or park;
+- aging restarts when a head-changing event fires and again when that head is published, so a
+  head never ages before its push;
 - review is cleared by a logic-changing event;
 - proof and CI are cleared by a head or base change.
 
 It is bounded, so the product with the table stays finite. Two facts remain inputs rather than
 observations: authority (configuration) and ready-for-review (a publish effect).
 
-`check --all-mutants` proves that the checker has teeth. Twelve seeded defects must each fail,
+`check --all-mutants` proves that the checker has teeth. Sixteen seeded defects must each fail,
 with the expected violation:
 - `no_age_gate`, `stale_review`, `third_round` and `unbounded_fixes`;
 - `merge_on_red`, `retarget_keeps_proof`, `gated_merges` and `draft_merge`;
-- `age_kept_on_push`, `uncounted_review`, `changes_reopen` and `conflict_keeps_review`.
+- `age_kept_on_push`, `uncounted_review`, `changes_reopen` and `conflict_keeps_review`;
+- `semantic_retarget_keeps_review`, `early_critical`, `tick_before_push` and `unfixed_critical`.
 
-The last four are bookkeeping slips that the first version of this checker certified as
-lawful. A fresh-context review found them, and the observer now catches them.
+The third group are bookkeeping slips that the first version of this checker certified as
+lawful. A fresh-context review found them, and the observer now catches them. The last group
+came from the second review round (#359) and the review of its fix (#361). Each fails only because
+of the observer rule it pins; removing that rule lets the mutant through, which was checked for
+`tick_before_push` and `unfixed_critical`.
 
 A new invariant belongs with a mutant it catches.
 
 **The abstraction.** Heads, bases and logic versions only increase, so evidence for an older one
 can never become current again. The checker therefore stores each evidence identity as current
 or stale, which is what makes the graph finite. A test replays seeded random walks, with and
-without each mutant. It asserts two things: the abstraction never changes a spec verdict, and
+without each mutant, so it samples states rather than checking every one. It asserts two things: the abstraction never changes a spec verdict, and
 `canonical(step(s, e)) == canonical(step(canonical(s), e))` for every event. The second is the
 property the exhaustive search relies on.
 
@@ -76,10 +84,13 @@ Writing the laws as a machine surfaced cases the prose leaves implicit:
   publishing it parks the PR. A *mechanical* fix keeps the review and can still ship. The first
   run of the checker found this path as a ceiling violation.
 - **Retarget versus refresh.** A retarget moves the base under the same head. It needs fresh
-  proof and CI, but it keeps the review and the aging clock. A merge-commit refresh is a new
+  proof and CI, but it keeps the review and the aging clock (paused while the new base is
+  re-proved, which only delays a lawful merge). A merge-commit refresh is a new
   pushed head, so its aging restarts (law 2f). It keeps the review *unless* the new base brings
   a conflict, semantic interaction or new logic: law 2g's exception is the `refresh_conflict`
-  event. Such a refresh after the last round parks.
+  event. Such a refresh after the last round parks. A retarget whose new base interacts
+  semantically with the change (`retarget_semantic`) likewise owes a fresh review, while the
+  head, and so its aging clock, stays.
 - **Base churn must be bounded.** Without a refresh counter, "base moved, re-prove" is an
   unbounded cycle. The model parks after three refreshes. The laws name no such bound; the
   control plane should adopt one or name its own.
@@ -91,10 +102,12 @@ Writing the laws as a machine surfaced cases the prose leaves implicit:
 
 ## Conformance corpus
 
-`traces --count N --seed S [--authority A]` emits seeded random walks as JSONL: the event list
-plus the final state. An implementation of the gate (the #432 DBOS workflow, or an EstateGate
-`merge_exact_head` precondition) passes when it replays every trace to the same final phase and
-counters, and when it refuses every event this model does not enable. The corpus is data; the
+`traces --count N --seed S [--authority A]` emits seeded random walks as JSONL: the event list,
+the phase reached after each event, the events the model refuses in each state along the way
+(including the final one), and the final state. An implementation of the gate (the #432 DBOS
+workflow, or an EstateGate `merge_exact_head` precondition) passes when it replays every trace
+to the same phases and final counters, and refuses every listed event at its step. The refusals
+make a permissive implementation fail, not only a strict one. The corpus is data; the
 implementation owns its own storage and effects.
 
 ## Diagram
@@ -108,14 +121,14 @@ stateDiagram-v2
   AgeGate --> Fixing: ci_red
   AgeGate --> MergeReady: evaluate
   AgeGate --> OwnerBlocked: evaluate
-  AgeGate --> Parked: ci_red, refresh_conflict, refresh_merge, retarget
-  AgeGate --> Proving: refresh_conflict, refresh_merge, retarget
+  AgeGate --> Parked: ci_red, refresh_conflict, refresh_merge, retarget, retarget_semantic
+  AgeGate --> Proving: refresh_conflict, refresh_merge, retarget, retarget_semantic
   Candidate --> Tasked: lease
   Fixing --> Parked: fix_failed
   Fixing --> Proving: fix_logic, fix_mechanical
   MergeReady --> Merged: merge
-  MergeReady --> Parked: refresh_conflict, refresh_merge, retarget
-  MergeReady --> Proving: refresh_conflict, refresh_merge, retarget
+  MergeReady --> Parked: refresh_conflict, refresh_merge, retarget, retarget_semantic
+  MergeReady --> Proving: refresh_conflict, refresh_merge, retarget, retarget_semantic
   Merged --> PostMerge: postmerge_start
   OwnerBlocked --> Closed: owner_answer
   PostMerge --> Closed: postmerge_pass
@@ -131,8 +144,8 @@ stateDiagram-v2
   Revert --> OwnerBlocked: revert_irreversible
   Review --> AgeGate: review_pass
   Review --> Fixing: ci_red, review_changes, review_critical
-  Review --> Parked: ci_red, refresh_conflict, refresh_merge, retarget, review_changes, review_critical
-  Review --> Proving: refresh_conflict, refresh_merge, retarget
+  Review --> Parked: ci_red, refresh_conflict, refresh_merge, retarget, retarget_semantic, review_changes, review_critical
+  Review --> Proving: refresh_conflict, refresh_merge, retarget, retarget_semantic
   Running --> Proving: worker_ok
   Running --> Tasked: lease_expired, worker_fail
   Tasked --> DeadLetter: start
