@@ -17,6 +17,7 @@ import shutil
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,67 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
             self.assertEqual(
                 "second payload", (target / "STRASSE.txt").read_text("utf-8")
             )
+
+    def test_first_copy_checks_exact_names_and_bytes(self):
+        for fault in ("missing-name", "changed-bytes"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                source, target = Path(tmp) / "source", Path(tmp) / "target"
+                self.write_distinct_unicode_files(source)
+                original_copy = shutil.copytree
+                injected = []
+
+                def incomplete_copy(src, dst, *args, **kwargs):
+                    result = original_copy(src, dst, *args, **kwargs)
+                    if Path(dst) == target:
+                        injected.append(fault)
+                        affected = target / "Straße.txt"
+                        if fault == "missing-name":
+                            affected.unlink()
+                        else:
+                            affected.write_text("different", encoding="utf-8")
+                    return result
+
+                with mock.patch.object(
+                    harness.shutil, "copytree", side_effect=incomplete_copy
+                ):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError, "copied skill tree does not match source"
+                    ):
+                        harness.copy_skill_tree_over(source, target)
+                self.assertEqual([fault], injected)
+                self.assertEqual(
+                    "first payload", (source / "Straße.txt").read_text("utf-8")
+                )
+                self.assertTrue(target.is_dir())
+
+    def test_first_copy_rejects_an_uninspectable_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            original_digest = harness.tree_digest
+            inspected = []
+
+            def uninspectable(path):
+                inspected.append(path)
+                return None if path == target else original_digest(path)
+
+            with mock.patch.object(harness, "tree_digest", side_effect=uninspectable):
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "copied skill tree does not match source"
+                ):
+                    harness.copy_skill_tree_over(source, target)
+            self.assertIn(source, inspected)
+            self.assertIn(target, inspected)
+            self.assertEqual(original_digest(source), original_digest(target))
+
+    def test_first_copy_of_a_complete_tree_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "parent" / "target"
+            self.write_distinct_unicode_files(source)
+            before = harness.tree_digest(source)
+            harness.copy_skill_tree_over(source, target)
+            self.assertEqual(before, harness.tree_digest(source))
+            self.assertEqual(before, harness.tree_digest(target))
 
 
 if __name__ == "__main__":

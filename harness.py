@@ -6349,23 +6349,49 @@ def canonicalize_skill_tree_case(source: Path, target: Path) -> None:
             f"cannot inspect skill tree while aligning case: {source}; {target}: {exc}"
         ) from exc
 
-    source_by_case: dict[str, Path] = {}
+    # Resolve source spellings through the destination itself. Unicode
+    # casefold is not a filesystem lookup rule (for example, NTFS can keep
+    # Straße and STRASSE as distinct entries).
+    for target_child in target_children:
+        if path_is_alias(target_child):
+            raise HarnessError(f"unsafe skill tree alias: {target_child}")
+    target_by_name = {entry.name: entry for entry in target_children}
+    source_by_target: dict[str, Path] = {}
     for source_child in source_children:
         if path_is_alias(source_child):
             raise HarnessError(f"unsafe skill tree alias: {source_child}")
-        key = source_child.name.casefold()
-        previous = source_by_case.get(key)
+        desired = target / source_child.name
+        if path_is_alias(desired):
+            raise HarnessError(f"unsafe skill tree alias: {desired}")
+        try:
+            if not desired.exists():
+                continue
+            exact = target_by_name.get(source_child.name)
+            # Exact directory entries stay distinct even when they are hard links.
+            matches = (
+                [exact]
+                if exact is not None
+                else [entry for entry in target_children if desired.samefile(entry)]
+            )
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot resolve skill destination spelling: {desired}: {exc}"
+            ) from exc
+        if len(matches) != 1:
+            raise HarnessError(f"ambiguous skill destination spelling: {desired}")
+        key = matches[0].name
+        previous = source_by_target.get(key)
         if previous is not None and previous.name != source_child.name:
             raise HarnessError(
-                f"source skill entries collide on a case-insensitive destination: "
+                f"source skill entries collide on this destination: "
                 f"{previous}; {source_child}"
             )
-        source_by_case[key] = source_child
+        source_by_target[key] = source_child
 
     for target_child in target_children:
         if path_is_alias(target_child):
             raise HarnessError(f"unsafe skill tree alias: {target_child}")
-        source_child = source_by_case.get(target_child.name.casefold())
+        source_child = source_by_target.get(target_child.name)
         if source_child is None:
             continue
 
@@ -6457,6 +6483,12 @@ def copy_skill_tree_over(source: Path, target: Path) -> None:
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, target)
+        source_digest = tree_digest(source)
+        target_digest = tree_digest(target)
+        if source_digest is None or target_digest != source_digest:
+            raise HarnessError(
+                f"copied skill tree does not match source: {source}; {target}"
+            )
         return
 
     source_kinds = skill_tree_entry_kinds(source)
