@@ -13264,12 +13264,14 @@ _CORE_HINT = re.compile(
     + _HINT_INTERPRETERS
     + r")(?:\.exe)?(?![\w.-])"
     r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
-    # Program text an evaluator runs from a download, however the download is
-    # spelled: backticks, a path-qualified downloader, `iex (irm ...)` (review
-    # of PR #363, MEDIUM). Each match starts with a charter-hint alternative.
+    # Program text an evaluator runs from a named downloader: backticks, a
+    # path-qualified downloader, `iex (irm ...)` (review of PR #363, MEDIUM).
+    # Each match starts with a charter-hint alternative. The span already eats
+    # path characters, so the downloader only needs a word-start guard; an
+    # `\S*` path group here backtracked quadratically (30k chars: 3.7s).
     r"|(?:\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s))"
     + _HINT_SPAN
-    + r"(?:\S*[\\/])?(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
+    + r"(?<![\w-])(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
     r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
     r"|\.netrc|\.npmrc|\.pypirc",
     re.IGNORECASE,

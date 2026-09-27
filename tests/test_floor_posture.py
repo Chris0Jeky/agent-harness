@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -465,6 +466,17 @@ class CorePostureTests(unittest.TestCase):
                 self.assertEqual(rendered[0], "deny")
         # An evaluator with no downloader stays a given-up family.
         self.assertFalse(dispatch.command_carries_core_hint('eval "$(ssh-agent -s)"'))
+        # A downloader name needs a word start (round-2 verification, LOW).
+        for command in ('bash -c "echo confirm"', 'eval "$(firmware)"'):
+            with self.subTest(given_up=command):
+                self.assertFalse(dispatch.command_carries_core_hint(command))
+        # Round-2 verification (MEDIUM): a `\S*` path group after the span
+        # backtracked quadratically -- 30k chars took 3.7s against a 5s hook
+        # timeout. The generous bound only catches that class coming back.
+        started = time.perf_counter()
+        for prefix in ("eval ", "bash -c ", "iex "):
+            dispatch.command_carries_core_hint(prefix + "a" * 60000)
+        self.assertLess(time.perf_counter() - started, 2.0)
         self.assertFalse(
             dispatch.command_carries_core_hint("git push --force origin main")
         )
