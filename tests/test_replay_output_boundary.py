@@ -159,7 +159,9 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
                     line for line in markdown.splitlines() if line.startswith("    [")
                 )
                 reproduction = json.loads(argv_line)
-                self.assertEqual([sys.executable, "-m", "replay_v0.cli"], reproduction[:3])
+                self.assertEqual(
+                    [sys.executable, "-m", "replay_v0.cli"], reproduction[:3]
+                )
                 self.assertEqual(0, cli.main(reproduction[3:]))
                 reports.append((output / "run-manifest.json").read_bytes())
             self.assertEqual(reports[0], reports[1])
@@ -174,7 +176,9 @@ class ReplayOutputBoundaryTests(unittest.TestCase):
             target.mkdir()
             alias = data[0] / "reports-alias"
             self.make_link(alias, target)
-            with mock.patch.object(cli, "_publish_report_set", wraps=cli._publish_report_set) as publish:
+            with mock.patch.object(
+                cli, "_publish_report_set", wraps=cli._publish_report_set
+            ) as publish:
                 self.assertEqual(0, cli.main(self.with_output(data[2], alias)))
             self.assertEqual(alias, publish.call_args.args[0])
             self.assertTrue((target / "report.json").is_file())
