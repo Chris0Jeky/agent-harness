@@ -5196,6 +5196,8 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
         "sudo rm -rf /srv/data",
         "echo TOKEN=x > .env",
         "git -c core.pager='rm -rf /srv' log",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x "
+        f"rm --recursive --force {outside}",
         f"git push --force origin feat; ./x; {rm_outside}",
     ):
         first = run_case(command, 3, dict(default))
