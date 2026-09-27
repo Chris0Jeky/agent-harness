@@ -11,7 +11,9 @@ section you need.
 - `README.md` for executable commands and current shipped state.
 - `BLUEPRINT.md` when a change touches durable policy: the tier ladder, laws, regions, routing,
   or the deny floor.
-- `SPECS.md` when a change touches a schema, a budget, hook wiring or the deny-floor matrix.
+- `SPECS.md` before changing any contract it specifies: its `## §N` headings index the tier
+  schema and root selection, budgets, skeletons, hook wiring, the deny-floor matrix, stop hooks,
+  model routing, the harness CLI, Gardener, skill-forge, concurrency and the review pipeline.
 - `BOOK.md` only when the rationale behind a policy is needed.
 - Never run anything in `legacy/`; those scripts are historical source material.
 
