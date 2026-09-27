@@ -73,6 +73,7 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Check Black formatting
@@ -100,6 +101,7 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Compile Python sources
@@ -127,6 +129,7 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
   replay-fast:
