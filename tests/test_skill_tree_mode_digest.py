@@ -145,6 +145,27 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                 self.fail(f"representable distinct Unicode directories rejected: {exc}")
             self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
 
+    def test_existing_distinct_hardlink_names_remain_representable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            source.mkdir()
+            target.mkdir()
+            for name in ("first.txt", "second.txt"):
+                (source / name).write_text("same payload", encoding="utf-8")
+            (target / "first.txt").write_text("same payload", encoding="utf-8")
+            try:
+                os.link(target / "first.txt", target / "second.txt")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"host cannot create a hard link: {exc}")
+            self.assertTrue((target / "first.txt").samefile(target / "second.txt"))
+            before = harness.tree_digest(target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"distinct existing directory entries rejected: {exc}")
+            self.assertEqual(before, harness.tree_digest(target))
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
     def test_repeat_copy_retains_distinct_unicode_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, target = Path(tmp) / "source", Path(tmp) / "target"
