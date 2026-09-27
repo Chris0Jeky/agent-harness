@@ -13,6 +13,7 @@ test skips there.
 
 import importlib.util
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -98,6 +99,65 @@ class SkillTreeModeDigestTests(unittest.TestCase):
                 directory.mkdir()
                 os.chmod(directory, mode)
             self.assertFalse(harness.same_tree(base / "source", base / "target"))
+
+
+class SkillTreeFilesystemLookupTests(unittest.TestCase):
+    def write_distinct_unicode_files(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        first = root / "Straße.txt"
+        second = root / "STRASSE.txt"
+        first.write_text("first payload", encoding="utf-8")
+        try:
+            with second.open("x", encoding="utf-8") as stream:
+                stream.write("second payload")
+        except FileExistsError:
+            self.skipTest("filesystem equates the two Unicode spellings")
+        self.assertFalse(first.samefile(second))
+
+    def test_distinct_unicode_files_survive_case_alignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            shutil.copytree(source, target)
+            before = harness.tree_digest(target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"representable distinct Unicode names rejected: {exc}")
+            self.assertEqual(before, harness.tree_digest(target))
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
+    def test_distinct_unicode_directories_survive_case_alignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            source.mkdir()
+            for name in ("Straße", "STRASSE"):
+                directory = source / name
+                try:
+                    directory.mkdir()
+                except FileExistsError:
+                    self.skipTest("filesystem equates the two Unicode spellings")
+                (directory / "payload.txt").write_text(name, encoding="utf-8")
+            shutil.copytree(source, target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"representable distinct Unicode directories rejected: {exc}")
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
+    def test_repeat_copy_retains_distinct_unicode_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            harness.copy_skill_tree_over(source, target)
+            (source / "Straße.txt").write_text("updated first", encoding="utf-8")
+            (target / "stale.txt").write_text("stale", encoding="utf-8")
+            harness.copy_skill_tree_over(source, target)
+            self.assertFalse((target / "stale.txt").exists())
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+            self.assertEqual(
+                "second payload", (target / "STRASSE.txt").read_text("utf-8")
+            )
 
 
 if __name__ == "__main__":
