@@ -8,8 +8,9 @@ The global law set lives in the claude-config repository, and it is the only cop
 `rules/laws.md`, deployed as `~/.claude/rules/laws.md`; Codex reads the same contract as
 `codex/AGENTS.md`, and claude-config's `tests/check-law-parity.ps1` keeps those two in step. This
 section used to hold a dated verbatim mirror (ratified 2026-07-26, issue #92). The mirror drifted
-from laws 2f/2g, and the drift misled a review (issue #358), so law 8 pruned it. When a document
-here says "law N", it means law N of that file.
+from laws 2f/2g, and the drift misled a review (issue #358), so law 8 pruned it. A "global law N"
+or "CLAUDE.md law N" pointer means law N of that file; a bare "law N" in BLUEPRINT.md means
+BLUEPRINT §0's own twelve laws, which are numbered differently.
 
 `doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
 byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, and source
