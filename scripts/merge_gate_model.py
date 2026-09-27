@@ -6,7 +6,7 @@ Merged -> PostMerge -> Closed/Revert/DeadLetter) written as a pure transition
 function, so the durable control plane can be conformance-tested against it
 instead of re-deriving the laws from prose.
 
-``check`` explores every reachable state for every merge authority and proves:
+``model_check`` (CLI: ``check``) explores every reachable state for every merge authority and proves:
 
 - no merge unless an INDEPENDENT spec holds: authority ``free``, published
   ready-for-review, proof and green CI for the exact (head, base) pair, a
@@ -496,7 +496,7 @@ def _cycles(graph):
     return found
 
 
-def check(mutants=frozenset()):
+def model_check(mutants=frozenset()):
     graph = Graph(mutants)
     violations = []
 
@@ -614,9 +614,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "check":
         if args.all_mutants:
-            baseline = check()
+            baseline = model_check()
             caught = {
-                name: not check(frozenset({name}))["ok"] for name in sorted(MUTANTS)
+                name: not model_check(frozenset({name}))["ok"]
+                for name in sorted(MUTANTS)
             }
             result = {
                 "model_ok": baseline["ok"],
@@ -625,7 +626,7 @@ def main(argv=None):
             }
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if baseline["ok"] and all(caught.values()) else 1
-        result = check(frozenset(args.mutant))
+        result = model_check(frozenset(args.mutant))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["ok"] else 1
     if args.command == "traces":

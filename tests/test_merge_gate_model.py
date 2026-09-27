@@ -41,7 +41,7 @@ def enabled(state, event):
 class ExhaustiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.result = model.check()
+        cls.result = model.model_check()
 
     def test_the_model_satisfies_every_invariant(self):
         self.assertTrue(self.result["ok"], self.result["violations"][:3])
@@ -74,7 +74,7 @@ class ExhaustiveTests(unittest.TestCase):
         self.assertEqual(set(expected), set(model.MUTANTS))
         for mutant, (kind, fragment) in expected.items():
             with self.subTest(mutant=mutant):
-                result = model.check(frozenset({mutant}))
+                result = model.model_check(frozenset({mutant}))
                 self.assertFalse(result["ok"])
                 self.assertTrue(
                     any(
@@ -86,7 +86,7 @@ class ExhaustiveTests(unittest.TestCase):
 
     def test_counterexample_traces_replay_to_the_violation(self):
         mutants = frozenset({"no_age_gate"})
-        result = model.check(mutants)
+        result = model.model_check(mutants)
         violation = next(
             v for v in result["violations"] if v["kind"] == "illegal_merge"
         )
@@ -161,7 +161,7 @@ class AbstractionTests(unittest.TestCase):
 
         model.step = owner_only
         self.addCleanup(setattr, model, "step", original)
-        result = model.check()
+        result = model.model_check()
         self.assertTrue(any(v["kind"] == "liveness" for v in result["violations"]))
 
 
