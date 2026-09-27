@@ -89,7 +89,7 @@ MUTANTS = {
     "conflict_keeps_review": "a conflicting base refresh keeps the review",
     "semantic_retarget_keeps_review": "a semantically interacting retarget keeps the review",
     "early_critical": "a CRITICAL in the first round opens the reopen allowance",
-    "tick_before_push": "the head ages before it is pushed and publish keeps that age",
+    "tick_before_push": "a new head ages from its creation, before it is pushed",
 }
 
 
@@ -152,6 +152,8 @@ def _new_head(s, logic_changed, mutants, counted=True):
         ci="none",
         reviewed=s.reviewed and keep_review,
         fixes=s.fixes + (1 if counted and "unbounded_fixes" not in mutants else 0),
+        # the mutant ages from the head change instead of the push
+        age=0 if "tick_before_push" in mutants else s.age,
     )
 
 

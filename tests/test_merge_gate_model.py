@@ -300,6 +300,12 @@ class CliTests(unittest.TestCase):
             result["violations"][:3],
         )  # fmt: skip
 
+    def test_refusals_align_when_the_step_limit_ends_the_walk(self):
+        for trace in model.random_traces(10, seed=5, max_steps=2):
+            self.assertEqual(len(trace["events"]), 2)
+            self.assertEqual(len(trace["refused"]), 3)
+            self.assertEqual(len(trace["phases"]), 2)
+
     def test_all_mutants_cli_exits_zero_only_when_every_mutant_is_caught(self):
         out = io.StringIO()
         with redirect_stdout(out):

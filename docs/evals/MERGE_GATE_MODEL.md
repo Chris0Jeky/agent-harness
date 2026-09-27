@@ -42,7 +42,7 @@ edges at this commit, in about two seconds.
 review round, or an age that survives a push, would otherwise look lawful. The observer is a
 small automaton driven only by the accepted event stream:
 - review verdicts are counted, and a CRITICAL counts toward the reopen only after a first round
-  (law 2d: introduced by the fixes);
+  (the model's reading of law 2d's "introduced by the fixes"; see Limits);
 - aging restarts when a head-changing event fires and again when that head is published, so a
   head never ages before its push;
 - review is cleared by a logic-changing event;
@@ -58,9 +58,10 @@ with the expected violation:
 - `age_kept_on_push`, `uncounted_review`, `changes_reopen` and `conflict_keeps_review`;
 - `semantic_retarget_keeps_review`, `early_critical` and `tick_before_push`.
 
-The fourth group are bookkeeping slips that the first version of this checker certified as
+The third group are bookkeeping slips that the first version of this checker certified as
 lawful. A fresh-context review found them, and the observer now catches them. The last group
-came from the second review round (#359).
+came from the second review round (#359); each fails only because of the observer rule it pins
+(removing that rule lets the mutant through, which was checked).
 
 A new invariant belongs with a mutant it catches.
 
@@ -80,7 +81,8 @@ Writing the laws as a machine surfaced cases the prose leaves implicit:
   publishing it parks the PR. A *mechanical* fix keeps the review and can still ship. The first
   run of the checker found this path as a ceiling violation.
 - **Retarget versus refresh.** A retarget moves the base under the same head. It needs fresh
-  proof and CI, but it keeps the review and the aging clock. A merge-commit refresh is a new
+  proof and CI, but it keeps the review and the aging clock (paused while the new base is
+  re-proved, which only delays a lawful merge). A merge-commit refresh is a new
   pushed head, so its aging restarts (law 2f). It keeps the review *unless* the new base brings
   a conflict, semantic interaction or new logic: law 2g's exception is the `refresh_conflict`
   event. Such a refresh after the last round parks. A retarget whose new base interacts
@@ -166,5 +168,10 @@ stateDiagram-v2
   establish.
 - One PR at a time. Stacked-PR ordering (law 4), post-merge late-comment reconciliation (law 2h)
   and cross-PR interference are not modelled.
+- The reopen is granted to any CRITICAL after a first round. A CRITICAL raised on a round that
+  reviewed only a base change (`retarget_semantic`, `refresh_conflict`) therefore also opens it,
+  although no fix introduced it. Merged code is still proven, reviewed and aged; only the round
+  ceiling stretches by the law's one reopen. Requiring a fix since the last verdict would be the
+  strict reading.
 - The bounds are the laws' where the laws name one. The refresh bound and the dead-letter
   attempt count are this model's proposals.
