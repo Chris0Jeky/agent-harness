@@ -650,7 +650,7 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
   stale user-profile paths, and default-branch server-side history protection
   (`non_fast_forward` + `deletion` ruleset or classic equivalent), reported as an advisory
-  when the effective floor posture is `core` (issue #356).
+  when the effective floor posture is `core` or `floor_wiring` is `none` (issues #356, #370).
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under
