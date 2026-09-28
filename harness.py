@@ -6257,7 +6257,9 @@ def same_file(left: Path, right: Path) -> bool:
     )
 
 
-GUIDANCE_SOURCE_PATHS = ("CLAUDE.md", "codex/AGENTS.md")
+# `rules/laws.md` is the law set Claude actually loads (a user-level rule);
+# CLAUDE.md is only its wrapper now (issue #366).
+GUIDANCE_SOURCE_PATHS = ("CLAUDE.md", "rules/laws.md", "codex/AGENTS.md")
 
 
 def guidance_reference_status(
@@ -9936,8 +9938,10 @@ def doctor(args: argparse.Namespace) -> int:
     if config_root is None:
         claude_guidance_ok: bool | str = REALITY_UNPROVEN
         codex_guidance_ok: bool | str = REALITY_UNPROVEN
+        claude_laws_ok: bool | str = REALITY_UNPROVEN
         claude_guidance_detail = "no --config-root supplied"
         codex_guidance_detail = "no --config-root supplied"
+        claude_laws_detail = "no --config-root supplied"
     else:
         guidance_reference_ok, guidance_reference_detail = guidance_reference_status(
             config_root, harness_root, probe_runner, probe_deadline
@@ -9954,6 +9958,12 @@ def doctor(args: argparse.Namespace) -> int:
             guidance_reference_ok,
             guidance_reference_detail,
         )
+        claude_laws_ok, claude_laws_detail = guidance_identity_status(
+            config_root / "rules" / "laws.md",
+            claude_home / "rules" / "laws.md",
+            guidance_reference_ok,
+            guidance_reference_detail,
+        )
     checks.extend(
         [
             (
@@ -9966,6 +9976,11 @@ def doctor(args: argparse.Namespace) -> int:
                 "global Claude guidance",
                 claude_guidance_ok,
                 claude_guidance_detail,
+            ),
+            (
+                "global Claude laws",
+                claude_laws_ok,
+                claude_laws_detail,
             ),
             (
                 "global Codex guidance",

@@ -151,10 +151,10 @@ that measured nothing cannot read as a clean one. `doctor` surfaces the same fin
 `[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
 
 Supply `doctor --config-root C:\path\to\claude-config` to compare the source checkout's
-`CLAUDE.md` and `codex/AGENTS.md` bytes with their respective deployed global runtime files.
-An `[ok]` source must be the checkout root of the harness origin's `claude-config` sibling,
-clean on `main`, level with its published `origin/main`, and free of hidden index flags on both
-guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
+`CLAUDE.md`, `rules/laws.md` (the law set Claude loads, #366) and `codex/AGENTS.md` bytes with
+their respective deployed global runtime files, as three separate checks. An `[ok]` source must
+be the checkout root of the harness origin's `claude-config` sibling, clean on `main`, level with
+its published `origin/main`, and free of hidden index flags on all three guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
 byte mismatch or absent deployed target fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs

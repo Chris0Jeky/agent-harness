@@ -13,9 +13,10 @@ or "CLAUDE.md law N" pointer means law N of that file; a bare "law N" in BLUEPRI
 BLUEPRINT §0's own twelve laws, which are numbered differently.
 
 `doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
-byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, and source
-`codex/AGENTS.md` against `~/.codex/AGENTS.md`. The supplied directory must be the clean,
-published `main` checkout of the harness origin's `claude-config` sibling, with both guidance
+byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, source
+`rules/laws.md` against `~/.claude/rules/laws.md` (the law set Claude actually loads, #366), and
+source `codex/AGENTS.md` against `~/.codex/AGENTS.md`. The supplied directory must be the clean,
+published `main` checkout of the harness origin's `claude-config` sibling, with all three guidance
 paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable byte mismatch
 fails.
 
