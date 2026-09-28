@@ -855,9 +855,13 @@ class HarnessTests(unittest.TestCase):
         (config_root / "codex").mkdir(parents=True)
         (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
         (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        (config_root / "rules").mkdir()
+        (config_root / "rules" / "laws.md").write_text("# Laws\n", encoding="utf-8")
         claude_home = (Path(self.temp.name) / "claude-home").resolve()
         claude_home.mkdir(parents=True)
         (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (claude_home / "rules").mkdir()
+        (claude_home / "rules" / "laws.md").write_text("# Laws\n", encoding="utf-8")
         dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
@@ -994,6 +998,41 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1, output)
         self.assertIn("[ok] global Claude guidance:", output)
         self.assertIn("[FAIL] global Codex guidance:", output)
+
+    def test_doctor_checks_the_law_file_claude_actually_loads(self) -> None:
+        # Issue #366: CLAUDE.md is only the wrapper; `rules/laws.md` is the law
+        # set. A drifted deployed copy under a matching wrapper must not pass.
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "rules").mkdir()
+        (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        (config_root / "rules" / "laws.md").write_text("# Laws v2\n", encoding="utf-8")
+        claude_home = root / "claude-home"
+        (claude_home / "rules").mkdir(parents=True)
+        (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        deployed_laws = claude_home / "rules" / "laws.md"
+        deployed_laws.write_text("# Laws v1\n", encoding="utf-8")
+
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[FAIL] global Claude laws:", output)
+
+        deployed_laws.write_text("# Laws v2\n", encoding="utf-8")
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[ok] global Claude laws:", output)
+
+        deployed_laws.unlink()
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[FAIL] global Claude laws: deployed guidance is absent", output)
 
     def test_doctor_guidance_identity_is_unproven_without_a_source_root(self) -> None:
         repo = self.make_repo()
@@ -8699,6 +8738,14 @@ class RealityCheckTests(unittest.TestCase):
         self.claude_home = self.root / "claude-home"
         (self.harness_root / "templates" / "hooks").mkdir(parents=True)
         (self.claude_home / "hooks").mkdir(parents=True)
+        # These tests pin the OTHER reality legs and their probe counts; the
+        # default-branch protection leg (issue #356) has its own module,
+        # tests/test_audit_branch_protection.py, so it is isolated here.
+        protection = mock.patch.object(
+            harness, "default_branch_protection_findings", return_value=[]
+        )
+        protection.start()
+        self.addCleanup(protection.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -8787,7 +8834,7 @@ class RealityCheckTests(unittest.TestCase):
             "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
             "rev-parse": (True, "main"),
             "status --porcelain": (True, ""),
-            "ls-files": (True, "H CLAUDE.md\nH codex/AGENTS.md"),
+            "ls-files": (True, "H CLAUDE.md\nH rules/laws.md\nH codex/AGENTS.md"),
             "rev-list": (True, "0\t0"),
             "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
         }
@@ -10068,7 +10115,7 @@ class RealityCheckTests(unittest.TestCase):
                     source_root,
                     **{"status --porcelain": (True, " M CLAUDE.md")},
                 ),
-                "uncommitted CLAUDE.md and codex/AGENTS.md changes",
+                "uncommitted CLAUDE.md and rules/laws.md and codex/AGENTS.md changes",
             ),
             (
                 "hidden guidance",

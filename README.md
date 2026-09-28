@@ -112,7 +112,10 @@ pull request and push to `main`; workflow actions are pinned to immutable commit
 a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
 `dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
 template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
-`human_todo` against a file that exists. A repo that vendors nothing says so rather than
+`human_todo` against a file that exists, and default-branch server-side history protection
+(`non_fast_forward` + `deletion` ruleset or classic equivalent) when the effective floor
+posture is `core` — reported as `advisory` when missing, never a failure (issue #356).
+A repo that vendors nothing says so rather than
 emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
 repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
@@ -148,10 +151,10 @@ that measured nothing cannot read as a clean one. `doctor` surfaces the same fin
 `[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
 
 Supply `doctor --config-root C:\path\to\claude-config` to compare the source checkout's
-`CLAUDE.md` and `codex/AGENTS.md` bytes with their respective deployed global runtime files.
-An `[ok]` source must be the checkout root of the harness origin's `claude-config` sibling,
-clean on `main`, level with its published `origin/main`, and free of hidden index flags on both
-guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
+`CLAUDE.md`, `rules/laws.md` (the law set Claude loads, #366) and `codex/AGENTS.md` bytes with
+their respective deployed global runtime files, as three separate checks. An `[ok]` source must
+be the checkout root of the harness origin's `claude-config` sibling, clean on `main`, level with
+its published `origin/main`, and free of hidden index flags on all three guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
 byte mismatch or absent deployed target fails.
 
 `seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
@@ -276,8 +279,16 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-03): the immutable `floor-v1-final` tag preserves 1.6.21. Canonical
-source is 1.6.33: 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
+Current state (2026-09-28): canonical source is **1.7.1** (1.7.0 plus #372's long-form rm hint), the **core posture** (SPECS §5.4,
+owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a
+non-sensitive repository. Default-branch history is protected server-side by rulesets, so the
+client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes outside the
+project or through an unresolved operand, secret-file mutation, downloaded program text run
+directly, and privilege elevation. Force-push, ref deletion, git config execution, work-loss and
+pure opacity proceed. A `sensitive_data` repository never runs core (its declared `core` renders
+as `guide`), and `guide`/`wall` stay declarable. It is deployed to `~/.claude/hooks` on the owner's main box
+(claude-config#461), and three of the four Codex consumers carry its marker. History before 1.7.0 (2026-09-03): the immutable
+`floor-v1-final` tag preserves 1.6.21, and 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
 T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
 double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive

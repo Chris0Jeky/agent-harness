@@ -69,6 +69,26 @@ P3 is void since 2026-09-07; consumer marker refreshes proceed one root at a tim
 proving its own bytes in its own exact CWD (H-14 step 3), merge first. No runtime proof is inherited from deployment, from Doctor, or from the
 completed 1.6.26 wave.
 
+## 2026-09-27 evals lanes: learning from outcomes, proving gates
+
+| Lane | PRs | Outcome |
+|---|---|---|
+| Outcome ledger over swarm receipts (#299/E1) | #354, #360 | **MERGED** `59db399`, `8434156`. #354's round 1 fixed 1 HIGH + 4 MEDIUM; its single reopen fixed one HIGH regression the fix introduced; Codex P2s closed by #360. |
+| Merge-gate model and checker (claude-config #432) | #355, #361 | **MERGED** `92d5795`, `91a31b9`. Round 1 found the spec trusted the table's own bookkeeping (three mutants certified lawful); fixed with an event-driven observer. A repo-wide raw-check guard turned CI red once (the model's `check()`), fixed by renaming. |
+
+Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; before the decision, none of the floored public repositories, nor this one, protected `main` server-side. Owner decision 2026-09-27 (H-17, closed): default-branch rulesets are live on six repositories; the client floor shrinks to local destruction next.
+
+## 2026-09-28 floor lane: core posture and its rollout (#356, owner decisions H-17 and core)
+
+| Lane | PRs | Outcome |
+|---|---|---|
+| Core posture, floor 1.7.0 | #363 | **MERGED** `a545fb9`. Round 1: one HIGH (a sensitive repo declaring core could leak a public push) and one MEDIUM fixed; round 2 caught a quadratic hint (fixed). |
+| Long-form rm hint, 1.7.1 | #372 | **MERGED** `f683e54`. A Codex P1 found on claude-config#461. Two review rounds; two Codex comments declined and recorded in FLOOR_LIMITATIONS. |
+| Audit: default-branch protection | #369 | **MERGED** `96068ca`. Muse drafted it and timed out; finished here. The check is advisory only. |
+| Doctor: `rules/laws.md` byte check | #371 | **MERGED** `43a6134` (closes #366). |
+| SPECS §1 law pointer | #364 | **MERGED** `dc90bfb` (closes #358). |
+| Rollout | claude-config#461; EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10, Pulseboard#167 | claude-config#461 **MERGED** `f0431b3` and deployed (doctor: canonical == deployed). Marker PRs **MERGED**: SwarmingLilMen#79 (`7e7b26e`), collaborative-hill-lab#10 (`8ad50d7`), Pulseboard#167 (`134ab8d`). EvidenceDeck#35 is parked: its CI cannot start (billing, H-18). The per-consumer re-trust is H-14. |
+
 ## Active implementation
 
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared
@@ -76,7 +96,6 @@ region boundary. Exactly one touched `templates/hooks/dispatch.py`; the other th
 from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, or the charter
 digests. **All four landed**, two on 2026-08-07/08 and two on 2026-09-02, alongside the three
 floor PRs of 2026-09-02.
-
 
 | Lane | PR | Outcome |
 |---|---|---|
@@ -88,20 +107,14 @@ floor PRs of 2026-09-02.
 | guide posture / FLOOR_ACK | **#260** | **MERGED `d6392dd`** as floor 1.6.31 after two review rounds (the second closed the masked-charter-spelling hole). |
 | masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
-No implementation lane is open and nothing is queued; the outstanding work is the Codex half of the
-rollout above (H-15) and the runtime-home posture proof (H-16). Closing H-15 does not close H-16.
+Done (2026-09-28): the client floor's local-destruction `core` posture and its rollout (#356; see the
+2026-09-28 floor lane above). Still open there: EvidenceDeck#35 behind H-18, and H-14's re-trusts.
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is
 its code and tests only; the shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`,
 `plans/ACTIVE.md`, `CLAUDE.md`, `SPECS.md` — belong to the coordinator's single pass after the lane
 merges (the exception: a floor lane updates the README shipped-state paragraph it moves). Both
 2026-08-07 lanes exceeded their regions once, and that — not code overlap — is what conflicted.
-
-How the two 2026-08-07 blockers were closed, for the record: #239 dropped its ledger edits outright
-(taking `main` for all three files disposed of the false "1.6.27 was never deployed" claim) and was
-re-versioned to 1.6.30 because 1.6.28/1.6.29 were taken by the owner's claude-config decisions;
-#238's three P1s (junctions followed, nested Git repos selectable, Doctor's layer walk) were fixed
-in one commit and pinned by tests. The full blocker text is in the PR threads.
 
 **Declared-cap divergence, tracked as #233.** `README.md` declares this file as allowing "at most
 two active, executable workstreams"; this wave ran four lanes plus the blocked rollout. The count was

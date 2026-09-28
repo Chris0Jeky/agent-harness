@@ -100,11 +100,11 @@ intentionally conservative: reject anything it cannot prove safe.
 Invoked as a PreToolUse hook with `--event pre --runtime claude|codex`; reads the repo's tier
 from `.agent-harness/tier.json` (strictest of it and legacy `.claude/`) and emits the
 allow/ask/deny JSON. Contract (docstring + BLUEPRINT §2, SPECS §5-6):
-- Blocks only the irreversible at every tier (force-push, rm -rf outside project, pipe-to-shell
-  installs, sudo, secret-file mutation); work-loss guards are tier-dependent
-- Posture (SPECS §5.4): below T4/wave the verdict is a GUIDE — pure-opacity denies proceed and
-  everything else is one acknowledgeable double-check (`# FLOOR_ACK=<key>`); T4/wave/sensitive
-  and any `floor_posture: wall` declaration keep the walls
+- The analyzer flags only the irreversible (force-push, rm -rf outside project, pipe-to-shell,
+  sudo, secret-file mutation); work-loss guards are tier-dependent; posture decides rendering
+- Posture (SPECS §5.4): below T4/wave the default is `core` (1.7.0, #356) — only local destruction
+  (deletes outside the project, secrets, pipe-to-shell, sudo) is an acknowledgeable double-check
+  (`# FLOOR_ACK=<key>`); `guide`/`wall` are declarable; T4/wave/sensitive keep the walls
 - Strips quoted strings before matching — never inspects commit-message/PR-body text
 - Unparseable stdin → allow (can't identify the command); exception during rule evaluation →
   deny (fail closed)

@@ -306,6 +306,17 @@ core below T4 is protected by a forced re-read of the exact command, not by refu
 `wave_mode` and (by default) `sensitive_data` keep the walls; any repo can declare
 `floor_posture: wall`. The freeze is otherwise unchanged.
 
+**Core posture (owner decision 2026-09-27, issue #356).** Measured that day: no Claude session ran
+the floor, only six Codex roots did, and none of the floored repositories protected `main`
+server-side. The owner approved default-branch rulesets (`non_fast_forward`, `deletion`) on all
+of them and chose to shrink the client floor to LOCAL destruction, trading some security for
+throughput. Since 1.7.0 the default below T4/`wave_mode` for a non-sensitive repository is
+`floor_posture: core`: destructive deletes outside the project, secret-file mutation, downloaded
+program text run directly and privilege elevation stay double-checks (a `sensitive_data`
+repository never runs `core`: its declared `core` renders as `guide`); force-push, ref deletion, git config execution, work-loss and launcher verdicts
+proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any repo can declare
+`guide` or `wall` to get the old rendering back.
+
 ---
 
 ## 3. Regions — the context-economy primitive (T3+; embryo at T2)
@@ -441,14 +452,14 @@ selected scripts — NOT caches/history) with a private remote, plus scheduled b
 from gone.
 
 - **Global CLAUDE.md** (ratified 2026-07-26, issue #92; the claude-config repo is the
-  canonical home and SPECS §1 the in-repo reference mirror): the universal laws once re-earned
+  only home; SPECS §1 points there — the in-repo mirror was pruned for drift, #358): the universal laws once re-earned
   per repo as duplicate memory files — never merge red CI, bounded reviews (one round + one
   fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
   tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
   the law set shipped (the last two folded 2026-07-26). `doctor --config-root <claude-config>`
-  separately exact-byte checks the supplied source `CLAUDE.md` and `codex/AGENTS.md` against
-  their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
+  separately exact-byte checks the supplied source `CLAUDE.md`, `rules/laws.md` and
+  `codex/AGENTS.md` against their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
   the clean, published `main` of the harness origin's `claude-config` sibling. A missing,
   unreadable, or noncanonical source is `UNPROVEN`; a readable mismatch fails. This document
   itself asserts nothing about deployment.
