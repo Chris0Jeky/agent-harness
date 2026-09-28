@@ -60,6 +60,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
@@ -74,6 +75,8 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
+          scripts/merge_gate_model.py tests/test_merge_gate_model.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Check Black formatting
@@ -88,6 +91,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
@@ -102,6 +106,8 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
+          scripts/merge_gate_model.py tests/test_merge_gate_model.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Compile Python sources
@@ -116,6 +122,7 @@ jobs:
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
+          tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
           tests/test_replay_decoder_contract.py
@@ -130,6 +137,8 @@ jobs:
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
+          scripts/outcome_ledger.py tests/test_outcome_ledger.py
+          scripts/merge_gate_model.py tests/test_merge_gate_model.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
   replay-fast:

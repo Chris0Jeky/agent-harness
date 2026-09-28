@@ -2,148 +2,29 @@
 
 Last Updated: 2026-07-26 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
-## §1 Global `~/.claude/CLAUDE.md` — the shipped law set
+## §1 Global laws — pointer, not a mirror
 
-Ratified 2026-07-26 (issue #92; mirrored from claude-config branch `policy/autonomy-first`,
-tip `734d007`). The claude-config repo (`~/.claude`, its own T3 repo) is the CANONICAL home;
-this section is a dated reference mirror so the harness repo reads stand-alone. On any drift,
-claude-config wins and this copy is the bug — refresh the mirror, never fork it. The named
-models inside the mirror belong to claude-config's file; this repo's own routing text (§8)
-still names no routing-tier assignments (its one model mention is the declared family-wide
-Haiku ban). The per-repo memory duplicates the law set graduated are deleted — the last two in
-this repo's own memory were folded 2026-07-26. `doctor --config-root <claude-config>` measures
-the source `CLAUDE.md` against deployed `~/.claude/CLAUDE.md` and source `codex/AGENTS.md`
-against deployed `~/.codex/AGENTS.md` as separate exact-byte checks. The supplied directory must
-be the clean, published `main` checkout of the harness origin's `claude-config` sibling, with
-both guidance paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable
-byte mismatch fails. This mirror itself still asserts nothing about deployment.
+The global law set lives in the claude-config repository, and it is the only copy. Claude loads
+`rules/laws.md`, deployed as `~/.claude/rules/laws.md`; Codex reads the same contract as
+`codex/AGENTS.md`, and claude-config's `tests/check-law-parity.ps1` keeps those two in step. This
+section used to hold a dated verbatim mirror (ratified 2026-07-26, issue #92). The mirror drifted
+from laws 2f/2g, and the drift misled a review (issue #358), so law 8 pruned it. A "global law N"
+or "CLAUDE.md law N" pointer means law N of that file; a bare "law N" in BLUEPRINT.md means
+BLUEPRINT §0's own twelve laws, which are numbered differently.
 
-```markdown
-# Global laws — all repos, all tiers
+`doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
+byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, source
+`rules/laws.md` against `~/.claude/rules/laws.md` (the law set Claude actually loads, #366), and
+source `codex/AGENTS.md` against `~/.codex/AGENTS.md`. The supplied directory must be the clean,
+published `main` checkout of the harness origin's `claude-config` sibling, with all three guidance
+paths tracked and visible to Git; otherwise the checks are `UNPROVEN`. A readable byte mismatch
+fails.
 
-Blueprint: the active sibling `agent-harness/BLUEPRINT.md` checkout · Estate registry: `~/.claude/ESTATE.md`
-
-**What the harness is for.** The harness guards against catastrophe, not against capability.
-Hard walls exist only for the irreversible: secret exposure, destroyed work, rewritten shared
-history, public leaks. Everything reversible is yours to do autonomously — tiers scale
-*verification* with blast radius, they never subtract autonomy. A small or new repo runs free;
-a production repo earns extra checks. An autonomous session is judged by finished tasks, and
-when ceremony and throughput conflict outside the irreversible core, throughput wins and the
-ceremony is the bug — file it as an issue and keep working. Declared authority
-(`tier.json`) and the irreversible core are never ceremony.
-
-## Non-negotiable
-
-1. Never merge a PR with failing CI. Investigate every failure; never dismiss as flaky.
-2. Every PR gets one real review — and no review loops. Post findings on the PR; triage every
-   comment once (bots included). Fix only what blocks a merge: confirmed correctness, security, or data-loss defects (CRITICAL/HIGH). Then
-   one verification pass scoped to the fix diff. Everything else — style, MEDIUM/LOW, ideas,
-   out-of-scope findings — becomes a tracked issue or a one-line decline on the thread, never a
-   fix-commit cascade and never a silent drop; explicitly classify informational / non-finding
-   notices without inventing a commit. Two rounds is the ceiling: after them, ship or park —
-   only a new CRITICAL introduced by the fixes reopens the pipeline — once, and only for that
-   defect; a second reopen parks the PR. Never pause mid-pipeline
-   to ask whether to continue — the answer is yes. Publish ready-for-review, never parked in
-   draft: draft only while the work is still being written, marked ready the moment it is
-   complete, never merged from draft — a draft PR does not invite the bot reviewers. At T3+
-   request the Codex review (Codex only, never Copilot) at ready-for-review and once more
-   after the final fix round; triage its comments by the same severity bar (optional below
-   T3 — but comments that do arrive get the same one-pass triage). Operational detail: the
-   `review-and-ship` skill.
-3. Never claim done/verified without running the thing that proves it. Always state what was
-   NOT verified. Close work with: changed / verified / NOT verified / residual risk.
-4. GitHub hygiene: "Closes #N" fires even quoted or negated — verify issue links after body
-   edits. Never `--delete-branch` a stacked base PR (cascade-closes children unreopenably).
-   In a PR stack, merge the oldest first, never the newest; after a base lands, retarget its
-   children and confirm via the API before merging them.
-5. Surface the repo's human-action file (HUMAN_TODO.md or its declared alias — see ESTATE.md)
-   in every summary. Apply [`CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo`](CLAUDE_CONFIG_OPERATIONS.md#work-routed-to-human-todo)
-   for evidence and completion. When items accumulate or the human asks to be guided, walk the
-   backlog via the `guided-walkthrough` skill (numbered q-N items: context + suggested action +
-   step-by-step guide for human-only ones).
-6. Questions: batch true blockers into ONE question; otherwise proceed on a named assumption
-   ("Assumption: X. Reason: Y. Reversible by Z.").
-7. Worktrees: guard preamble is the first action; `$WT_PROJECT_DIR` paths only; create with
-   `--detach origin/main`, never branch refs, then `git switch -c <branch>` before committing —
-   a detached worktree's commits are held only by its own HEAD and die with its removal; plain
-   `git worktree remove` only, never `--force`: a refusal means work is still in there;
-   coordinator verifies main is clean after waves.
-8. Structure arrives with the second item. Don't build speculative scaffolding. When a lesson
-   recurs, promote it up the enforcement ladder (memory → CLAUDE.md → skill → hook → CI →
-   structure) to the cheapest layer that actually enforces it — and prune the old copy.
-9. Before working in an unfamiliar repo: check `~/.claude/ESTATE.md` (junk wrappers and
-   frozen snapshots exist) and the repo's `.agent-harness/tier.json` — a legacy
-   `.claude/tier.json` survives in some older repos, and where both exist the strictest
-   declaration binds (higher tier, union of tightening overlays; a work-loss guard relaxes
-   only when every declaration agrees). Authority is declared, not negotiated. An unregistered
-   repo with no production signals (deploys, other users or published consumers, money,
-   sensitive data) runs at
-   sandbox autonomy — do the work, propose a tier in the handoff; with such signals, propose
-   the tier first.
-10. Weak-model rails: if you are not the top routed model, never merge, never edit canonical
-    docs, the deny floor, or gates. Open PRs and let the gate decide.
-11. Every gate loop terminates. Two review rounds (law 2); three genuinely different attempts
-    at a red check; one re-measure of a disputed fact; a task parks at roughly twice its
-    budget. Then ship what is sound, park what is
-    not — tracked issue plus a one-line handoff — and move to the next task. Circling a gate
-    is not diligence; it is the failure mode this law exists to stop.
-12. Mission first. Harness, floor, gate, and doc work happens when it IS the mission, never as
-    a detour from it — friction found mid-task becomes a one-line tracked issue, not a fix.
-    A session that polishes evidence but finishes nothing has failed, whatever its rigor.
-
-## Tier ladder (by blast radius)
-
-T0 tombstone · T1 sandbox · T2 daily driver · T3 workshop · T4 live wire
-Tiers add verification, never permission: T1/T2 ship on green checks, T3 adds one bounded
-independent review, T4 runs the repo's full declared gate.
-Overlays tighten posture regardless of tier: `sensitive_data`, `wave_mode`,
-`dormant_production`. Details in the blueprint.
-
-## Working style
-
-- **Commit in small, logical increments as you work** — standing authorization; don't wait to be
-  asked, and don't bundle unrelated changes. No `Co-Authored-By` / "Generated with" trailers
-  (`includeCoAuthoredBy:false` is the settings default — keep it off in every repo).
-- **Publish autonomously; merge within your tier's gate.** Standing authorization covers pushing
-  scoped branches, opening ready-for-review PRs after relevant local checks, and merging once the
-  tier's gate is met: **T1/T2** — proving checks green at the head and comments triaged; that is
-  the whole gate, no independent review and no waiting required. **T3** — plus one independent
-  review pass at the current head (bot or agent), bounded per law 2. **T4** — the repo's declared
-  full gate. These are per-tier defaults — a repo's declared `.agent-harness/tier.json`
-  authority binds over them (`merge: gated` / `human-only` means exactly that at any tier, and
-  floor/dispatcher changes stay T4-class everywhere). Evidence is scoped, not global: a head
-  change re-proves what changed — re-run the checks that exercise it; a fresh review round is
-  owed only when the fixes went beyond the reviewed findings or touched new logic. A base
-  change counts as a head change: a retarget or a landed stack base moves the merge base while
-  the head SHA stays put — re-prove CI and review against the new base before merging. Where no
-  CI exists, proving checks are the narrowest commands that exercise the change plus the repo's
-  declared gate ritual; a run that never reads the changed files is not a green.
-- **Never squash-merge — preserve full commit history and count.** Merge PRs with a merge commit
-  (`gh pr merge --merge`, or the GitHub "Create a merge commit" option), never `--squash`. Rebase is
-  acceptable (keeps the count) but a merge commit is preferred (original SHAs + a merge marker).
-  Squash-merge was disabled repo-side across the estate (2026-07-18); if a repo re-enables it, turn
-  it back off. `atlasan/series_tools_python` still needs an admin to disable it.
-- **Right-size compute cheapest-dial-first (effort → model → agent count).** The standard:
-  **Opus 5 low** is the generalist default; **Opus 5 high** for code implementation, reviews, and
-  anything else judgment-heavy — Opus 5 costs what Opus 4.8 did, is far more effective, and per
-  *successful* task at low effort is level with Sonnet. **Sonnet 4.6 medium/high** is therefore for work
-  genuinely *beneath* Opus 5 low, not a way to save money (**never Haiku** — quality too low; no
-  agent pin, CLI flag, config key or env var may select it — `tests/check-agent-models.ps1` enforces
-  all four); avoid Sonnet 5 as a
-  default. **Fable 5 at high or xhigh** for the really difficult calls that need the most
-  intelligence — reserved by value, not rationed by access. Start
-  **inline**; fan out only when regions are disjoint / context >20k / an independent lens is needed;
-  right-size fleets (≤3–5; ≤8–12 for a sweep) — never a reflexive fleet. Full ladder: the
-  `model-effort-routing` skill.
-
-## Machine
-
-Windows quirks and environment fixes live in `~/.claude/MACHINE.md` — read it before fighting
-a tool failure that smells environmental (git resolution, PowerShell chaining, vitest OOM).
-Its "RAM & MCP hygiene" section binds long or looped sessions on this box: never declare the
-same MCP server at two scopes (user + project = two gateways, not one), and a relaunching loop
-sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-config repo).
-```
+This repository's own deltas from the global merge rules:
+- `templates/hooks/dispatch.py` changes are T4-class whatever this repository's tier. They need the
+  smoke suite, the unit tests, and an independent read-only review, per CLAUDE.md's change rules.
+- Everything else follows the global laws at this repository's declared tier (T3 workshop, push
+  and merge free).
 
 ## §2 `.agent-harness/tier.json` schema
 
@@ -170,10 +51,11 @@ sweeps leaked MCP stacks between runs (`tools/mcp-hygiene.ps1` in the claude-con
   (`reset --hard`, `clean -f`, `checkout -- .`, `restore .`) stay ALLOW below T4/wave_mode
   instead of the T3 ask. IGNORED at T4 and under `wave_mode`; the irreversible floor is
   unaffected. Reference repo: wealthlens-hq (the estate's written sub-T4 git-freedom spec).
-- `floor_posture` (optional): `wall` | `guide` — how the deny floor RENDERS its verdicts
-  (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`; `sensitive_data`
-  defaults to `wall`; everything else defaults to `guide`. Co-located and chained declarations
-  merge strictest-wins (`wall` beats `guide`; a declared `guide` never relaxes T4/wave).
+- `floor_posture` (optional): `wall` | `guide` | `core` — how the deny floor RENDERS its
+  verdicts (§5.4). Absent, the tier decides: T4 and `wave_mode` are always `wall`;
+  `sensitive_data` defaults to `wall`; everything else defaults to `core` (since 1.7.0; `guide`
+  before). Co-located and chained declarations merge strictest-wins (`wall` beats `guide` beats
+  `core`; no declared posture relaxes T4/wave).
 - `floor_wiring` (optional): `none` — the owner's declaration that this repository runs WITHOUT a
   floor: no `.codex/hooks.json` adapter and no global Claude `PreToolUse` hook (§5). It is a
   relaxation, so it binds only when every co-located declaration carries it. `doctor --repo`
@@ -540,24 +422,42 @@ re-trust and canaries → consumer marker refresh → each consumer's exact-CWD 
 Consumer marker updates and their runtime validation are separate reviewed rollout work; neither a
 producer PR nor a standalone scratch audit performs them.
 
-### §5.4 Posture and FLOOR_ACK (owner decision 2026-09-02; #21 slices #26 / #62)
+### §5.4 Posture and FLOOR_ACK (owner decisions 2026-09-02 and 2026-09-27; #21 slices #26 / #62; #356)
 
 The analyzer's verdict (`check()`: allow / ask / deny) is computed exactly as before and then
 RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_posture`):
 
-| Analyzer verdict | `wall` | `guide` |
-|---|---|---|
-| allow | allow | allow |
-| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) |
-| any other deny — the charter: force spellings, `rm -rf` outside the project, secret-file mutation, pipe-to-shell, sudo, remote-ref destruction, `sensitive_data` publication | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` |
-| ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes |
-| dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable |
+| Analyzer verdict | `wall` | `guide` | `core` |
+|---|---|---|---|
+| allow | allow | allow | allow |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) | **allow**, unless the command carries a CORE hint (`dispatch._CORE_HINT`: the charter hint's deletion verbs, privilege heads, downloaded program text piped or substituted into an interpreter, and secret-looking names — never git push/force, gh, nested program text or work-loss spellings) or a later segment earns a core verdict: then double-check |
+| a CORE deny (`dispatch.verdict_is_core`): `rm -rf`/`Remove-Item` outside the project or at a root, an unresolved delete operand, `find -delete`, pipe-to-Remove-Item, a secret-looking target, downloaded program text run directly, privilege elevation (a `sensitive_data` repository never runs `core`; see below) | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` | **double-check**, same mechanism |
+| any other deny — force spellings, `+refspec`, remote-ref destruction, git config/environment execution, launchers, T4 work-loss spellings, and the git pathspec-file opacity guide keeps as guarded (`git rm --pathspec-from-file`) | deny | **double-check** | **allow**, unless the command carries a core hint or a later segment earns a core verdict: then double-check |
+| ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes | **allow**, with the same core-hint and later-segment exception |
+| dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable | deny — never scaled |
 
 - Effective posture: T4 or `wave_mode` → `wall`, whatever is declared. Otherwise a declared
-  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `guide`. In the merge across
-  co-located and chained declarations an undeclared `sensitive_data` declaration VOTES `wall`, so
-  a nested or co-located `guide` cannot relax an outer tightening overlay; only the same
-  declaration saying both `sensitive_data` and `guide` is the owner's explicit choice.
+  `floor_posture` binds; absent one, `sensitive_data` → `wall`, else `core` (1.7.0). In the merge
+  across co-located and chained declarations an undeclared `sensitive_data` declaration VOTES
+  `wall`, so a nested or co-located `guide` or `core` cannot relax an outer tightening overlay;
+  only the same declaration saying both `sensitive_data` and a posture is the owner's explicit
+  choice. A `sensitive_data` repository never runs `core`: a declared `core` renders as `guide`
+  there, because the analyzer returns its FIRST deny and a given-up push verdict (an opaque
+  refspec, a force spelling) can precede the public-remote privacy check (review of #363).
+- Why `core` (owner decision 2026-09-27, issue #356): default-branch history is protected
+  SERVER-side by repository rulesets (`non_fast_forward` + `deletion`, no bypass actors) on every
+  repository that runs the floor. A ruleset sees every runtime — Claude, Codex, the Muse swarm,
+  Grok and humans — and has no parser to fool, while the client floor ran in six Codex roots and
+  paid the #21 false-positive tax for history families the server now covers. So below T4/wave
+  the client keeps only what no server can protect: local destruction. Security given up, by the
+  owner's explicit productivity-first choice: a force-push to a NON-default branch (recoverable
+  from the reflog and the PR record, and nothing merges without the gate), local work-loss
+  (`reset --hard`, `clean -fdx`, `checkout -- .`, `worktree remove --force`), git
+  config/environment execution laundering, and non-sensitive publication (`gh repo create
+  --public`). Invariant, test-pinned: `core` never denies what `guide` allows.
+- Under `core` the masked-segment re-check runs whenever the whole-command verdict is not core
+  (not only for opacity), and keeps the first CORE verdict among the later segments, sharing the
+  invocation's remote cache and deadline.
 - The key is the first 10 hex characters of SHA-256 over `<reason>\n<command without the marker>`,
   so it binds to that exact command AND verdict: a corrected command, or the same command denied
   for a new reason, is a fresh double-check. The marker is a trailing shell comment
@@ -567,12 +467,18 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 - `smoke_test.py` pins the ANALYZER under an explicit `wall` fixture and the posture layer in its
   own `floor-posture` section; `tests/test_floor_posture.py` asserts every deny literal in
   `dispatch.py` classifies deliberately — a reason the opacity table does not recognise stays on
-  the double-check path, never on allow.
+  the double-check path under `guide`. Under `core` the direction flips by design: only a reason
+  the core table recognises is double-checked, so a NEW deny site that should be core must add its
+  wording to `_CORE_REASON` (the test pins every current core family by its reason text).
 - What this is not: a wall. Below T4/wave the floor is, by owner decision, a speed bump: the
   irreversible core is protected by one deliberate re-read of the exact command, not by refusal.
   A repository that wants the old walls declares `"floor_posture": "wall"`.
 
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
+
+This matrix pins the ANALYZER (every fixture declares `wall`). How a verdict renders below
+T4/wave is §5.4's posture table: under the default `core` posture the history families below are
+guarded server-side instead and proceed on the client.
 
 MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +main`,
 `rm -rf /`, `rm -rf ~`, `rm -rf` outside repo/scratch, `... | Remove-Item`, `... | del`,
@@ -742,7 +648,9 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
 - `harness.py seed <path> --tier N` — writes only the runtime-neutral tier germ and refuses
   overwrite. Repo instructions remain judgment work and are not generated blindly.
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
-  stale user-profile paths.
+  stale user-profile paths, and default-branch server-side history protection
+  (`non_fast_forward` + `deletion` ruleset or classic equivalent), reported as an advisory
+  when the effective floor posture is `core` (issue #356).
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under
@@ -860,7 +768,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 - **Where the model name may live (the derivation contract).** The `model-effort-routing` skill
   is the SOURCE: it alone defines which named model fills `default`. Prose — this spec, the
   blueprint, the scheduled-routine description — carries the tier name and points at the skill,
-  never a model name (the §1 mirror's QUOTED text is the one exemption — see §13). Agent definitions are the ONE permitted DERIVED copy, because `model:` in
+  never a model name (§1 no longer quotes the law text, so there is no exemption). Agent definitions are the ONE permitted DERIVED copy, because `model:` in
   `~/.claude/agents/gardener.md` is a machine-read field that cannot hold an indirection. Being
   permitted, that copy is governed rather than trusted:
   1. Changing which model fills a tier in the skill is NOT DONE until every agent definition
@@ -919,10 +827,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
   `model-effort-routing` (effort→model→fan-out ladder and fleet caps ≤3–5 / ≤8–12), and
   `review-and-ship` (the §14 bounded review pipeline in executable form). These are
   the single home for their behavior — in particular, `model-effort-routing` is the ONLY place that
-  names models and their effort bindings (the dated §1 mirror QUOTES claude-config's file,
-  which names models in its working style — a quotation, not a second home: the skill stays
-  authoritative for model names even where the mirror's text disagrees, and claude-config stays
-  authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
+  names models and their effort bindings (claude-config's `rules/laws.md` also names models in
+  its working style; the skill stays authoritative for model names where the two disagree, and
+  claude-config stays authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
   and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
   at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
@@ -935,9 +842,9 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 BLUEPRINT §1's T3 "bounded review pipeline" slot is filled by the `review-and-ship` skill,
 shipped from claude-config for both runtimes. Reference, don't restate: the skill file is the
-single home for the step-by-step, and law 2 of the §1 mirror plus BLUEPRINT law 11 are the
+single home for the step-by-step, and global law 2 (claude-config `rules/laws.md`) plus BLUEPRINT law 11 are the
 law it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
 commits only; the rest tracked or declined on the thread), one fix round verified against the
-fix diff — at T3+ the re-requested Codex review after that fix round IS the verification pass,
-not a new round — then ship or park. Tier changes WHO reviews and how many eyes the single
+fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
+law 2g; a manual `@codex review` is never a per-fix step, law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T3 one independent pass, T4 two adversarial reviews), never how many rounds run.
