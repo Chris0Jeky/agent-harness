@@ -108,8 +108,8 @@ floor PRs of 2026-09-02.
 | guide posture / FLOOR_ACK | **#260** | **MERGED `d6392dd`** as floor 1.6.31 after two review rounds (the second closed the masked-charter-spelling hole). |
 | masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
-Queued (2026-09-27): the client floor's local-destruction `core` posture and its consumer rollout (#356,
-owner decision recorded under H-17). Also outstanding: the Codex half of the rollout above (H-15). H-16
+Done (2026-09-28): the client floor's local-destruction `core` posture and its rollout (#356; see the
+2026-09-28 floor lane above). Still open there: EvidenceDeck#35 behind H-18, and H-14's re-trusts. Also outstanding: the Codex half of the rollout above (H-15). H-16
 closed on 2026-09-07.
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is

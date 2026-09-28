@@ -97,7 +97,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   "merge first" order still binds. Original item: This item holds ONLY the human-only actions:
   every step below requires a new normal interactive session launched in an exact CWD, which an
   agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
-  toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-28: the version owed is now floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). It is deployed to `~/.claude/hooks` on DESKTOP-IHKOOJS (doctor: canonical == deployed). The marker PRs merged in SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167; EvidenceDeck#35 waits on H-18. For each merged root, what is yours is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then an allow canary (`git status`) and a deny canary (`echo x > .env` should deny once with a `FLOOR_ACK` key).
+  toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-28: the version owed is now floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). It is deployed to `~/.claude/hooks` on DESKTOP-IHKOOJS (doctor: canonical == deployed). The marker PRs merged in SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167; EvidenceDeck#35 waits on H-18. For each merged root, what is yours is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then three inert canaries. None of them changes anything even if the hook is not running.
+  1. Allow: `git status`.
+  2. Core allow, which only 1.7.x passes: `git push --dry-run --no-verify --force . HEAD:refs/heads/codex-core-canary` must proceed.
+  3. Deny: `rm -rf ../floor-canary-1-7-1-does-not-exist` must deny once. Its banner must read `[floor 1.7.1 (2026-09-28)]` and it must carry a `FLOOR_ACK` key. **Never re-run a canary with the key.**
+  Pulseboard's live checkout is on Kraspyon, so that machine's `~/.claude` has to pull claude-config `main` (1.7.1) before its canary means anything (review of #373).
 
   The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
   item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can
