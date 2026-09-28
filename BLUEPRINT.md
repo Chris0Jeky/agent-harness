@@ -183,8 +183,9 @@ Everything in T2, plus:
   defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
   on the thread. Severity is judged by the finding's content, never the reviewer's label — a
   bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
-  data-loss defect. One fix round, verified against the fix diff — the re-requested bot review
-  at T3+ IS that verification pass, not a second round — then ship or park (law 11); never
+  data-loss defect. One fix round, verified against the fix diff (another fresh-context pass only
+  when the fixes changed logic or the risk boundary; never a per-fix `@codex review` — global law
+  2f/2g) — then ship or park (law 11); never
   pause mid-pipeline to ask whether to continue. PostToolUse nudge after `gh pr create` points
   at the skill (~20 tokens, exactly when relevant).
 - **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
@@ -305,6 +306,17 @@ explicit direction, goes one step past #26's "never a charter deny" invariant: t
 core below T4 is protected by a forced re-read of the exact command, not by refusal. T4,
 `wave_mode` and (by default) `sensitive_data` keep the walls; any repo can declare
 `floor_posture: wall`. The freeze is otherwise unchanged.
+
+**Core posture (owner decision 2026-09-27, issue #356).** Measured that day: no Claude session ran
+the floor, only six Codex roots did, and none of the floored repositories protected `main`
+server-side. The owner approved default-branch rulesets (`non_fast_forward`, `deletion`) on all
+of them and chose to shrink the client floor to LOCAL destruction, trading some security for
+throughput. Since 1.7.0 the default below T4/`wave_mode` for a non-sensitive repository is
+`floor_posture: core`: destructive deletes outside the project, secret-file mutation, downloaded
+program text run directly and privilege elevation stay double-checks (a `sensitive_data`
+repository never runs `core`: its declared `core` renders as `guide`); force-push, ref deletion, git config execution, work-loss and launcher verdicts
+proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any repo can declare
+`guide` or `wall` to get the old rendering back.
 
 ---
 
@@ -441,14 +453,14 @@ selected scripts — NOT caches/history) with a private remote, plus scheduled b
 from gone.
 
 - **Global CLAUDE.md** (ratified 2026-07-26, issue #92; the claude-config repo is the
-  canonical home and SPECS §1 the in-repo reference mirror): the universal laws once re-earned
+  only home; SPECS §1 points there — the in-repo mirror was pruned for drift, #358): the universal laws once re-earned
   per repo as duplicate memory files — never merge red CI, bounded reviews (one round + one
   fix round, CRITICAL/HIGH-confirmed bar), verify-before-done, close-keyword hygiene, no
   `--delete-branch` on stacked bases, HUMAN_TODO surfacing, question protocol, worktree guard,
   tier check, loop convergence, mission-first. The per-repo memory duplicates were deleted as
   the law set shipped (the last two folded 2026-07-26). `doctor --config-root <claude-config>`
-  separately exact-byte checks the supplied source `CLAUDE.md` and `codex/AGENTS.md` against
-  their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
+  separately exact-byte checks the supplied source `CLAUDE.md`, `rules/laws.md` and
+  `codex/AGENTS.md` against their deployed Claude and Codex runtime files, but only after proving the supplied checkout is
   the clean, published `main` of the harness origin's `claude-config` sibling. A missing,
   unreadable, or noncanonical source is `UNPROVEN`; a readable mismatch fails. This document
   itself asserts nothing about deployment.
@@ -520,11 +532,11 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 - **Resolve policy conflicts at the canon level**: one delegation policy stated once (in
   AGENTS.md), vendor files link to it. (Today Codex says "spawn subagents without asking"
   while CLAUDE.md says "only when asked" — same repo.)
-- **Global vendor mirror**: the universal laws Claude gets from `~/.claude/CLAUDE.md` reach Codex
+- **Global vendor mirror**: the universal laws Claude gets from `~/.claude/rules/laws.md` reach Codex
   through `~/.codex/AGENTS.md` (Codex's global personal-instructions file) — a faithful mirror of
   the twelve laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
-  and the floor note. It declares `~/.claude/CLAUDE.md` canonical and must be kept in sync (a
-  parity-diff belongs on the roadmap). This is WHY per-repo dual-runtime AGENTS.md files stay thin:
+  and the floor note. It declares `rules/laws.md` canonical and is kept in sync by claude-config's
+  `tests/check-law-parity.ps1`. This is WHY per-repo dual-runtime AGENTS.md files stay thin:
   the universal rules arrive globally for Codex exactly as they do for Claude, so nothing is
   restated per repo — only the vendor-runtime delta and repo-specific rules live in the repo file.
 

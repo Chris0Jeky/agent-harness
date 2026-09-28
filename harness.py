@@ -139,7 +139,7 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
-FLOOR_POSTURES = frozenset({"wall", "guide"})
+FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
 # `"floor_wiring": "none"` is the owner's declaration that a repository runs
 # WITHOUT a floor (SPECS §5): no Codex adapter and no global Claude hook. It
 # binds only when every co-located declaration agrees, like the other
@@ -4317,7 +4317,8 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
 
     `wall` binds when any declaration sets it — or leaves it unset while
     declaring `sensitive_data`, whose default wall is a vote; `guide` binds
-    only when at least one declaration sets it and none says `wall`.
+    only when at least one declaration sets it and none says `wall`; `core`
+    binds only when nothing stricter is declared.
     """
     votes = set()
     for declaration in declarations:
@@ -4330,6 +4331,8 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
         return "wall"
     if "guide" in votes:
         return "guide"
+    if "core" in votes:
+        return "core"
     return None
 
 
@@ -4507,6 +4510,12 @@ def _pruned_scan_files(root: Path) -> Iterator[Path]:
             return
     except OSError:
         return
+    try:
+        marker = root / ".git"
+        if marker.is_file() or marker.is_dir() or marker.is_symlink():
+            return
+    except OSError:
+        pass
     stack: list[Path] = [root]
     while stack:
         current = stack.pop()
@@ -5480,6 +5489,225 @@ def sensitive_data_findings(
     return findings
 
 
+# Floor 1.7.0 (issue #356) moved default-branch history below T4/wave_mode for
+# a non-sensitive repo out of the client-side deny floor: the `core` posture no
+# longer intercepts force-push or branch deletion, because that history is
+# meant to be protected server-side by a GitHub repository ruleset
+# (`non_fast_forward` + `deletion`) or classic branch protection. The audit leg
+# below measures that premise.
+EFFECTIVE_FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
+BRANCH_PROTECTION_CHECK = "default-branch history protection vs the floor posture"
+
+
+def effective_floor_posture(tier_data: dict) -> str:
+    """Effective floor posture for one merged tier declaration.
+
+    Mirrors `dispatch.floor_posture`'s structure: T4 and `wave_mode` are walls
+    whatever is declared; below that a declared `floor_posture` binds; without
+    one, `sensitive_data` keeps the wall. The default differs on purpose:
+    dispatch on this base still defaults to "guide", while the 1.7.0 contract
+    (issue #356) is "core" — which no longer intercepts force-push or branch
+    deletion client-side — and "core" binds here when declared.
+    """
+    # A malformed tier is reported by audit's own validation, never a crash
+    # here (review of #369, M3): the merge passes an invalid raw value through.
+    tier = tier_data.get("tier")
+    tier = tier if tier in TIER_NAMES else 1
+    flags = tier_data.get("flags", {}) or {}
+    if tier >= 4 or bool(flags.get("wave_mode")):
+        return "wall"
+    sensitive = bool(flags.get("sensitive_data"))
+    declared = tier_data.get("floor_posture")
+    if declared == "core" and sensitive:
+        return "guide"  # a sensitive repository never runs core (review of #363)
+    if declared in EFFECTIVE_FLOOR_POSTURES:
+        return declared
+    if sensitive:
+        return "wall"
+    return "core"
+
+
+def default_branch_protection_findings(
+    repo: Path,
+    tier_data: dict,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict]:
+    """Measure server-side default-branch history protection under `core`.
+
+    Applies only when the effective floor posture is "core" — where the deny
+    floor no longer intercepts force-push or branch deletion client-side — or
+    when the owner declares `"floor_wiring": "none"` (no floor at all, so no
+    client-side interception either). Any other posture still intercepts, so
+    there is nothing server-side to measure and the leg emits nothing.
+
+    The `origin` remote is resolved with the same helpers as
+    `sensitive_data_findings`; a non-GitHub or missing origin is out of scope
+    and also emits nothing. Otherwise three `gh` probes, each host-pinned like
+    `github_visibility`, read the default branch, its branch ruleset, and —
+    only when the ruleset lacks both rules — classic branch protection. Every
+    emitted status is `ok`, `advisory` (owner preference: a missing
+    server-side rule never fails the audit) or `UNPROVEN`, never `MISMATCH`.
+    An `--offline` run refuses the network probes through the runner and
+    reports `UNPROVEN`, like the other reality checks.
+    """
+    if (
+        effective_floor_posture(tier_data) != "core"
+        and tier_data.get("floor_wiring") != "none"
+    ):
+        return []
+    resolved, rows = configured_remote_urls(repo, command_runner, deadline)
+    if not resolved:
+        # A leg that emits nothing reads as "does not apply"; a remote list git
+        # never produced is unmeasured (review of #369).
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                "the configured remotes could not be enumerated, so origin's "
+                "default-branch protection is unmeasured",
+            )
+        ]
+    # Only where pushes GO: a non-GitHub push URL with a GitHub fetch URL must
+    # not be measured through the fetch repository (Codex P1 on #369).
+    push_urls = [
+        url for name, url, direction in rows if name == "origin" and direction == "push"
+    ]
+    slugs = [github_repo_slug(url) for url in push_urls]
+    if not slugs or not all(slugs):
+        return []  # no origin, or a push destination off GitHub: out of scope
+    slug = slugs[0]
+    rest_path = github_rest_repo_path(slug)
+    if not rest_path:
+        return []
+    branch_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}",
+        "--jq",
+        ".default_branch",
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, branch_argv, repo, deadline
+    )
+    branch = output.strip() if resolved else ""
+    if not branch or branch.lower() == "null":
+        if resolved:
+            answer = redact_probe_text(branch[:24]) or "<no output>"
+            evidence = (
+                f"`{' '.join(branch_argv)}` answered {answer!r}, "
+                "which is not a branch"
+            )
+        else:
+            evidence = probe_failure_note(branch_argv, failure)
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug}: default branch is unmeasured (offline, "
+                "unauthenticated, rate-limited, or gh is absent) — "
+                f"{evidence}",
+            )
+        ]
+    rules_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/rules/branches/{branch}",
+        "--jq",
+        '[.[].type]|join(",")',
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, rules_argv, repo, deadline
+    )
+    if not resolved:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug} branch {branch}: branch rules are unmeasured (offline, "
+                "unauthenticated, rate-limited, or gh is absent) — "
+                f"{probe_failure_note(rules_argv, failure)}",
+            )
+        ]
+    rule_types = [part.strip() for part in output.split(",")]
+    if "non_fast_forward" in rule_types and "deletion" in rule_types:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_OK,
+                f"{slug} default branch {branch} blocks force-push and deletion "
+                "server-side (ruleset rules non_fast_forward, deletion) — "
+                f"evidence: `{' '.join(rules_argv)}` -> {output.strip()}",
+            )
+        ]
+    rules_text = output.strip() or "<none>"
+    protection_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/branches/{branch}/protection",
+        "--jq",
+        "[.allow_force_pushes.enabled, .allow_deletions.enabled]"
+        '|map(tostring)|join(",")',
+    ]
+    resolved, output, failure = result_before_deadline(
+        command_runner, protection_argv, repo, deadline
+    )
+    if resolved and output.strip() == "false,false":
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_OK,
+                f"{slug} default branch {branch} blocks force-push and deletion "
+                "server-side (classic branch protection denies both) — "
+                f"evidence: `{' '.join(protection_argv)}` -> false,false",
+            )
+        ]
+    if resolved:
+        answer = redact_probe_text(output.strip()[:24]) or "<no output>"
+        protection_evidence = (
+            f"`{' '.join(protection_argv)}` answered {answer!r}, "
+            "which leaves force-push or deletion allowed"
+        )
+    elif "branch not protected" in failure.lower():
+        protection_evidence = (
+            f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
+        )
+    else:
+        # Only GitHub's own "Branch not protected" proves absence; a missing
+        # admin scope, a rate limit or an expired budget measured nothing
+        # (review of #369, M2).
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{slug} branch {branch}: rulesets lack non_fast_forward and "
+                f"deletion ({rules_text}) and classic protection is unmeasured "
+                f"— {probe_failure_note(protection_argv, failure)}",
+            )
+        ]
+    return [
+        reality_finding(
+            BRANCH_PROTECTION_CHECK,
+            REALITY_ADVISORY,
+            f"{slug} default branch {branch} has no server-side rule blocking "
+            f"force-push and deletion (ruleset rules: {rules_text}; "
+            f"{protection_evidence}) — the `core` floor does not intercept "
+            "either client-side, so protect it with "
+            f"`gh api -X POST repos/{rest_path}/rulesets` creating ruleset "
+            "'protect-default-branch' (target branch, enforcement active, "
+            "conditions ref_name include ~DEFAULT_BRANCH, rules "
+            "non_fast_forward + deletion); see issue #356 for the body",
+        )
+    ]
+
+
 def human_todo_findings(
     repo: Path, tier: int, tier_data: dict[str, Any]
 ) -> list[dict[str, str]]:
@@ -5953,6 +6181,13 @@ def reality_findings(
             deadline=deadline,
         )
     )
+    # Advisory-only, so it spends the shared budget AFTER the legs that can
+    # MISMATCH (review of #369, M1).
+    findings.extend(
+        default_branch_protection_findings(
+            repo, tier_data, command_runner=command_runner, deadline=deadline
+        )
+    )
     findings.extend(human_todo_findings(repo, tier, tier_data))
     return findings
 
@@ -6071,7 +6306,9 @@ def same_file(left: Path, right: Path) -> bool:
     )
 
 
-GUIDANCE_SOURCE_PATHS = ("CLAUDE.md", "codex/AGENTS.md")
+# `rules/laws.md` is the law set Claude actually loads (a user-level rule);
+# CLAUDE.md is only its wrapper now (issue #366).
+GUIDANCE_SOURCE_PATHS = ("CLAUDE.md", "rules/laws.md", "codex/AGENTS.md")
 
 
 def guidance_reference_status(
@@ -6343,6 +6580,158 @@ def remove_skill_tree_entry(path: Path) -> None:
         ) from exc
 
 
+def skill_tree_destination_is_case_insensitive(directory: Path) -> bool:
+    probe = directory / f".harness-case-probe-{uuid.uuid4().hex}"
+    try:
+        probe.write_bytes(b"probe")
+    except OSError:
+        return os.name == "nt"
+    try:
+        return probe.with_name(probe.name.upper()).exists()
+    except OSError:
+        return os.name == "nt"
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
+def rename_skill_tree_entry_to_canonical_name(current: Path, desired: Path) -> None:
+    if current.name == desired.name:
+        return
+    if path_is_alias(current):
+        raise HarnessError(f"unsafe skill tree alias: {current}")
+    temporary = current.with_name(f".harness-skill-rename-{uuid.uuid4().hex}")
+    try:
+        current.rename(temporary)
+        try:
+            temporary.rename(desired)
+        except OSError as exc:
+            try:
+                temporary.rename(current)
+            except OSError:
+                pass
+            raise HarnessError(
+                f"cannot rename skill entry {current} to {desired}"
+            ) from exc
+    except OSError as exc:
+        raise HarnessError(f"cannot rename skill entry {current} to {desired}") from exc
+
+
+def canonicalize_skill_tree_case(source: Path, target: Path) -> None:
+    """Give case-insensitive destination entries the source tree's spelling."""
+    try:
+        source_children = sorted(source.iterdir(), key=lambda path: path.name)
+        target_children = sorted(target.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect skill tree while aligning case: {source}; {target}: {exc}"
+        ) from exc
+
+    source_by_case: dict[str, Path] = {}
+    for source_child in source_children:
+        if path_is_alias(source_child):
+            raise HarnessError(f"unsafe skill tree alias: {source_child}")
+        key = source_child.name.casefold()
+        previous = source_by_case.get(key)
+        if previous is not None and previous.name != source_child.name:
+            raise HarnessError(
+                f"source skill entries collide on a case-insensitive destination: "
+                f"{previous}; {source_child}"
+            )
+        source_by_case[key] = source_child
+
+    for target_child in target_children:
+        if path_is_alias(target_child):
+            raise HarnessError(f"unsafe skill tree alias: {target_child}")
+        source_child = source_by_case.get(target_child.name.casefold())
+        if source_child is None:
+            continue
+
+        try:
+            source_mode = source_child.lstat().st_mode
+            target_mode = target_child.lstat().st_mode
+        except OSError as exc:
+            raise HarnessError(
+                f"skill tree changed while aligning case: {source_child}; "
+                f"{target_child}: {exc}"
+            ) from exc
+        source_is_dir = stat.S_ISDIR(source_mode)
+        target_is_dir = stat.S_ISDIR(target_mode)
+        if source_is_dir != target_is_dir:
+            remove_skill_tree_entry(target_child)
+            continue
+        if not (source_is_dir or stat.S_ISREG(source_mode)) or not (
+            target_is_dir or stat.S_ISREG(target_mode)
+        ):
+            raise HarnessError(
+                f"unsupported skill tree entry while aligning case: {target_child}"
+            )
+
+        if source_child.name != target_child.name:
+            desired = target / source_child.name
+            if desired.exists() or path_is_alias(desired):
+                try:
+                    same_entry = target_child.samefile(desired)
+                except OSError as exc:
+                    raise HarnessError(
+                        f"cannot compare case-renamed skill entry: "
+                        f"{target_child}; {desired}: {exc}"
+                    ) from exc
+                if not same_entry:
+                    raise HarnessError(
+                        f"ambiguous case-insensitive skill destination: "
+                        f"{target_child}; {desired}"
+                    )
+            rename_skill_tree_entry_to_canonical_name(target_child, desired)
+            target_child = desired
+
+        if source_is_dir:
+            canonicalize_skill_tree_case(source_child, target_child)
+
+
+def make_skill_tree_directories_writable(root: Path) -> None:
+    """Temporarily make an existing target tree removable on POSIX."""
+    if os.name == "nt":
+        return
+
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        if path_is_alias(directory):
+            raise HarnessError(f"unsafe skill tree alias: {directory}")
+        try:
+            mode = directory.lstat().st_mode
+            if not stat.S_ISDIR(mode):
+                raise HarnessError(f"skill tree changed during pruning: {directory}")
+            current_mode = stat.S_IMODE(mode)
+            writable_mode = current_mode | 0o700
+            if writable_mode != current_mode:
+                os.chmod(directory, writable_mode)
+            children = list(directory.iterdir())
+        except HarnessError:
+            raise
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot prepare skill tree for pruning {directory}: {exc}"
+            ) from exc
+
+        for child in children:
+            if path_is_alias(child):
+                raise HarnessError(f"unsafe skill tree alias: {child}")
+            try:
+                child_mode = child.lstat().st_mode
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot inspect skill tree entry {child}: {exc}"
+                ) from exc
+            if stat.S_ISDIR(child_mode):
+                pending.append(child)
+            elif not stat.S_ISREG(child_mode):
+                raise HarnessError(f"unsupported skill tree entry: {child}")
+
+
 def copy_skill_tree_over(source: Path, target: Path) -> None:
     """Copy a skill over its live root, then prune stale entries in place."""
     if not target.exists():
@@ -6355,12 +6744,44 @@ def copy_skill_tree_over(source: Path, target: Path) -> None:
     if source_kinds is None or target_kinds is None:
         raise HarnessError(f"skill tree changed during sync: {source}; {target}")
 
+    source_dir_modes: dict[str, int] = {}
+    if os.name != "nt":
+        try:
+            source_dir_modes[""] = stat.S_IMODE(source.lstat().st_mode)
+            for relative, kind in source_kinds.items():
+                if kind == "directory":
+                    path = source / Path(*PurePosixPath(relative).parts)
+                    source_dir_modes[relative] = stat.S_IMODE(path.lstat().st_mode)
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect skill tree {source}: {exc}") from exc
+
+    # The caller has already retained a backup of an existing target. Make it
+    # removable before pruning so a previous sync's read-only directory modes
+    # cannot prevent this sync from deleting stale entries.
+    make_skill_tree_directories_writable(target)
+
     # copytree(..., dirs_exist_ok=True) cannot replace a file with a directory
-    # (or vice versa), so remove only conflicting nested entries first. The
-    # live skill root itself remains in place for Windows readers holding it.
+    # (or vice versa), so remove conflicting nested entries first. Keep the live
+    # skill root in place for Windows readers holding it.
     for relative in sorted(set(source_kinds) & set(target_kinds)):
         if source_kinds[relative] != target_kinds[relative]:
             remove_skill_tree_entry(target / Path(*PurePosixPath(relative).parts))
+
+    if skill_tree_destination_is_case_insensitive(target):
+        canonicalize_skill_tree_case(source, target)
+
+    target_kinds = skill_tree_entry_kinds(target)
+    if target_kinds is None:
+        raise HarnessError(f"skill tree changed during sync: {target}")
+    stale = sorted(
+        set(target_kinds) - set(source_kinds),
+        key=lambda relative: (-len(PurePosixPath(relative).parts), relative),
+    )
+    for relative in stale:
+        path = target / Path(*PurePosixPath(relative).parts)
+        if path.exists() or path_is_alias(path):
+            remove_skill_tree_entry(path)
+
     shutil.copytree(source, target, dirs_exist_ok=True)
 
     current_kinds = skill_tree_entry_kinds(target)
@@ -6370,10 +6791,30 @@ def copy_skill_tree_over(source: Path, target: Path) -> None:
         set(current_kinds) - set(source_kinds),
         key=lambda relative: (-len(PurePosixPath(relative).parts), relative),
     )
-    for relative in stale:
-        path = target / Path(*PurePosixPath(relative).parts)
-        if path.exists() or path_is_alias(path):
-            remove_skill_tree_entry(path)
+    if stale:
+        make_skill_tree_directories_writable(target)
+        try:
+            for relative in stale:
+                path = target / Path(*PurePosixPath(relative).parts)
+                if path.exists() or path_is_alias(path):
+                    remove_skill_tree_entry(path)
+        finally:
+            if os.name != "nt":
+                for relative, mode in source_dir_modes.items():
+                    path = (
+                        target
+                        if not relative
+                        else target / Path(*PurePosixPath(relative).parts)
+                    )
+                    try:
+                        if stat.S_ISDIR(path.lstat().st_mode):
+                            os.chmod(path, mode)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise HarnessError(
+                            f"cannot restore skill tree mode {path}: {exc}"
+                        ) from exc
 
     source_digest = tree_digest(source)
     target_digest = tree_digest(target)
@@ -9546,8 +9987,10 @@ def doctor(args: argparse.Namespace) -> int:
     if config_root is None:
         claude_guidance_ok: bool | str = REALITY_UNPROVEN
         codex_guidance_ok: bool | str = REALITY_UNPROVEN
+        claude_laws_ok: bool | str = REALITY_UNPROVEN
         claude_guidance_detail = "no --config-root supplied"
         codex_guidance_detail = "no --config-root supplied"
+        claude_laws_detail = "no --config-root supplied"
     else:
         guidance_reference_ok, guidance_reference_detail = guidance_reference_status(
             config_root, harness_root, probe_runner, probe_deadline
@@ -9564,6 +10007,12 @@ def doctor(args: argparse.Namespace) -> int:
             guidance_reference_ok,
             guidance_reference_detail,
         )
+        claude_laws_ok, claude_laws_detail = guidance_identity_status(
+            config_root / "rules" / "laws.md",
+            claude_home / "rules" / "laws.md",
+            guidance_reference_ok,
+            guidance_reference_detail,
+        )
     checks.extend(
         [
             (
@@ -9576,6 +10025,11 @@ def doctor(args: argparse.Namespace) -> int:
                 "global Claude guidance",
                 claude_guidance_ok,
                 claude_guidance_detail,
+            ),
+            (
+                "global Claude laws",
+                claude_laws_ok,
+                claude_laws_detail,
             ),
             (
                 "global Codex guidance",

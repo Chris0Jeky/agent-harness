@@ -62,13 +62,13 @@ Its recorded baselines are deliberate — a documented bypass that starts passin
 **The review treadmill, and why it is over.** The connector re-reviews every pushed head, so
 each fix round draws a new round of comments; one branch this session went six rounds, every
 round finding genuine second-order defects in the previous round's fixes. That treadmill is
-exactly the loop law 11 now terminates: two rounds is the ceiling — re-request the review
-after the final fix round, triage what arrives once, then ship or park.
+exactly the loop law 11 now terminates: two rounds is the ceiling — triage what arrives
+once, then ship or park (the current rule, including when a fresh pass is owed, is global law 2).
 
 **Superseded (2026-07-26, issue #92):** the zero-skip rule this section used to state is
 replaced by the bounded pipeline — one review round + one fix round; fix commits only for
 confirmed CRITICAL/HIGH defects; everything else a tracked issue or a one-line decline, never
-a silent drop. Global CLAUDE.md law 2 is the home (mirrored in SPECS §1).
+a silent drop. Global law 2 (claude-config `rules/laws.md`) is the home; SPECS §1 points there.
 
 ## The redesign, ratified
 

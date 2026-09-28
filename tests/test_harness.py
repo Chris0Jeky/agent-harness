@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -897,9 +898,13 @@ class HarnessTests(unittest.TestCase):
         (config_root / "codex").mkdir(parents=True)
         (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
         (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        (config_root / "rules").mkdir()
+        (config_root / "rules" / "laws.md").write_text("# Laws\n", encoding="utf-8")
         claude_home = (Path(self.temp.name) / "claude-home").resolve()
         claude_home.mkdir(parents=True)
         (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (claude_home / "rules").mkdir()
+        (claude_home / "rules" / "laws.md").write_text("# Laws\n", encoding="utf-8")
         dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
         dispatcher.parent.mkdir(parents=True)
         dispatcher.write_text("# fixture\n", encoding="utf-8")
@@ -1036,6 +1041,41 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(result, 1, output)
         self.assertIn("[ok] global Claude guidance:", output)
         self.assertIn("[FAIL] global Codex guidance:", output)
+
+    def test_doctor_checks_the_law_file_claude_actually_loads(self) -> None:
+        # Issue #366: CLAUDE.md is only the wrapper; `rules/laws.md` is the law
+        # set. A drifted deployed copy under a matching wrapper must not pass.
+        repo = self.make_repo()
+        root = Path(self.temp.name)
+        config_root = root / "config-root"
+        (config_root / "codex").mkdir(parents=True)
+        (config_root / "rules").mkdir()
+        (config_root / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        (config_root / "codex" / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
+        (config_root / "rules" / "laws.md").write_text("# Laws v2\n", encoding="utf-8")
+        claude_home = root / "claude-home"
+        (claude_home / "rules").mkdir(parents=True)
+        (claude_home / "CLAUDE.md").write_text("# Claude\n", encoding="utf-8")
+        deployed_laws = claude_home / "rules" / "laws.md"
+        deployed_laws.write_text("# Laws v1\n", encoding="utf-8")
+
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[ok] global Claude guidance:", output)
+        self.assertIn("[FAIL] global Claude laws:", output)
+
+        deployed_laws.write_text("# Laws v2\n", encoding="utf-8")
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[ok] global Claude laws:", output)
+
+        deployed_laws.unlink()
+        _result, output = self.run_doctor_with_fixture_globals(
+            repo, config_root=config_root
+        )
+        self.assertIn("[FAIL] global Claude laws: deployed guidance is absent", output)
 
     def test_doctor_guidance_identity_is_unproven_without_a_source_root(self) -> None:
         repo = self.make_repo()
@@ -1323,6 +1363,52 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(any("settings.json" in issue for issue in issues))
         self.assertFalse(any("nested" in issue for issue in issues))
         self.assertFalse(any("dir-checkout" in issue for issue in issues))
+
+    def test_stale_path_issues_skips_scan_root_that_is_worktree_file(self) -> None:
+        repo = self.make_repo()
+        stale = "C:/Users/jekyt/source/repo"
+        checkout_root = repo / ".claude"
+        checkout_root.mkdir(parents=True, exist_ok=True)
+        (checkout_root / ".git").write_text(
+            f"gitdir: {stale}/.git/worktrees/root-checkout\n", encoding="utf-8"
+        )
+        (checkout_root / "root-stale.py").write_text(
+            f"# copied from {stale}\n", encoding="utf-8"
+        )
+        ordinary_root = repo / ".agents"
+        ordinary_root.mkdir(parents=True, exist_ok=True)
+        (ordinary_root / "note.json").write_text(
+            f'{{"note": "{stale}"}}\n', encoding="utf-8"
+        )
+
+        issues = harness.stale_path_issues(repo)
+
+        self.assertTrue(any("note.json" in issue for issue in issues))
+        self.assertFalse(any("root-stale.py" in issue for issue in issues))
+
+    def test_stale_path_issues_skips_scan_root_that_is_directory_checkout(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        stale = "C:/Users/jekyt/source/repo"
+        checkout_root = repo / ".codex"
+        (checkout_root / ".git").mkdir(parents=True, exist_ok=True)
+        (checkout_root / ".git" / "config").write_text(
+            f"[core]\n\tworktree = {stale}\n", encoding="utf-8"
+        )
+        (checkout_root / "root-copied.py").write_text(
+            f"# copied from {stale}\n", encoding="utf-8"
+        )
+        ordinary_root = repo / ".agents"
+        ordinary_root.mkdir(parents=True, exist_ok=True)
+        (ordinary_root / "ordinary.json").write_text(
+            f'{{"note": "{stale}"}}\n', encoding="utf-8"
+        )
+
+        issues = harness.stale_path_issues(repo)
+
+        self.assertTrue(any("ordinary.json" in issue for issue in issues))
+        self.assertFalse(any("root-copied.py" in issue for issue in issues))
 
     def test_audit_finds_stale_profile_path(self) -> None:
         repo = self.make_repo()
@@ -4388,6 +4474,98 @@ allow_local_binding = true
             (second_skill / "SKILL.md").read_text(encoding="utf-8"),
             "intermediate skill\n",
         )
+
+    @unittest.skipUnless(
+        sys.platform == "win32", "requires case-insensitive Windows destination"
+    )
+    def test_sync_global_codex_skill_case_only_rename(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("skill-case-only-rename")
+        )
+        upper_directory = source_skill / "Docs"
+        upper_directory.mkdir()
+        upper = upper_directory / "Guide.py"
+        upper.write_text("print('v1')\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+
+        temporary_directory = source_skill / "case-rename-temp"
+        lower_directory = source_skill / "docs"
+        upper_directory.rename(temporary_directory)
+        temporary_directory.rename(lower_directory)
+        upper = lower_directory / "Guide.py"
+        temporary_file = lower_directory / "case-rename-temp.py"
+        lower = lower_directory / "guide.py"
+        upper.rename(temporary_file)
+        temporary_file.rename(lower)
+        lower.write_text("print('v2')\n", encoding="utf-8")
+        self.assertEqual(harness.sync_global(args), 0)
+
+        self.assertEqual(
+            sorted(entry.name for entry in target_skill.iterdir()),
+            sorted(entry.name for entry in source_skill.iterdir()),
+        )
+        target_directory = target_skill / "docs"
+        self.assertEqual(
+            sorted(entry.name for entry in target_directory.iterdir()),
+            sorted(entry.name for entry in lower_directory.iterdir()),
+        )
+        self.assertEqual(
+            (target_directory / "guide.py").read_text(encoding="utf-8"),
+            lower.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+        )
+
+    @unittest.skipUnless(os.name != "nt", "requires POSIX directory modes")
+    def test_sync_global_codex_skill_restrictive_dir_prunes_stale(self) -> None:
+        source_skill, target_skill, _skills_home, args = (
+            self.make_sync_global_skill_fixture("skill-restrictive-dir")
+        )
+        nested_source = source_skill / "locked"
+        nested_source.mkdir()
+        (nested_source / "keep.txt").write_text("keep\n", encoding="utf-8")
+        os.chmod(nested_source, 0o555)
+        nested_target = target_skill / "locked"
+        nested_target.mkdir(exist_ok=True)
+        (nested_target / "stale.txt").write_text("stale\n", encoding="utf-8")
+        backup_root = Path(args.codex_home) / "backups"
+        try:
+            self.assertEqual(harness.sync_global(args), 0)
+            self.assertFalse((nested_target / "stale.txt").exists())
+            self.assertEqual(
+                (nested_target / "keep.txt").read_text(encoding="utf-8"), "keep\n"
+            )
+            self.assertEqual(stat.S_IMODE(nested_target.stat().st_mode), 0o555)
+
+            os.chmod(nested_source, 0o755)
+            (nested_source / "keep.txt").unlink()
+            os.chmod(nested_source, 0o555)
+            self.assertEqual(harness.sync_global(args), 0)
+
+            self.assertFalse((nested_target / "keep.txt").exists())
+            self.assertEqual(
+                harness.tree_digest(source_skill), harness.tree_digest(target_skill)
+            )
+            self.assertEqual(stat.S_IMODE(nested_target.stat().st_mode), 0o555)
+        finally:
+            for root in (source_skill, target_skill, backup_root):
+                if not root.exists():
+                    continue
+                directories = [root]
+                try:
+                    directories.extend(
+                        path for path in root.rglob("*") if path.is_dir()
+                    )
+                except OSError:
+                    pass
+                for directory in sorted(
+                    directories, key=lambda path: len(path.parts), reverse=True
+                ):
+                    try:
+                        os.chmod(directory, 0o755)
+                    except OSError:
+                        pass
 
     @staticmethod
     def wrapper_adapter_text(pin: str, posix_wrapper: str, windows_wrapper: str) -> str:
@@ -8686,6 +8864,14 @@ class RealityCheckTests(unittest.TestCase):
         self.claude_home = self.root / "claude-home"
         (self.harness_root / "templates" / "hooks").mkdir(parents=True)
         (self.claude_home / "hooks").mkdir(parents=True)
+        # These tests pin the OTHER reality legs and their probe counts; the
+        # default-branch protection leg (issue #356) has its own module,
+        # tests/test_audit_branch_protection.py, so it is isolated here.
+        protection = mock.patch.object(
+            harness, "default_branch_protection_findings", return_value=[]
+        )
+        protection.start()
+        self.addCleanup(protection.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -8774,7 +8960,7 @@ class RealityCheckTests(unittest.TestCase):
             "rev-parse HEAD": (True, PUBLISHED_MAIN_TIP),
             "rev-parse": (True, "main"),
             "status --porcelain": (True, ""),
-            "ls-files": (True, "H CLAUDE.md\nH codex/AGENTS.md"),
+            "ls-files": (True, "H CLAUDE.md\nH rules/laws.md\nH codex/AGENTS.md"),
             "rev-list": (True, "0\t0"),
             "ls-remote": (True, f"{PUBLISHED_MAIN_TIP}\trefs/heads/main"),
         }
@@ -10055,7 +10241,7 @@ class RealityCheckTests(unittest.TestCase):
                     source_root,
                     **{"status --porcelain": (True, " M CLAUDE.md")},
                 ),
-                "uncommitted CLAUDE.md and codex/AGENTS.md changes",
+                "uncommitted CLAUDE.md and rules/laws.md and codex/AGENTS.md changes",
             ),
             (
                 "hidden guidance",

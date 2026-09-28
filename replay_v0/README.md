@@ -46,6 +46,51 @@ python -m pytest -q replay_v0/tests
 python -m pytest -q replay_v0/tests/unit replay_v0/tests/contract
 ```
 
+## Process argument encodings
+
+`process:executable,arg,policy-file` retains the original bare comma-separated
+contract. Commas are separators; quotes and backslashes have no escaping meaning.
+Use the explicit `process-json:` prefix when a value contains a comma. Its payload
+is exactly one JSON array of strings, not a shell command or a path to a JSON file.
+The first string identifies the executable and the final string identifies the
+policy file. Intermediate strings are passed literally and in order.
+
+Construct the reference with a JSON encoder and pass it as a single CLI argument:
+
+```python
+import json
+import subprocess
+import sys
+
+candidate = "process-json:" + json.dumps(
+    [sys.executable, "-B", "policies/my candidate,final.py"]
+)
+subprocess.run(
+    [
+        sys.executable, "-m", "replay_v0.cli", "replay",
+        "--baseline", "recorded:replay_v0/fixtures/legacy-decisions.jsonl",
+        "--candidate", candidate,
+        "--corpus", "replay_v0/corpora/charter/events.jsonl",
+        "--output", ".local/replay-proof",
+    ],
+    check=True,
+)
+```
+
+Both baseline and candidate accept either process encoding. JSON must contain at
+least two nonempty strings; NUL, CR/LF and unpaired Unicode surrogates are rejected
+before any policy executes. Invalid JSON, nested values, numbers, trailing data
+and empty entries return input-invalid exit 2 with a bounded diagnostic. JSON
+whitespace and ordinary JSON string escapes are supported. There is no fallback
+to comma parsing, shell expansion, CSV parsing or filename-based autodetection.
+
+This is an additive CLI encoding, not a process identity version change. Equivalent
+decoded argv values use the same existing identity, executable/policy validation,
+snapshot isolation and timeout. The Markdown report's structured reproduction
+retains the chosen input encoding, so rerunning it preserves comma-bearing values.
+The policy still runs as an unsandboxed program; JSON encoding grants no additional
+isolation or authority.
+
 ## Baseline truth
 
 Despite its compatibility filename, `fixtures/legacy-decisions.jsonl` is a synthetic

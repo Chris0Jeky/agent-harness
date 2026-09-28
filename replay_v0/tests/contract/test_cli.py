@@ -119,7 +119,9 @@ class CliTests(unittest.TestCase):
             }
             Path(f"{recording}.manifest.json").write_bytes(manifest_json_bytes(sidecar))
 
-            candidate = directory / f"candidate_{mode}.py"
+            policy_directory = directory / "policies"
+            policy_directory.mkdir()
+            candidate = policy_directory / f"candidate_{mode}.py"
             candidate.write_text(
                 self.policy_script(mode), encoding="utf-8", newline="\n"
             )
