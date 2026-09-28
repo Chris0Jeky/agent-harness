@@ -13379,13 +13379,16 @@ _CORE_HINT = re.compile(
     # `please` is a privilege tool only in its own lowercase spelling; prose
     # ("Please update ...") is not (1.7.2, issue #365).
     r"|\b(?:" + _CORE_HINT_PRIVILEGE + r")\b|(?-i:\bplease\b)"
+    # `git credential fill` prints a stored secret; the bare word `credential`
+    # was what double-checked it before the secret names became path-shaped.
+    r"|\bgit\s+credential"
     # A download substituted in COMMAND position (or fed to a here-string) is
     # program text; `for f in $(curl ...)` and `until [ "$(curl ...)" ]` read
     # it as data (1.7.2, issue #365). Evaluator spellings are the
     # alternative below.
     # A shell's `-c` cluster (`bash -lc`, `sh -ec`) is command position too
     # (review of #376, HIGH).
-    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b|<<<|(?-i:\s-[A-Za-z]*c))[ \t]*\"?"
+    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b|<<<|(?-i:\s-[A-Za-z]*c))[ \t]*[\"']?"
     r"\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)"
     r"|<\(\s*(?:curl|wget)"
     # Program text an evaluator runs from a named downloader: backticks, a
