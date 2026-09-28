@@ -2498,17 +2498,84 @@ def claude_target_overlap(left: list[str], right: list[str]) -> list[str]:
 
 def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
     """Recognize the controlled dispatcher path without POSIX case folding."""
-    expected = str(dispatcher.resolve()).replace("\\", "/")
+    expected = _dispatcher_identity_key(str(dispatcher))
+    if expected is None:
+        return False
     candidate = command.replace("\\", "/")
     if os.name == "nt":
-        expected = expected.casefold()
         candidate = candidate.casefold()
     # This is intentionally a token check, not a shell parser: static Doctor
     # can identify the exact controlled path but cannot prove what a shell will
     # execute. The boundaries reject a path merely embedded in another token.
     if re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate):
         return True
+    if _claude_command_names_dispatcher_alias(command, dispatcher, expected):
+        return True
     return _claude_command_uses_default_home_dispatcher(command, dispatcher)
+
+
+# One quoted string (either quote) or one unquoted run is one path token; the
+# unquoted run stops at the same separators the literal match treats as ends.
+_COMMAND_PATH_TOKEN = re.compile(r"\"([^\"]*)\"|'([^']*)'|([^\s\"';|&]+)")
+# Resolution touches the filesystem, so a pathological command is capped.
+_DISPATCHER_ALIAS_CANDIDATE_LIMIT = 32
+
+
+def _dispatcher_identity_key(path_text: str) -> str | None:
+    """Resolve a path to its comparison key; a resolution error is no identity."""
+    try:
+        resolved = os.path.realpath(path_text)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    key = resolved.replace("\\", "/")
+    # Windows names are case-insensitive; POSIX keeps case distinct, and
+    # realpath never rewrites a POSIX component's case, even on a
+    # case-insensitive volume.
+    return key.casefold() if os.name == "nt" else key
+
+
+def _claude_command_names_dispatcher_alias(
+    command: str, dispatcher: Path, expected: str
+) -> bool:
+    """Match an absolute path token that resolves to the controlled dispatcher.
+
+    A valid spelling of the same file differs from the resolved one when the
+    path crosses a symlink or junction, a Windows 8.3 short name, or macOS's
+    /var -> /private/var link. Each whole token is resolved and compared by
+    identity, so a foreign file reached through an alias, a decoy name, or a
+    path fragment inside a larger token never matches.
+    """
+    names = {dispatcher.name, expected.rsplit("/", 1)[-1]}
+    if os.name == "nt":
+        names = {name.casefold() for name in names}
+    checked = 0
+    for match in _COMMAND_PATH_TOKEN.finditer(command):
+        token = next(group for group in match.groups() if group is not None)
+        options = [token]
+        # `--hook=/abs/dispatch.py`: the literal match accepts `=` as a start.
+        options.extend(
+            token[index + 1 :] for index, char in enumerate(token) if char == "="
+        )
+        for option in options:
+            name = option.replace("\\", "/").rsplit("/", 1)[-1]
+            if os.name == "nt":
+                name = name.casefold()
+            if name not in names or any(char in option for char in "$%`"):
+                # Only a candidate with the dispatcher's name is resolved, and
+                # a shell-expanded spelling is not statically provable.
+                continue
+            if not os.path.isabs(option) or (
+                os.sep == "\\" and not os.path.splitdrive(option)[0]
+            ):
+                # A relative or drive-relative token depends on the process
+                # cwd, which static Doctor does not share with the hook.
+                continue
+            if checked >= _DISPATCHER_ALIAS_CANDIDATE_LIMIT:
+                return False
+            checked += 1
+            if _dispatcher_identity_key(option) == expected:
+                return True
+    return False
 
 
 def _claude_command_uses_default_home_dispatcher(
