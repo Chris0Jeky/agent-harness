@@ -8,6 +8,7 @@ no process is spawned and no network is touched.
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -27,25 +28,54 @@ DEFAULT_BRANCH_ARGV = (
     "--jq",
     ".default_branch",
 )
-RULES_ARGV = (
-    "gh",
-    "api",
-    "--hostname",
-    "github.com",
-    "repos/acme/widgets/rules/branches/main",
-    "--jq",
-    '[.[].type]|join(",")',
-)
-PROTECTION_ARGV = (
-    "gh",
-    "api",
-    "--hostname",
-    "github.com",
-    "repos/acme/widgets/branches/main/protection",
-    "--jq",
-    "[.allow_force_pushes.enabled, .allow_deletions.enabled]"
-    '|map(tostring)|join(",")',
-)
+RULES_JQ = '.[]|"\\(.type) \\(.ruleset_id // "")"'
+
+
+def rules_argv(branch_path="main"):
+    """The paginated rules probe for one URL-encoded branch path."""
+    return (
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        "--paginate",
+        f"repos/acme/widgets/rules/branches/{branch_path}",
+        "--jq",
+        RULES_JQ,
+    )
+
+
+def protection_argv(branch_path="main"):
+    """The classic protection probe for one URL-encoded branch path."""
+    return (
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/acme/widgets/branches/{branch_path}/protection",
+        "--jq",
+        "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
+        '.enforce_admins.enabled]|map(tostring)|join(",")',
+    )
+
+
+def bypass_argv(ruleset_id):
+    """The bypass probe for one ruleset id."""
+    return (
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/acme/widgets/rulesets/{ruleset_id}",
+        "--jq",
+        ".current_user_can_bypass",
+    )
+
+
+RULES_ARGV = rules_argv()
+PROTECTION_ARGV = protection_argv()
+BYPASS_7 = bypass_argv(7)
+BOTH_RULES = "non_fast_forward 7\ndeletion 7\n"
 
 
 def make_tier_data(tier=2, flags=None, floor_posture=None, floor_wiring=None):
@@ -132,7 +162,8 @@ class BranchProtectionFindingTests(unittest.TestCase):
             make_tier_data(),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "non_fast_forward,deletion"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
             },
         )
         self.assertEqual(len(findings), 1)
@@ -140,7 +171,8 @@ class BranchProtectionFindingTests(unittest.TestCase):
         self.assertIn("acme/widgets", findings[0]["detail"])
         self.assertIn("main", findings[0]["detail"])
         self.assertEqual(
-            runner.gh_calls(), [list(DEFAULT_BRANCH_ARGV), list(RULES_ARGV)]
+            runner.gh_calls(),
+            [list(DEFAULT_BRANCH_ARGV), list(RULES_ARGV), list(BYPASS_7)],
         )
 
     def test_ok_when_classic_protection_denies_both(self):
@@ -148,8 +180,9 @@ class BranchProtectionFindingTests(unittest.TestCase):
             make_tier_data(),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "non_fast_forward"),
-                PROTECTION_ARGV: (True, "false,false"),
+                RULES_ARGV: (True, "non_fast_forward 7"),
+                PROTECTION_ARGV: (True, "false,false,true"),
+                BYPASS_7: (True, "never"),
             },
         )
         self.assertEqual([item["status"] for item in findings], ["ok"])
@@ -160,7 +193,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
                 RULES_ARGV: (True, ""),
-                PROTECTION_ARGV: (True, "false,true"),
+                PROTECTION_ARGV: (True, "false,true,true"),
             },
         )
         self.assertEqual(len(findings), 1)
@@ -183,7 +216,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
             make_tier_data(),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "deletion"),
+                RULES_ARGV: (True, "deletion 7"),
                 PROTECTION_ARGV: (False, "", "gh: Branch not protected (HTTP 404)"),
             },
         )
@@ -198,7 +231,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
                     make_tier_data(),
                     {
                         DEFAULT_BRANCH_ARGV: (True, "main"),
-                        RULES_ARGV: (True, "deletion"),
+                        RULES_ARGV: (True, "deletion 7"),
                         PROTECTION_ARGV: (False, "", failure),
                     },
                 )
@@ -238,7 +271,8 @@ class BranchProtectionFindingTests(unittest.TestCase):
     def test_skipped_unless_core_or_floorless(self):
         answered = {
             DEFAULT_BRANCH_ARGV: (True, "main"),
-            RULES_ARGV: (True, "non_fast_forward,deletion"),
+            RULES_ARGV: (True, BOTH_RULES),
+            BYPASS_7: (True, "never"),
         }
         skipped = [
             make_tier_data(tier=4),
@@ -258,7 +292,8 @@ class BranchProtectionFindingTests(unittest.TestCase):
             make_tier_data(floor_posture="guide", floor_wiring="none"),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "non_fast_forward,deletion"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
             },
         )
         self.assertEqual([item["status"] for item in findings], ["ok"])
@@ -307,6 +342,201 @@ class BranchProtectionFindingTests(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(runner.gh_calls(), [])
 
+    def statuses(self, responses, data=None):
+        """Run the leg on `main` with the given probe answers; return statuses."""
+        full = {DEFAULT_BRANCH_ARGV: (True, "main")}
+        full.update(responses)
+        runner, findings = self.run_protection(data or make_tier_data(), full)
+        return runner, findings, [item["status"] for item in findings]
+
+    # Item 1: the rules probe paginates and carries ruleset ids.
+    def test_rules_probe_paginates_and_reads_ruleset_ids(self):
+        self.assertIn("--paginate", RULES_ARGV)
+        self.assertEqual(
+            harness.parse_branch_rules(
+                "non_fast_forward 7\n\n  \ndeletion 9\nupdate\n"
+            ),
+            [("non_fast_forward", "7"), ("deletion", "9"), ("update", "")],
+        )
+        # Two pages concatenate; each distinct backing ruleset is probed once.
+        runner, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "non_fast_forward 7\nupdate 3\n\ndeletion 9\n"),
+                BYPASS_7: (True, "never"),
+                bypass_argv(9): (True, "pull_requests_only"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+        self.assertEqual(runner.gh_calls()[2:], [list(BYPASS_7), list(bypass_argv(9))])
+        self.assertNotIn(list(bypass_argv(3)), runner.gh_calls())
+        self.assertNotIn(list(PROTECTION_ARGV), runner.gh_calls())
+
+    # Item 2: bypass actors on the backing rulesets.
+    def test_bypass_answers_grade_the_ruleset_block(self):
+        rows = [
+            ("never", "ok"),
+            ("pull_requests_only", "ok"),
+            ("always", "advisory"),
+            ("exempt", "advisory"),
+            ("null", "UNPROVEN"),
+            ("", "UNPROVEN"),
+            ("sometimes", "UNPROVEN"),
+        ]
+        for answer, wanted in rows:
+            with self.subTest(answer=answer):
+                _, findings, statuses = self.statuses(
+                    {RULES_ARGV: (True, BOTH_RULES), BYPASS_7: (True, answer)}
+                )
+                self.assertEqual(statuses, [wanted])
+                if wanted == "advisory":
+                    self.assertIn("can bypass", findings[0]["detail"])
+                    self.assertIn("rulesets/7", findings[0]["detail"])
+
+    def test_unresolved_bypass_probe_is_unproven_and_named(self):
+        _, findings, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (False, "", "gh: HTTP 403 Resource not accessible"),
+            }
+        )
+        self.assertEqual(statuses, ["UNPROVEN"])
+        # The probe note's credential redaction masks the long REST path, so
+        # the finding names the ruleset and the probed field itself.
+        self.assertIn("ruleset 7", findings[0]["detail"])
+        self.assertIn(".current_user_can_bypass", findings[0]["detail"])
+
+    def test_one_bypassable_ruleset_among_two_is_advisory(self):
+        _, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "non_fast_forward 7\ndeletion 9\n"),
+                BYPASS_7: (True, "never"),
+                bypass_argv(9): (True, "always"),
+            }
+        )
+        self.assertEqual(statuses, ["advisory"])
+
+    def test_a_ruleset_rule_without_a_numeric_id_is_unproven(self):
+        for rules in ("non_fast_forward\ndeletion 7\n", "non_fast_forward ../x\n"):
+            with self.subTest(rules=rules):
+                runner, _, statuses = self.statuses(
+                    {
+                        RULES_ARGV: (True, rules + "deletion 7\n"),
+                        BYPASS_7: (True, "never"),
+                    }
+                )
+                self.assertEqual(statuses, ["UNPROVEN"])
+                self.assertFalse(
+                    any("rulesets/.." in " ".join(argv) for argv in runner.calls)
+                )
+
+    # Item 3: coverage split across rulesets and classic protection.
+    def test_coverage_split_across_mechanisms_is_ok(self):
+        runner, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "non_fast_forward 7"),
+                PROTECTION_ARGV: (True, "true,false,true"),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+        self.assertEqual(
+            runner.gh_calls()[1:],
+            [list(RULES_ARGV), list(PROTECTION_ARGV), list(BYPASS_7)],
+        )
+
+    def test_coverage_split_keeps_the_ruleset_bypass_check(self):
+        _, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "deletion 7"),
+                PROTECTION_ARGV: (True, "false,true,true"),
+                BYPASS_7: (True, "exempt"),
+            }
+        )
+        self.assertEqual(statuses, ["advisory"])
+
+    def test_coverage_split_that_leaves_a_rule_open_is_advisory(self):
+        _, findings, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "deletion 7"),
+                PROTECTION_ARGV: (True, "true,true,true"),
+            }
+        )
+        self.assertEqual(statuses, ["advisory"])
+        self.assertIn("force-push", findings[0]["detail"])
+        self.assertIn("gh api -X POST", findings[0]["detail"])
+
+    # Item 4: classic protection with enforce_admins false.
+    def test_classic_block_without_enforce_admins_is_advisory(self):
+        for rules in ("", "non_fast_forward 7\n"):
+            with self.subTest(rules=rules):
+                _, findings, statuses = self.statuses(
+                    {
+                        RULES_ARGV: (True, rules),
+                        PROTECTION_ARGV: (True, "false,false,false"),
+                        BYPASS_7: (True, "never"),
+                    }
+                )
+                self.assertEqual(statuses, ["advisory"])
+                self.assertIn("enforce_admins is false", findings[0]["detail"])
+                self.assertIn("false,false,false", findings[0]["detail"])
+
+    def test_classic_block_with_enforce_admins_is_ok(self):
+        _, _, statuses = self.statuses(
+            {RULES_ARGV: (True, ""), PROTECTION_ARGV: (True, "false,false,true")}
+        )
+        self.assertEqual(statuses, ["ok"])
+
+    def test_classic_block_with_unknown_enforce_admins_is_unproven(self):
+        for answer in ("false,false", "false,false,null"):
+            with self.subTest(answer=answer):
+                _, _, statuses = self.statuses(
+                    {RULES_ARGV: (True, ""), PROTECTION_ARGV: (True, answer)}
+                )
+                self.assertEqual(statuses, ["UNPROVEN"])
+
+    # Item 5: an empty or null classic answer is unmeasured.
+    def test_empty_or_null_classic_answer_is_unproven(self):
+        for answer in ("", "  \n", "null", "null,null,true", "false,null,true"):
+            with self.subTest(answer=answer):
+                _, findings, statuses = self.statuses(
+                    {RULES_ARGV: (True, "deletion 7"), PROTECTION_ARGV: (True, answer)}
+                )
+                self.assertEqual(statuses, ["UNPROVEN"])
+                self.assertNotIn("gh api -X POST", findings[0]["detail"])
+
+    # Item 6: the branch is URL-encoded in both probe paths.
+    def test_branch_is_url_encoded_in_probe_paths(self):
+        encoded = "release/v1%20beta%232"
+        runner, _, statuses = self.statuses(
+            {
+                DEFAULT_BRANCH_ARGV: (True, "release/v1 beta#2"),
+                rules_argv(encoded): (True, "non_fast_forward 7"),
+                protection_argv(encoded): (True, "true,false,true"),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+        self.assertIn(list(rules_argv(encoded)), runner.gh_calls())
+        self.assertIn(list(protection_argv(encoded)), runner.gh_calls())
+
+    def test_an_expired_deadline_is_unproven_never_ok(self):
+        runner = ArgvRunner(
+            {
+                REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        findings = harness.default_branch_protection_findings(
+            Path("."),
+            make_tier_data(),
+            command_runner=runner,
+            deadline=time.monotonic() - 1,
+        )
+        self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+        self.assertEqual(runner.calls, [])
+
     def test_status_is_never_a_mismatch(self):
         scenarios = [
             {},
@@ -315,13 +545,34 @@ class BranchProtectionFindingTests(unittest.TestCase):
             {DEFAULT_BRANCH_ARGV: (True, "null")},
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "deletion"),
-                PROTECTION_ARGV: (True, "true,true"),
+                RULES_ARGV: (True, "deletion 7"),
+                PROTECTION_ARGV: (True, "true,true,true"),
+            },
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, "deletion 7"),
+                PROTECTION_ARGV: (True, "null,null,null"),
+            },
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "always"),
+            },
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+            },
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
             },
         ]
         for responses in scenarios:
             with self.subTest(responses=sorted(responses)):
                 _, findings = self.run_protection(make_tier_data(), responses)
+                # Non-vacuous: every scenario is in scope and must report.
+                self.assertGreaterEqual(len(findings), 1)
                 for item in findings:
                     self.assertIn(
                         item["status"],
@@ -343,7 +594,8 @@ class BranchProtectionFindingTests(unittest.TestCase):
                 {
                     REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
                     DEFAULT_BRANCH_ARGV: (True, "main"),
-                    RULES_ARGV: (True, "non_fast_forward,deletion"),
+                    RULES_ARGV: (True, BOTH_RULES),
+                    BYPASS_7: (True, "never"),
                 }
             )
             findings = harness.reality_findings(
