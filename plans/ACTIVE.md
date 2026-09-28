@@ -97,7 +97,6 @@ from it, so no two lanes could collide on `FLOOR_VERSION`, the adapter marker, o
 digests. **All four landed**, two on 2026-08-07/08 and two on 2026-09-02, alongside the three
 floor PRs of 2026-09-02.
 
-
 | Lane | PR | Outcome |
 |---|---|---|
 | #110 cross-product gate | **#240** | **MERGED `a8ed1d4`** at head `f06b304`. Nine green, adversarial review MERGE with zero blocking findings and every claim reproduced. |
@@ -109,20 +108,13 @@ floor PRs of 2026-09-02.
 | masked later segments | **#262** | **MERGED `c34c74c`** as floor 1.6.32 (the late Codex P1 on #260): an opacity-first deny re-checks every later command segment with the analyzer; one review round. |
 
 Done (2026-09-28): the client floor's local-destruction `core` posture and its rollout (#356; see the
-2026-09-28 floor lane above). Still open there: EvidenceDeck#35 behind H-18, and H-14's re-trusts. Also outstanding: the Codex half of the rollout above (H-15). H-16
-closed on 2026-09-07.
+2026-09-28 floor lane above). Still open there: EvidenceDeck#35 behind H-18, and H-14's re-trusts.
 
 **The ownership rule that this wave established stays in force.** A lane's permitted region is
 its code and tests only; the shared ledgers — `README.md`, `ROADMAP.md`, `docs/SYSTEM_STATE.md`,
 `plans/ACTIVE.md`, `CLAUDE.md`, `SPECS.md` — belong to the coordinator's single pass after the lane
 merges (the exception: a floor lane updates the README shipped-state paragraph it moves). Both
 2026-08-07 lanes exceeded their regions once, and that — not code overlap — is what conflicted.
-
-How the two 2026-08-07 blockers were closed, for the record: #239 dropped its ledger edits outright
-(taking `main` for all three files disposed of the false "1.6.27 was never deployed" claim) and was
-re-versioned to 1.6.30 because 1.6.28/1.6.29 were taken by the owner's claude-config decisions;
-#238's three P1s (junctions followed, nested Git repos selectable, Doctor's layer walk) were fixed
-in one commit and pinned by tests. The full blocker text is in the PR threads.
 
 **Declared-cap divergence, tracked as #233.** `README.md` declares this file as allowing "at most
 two active, executable workstreams"; this wave ran four lanes plus the blocked rollout. The count was
