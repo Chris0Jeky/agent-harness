@@ -139,6 +139,17 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
+
+
+def is_valid_tier(value: Any) -> bool:
+    """True only for a real integer tier 0-4.
+
+    `type(...) is int` mirrors the dispatcher: `True in TIER_NAMES` is True
+    (bool subclasses int), and an unhashable value such as `[4]` would raise
+    from the membership test instead of reading as invalid (#370).
+    """
+    return type(value) is int and value in TIER_NAMES
+
 FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
 # `"floor_wiring": "none"` is the owner's declaration that a repository runs
 # WITHOUT a floor (SPECS §5): no Codex adapter and no global Claude hook. It
@@ -4175,7 +4186,7 @@ def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any
     tiers = [
         declaration["tier"]
         for declaration in declarations
-        if declaration.get("tier") in TIER_NAMES
+        if is_valid_tier(declaration.get("tier"))
     ]
     if tiers:
         merged["tier"] = max(tiers)
@@ -4370,7 +4381,7 @@ def load_tier(repo: Path) -> tuple[list[Path], dict[str, Any]]:
 def validate_tier(data: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     tier = data.get("tier")
-    if tier not in TIER_NAMES:
+    if not is_valid_tier(tier):
         issues.append("tier must be an integer from 0 through 4")
     elif data.get("name") != TIER_NAMES[tier]:
         issues.append(f"name must be {TIER_NAMES[tier]!r} for tier {tier}")
@@ -5455,15 +5466,15 @@ def effective_floor_posture(tier_data: dict) -> str:
 
     Mirrors `dispatch.floor_posture`'s structure: T4 and `wave_mode` are walls
     whatever is declared; below that a declared `floor_posture` binds; without
-    one, `sensitive_data` keeps the wall. The default differs on purpose:
-    dispatch on this base still defaults to "guide", while the 1.7.0 contract
-    (issue #356) is "core" — which no longer intercepts force-push or branch
-    deletion client-side — and "core" binds here when declared.
+    one, `sensitive_data` keeps the wall. The default matches
+    `dispatch.floor_posture` ("core" below T4/wave for a non-sensitive
+    repository) — which no longer intercepts force-push or branch deletion
+    client-side — and "core" binds here when declared.
     """
     # A malformed tier is reported by audit's own validation, never a crash
     # here (review of #369, M3): the merge passes an invalid raw value through.
     tier = tier_data.get("tier")
-    tier = tier if tier in TIER_NAMES else 1
+    tier = tier if is_valid_tier(tier) else 1
     flags = tier_data.get("flags", {}) or {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
@@ -6177,7 +6188,7 @@ def audit_repo(
                 else ""
             )
             issues.extend(f"{label}{issue}" for issue in validate_tier(data))
-        tier = tier_data.get("tier") if tier_data.get("tier") in TIER_NAMES else 1
+        tier = tier_data.get("tier") if is_valid_tier(tier_data.get("tier")) else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
     issues.extend(budget_issues(repo, tier))
@@ -10470,7 +10481,7 @@ def doctor(args: argparse.Namespace) -> int:
             _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
-                if reality_tier_data.get("tier") in TIER_NAMES
+                if is_valid_tier(reality_tier_data.get("tier"))
                 else 1
             )
             findings = reality_findings(
