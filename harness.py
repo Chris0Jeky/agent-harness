@@ -4417,15 +4417,42 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
         isinstance(wiring, str) and wiring in FLOOR_WIRING_VALUES
     ):
         issues.append(f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}")
+    # Optional (issue #247); null is a declaration of "none", as for `human_todo`.
+    status_doc = data.get("status_doc")
+    if status_doc is not None and not (
+        isinstance(status_doc, str)
+        and status_doc.strip()
+        and repo_relative_declaration(status_doc) is not None
+    ):
+        issues.append(
+            f"status_doc must be a repo-relative path or null, not {status_doc!r}"
+        )
     return issues
+
+
+STATUS_DOC_LINE_CAP = 150
 
 
 def line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8").splitlines())
 
 
-def budget_issues(repo: Path, tier: int) -> list[str]:
+def budget_issues(
+    repo: Path, tier: int, tier_data: dict[str, Any] | None = None
+) -> list[str]:
     checks: list[tuple[Path, int, str]] = []
+    # SPECS §3's "now"/STATUS head row (issue #247). The name is per-repo, so
+    # only a declared `status_doc` is measured; a missing file is the reality
+    # check's to report, not a budget line.
+    status_doc = declared_status_doc(tier_data or {})
+    if status_doc is not None and (repo / status_doc).is_file():
+        checks.append(
+            (
+                repo / status_doc,
+                STATUS_DOC_LINE_CAP,
+                "rotate to docs/archive/status-YYYY-MM.md",
+            )
+        )
     if (repo / "CLAUDE.md").is_file():
         checks.append(
             (
@@ -4462,7 +4489,8 @@ def budget_issues(repo: Path, tier: int) -> list[str]:
         actual = line_count(path)
         if actual > cap:
             issues.append(
-                f"{path.relative_to(repo)}: {actual}>{cap} lines; ROTATE: {remedy}"
+                f"{path.relative_to(repo).as_posix()}: {actual}>{cap} lines; "
+                f"ROTATE: {remedy}"
             )
     return issues
 
@@ -5815,6 +5843,67 @@ def default_branch_protection_findings(
     ]
 
 
+def repo_relative_declaration(declared: str) -> PurePosixPath | None:
+    """The repo-relative path a tier.json path field names, or None if it names
+    none (absolute, drive- or root-anchored, `..`-escaping, or malformed)."""
+    relative = PurePosixPath(declared.replace("\\", "/"))
+    # `PurePosixPath("C:/Users/...").is_absolute()` is False - no leading slash -
+    # so a drive-absolute declaration slipped past the POSIX test and was then
+    # JOINED to the repo path, where the drive silently won. Reject any value
+    # that carries a Windows drive or root as well.
+    windows_view = PureWindowsPath(declared)
+    if (
+        relative.is_absolute()
+        or windows_view.is_absolute()
+        or windows_view.drive
+        or windows_view.root
+        or ".." in relative.parts
+        # A NUL cannot appear in any path on any supported platform, so it is a
+        # malformed DECLARATION, not a filesystem that would not answer. Left
+        # to the stat guard it surfaced as `ValueError` -> UNPROVEN -> exit 0.
+        or "\x00" in declared
+    ):
+        return None
+    return relative
+
+
+def declared_status_doc(tier_data: dict[str, Any]) -> PurePosixPath | None:
+    """The routed "now"/STATUS doc a VALID `status_doc` names, else None.
+
+    An invalid value is `validate_tier`'s to report; every consumer here treats
+    it as no declaration rather than guessing a path from it.
+    """
+    declared = tier_data.get("status_doc")
+    if not isinstance(declared, str) or not declared.strip():
+        return None
+    return repo_relative_declaration(declared)
+
+
+def status_doc_findings(repo: Path, tier_data: dict[str, Any]) -> list[dict[str, str]]:
+    """Measure a declared "now"/STATUS doc against the filesystem (issue #247).
+
+    Absent (or null) means no check, exactly as `human_todo`; a malformed value
+    is already a `validate_tier` issue, so it is not reported twice here.
+    """
+    check = "status_doc vs the file on disk"
+    relative = declared_status_doc(tier_data)
+    if relative is None:
+        return []
+    declared = tier_data["status_doc"]
+    present, access_error = file_presence(repo / relative)
+    if access_error:
+        return [reality_finding(check, REALITY_UNPROVEN, access_error)]
+    if present:
+        return [reality_finding(check, REALITY_OK, f"{declared} exists")]
+    return [
+        reality_finding(
+            check,
+            REALITY_MISMATCH,
+            f"status_doc declares {declared!r} but no such file exists in {repo}",
+        )
+    ]
+
+
 def human_todo_findings(
     repo: Path, tier: int, tier_data: dict[str, Any]
 ) -> list[dict[str, str]]:
@@ -5841,23 +5930,8 @@ def human_todo_findings(
                 f"human_todo must be a repo-relative path or null, not {declared!r}",
             )
         ]
-    relative = PurePosixPath(declared.replace("\\", "/"))
-    # `PurePosixPath("C:/Users/...").is_absolute()` is False - no leading slash -
-    # so a drive-absolute declaration slipped past the POSIX test and was then
-    # JOINED to the repo path, where the drive silently won. Reject any value
-    # that carries a Windows drive or root as well.
-    windows_view = PureWindowsPath(declared)
-    if (
-        relative.is_absolute()
-        or windows_view.is_absolute()
-        or windows_view.drive
-        or windows_view.root
-        or ".." in relative.parts
-        # A NUL cannot appear in any path on any supported platform, so it is a
-        # malformed DECLARATION, not a filesystem that would not answer. Left
-        # to the stat guard it surfaced as `ValueError` -> UNPROVEN -> exit 0.
-        or "\x00" in declared
-    ):
+    relative = repo_relative_declaration(declared)
+    if relative is None:
         return [
             reality_finding(
                 check,
@@ -6296,6 +6370,7 @@ def reality_findings(
         )
     )
     findings.extend(human_todo_findings(repo, tier, tier_data))
+    findings.extend(status_doc_findings(repo, tier_data))
     return findings
 
 
@@ -6336,7 +6411,7 @@ def audit_repo(
         tier = tier_data.get("tier") if is_valid_tier(tier_data.get("tier")) else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
-    issues.extend(budget_issues(repo, tier))
+    issues.extend(budget_issues(repo, tier, tier_data))
     issues.extend(stale_path_issues(repo))
     findings = reality_findings(
         repo,
