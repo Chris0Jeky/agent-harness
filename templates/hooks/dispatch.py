@@ -2740,6 +2740,9 @@ def data_heredoc_receiver(prefix: str, suffix: str) -> bool:
     """
     if inert_heredoc_receiver(prefix, suffix):
         return True
+    # `tee >(bash) <<'EOF'` feeds the body to a process (review of #376).
+    if ">(" in prefix or ">(" in suffix:
+        return False
     suffix_flow = quote_aware_segments_with_operators("true " + suffix)
     if suffix_flow and suffix_flow[0][1] in {"|", "|&"}:
         return False
@@ -9568,6 +9571,12 @@ def inline_program_reads_stdin_as_data(stage: list[str]) -> bool:
     head, toks = command_head(stage)
     if head not in {"python", "python3", "node"}:
         return False
+    # `xargs -I{} python3 -c "{}"` splices piped lines INTO the program text
+    # (review of #376, MEDIUM): a fan-out wrapper before the head disqualifies.
+    for wrapper in stage[: len(stage) - len(toks)]:
+        name = re.split(r"[\\/]", wrapper)[-1].lower()
+        if name.removesuffix(".exe") in {"xargs", "parallel"}:
+            return False
     args = toks[1:]
     index = 0
     program = None
@@ -13298,7 +13307,10 @@ _CHARTER_HINT = re.compile(
     r"\s-(?:-[rf]|[a-z]*[rf])"
     r"|\bunlink\b|\bshred\b|-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
-    r"|\|\s*(?:\S*[\\/])?(?:(?:"
+    # A bounded path run with no `|` in it: `\S*` rescanned the rest of the
+    # line from every `|`, and 60,000 pipes took 15s against the 5s hook
+    # timeout, which proceeds (review of #376; pre-existing since 1.6.x).
+    r"|\|\s*(?:[^\s|]{0,512}[\\/])?(?:(?:"
     + _HINT_PRIVILEGE
     + r"|env)\s+)?(?:"
     + _HINT_INTERPRETERS
@@ -13371,7 +13383,9 @@ _CORE_HINT = re.compile(
     # program text; `for f in $(curl ...)` and `until [ "$(curl ...)" ]` read
     # it as data (1.7.2, issue #365). Evaluator spellings are the
     # alternative below.
-    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b|<<<)[ \t]*\"?"
+    # A shell's `-c` cluster (`bash -lc`, `sh -ec`) is command position too
+    # (review of #376, HIGH).
+    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b|<<<|(?-i:\s-[A-Za-z]*c))[ \t]*\"?"
     r"\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)"
     r"|<\(\s*(?:curl|wget)"
     # Program text an evaluator runs from a named downloader: backticks, a
@@ -13394,11 +13408,22 @@ _CORE_SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 _CORE_PATH_SHAPED = re.compile(r"[\\/.]|id_", re.IGNORECASE)
+# A download captured into a variable and then evaluated in the same command
+# (`S=$(curl ...); eval "$S"`) is program text; plain `STATUS=$(curl ...)` is
+# not (review of #376, MEDIUM).
+_CORE_DOWNLOAD_ASSIGNED = re.compile(
+    r"\w=\"?\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)",
+    re.IGNORECASE,
+)
+_CORE_EVALUATOR = re.compile(
+    r"\beval\b|\biex\b|invoke-expression|\bsource\b|<<<|(?-i:\s-[A-Za-z]*c\s)",
+    re.IGNORECASE,
+)
 # Program text piped into an interpreter. Confirmed structurally in
 # `command_carries_core_hint`: a stage that runs a literal inline program
 # reads the pipe as data (`inline_program_reads_stdin_as_data`).
 _CORE_PIPE_HINT = re.compile(
-    r"\|\s*(?:\S*[\\/])?(?:(?:"
+    r"\|\s*(?:[^\s|]{0,512}[\\/])?(?:(?:"
     + _HINT_PRIVILEGE
     + r"|env)\s+)?(?:"
     + _HINT_INTERPRETERS
@@ -13430,6 +13455,7 @@ def pipes_program_text_into_interpreter(text: str) -> bool:
                 admitted += 1
         previous = operator_after
     return admitted == 0
+
 
 # A command is checked as ONE text, and the analyzer returns its FIRST deny.
 # When that deny is opacity, a LATER segment (`; git reset --hard`,
@@ -13576,10 +13602,11 @@ def command_carries_core_hint(command: str) -> bool:
         return True
     if _CORE_PIPE_HINT.search(text) and pipes_program_text_into_interpreter(text):
         return True
+    if _CORE_DOWNLOAD_ASSIGNED.search(text) and _CORE_EVALUATOR.search(text):
+        return True
     for token in text.split():
         if _CORE_PATH_SHAPED.search(token) and (
-            _CORE_SECRET_NAME.search(token)
-            or _SECRET_PATH.search(token.strip("'\"`"))
+            _CORE_SECRET_NAME.search(token) or _SECRET_PATH.search(token.strip("'\"`"))
         ):
             return True
     return False
