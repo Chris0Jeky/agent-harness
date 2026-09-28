@@ -901,6 +901,38 @@ class HarnessTests(unittest.TestCase):
                     harness.claude_command_points_to_dispatcher(command, dispatcher)
                 )
 
+    def test_claude_dispatcher_identity_never_resolves_network_paths(self) -> None:
+        # Review of #345: resolving a repo-controlled UNC token would contact
+        # the named host (an SMB session on Windows) despite --offline.
+        dispatcher, _link, _real = self.make_aliased_claude_home()
+        resolved = []
+        real_realpath = os.path.realpath
+
+        def recording(path, *args, **kwargs):
+            resolved.append(str(path))
+            return real_realpath(path, *args, **kwargs)
+
+        commands = [
+            r"python \\host.example\share\hooks\dispatch.py --event pre",
+            "python //host.example/share/hooks/dispatch.py --event pre",
+            r'python "\\?\UNC\host.example\share\dispatch.py"',
+            "python --hook=//host.example/share/dispatch.py",
+        ]
+        with mock.patch.object(harness.os.path, "realpath", recording):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertFalse(
+                        harness.claude_command_points_to_dispatcher(command, dispatcher)
+                    )
+        self.assertFalse(
+            [path for path in resolved if "host.example" in path], resolved
+        )
+        started = time.perf_counter()
+        harness.claude_command_points_to_dispatcher(
+            "python " + "=" * 20000 + "/dispatch.py", dispatcher
+        )
+        self.assertLess(time.perf_counter() - started, 2.0)
+
     def test_claude_dispatcher_identity_resolution_error_is_no_match(self) -> None:
         dispatcher, link, _real = self.make_aliased_claude_home()
         aliased = link / "claude-home" / "hooks" / "dispatch.py"

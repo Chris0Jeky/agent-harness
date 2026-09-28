@@ -2553,10 +2553,16 @@ def _claude_command_names_dispatcher_alias(
         token = next(group for group in match.groups() if group is not None)
         options = [token]
         # `--hook=/abs/dispatch.py`: the literal match accepts `=` as a start.
-        options.extend(
-            token[index + 1 :] for index, char in enumerate(token) if char == "="
-        )
+        # Bounded so a pathological `=` run cannot build quadratic slices.
+        starts = [index for index, char in enumerate(token) if char == "="][:8]
+        options.extend(token[index + 1 :] for index in starts)
         for option in options:
+            if option[:2].replace("\\", "/") == "//":
+                # A UNC or `//host` path names a NETWORK location: resolving it
+                # would contact that host (on Windows, an SMB session that can
+                # hand over NTLM credentials) from repo-controlled settings,
+                # and `--offline` promises no network (review of #345).
+                continue
             name = option.replace("\\", "/").rsplit("/", 1)[-1]
             if os.name == "nt":
                 name = name.casefold()
