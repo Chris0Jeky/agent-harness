@@ -466,6 +466,39 @@ class CorePostureTests(unittest.TestCase):
                 self.assertEqual(rendered[0], "deny")
         # An evaluator with no downloader stays a given-up family.
         self.assertFalse(dispatch.command_carries_core_hint('eval "$(ssh-agent -s)"'))
+        # Codex P1 on claude-config#461: long-form rm flags behind a first
+        # given-up verdict (a git environment prefix) must still double-check.
+        long_rm = (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x "
+            "rm --recursive --force /srv/outside"
+        )
+        for command in (
+            long_rm,
+            "rm --rec --f /srv/x",
+            "rm -v --force x",
+            # Review of #372: every abbreviation, later short clusters, and a
+            # backslash-newline continuation.
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm --r /srv/x",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm -v -rf /srv/x",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm /srv/x -rf",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=k GIT_CONFIG_VALUE_0=x rm \\\n"
+            "  --recursive /srv/x",
+            "/bin/rm --no-preserve-root -r /srv/x",
+        ):
+            with self.subTest(long_rm=command):
+                self.assertTrue(dispatch.command_carries_core_hint(command))
+                self.assertTrue(dispatch.command_carries_charter_hint(command))
+        for command in (
+            "git rm --cached x",
+            "rm --verbose x",
+            "rm x; ls --reverse",
+            # A command-position rm only: `--rm` flags and `-rm-` path parts
+            # are not an rm (review of #372).
+            "docker run --rm --read-only img",
+            "git push origin fix/floor-rm-long-flags --force-with-lease",
+        ):
+            with self.subTest(not_long_rm=command):
+                self.assertFalse(dispatch.command_carries_core_hint(command))
         # A downloader name needs a word start (round-2 verification, LOW).
         for command in ('bash -c "echo confirm"', 'eval "$(firmware)"'):
             with self.subTest(given_up=command):
@@ -476,6 +509,14 @@ class CorePostureTests(unittest.TestCase):
         started = time.perf_counter()
         for prefix in ("eval ", "bash -c ", "iex "):
             dispatch.command_carries_core_hint(prefix + "a" * 60000)
+        # The long-form rm alternative scans at most 256 characters per `rm`,
+        # so many `rm` words on one line stay linear (1.7.1).
+        dispatch.command_carries_core_hint("rm a " * 20000 + "b " * 50000)
+        dispatch.command_carries_charter_hint("rm a " * 20000 + "b " * 50000)
+        # Round-2 verification of #372: a trailing `[a-z]*\\b` after the flag
+        # backtracked quadratically on a long letter run (20k chars: 3.2s).
+        dispatch.command_carries_core_hint("rm x -" + "r" * 40000 + "1")
+        dispatch.command_carries_core_hint("rm " * 80 + "x -" + "r" * 20000 + "1")
         self.assertLess(time.perf_counter() - started, 2.0)
         self.assertFalse(
             dispatch.command_carries_core_hint("git push --force origin main")
@@ -898,6 +939,8 @@ class HookRoundTripTests(unittest.TestCase):
             "sudo systemctl restart nginx",
             "echo TOKEN=x > .env",
             "git -c core.pager='rm -rf /srv' log",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x "
+            f"rm --recursive --force {OUTSIDE}",
         ):
             with self.subTest(deny=command):
                 decision, reason = self.invoke(command)
