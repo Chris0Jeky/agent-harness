@@ -279,15 +279,17 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-28): canonical source is **1.7.1** (1.7.0 plus #372's long-form rm hint), the **core posture** (SPECS §5.4,
+Current state (2026-09-28): canonical source is **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
+false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core
+hint reads commands rather than PR-body or heredoc prose), the **core posture** (SPECS §5.4,
 owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a
 non-sensitive repository. Default-branch history is protected server-side by rulesets, so the
 client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes outside the
 project or through an unresolved operand, secret-file mutation, downloaded program text run
 directly, and privilege elevation. Force-push, ref deletion, git config execution, work-loss and
 pure opacity proceed. A `sensitive_data` repository never runs core (its declared `core` renders
-as `guide`), and `guide`/`wall` stay declarable. It is deployed to `~/.claude/hooks` on the owner's main box
-(claude-config#461), and three of the four Codex consumers carry its marker. History before 1.7.0 (2026-09-03): the immutable
+as `guide`), and `guide`/`wall` stay declarable. 1.7.1 is deployed to `~/.claude/hooks` on the owner's main box
+(claude-config#461); 1.7.2's deploy and consumer markers follow in the SPECS §5.3 rollout order. History before 1.7.0 (2026-09-03): the immutable
 `floor-v1-final` tag preserves 1.6.21, and 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
 T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
