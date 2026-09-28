@@ -348,5 +348,103 @@ class ProbeBinaryTests(unittest.TestCase):
         self.assertEqual(spawned[0][1:], ["/F", "/T", "/PID", "424242"])
 
 
+class CodexVersionProbeTests(unittest.TestCase):
+    """Doctor's Codex version probe never goes through PowerShell (#276).
+
+    npm writes `codex.cmd` beside an unsigned `codex.ps1`; under a restrictive
+    execution policy `powershell -Command "codex --version"` picks the `.ps1`
+    and fails although `codex.cmd --version` works.
+    """
+
+    NPM_CMD = r"C:\Users\fixture\AppData\Roaming\npm\codex.cmd"
+    NPM_PS1 = r"C:\Users\fixture\AppData\Roaming\npm\codex.ps1"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        harness.reset_probe_binary_cache()
+        self.addCleanup(harness.reset_probe_binary_cache)
+        self.addCleanup(self.temp.cleanup)
+
+    def test_non_windows_probe_is_the_unchanged_bare_command(self) -> None:
+        with mock.patch.object(
+            harness, "resolve_codex_launcher", side_effect=AssertionError
+        ):
+            self.assertEqual(
+                harness.codex_version_argv(windows=False),
+                (["codex", "--version"], ""),
+            )
+
+    def test_simulated_windows_spawns_the_resolved_cmd_directly(self) -> None:
+        with mock.patch.object(
+            harness, "resolve_codex_launcher", return_value=self.NPM_CMD
+        ):
+            argv, failure = harness.codex_version_argv(windows=True)
+        self.assertEqual(argv, [self.NPM_CMD, "--version"])
+        self.assertEqual(failure, "")
+        self.assertFalse(any("powershell" in token.lower() for token in argv))
+
+    def test_simulated_windows_without_a_launcher_is_a_named_failure(self) -> None:
+        with mock.patch.object(harness, "resolve_codex_launcher", return_value=None):
+            argv, failure = harness.codex_version_argv(windows=True)
+        self.assertEqual(argv, [])
+        self.assertIn("no codex .exe/.com/.cmd/.bat launcher", failure)
+        self.assertIn("never run through PowerShell", failure)
+
+    def test_launcher_search_drops_ps1_and_other_script_hosts(self) -> None:
+        seen: list[dict[str, str]] = []
+
+        def record(name: str, env: dict[str, str]) -> str:
+            seen.append(dict(env))
+            return self.NPM_CMD
+
+        env = {"PATH": r"C:\npm", "PATHEXT": ".PS1;.JS;.VBS;.PY;.CMD;.EXE"}
+        with mock.patch.object(harness, "resolve_probe_binary", side_effect=record):
+            self.assertEqual(harness.resolve_codex_launcher(env), self.NPM_CMD)
+        self.assertEqual(seen[0]["PATHEXT"].split(os.pathsep), [".CMD", ".EXE"])
+        self.assertEqual(seen[0]["PATH"], r"C:\npm")
+
+    def test_a_ps1_resolution_is_refused_rather_than_spawned(self) -> None:
+        with mock.patch.object(
+            harness, "resolve_probe_binary", return_value=self.NPM_PS1
+        ):
+            self.assertIsNone(
+                harness.resolve_codex_launcher({"PATH": r"C:\npm", "PATHEXT": ".PS1"})
+            )
+            with mock.patch.object(harness, "run", side_effect=AssertionError):
+                argv, failure = harness.codex_version_argv(windows=True)
+        self.assertEqual(argv, [])
+        self.assertIn("codex.ps1 shim alone is never run through PowerShell", failure)
+
+    @unittest.skipUnless(os.name == "nt", "PATHEXT resolution is Windows-only")
+    def test_real_resolution_picks_codex_cmd_beside_codex_ps1(self) -> None:
+        npm = self.root / "npm"
+        plant(npm, "codex")
+        plant(npm, "codex.ps1")
+        expected = plant(npm, "codex.cmd")
+        env = {"PATH": str(npm), "PATHEXT": ".PS1;.COM;.EXE;.BAT;.CMD"}
+        resolved = harness.resolve_codex_launcher(env)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(
+            os.path.normcase(str(resolved)), os.path.normcase(str(expected))
+        )
+        argv, failure = harness.codex_version_argv(env, windows=True)
+        self.assertEqual(failure, "")
+        self.assertEqual(argv[1:], ["--version"])
+        spawn_argv, spawn_failure = harness.probe_spawn_argv(argv, env)
+        self.assertEqual(spawn_failure, "")
+        self.assertEqual(spawn_argv, argv)
+
+    @unittest.skipUnless(os.name == "nt", "PATHEXT resolution is Windows-only")
+    def test_real_resolution_with_only_codex_ps1_finds_nothing(self) -> None:
+        npm = self.root / "npm"
+        plant(npm, "codex.ps1")
+        env = {"PATH": str(npm), "PATHEXT": ".PS1;.CMD"}
+        self.assertIsNone(harness.resolve_codex_launcher(env))
+        argv, failure = harness.codex_version_argv(env, windows=True)
+        self.assertEqual(argv, [])
+        self.assertIn("never run through PowerShell", failure)
+
+
 if __name__ == "__main__":
     unittest.main()
