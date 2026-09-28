@@ -183,8 +183,9 @@ Everything in T2, plus:
   defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
   on the thread. Severity is judged by the finding's content, never the reviewer's label — a
   bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
-  data-loss defect. One fix round, verified against the fix diff — the re-requested bot review
-  at T3+ IS that verification pass, not a second round — then ship or park (law 11); never
+  data-loss defect. One fix round, verified against the fix diff (another fresh-context pass only
+  when the fixes changed logic or the risk boundary; never a per-fix `@codex review` — global law
+  2f/2g) — then ship or park (law 11); never
   pause mid-pipeline to ask whether to continue. PostToolUse nudge after `gh pr create` points
   at the skill (~20 tokens, exactly when relevant).
 - **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
@@ -531,11 +532,11 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 - **Resolve policy conflicts at the canon level**: one delegation policy stated once (in
   AGENTS.md), vendor files link to it. (Today Codex says "spawn subagents without asking"
   while CLAUDE.md says "only when asked" — same repo.)
-- **Global vendor mirror**: the universal laws Claude gets from `~/.claude/CLAUDE.md` reach Codex
+- **Global vendor mirror**: the universal laws Claude gets from `~/.claude/rules/laws.md` reach Codex
   through `~/.codex/AGENTS.md` (Codex's global personal-instructions file) — a faithful mirror of
   the twelve laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
-  and the floor note. It declares `~/.claude/CLAUDE.md` canonical and must be kept in sync (a
-  parity-diff belongs on the roadmap). This is WHY per-repo dual-runtime AGENTS.md files stay thin:
+  and the floor note. It declares `rules/laws.md` canonical and is kept in sync by claude-config's
+  `tests/check-law-parity.ps1`. This is WHY per-repo dual-runtime AGENTS.md files stay thin:
   the universal rules arrive globally for Codex exactly as they do for Claude, so nothing is
   restated per repo — only the vendor-runtime delta and repo-specific rules live in the repo file.
 
