@@ -4445,7 +4445,10 @@ def budget_issues(
     # only a declared `status_doc` is measured; a missing file is the reality
     # check's to report, not a budget line.
     status_doc = declared_status_doc(tier_data or {})
-    if status_doc is not None and (repo / status_doc).is_file():
+    # `file_presence`, not `is_file()`: an access error or an over-long name
+    # raises from `is_file()` on 3.11 and would abort the audit; the reality
+    # leg reports it as UNPROVEN instead (review of #381).
+    if status_doc is not None and file_presence(repo / status_doc)[0]:
         checks.append(
             (
                 repo / status_doc,

@@ -9984,6 +9984,22 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(self.statuses(result, "status_doc"), ["ok"])
         self.assertTrue(result["ok"], result["issues"])
 
+    def test_an_unreadable_status_doc_path_is_unproven_not_a_crash(self) -> None:
+        # Review of #381: `is_file()` raises PermissionError/ENAMETOOLONG on
+        # 3.11, which aborted the budget pass before the reality leg ran.
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 10)
+        real_stat = Path.stat
+
+        def denied(path, *args, **kwargs):
+            if path.name == "ACTIVE.md":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", denied):
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["UNPROVEN"])
+
     def test_a_status_doc_naming_a_missing_file_is_a_mismatch(self) -> None:
         repo = self.make_repo(status_doc="plans/ACTIVE.md")
         result = self.audit(repo, FakeCommandRunner())
