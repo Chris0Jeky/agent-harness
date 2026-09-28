@@ -70,7 +70,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.7.1 (2026-09-28)"
+FLOOR_VERSION = "1.7.2 (2026-09-28)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -2728,8 +2728,35 @@ def inert_heredoc_receiver(prefix: str, suffix: str) -> bool:
     return False
 
 
-def strip_quoted_heredoc_bodies(command: str) -> str:
+def data_heredoc_receiver(prefix: str, suffix: str) -> bool:
+    """The core posture's wider notion of a data heredoc (1.7.2, issue #365).
+
+    Adds `cat`/`tee` writing the body to a FILE (`cat > notes.md <<'EOF'`) to
+    the analyzer's inert receivers, as long as the body is not piped onward.
+    Used only for the core hint and masked re-check, which decide whether a
+    given-up verdict still double-checks: the body is written, not run. A
+    script written this way and run in the same command is not re-read --
+    exactly as a script written with the Write tool never is.
+    """
+    if inert_heredoc_receiver(prefix, suffix):
+        return True
+    # `tee >(bash) <<'EOF'` feeds the body to a process (review of #376).
+    if ">(" in prefix or ">(" in suffix:
+        return False
+    suffix_flow = quote_aware_segments_with_operators("true " + suffix)
+    if suffix_flow and suffix_flow[0][1] in {"|", "|&"}:
+        return False
+    parsed = quote_aware_segments(prefix)
+    if not parsed:
+        return False
+    head, _ = command_head(parsed[-1])
+    return head in {"cat", "tee"}
+
+
+def strip_quoted_heredoc_bodies(command: str, receiver=None) -> str:
     """Remove inert bodies whose quoted delimiter disables shell expansion."""
+    if receiver is None:
+        receiver = inert_heredoc_receiver
     lines = command.splitlines(keepends=True)
     result = []
     pending: list[tuple[str, bool, bool]] = []
@@ -2752,7 +2779,7 @@ def strip_quoted_heredoc_bodies(command: str) -> str:
                 (
                     match.group("single") or match.group("double"),
                     bool(match.group("tabs")),
-                    inert_heredoc_receiver(line[: match.start()], line[match.end() :]),
+                    receiver(line[: match.start()], line[match.end() :]),
                 )
             )
         if pending:
@@ -9510,6 +9537,79 @@ def stage_closes_compound(raw: list[str], closer: str) -> bool:
     return any(token.lower() == closer for token in raw)
 
 
+# An interpreter given its program inline (`python -c`, `node -e`) reads the
+# piped download as DATA, not program text -- `curl -s localhost:8191/api |
+# python -c "import json,sys; ..."` is the most common real deny the core
+# posture still raised (34 of 95 over 3,000 commands, issue #365). The program
+# itself decides, so a program that could run stdin (or start something that
+# inherits it) keeps the verdict. `-i` enters interactive mode after `-c`
+# and reads stdin as code, so no flag outside the listed set is admitted.
+_INLINE_PROGRAM_PYTHON_FLAGS = re.compile(r"-[bBdEOqsSuvRP]+")
+# Call-shaped where a bare word is common data (`d['system']`, `re.compile(`).
+_INLINE_PROGRAM_PYTHON_RISK = re.compile(
+    r"\b(?:exec\w*|eval|system|popen\w*|spawn\w*|breakpoint)\s*\("
+    r"|(?<![.\w])compile\s*\(|\bimport\s[\w\s,]{0,120}?\bsystem\b"
+    r"|\b(?:__import__|importlib|import_module|runpy|subprocess|pty|pickle"
+    r"|marshal|shelve|ctypes|cffi|getattr|builtins|__builtins__|globals"
+    r"|FunctionType|interact|InteractiveConsole|execfile)\b"
+)
+_INLINE_PROGRAM_NODE_RISK = re.compile(
+    r"\b(?:eval|exec\w*|spawn\w*|import)\s*\("
+    r"|\b(?:Function|child_process|vm|worker_threads|binding|module)\b"
+)
+
+
+def inline_program_reads_stdin_as_data(stage: list[str]) -> bool:
+    """Whether a piped-into interpreter runs a literal inline program only.
+
+    Admits `python`/`python3` with `-c` and `node` with `-e`/`--eval`/`-p`/
+    `--print` whose program text is literal (no shell expansion) and names no
+    evaluator, process launcher, or loader. Anything else -- a script path,
+    `-`, `-m`, an unlisted flag, a dynamic program -- is still an interpreter
+    reading program text from the pipe.
+    """
+    head, toks = command_head(stage)
+    if head not in {"python", "python3", "node"}:
+        return False
+    # `xargs -I{} python3 -c "{}"` splices piped lines INTO the program text
+    # (review of #376, MEDIUM): a fan-out wrapper before the head disqualifies.
+    for wrapper in stage[: len(stage) - len(toks)]:
+        name = re.split(r"[\\/]", wrapper)[-1].lower()
+        if name.removesuffix(".exe") in {"xargs", "parallel"}:
+            return False
+    args = toks[1:]
+    index = 0
+    program = None
+    while index < len(args):
+        arg = args[index]
+        if head == "node":
+            if arg in {"-e", "--eval", "-p", "--print"} and index + 1 < len(args):
+                program = args[index + 1]
+            break
+        if arg == "-c" and index + 1 < len(args):
+            program = args[index + 1]
+            break
+        if arg in {"-X", "-W"} and index + 1 < len(args):
+            index += 2
+            continue
+        if (arg.startswith(("-X", "-W")) and len(arg) > 2) or (
+            _INLINE_PROGRAM_PYTHON_FLAGS.fullmatch(arg)
+        ):
+            index += 1
+            continue
+        break
+    if program is None:
+        return False
+    text = restore_quoted_literal_markers(program)
+    if "$" in text or "`" in text:
+        return False
+    if head == "node":
+        if any(arg in {"-i", "--interactive"} for arg in args):
+            return False
+        return not _INLINE_PROGRAM_NODE_RISK.search(text)
+    return not _INLINE_PROGRAM_PYTHON_RISK.search(text)
+
+
 def has_download_pipe_to_shell(command: str) -> bool:
     """Recognize pipeline endpoints after path/wrapper normalization."""
     download_seen = False
@@ -9534,7 +9634,11 @@ def has_download_pipe_to_shell(command: str) -> bool:
         ):
             download_seen = True
         stage_head, _ = command_head(stage)
-        if download_seen and stage_head in _PIPE_INTERPRETER_HEADS:
+        if (
+            download_seen
+            and stage_head in _PIPE_INTERPRETER_HEADS
+            and not inline_program_reads_stdin_as_data(stage)
+        ):
             return True
         if stage_head in {
             "curl",
@@ -13203,7 +13307,10 @@ _CHARTER_HINT = re.compile(
     r"\s-(?:-[rf]|[a-z]*[rf])"
     r"|\bunlink\b|\bshred\b|-delete\b"
     r"|\b(?:" + _HINT_PRIVILEGE + r")\b|start-process"
-    r"|\|\s*(?:\S*[\\/])?(?:(?:"
+    # A bounded path run with no `|` in it: `\S*` rescanned the rest of the
+    # line from every `|`, and 60,000 pipes took 15s against the 5s hook
+    # timeout, which proceeds (review of #376; pre-existing since 1.6.x).
+    r"|\|\s*(?:[^\s|]{0,512}[\\/])?(?:(?:"
     + _HINT_PRIVILEGE
     + r"|env)\s+)?(?:"
     + _HINT_INTERPRETERS
@@ -13260,19 +13367,34 @@ _CORE_REASON = re.compile(
 # program text and work-loss spellings are deliberately absent -- they are the
 # families core gives up. Every alternative here is also in `_CHARTER_HINT`, so
 # the core hint can never double-check a command guide lets through.
+_CORE_HINT_PRIVILEGE = "|".join(
+    sorted(re.escape(head) for head in _PRIVILEGE_HEADS if head != "please")
+)
 _CORE_HINT = re.compile(
     r"\brm\s+-[a-z]*[rf]|\brmdir\b|\bdel\b|\berase\b|\brd\b|remove-item|\bri\b"
     r"|(?<![\w.-])rm(?:\.exe)?\b(?:[^|;&\n]|\\\r?\n){0,256}?"
     r"\s-(?:-[rf]|[a-z]*[rf])"
     # find's single-dash `-delete`, not git's `--delete` (a ref, not a file).
     r"|\bunlink\b|\bshred\b|(?<![\w-])-delete\b"
-    r"|\b(?:" + _HINT_PRIVILEGE + r")\b"
-    r"|\|\s*(?:\S*[\\/])?(?:(?:"
-    + _HINT_PRIVILEGE
-    + r"|env)\s+)?(?:"
-    + _HINT_INTERPRETERS
-    + r")(?:\.exe)?(?![\w.-])"
-    r"|\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)|<\(\s*(?:curl|wget)"
+    # `please` is a privilege tool only in its own lowercase spelling; prose
+    # ("Please update ...") is not (1.7.2, issue #365).
+    r"|\b(?:" + _CORE_HINT_PRIVILEGE + r")\b|(?-i:\bplease\b)"
+    # `git credential fill` prints a stored secret; the bare word `credential`
+    # was what double-checked it before the secret names became path-shaped.
+    r"|\bgit\s+credential"
+    # A download substituted in COMMAND position (or fed to a here-string) is
+    # program text; `for f in $(curl ...)` and `until [ "$(curl ...)" ]` read
+    # it as data (1.7.2, issue #365). Evaluator spellings are the
+    # alternative below.
+    # A shell's `-c` cluster (`bash -lc`, `sh -ec`) is command position too
+    # (review of #376, HIGH).
+    # Executable prefixes and assignments keep command position (Codex P1 on
+    # #376): `env $(curl ...)`, `command $(curl ...)`, `X=1 $(curl ...)`.
+    r"|(?:^|[;&|({\n!]|<<<|(?-i:\s-[A-Za-z]*c)"
+    r"|\b(?:then|do|else|if|elif|while|until|env|command|exec|builtin|nohup"
+    r"|time|nice|xargs)\b|\w=[^\s;&|]{0,256}[ \t])[ \t]*[\"']?"
+    r"\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)"
+    r"|<\(\s*(?:curl|wget)"
     # Program text an evaluator runs from a named downloader: backticks, a
     # path-qualified downloader, `iex (irm ...)` (review of PR #363, MEDIUM).
     # Each match starts with a charter-hint alternative. The span already eats
@@ -13280,11 +13402,67 @@ _CORE_HINT = re.compile(
     # `\S*` path group here backtracked quadratically (30k chars: 3.7s).
     r"|(?:\beval\b|\biex\b|invoke-expression|(?-i:\s-c\s))"
     + _HINT_SPAN
-    + r"(?<![\w-])(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
-    r"|\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
+    + r"(?<![\w-])(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b",
+    re.IGNORECASE,
+)
+# Secret-looking names count only inside a path-shaped token (a separator or a
+# dot), so prose -- "the committed secrets", "the credential prompt" -- in a PR
+# body or a heredoc no longer turns a given-up verdict into a double-check
+# (1.7.2, issue #365). The analyzer's own secret checks are unchanged.
+_CORE_SECRET_NAME = re.compile(
+    r"\.env(?:rc)?\b|credential|secret|id_(?:rsa|dsa|ecdsa|ed25519)|\.pem\b|\.key\b"
     r"|\.netrc|\.npmrc|\.pypirc",
     re.IGNORECASE,
 )
+_CORE_PATH_SHAPED = re.compile(r"[\\/.]|id_", re.IGNORECASE)
+# A download captured into a variable and then evaluated in the same command
+# (`S=$(curl ...); eval "$S"`) is program text; plain `STATUS=$(curl ...)` is
+# not (review of #376, MEDIUM).
+_CORE_DOWNLOAD_ASSIGNED = re.compile(
+    r"\w=\"?\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)",
+    re.IGNORECASE,
+)
+_CORE_EVALUATOR = re.compile(
+    r"\beval\b|\biex\b|invoke-expression|\bsource\b|<<<|(?-i:\s-[A-Za-z]*c\s)",
+    re.IGNORECASE,
+)
+# Program text piped into an interpreter. Confirmed structurally in
+# `command_carries_core_hint`: a stage that runs a literal inline program
+# reads the pipe as data (`inline_program_reads_stdin_as_data`).
+_CORE_PIPE_HINT = re.compile(
+    r"\|\s*(?:[^\s|]{0,512}[\\/])?(?:(?:"
+    + _HINT_PRIVILEGE
+    + r"|env)\s+)?(?:"
+    + _HINT_INTERPRETERS
+    + r")(?:\.exe)?(?![\w.-])",
+    re.IGNORECASE,
+)
+
+
+def pipes_program_text_into_interpreter(text: str) -> bool:
+    """Whether some piped-into interpreter stage may read the pipe as code.
+
+    Conservative: any parse failure, or a regex match the stage walk cannot
+    attribute to an admitted inline program, counts as program text.
+    """
+    try:
+        stages = quote_aware_segments_with_operators(text)
+    except Exception:
+        return True
+    admitted = 0
+    previous = None
+    for stage, operator_after in stages:
+        if previous in {"|", "|&"}:
+            head, _ = command_head(strip_control_prefixes(stage))
+            if head in _PIPE_INTERPRETER_HEADS:
+                if not inline_program_reads_stdin_as_data(
+                    strip_control_prefixes(stage)
+                ):
+                    return True
+                admitted += 1
+        previous = operator_after
+    return admitted == 0
+
 
 # A command is checked as ONE text, and the analyzer returns its FIRST deny.
 # When that deny is opacity, a LATER segment (`; git reset --hard`,
@@ -13419,9 +13597,26 @@ def verdict_is_core(decision: str, reason: str) -> bool:
     )
 
 
+def core_hint_text(command: str) -> str:
+    """The command text the core posture reads: data heredoc bodies removed."""
+    return strip_quoted_heredoc_bodies(command, data_heredoc_receiver)
+
+
 def command_carries_core_hint(command: str) -> bool:
     """Whether the command text, quotes included, spells a local-destruction action."""
-    return bool(_CORE_HINT.search(command)) or bool(_SECRET_PATH.search(command))
+    text = core_hint_text(command)
+    if _CORE_HINT.search(text):
+        return True
+    if _CORE_PIPE_HINT.search(text) and pipes_program_text_into_interpreter(text):
+        return True
+    if _CORE_DOWNLOAD_ASSIGNED.search(text) and _CORE_EVALUATOR.search(text):
+        return True
+    for token in text.split():
+        if _CORE_PATH_SHAPED.search(token) and (
+            _CORE_SECRET_NAME.search(token) or _SECRET_PATH.search(token.strip("'\"`"))
+        ):
+            return True
+    return False
 
 
 def command_carries_charter_hint(command: str) -> bool:
@@ -13617,7 +13812,7 @@ def main():
             and not verdict_is_core(decision, reason)
         ):
             masked = masked_segment_verdict(
-                command,
+                core_hint_text(command),
                 tier_cfg,
                 project_dir,
                 payload_cwd or env_project_dir,
