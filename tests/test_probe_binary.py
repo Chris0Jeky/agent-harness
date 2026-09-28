@@ -398,7 +398,10 @@ class CodexVersionProbeTests(unittest.TestCase):
             seen.append(dict(env))
             return self.NPM_CMD
 
-        env = {"PATH": r"C:\npm", "PATHEXT": ".PS1;.JS;.VBS;.PY;.CMD;.EXE"}
+        # os.pathsep, as the resolver splits: `;` on Windows, `:` on the POSIX
+        # CI hosts (review of #380).
+        pathext = os.pathsep.join([".PS1", ".JS", ".VBS", ".PY", ".CMD", ".EXE"])
+        env = {"PATH": r"C:\npm", "PATHEXT": pathext}
         with mock.patch.object(harness, "resolve_probe_binary", side_effect=record):
             self.assertEqual(harness.resolve_codex_launcher(env), self.NPM_CMD)
         self.assertEqual(seen[0]["PATHEXT"].split(os.pathsep), [".CMD", ".EXE"])
