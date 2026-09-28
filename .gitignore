@@ -7,3 +7,5 @@ __pycache__/
 
 # Private replay corpora built by `charter-replay import` never enter Git.
 **/private-corpus/
+/build/
+*.egg-info/
