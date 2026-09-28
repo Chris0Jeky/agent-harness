@@ -73,6 +73,7 @@ jobs:
           replay_v0/app.py replay_v0/hooks.py replay_v0/importer.py
           examples/toy-guard/guard_v1.py examples/toy-guard/guard_v2.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/build_charter_corpus.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
@@ -106,6 +107,7 @@ jobs:
           replay_v0/app.py replay_v0/hooks.py replay_v0/importer.py
           examples/toy-guard/guard_v1.py examples/toy-guard/guard_v2.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/build_charter_corpus.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
@@ -139,6 +141,7 @@ jobs:
           replay_v0/app.py replay_v0/hooks.py replay_v0/importer.py
           examples/toy-guard/guard_v1.py examples/toy-guard/guard_v2.py
           scripts/generate_curl_option_arity_fixture.py
+          scripts/build_charter_corpus.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
