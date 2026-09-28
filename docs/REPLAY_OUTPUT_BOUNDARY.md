@@ -14,10 +14,10 @@ Unrelated siblings, including names sharing a string prefix with the policy root
 remain supported. Output aliases and policy-root ancestors are resolved before
 comparison. Publication and the reproduction command retain the caller's
 original path spelling after validation; existing path-sensitive publication
-behavior is unchanged. Recorded-only
-comparisons have no process-root restriction. Unsupported policy-directory
-symlinks remain unsupported by the existing tree hasher; this guard does not
-relax that separate contract.
+behavior is unchanged. Recorded-only comparisons have no process-root restriction.
+Policy-root directory aliases are resolved by the loader as described in
+`REPLAY_POLICY_ROOT_ALIASES.md`; directory links inside a bound tree remain unsupported
+by the tree hasher. This guard does not relax that separate contract.
 
 ## Controls
 

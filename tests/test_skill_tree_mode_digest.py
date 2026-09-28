@@ -13,9 +13,11 @@ test skips there.
 
 import importlib.util
 import os
+import shutil
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +100,147 @@ class SkillTreeModeDigestTests(unittest.TestCase):
                 directory.mkdir()
                 os.chmod(directory, mode)
             self.assertFalse(harness.same_tree(base / "source", base / "target"))
+
+
+class SkillTreeFilesystemLookupTests(unittest.TestCase):
+    def write_distinct_unicode_files(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        first = root / "Straße.txt"
+        second = root / "STRASSE.txt"
+        first.write_text("first payload", encoding="utf-8")
+        try:
+            with second.open("x", encoding="utf-8") as stream:
+                stream.write("second payload")
+        except FileExistsError:
+            self.skipTest("filesystem equates the two Unicode spellings")
+        self.assertFalse(first.samefile(second))
+
+    def test_distinct_unicode_files_survive_case_alignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            shutil.copytree(source, target)
+            before = harness.tree_digest(target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"representable distinct Unicode names rejected: {exc}")
+            self.assertEqual(before, harness.tree_digest(target))
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
+    def test_distinct_unicode_directories_survive_case_alignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            source.mkdir()
+            for name in ("Straße", "STRASSE"):
+                directory = source / name
+                try:
+                    directory.mkdir()
+                except FileExistsError:
+                    self.skipTest("filesystem equates the two Unicode spellings")
+                (directory / "payload.txt").write_text(name, encoding="utf-8")
+            shutil.copytree(source, target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"representable distinct Unicode directories rejected: {exc}")
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
+    def test_existing_distinct_hardlink_names_remain_representable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            source.mkdir()
+            target.mkdir()
+            for name in ("first.txt", "second.txt"):
+                (source / name).write_text("same payload", encoding="utf-8")
+            (target / "first.txt").write_text("same payload", encoding="utf-8")
+            try:
+                os.link(target / "first.txt", target / "second.txt")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"host cannot create a hard link: {exc}")
+            self.assertTrue((target / "first.txt").samefile(target / "second.txt"))
+            before = harness.tree_digest(target)
+            try:
+                harness.canonicalize_skill_tree_case(source, target)
+            except harness.HarnessError as exc:
+                self.fail(f"distinct existing directory entries rejected: {exc}")
+            self.assertEqual(before, harness.tree_digest(target))
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+
+    def test_repeat_copy_retains_distinct_unicode_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            harness.copy_skill_tree_over(source, target)
+            (source / "Straße.txt").write_text("updated first", encoding="utf-8")
+            (target / "stale.txt").write_text("stale", encoding="utf-8")
+            harness.copy_skill_tree_over(source, target)
+            self.assertFalse((target / "stale.txt").exists())
+            self.assertEqual(harness.tree_digest(source), harness.tree_digest(target))
+            self.assertEqual(
+                "second payload", (target / "STRASSE.txt").read_text("utf-8")
+            )
+
+    def test_first_copy_checks_exact_names_and_bytes(self):
+        for fault in ("missing-name", "changed-bytes"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                source, target = Path(tmp) / "source", Path(tmp) / "target"
+                self.write_distinct_unicode_files(source)
+                original_copy = shutil.copytree
+                injected = []
+
+                def incomplete_copy(src, dst, *args, **kwargs):
+                    result = original_copy(src, dst, *args, **kwargs)
+                    if Path(dst) == target:
+                        injected.append(fault)
+                        affected = target / "Straße.txt"
+                        if fault == "missing-name":
+                            affected.unlink()
+                        else:
+                            affected.write_text("different", encoding="utf-8")
+                    return result
+
+                with mock.patch.object(
+                    harness.shutil, "copytree", side_effect=incomplete_copy
+                ):
+                    with self.assertRaisesRegex(
+                        harness.HarnessError, "copied skill tree does not match source"
+                    ):
+                        harness.copy_skill_tree_over(source, target)
+                self.assertEqual([fault], injected)
+                self.assertEqual(
+                    "first payload", (source / "Straße.txt").read_text("utf-8")
+                )
+                self.assertTrue(target.is_dir())
+
+    def test_first_copy_rejects_an_uninspectable_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            self.write_distinct_unicode_files(source)
+            original_digest = harness.tree_digest
+            inspected = []
+
+            def uninspectable(path):
+                inspected.append(path)
+                return None if path == target else original_digest(path)
+
+            with mock.patch.object(harness, "tree_digest", side_effect=uninspectable):
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "copied skill tree does not match source"
+                ):
+                    harness.copy_skill_tree_over(source, target)
+            self.assertIn(source, inspected)
+            self.assertIn(target, inspected)
+            self.assertEqual(original_digest(source), original_digest(target))
+
+    def test_first_copy_of_a_complete_tree_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "parent" / "target"
+            self.write_distinct_unicode_files(source)
+            before = harness.tree_digest(source)
+            harness.copy_skill_tree_over(source, target)
+            self.assertEqual(before, harness.tree_digest(source))
+            self.assertEqual(before, harness.tree_digest(target))
 
 
 if __name__ == "__main__":

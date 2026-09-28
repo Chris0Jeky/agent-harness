@@ -650,7 +650,7 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
   stale user-profile paths, and default-branch server-side history protection
   (`non_fast_forward` + `deletion` ruleset or classic equivalent), reported as an advisory
-  when the effective floor posture is `core` (issue #356).
+  when the effective floor posture is `core` or `floor_wiring` is `none` (issues #356, #370).
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under
@@ -845,6 +845,6 @@ shipped from claude-config for both runtimes. Reference, don't restate: the skil
 single home for the step-by-step, and global law 2 (claude-config `rules/laws.md`) plus BLUEPRINT law 11 are the
 law it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
 commits only; the rest tracked or declined on the thread), one fix round verified against the
-fix diff — at T3+ the re-requested Codex review after that fix round IS the verification pass,
-not a new round — then ship or park. Tier changes WHO reviews and how many eyes the single
+fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
+law 2g; a manual `@codex review` is never a per-fix step, law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T3 one independent pass, T4 two adversarial reviews), never how many rounds run.

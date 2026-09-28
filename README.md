@@ -114,7 +114,8 @@ a declared `sensitive_data` overlay against each remote's actual host visibility
 template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
 `human_todo` against a file that exists, and default-branch server-side history protection
 (`non_fast_forward` + `deletion` ruleset or classic equivalent) when the effective floor
-posture is `core` — reported as `advisory` when missing, never a failure (issue #356).
+posture is `core` or the repo declares `floor_wiring: none` — reported as `advisory` when
+missing or bypassable by the auditing token, never a failure (issues #356, #370).
 A repo that vendors nothing says so rather than
 emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
