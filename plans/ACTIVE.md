@@ -78,6 +78,17 @@ completed 1.6.26 wave.
 
 Floor finding (issue #356, owner decision **H-17**): no Claude session runs the deny floor and only six Codex roots do; before the decision, none of the floored public repositories, nor this one, protected `main` server-side. Owner decision 2026-09-27 (H-17, closed): default-branch rulesets are live on six repositories; the client floor shrinks to local destruction next.
 
+## 2026-09-28 floor lane: core posture and its rollout (#356, owner decisions H-17 and core)
+
+| Lane | PRs | Outcome |
+|---|---|---|
+| Core posture, floor 1.7.0 | #363 | **MERGED** `a545fb9`. Round 1: one HIGH (a sensitive repo declaring core could leak a public push) and one MEDIUM fixed; round 2 caught a quadratic hint (fixed). |
+| Long-form rm hint, 1.7.1 | #372 | **MERGED** `f683e54`. A Codex P1 found on claude-config#461. Two review rounds; two Codex comments declined and recorded in FLOOR_LIMITATIONS. |
+| Audit: default-branch protection | #369 | **MERGED** `96068ca`. Muse drafted it and timed out; finished here. The check is advisory only. |
+| Doctor: `rules/laws.md` byte check | #371 | **MERGED** `43a6134` (closes #366). |
+| SPECS §1 law pointer | #364 | **MERGED** `dc90bfb` (closes #358). |
+| Rollout | claude-config#461; EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10, Pulseboard#167 | Open at 1.7.1. EvidenceDeck's CI cannot start (billing, H-18). The per-consumer re-trust is H-14. |
+
 ## Active implementation
 
 Four bounded lanes were dispatched 2026-08-07, each in its own isolated worktree with a declared

@@ -97,7 +97,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   "merge first" order still binds. Original item: This item holds ONLY the human-only actions:
   every step below requires a new normal interactive session launched in an exact CWD, which an
   agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
-  toggles that only a human can perform. Tracked durably as issue #232.
+  toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-28: the version owed is now floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). Marker PRs are open in EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167, and the deploy follows claude-config#461. Once each marker PR merges, what is yours per root is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then an allow canary (`git status`) and a deny canary (`echo x > .env` should deny once with a `FLOOR_ACK` key).
 
   The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
   item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can
@@ -254,8 +254,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   Do the same on the Codex side if you keep a Codex root there. Until that is done, the runtime home
   is level on paper and unproven in practice — do not describe it as verified.
 - [x] **H-17** — **Decide server-side default-branch protection (issue #356).** Measured 2026-09-27: no Claude session runs the deny floor, only six Codex roots do, and none of the floored public repositories (SwarmingLilMen, collaborative-hill-lab, Pulseboard) nor agent-harness itself protects `main` server-side. A ruleset with `non_fast_forward` and `deletion` guards irreversible history for every runtime with zero command false positives. It is a GitHub settings change, so it needs your explicit yes, per repository or for the list. Agents may then apply it with the command in #356 and, once it is live, propose retiring the client floor's history families (a T4-class `dispatch.py` change). Close when your decision is recorded and, if yes, each ruleset is read back via `gh api repos/Chris0Jeky/<repo>/rulesets`. **CLOSED 2026-09-27: the owner said yes in session for the floored repositories plus agent-harness.** Ruleset `protect-default-branch` (`non_fast_forward`, `deletion`, no bypass actors) is live on agent-harness, SwarmingLilMen, collaborative-hill-lab, Pulseboard, EvidenceDeck (private; its plan accepted the ruleset) and extract-api (the remote of the `extract-api-codex-parity` checkout; it keeps its classic protection too). Read back the same day via `gh api repos/Chris0Jeky/<repo>/rules/branches/main`, which reported `non_fast_forward,deletion` on all six. Each ruleset was also fetched by ID (`gh api repos/Chris0Jeky/<repo>/rulesets/<id>`, ids 24086006, 24086008, 24086009, 24086010, 24086012 and 24086014): all `active`, condition `~DEFAULT_BRANCH`, rules `non_fast_forward` and `deletion`, zero bypass actors. The owner also chose the local-destruction-core floor and a consumer rollout in this session; that work is tracked on #356.
+- [ ] **H-18** — **Unblock GitHub Actions billing for private repositories.** Measured 2026-09-28: every job of EvidenceDeck#35 (a two-line marker PR) failed without starting. GitHub's annotation: "The job was not started because recent account payments have failed or your spending limit needs to be increased." EvidenceDeck is private; its `main` last ran CI on 2026-09-10. Under law 1 no agent may merge that PR while its CI cannot run. Fix the payment method or spending limit under GitHub Settings → Billing and plans, then re-run the PR's checks. Close when a private-repo run starts.
 
 ## Changelog
+
+- 2026-09-28 — **H-14 re-pointed to floor 1.7.1; H-18 added** (private-repo Actions billing blocks EvidenceDeck#35).
 
 - 2026-09-27 — **H-17 added and closed the same day.** The owner approved default-branch rulesets for six repositories; each was applied and read back (issue #356).
 

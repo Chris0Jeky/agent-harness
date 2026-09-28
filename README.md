@@ -279,7 +279,7 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-27): canonical source is **1.7.0**, the **core posture** (SPECS §5.4,
+Current state (2026-09-28): canonical source is **1.7.1** (1.7.0 plus #372's long-form rm hint), the **core posture** (SPECS §5.4,
 owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a
 non-sensitive repository. Default-branch history is protected server-side by rulesets, so the
 client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes outside the
