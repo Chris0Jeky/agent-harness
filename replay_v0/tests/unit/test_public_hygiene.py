@@ -13,7 +13,7 @@ from replay_v0 import cli as kernel
 REPO = Path(__file__).resolve().parents[3]
 PUBLIC = [
     *sorted((REPO / "replay_v0").glob("*.py")),
-    REPO / "replay_v0" / "README.md",
+    REPO / "replay_v0" / "PRODUCT_README.md",
     REPO / "pyproject.toml",
     *sorted(path for path in (REPO / "examples").rglob("*") if path.is_file()),
 ]

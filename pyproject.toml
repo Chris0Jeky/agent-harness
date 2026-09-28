@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 name = "charter-replay"
 version = "0.1.0.dev0"
 description = "Measure a coding-agent command hook: replay a corpus through two versions and diff the decisions."
-readme = "replay_v0/README.md"
+readme = "replay_v0/PRODUCT_README.md"
 dependencies = []
 # Python 3.11+. requires-python is deliberately omitted: Black would read it as
 # the formatting target and reformat the rest of this repository.
