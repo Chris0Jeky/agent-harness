@@ -13388,7 +13388,11 @@ _CORE_HINT = re.compile(
     # alternative below.
     # A shell's `-c` cluster (`bash -lc`, `sh -ec`) is command position too
     # (review of #376, HIGH).
-    r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b|<<<|(?-i:\s-[A-Za-z]*c))[ \t]*[\"']?"
+    # Executable prefixes and assignments keep command position (Codex P1 on
+    # #376): `env $(curl ...)`, `command $(curl ...)`, `X=1 $(curl ...)`.
+    r"|(?:^|[;&|({\n!]|<<<|(?-i:\s-[A-Za-z]*c)"
+    r"|\b(?:then|do|else|if|elif|while|until|env|command|exec|builtin|nohup"
+    r"|time|nice|xargs)\b|\w=[^\s;&|]{0,256}[ \t])[ \t]*[\"']?"
     r"\$\(\s*(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)"
     r"|<\(\s*(?:curl|wget)"
     # Program text an evaluator runs from a named downloader: backticks, a
