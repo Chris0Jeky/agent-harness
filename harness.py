@@ -458,6 +458,67 @@ def git_command_fidelity_status(
     )
 
 
+# Suffixes a Windows Codex launcher may carry (issue #276). npm installs a
+# `codex.cmd` batch shim beside an unsigned `codex.ps1`; the doctor probe used to
+# reach Codex through `powershell -Command "codex --version"`, where PowerShell
+# prefers the `.ps1` and a restrictive execution policy refuses it. The probe
+# now spawns a native image or the batch launcher directly and never routes a
+# `.ps1` (or any other PATHEXT script host such as `.JS`/`.VBS`/`.PY`) through
+# an interpreter. The user's execution policy is neither read nor changed.
+CODEX_WINDOWS_LAUNCHER_SUFFIXES = NON_REPARSING_PROBE_SUFFIXES | frozenset(
+    {".cmd", ".bat"}
+)
+
+
+def resolve_codex_launcher(env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve the Windows Codex launcher Doctor may spawn directly, or None.
+
+    Resolution stays on the shared probe resolver (absolute PATH entries only,
+    native images before batch shims), restricted to launcher suffixes so a
+    PATHEXT that lists `.PS1` or another script host can never select it.
+    """
+    environment = probe_environment(env)
+    declared = environment.get("PATHEXT", "") or DEFAULT_WINDOWS_PATHEXT
+    launcher_suffixes = [
+        entry.strip()
+        for entry in declared.split(os.pathsep)
+        if entry.strip().lower() in CODEX_WINDOWS_LAUNCHER_SUFFIXES
+    ] or DEFAULT_WINDOWS_PATHEXT.split(os.pathsep)
+    restricted = dict(environment)
+    restricted["PATHEXT"] = os.pathsep.join(launcher_suffixes)
+    resolved = resolve_probe_binary("codex", restricted)
+    if resolved is None:
+        return None
+    if os.path.splitext(resolved)[1].lower() not in CODEX_WINDOWS_LAUNCHER_SUFFIXES:
+        return None
+    return resolved
+
+
+def codex_version_argv(
+    env: Mapping[str, str] | None = None, *, windows: bool | None = None
+) -> tuple[list[str], str]:
+    """Return Doctor's Codex version probe argv, or why none can be spawned.
+
+    Off Windows this is the bare `codex --version`, resolved by `run` exactly as
+    before. On Windows the launcher is resolved here and spawned directly —
+    never through PowerShell — so an unsigned npm `codex.ps1` under a
+    restrictive execution policy cannot turn a working install into a FAIL.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return ["codex", "--version"], ""
+    launcher = resolve_codex_launcher(env)
+    if launcher is None:
+        return [], (
+            "codex: no codex .exe/.com/.cmd/.bat launcher on absolute PATH "
+            "entries; a codex.ps1 shim alone is never run through PowerShell "
+            "(reinstall with `npm install -g @openai/codex`, which also writes "
+            "codex.cmd)"
+        )
+    return [launcher, "--version"], ""
+
+
 def run(
     command: list[str], cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -9939,16 +10000,16 @@ def doctor(args: argparse.Namespace) -> int:
     harness_root = Path(__file__).resolve().parent
     checks = []
     claude_findings: list[dict[str, Any]] = []
-    codex_command = (
-        ["powershell", "-NoProfile", "-Command", "codex --version"]
-        if os.name == "nt"
-        else ["codex", "--version"]
-    )
+    codex_command, codex_failure = codex_version_argv()
     for label, command in (
         ("python", [sys.executable, "--version"]),
         ("codex", codex_command),
         ("git", ["git", "--version"]),
     ):
+        if not command:
+            # Same FAIL a missing binary produced before, with a named reason.
+            checks.append((label, False, codex_failure))
+            continue
         result = run(command)
         checks.append(
             (label, result.returncode == 0, (result.stdout or result.stderr).strip())

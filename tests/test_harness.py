@@ -21,6 +21,8 @@ from unittest import mock
 
 import harness
 
+DOCTOR_FIXTURE_CODEX_LAUNCHER = r"C:\fixture\npm\codex.cmd"
+
 
 class HarnessTests(unittest.TestCase):
     def make_repo(self) -> Path:
@@ -334,6 +336,7 @@ class HarnessTests(unittest.TestCase):
         as_json: bool = False,
         config_root: Path | None = None,
         guidance_reference: tuple[bool, str] | None = None,
+        codex_launcher: str | None = DOCTOR_FIXTURE_CODEX_LAUNCHER,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -379,11 +382,15 @@ class HarnessTests(unittest.TestCase):
         def fixture_run(
             command: list[str], cwd: Path | None = None
         ) -> subprocess.CompletedProcess[str]:
+            self.doctor_commands.append(list(command))
             if command == [sys.executable, "--version"]:
                 return subprocess.CompletedProcess(command, 0, "Python fixture", "")
             if command == ["git", "--version"]:
                 return subprocess.CompletedProcess(command, 0, "git fixture", "")
-            if command == ["codex", "--version"] or command[-1:] == ["codex --version"]:
+            if command in (
+                ["codex", "--version"],
+                [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"],
+            ):
                 return subprocess.CompletedProcess(command, 0, "codex fixture", "")
             return original_run(command, cwd)
 
@@ -392,7 +399,17 @@ class HarnessTests(unittest.TestCase):
             True,
             "fixture guidance source is canonical",
         )
-        with mock.patch.object(harness, "run", side_effect=fixture_run):
+        self.doctor_commands: list[list[str]] = []
+        # The Windows Codex probe resolves its launcher before spawning (#276);
+        # pin that resolution so no test depends on the host's own install.
+        with (
+            mock.patch.object(harness, "run", side_effect=fixture_run),
+            mock.patch.object(
+                harness,
+                "resolve_codex_launcher",
+                return_value=codex_launcher,
+            ),
+        ):
             with mock.patch.object(
                 harness,
                 "codex_system_config_path",
@@ -957,6 +974,69 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotIn("synthetic-secret", human + rendered_json)
         self.assertNotIn("--token", human + rendered_json)
+
+    def run_doctor_on_simulated_host(
+        self, *, windows: bool, codex_launcher: str | None
+    ) -> str:
+        """Run Doctor with the Codex probe forced onto one host family (#276)."""
+        real_codex_version_argv = harness.codex_version_argv
+
+        def simulated(env=None, **_host):
+            return real_codex_version_argv(env, windows=windows)
+
+        with mock.patch.object(harness, "codex_version_argv", side_effect=simulated):
+            _result, output = self.run_doctor_with_fixture_globals(
+                self.make_repo(), offline=True, codex_launcher=codex_launcher
+            )
+        return output
+
+    def assert_no_powershell_codex_probe(self) -> None:
+        for command in self.doctor_commands:
+            for token in command:
+                self.assertNotIn("powershell", token.lower(), command)
+                self.assertFalse(token.lower().endswith(".ps1"), command)
+            self.assertNotIn("codex --version", command)
+
+    def test_doctor_windows_codex_probe_spawns_the_cmd_launcher_directly(
+        self,
+    ) -> None:
+        output = self.run_doctor_on_simulated_host(
+            windows=True, codex_launcher=DOCTOR_FIXTURE_CODEX_LAUNCHER
+        )
+
+        self.assertIn("[ok] codex: codex fixture", output)
+        self.assertIn(
+            [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"], self.doctor_commands
+        )
+        self.assertNotIn(["codex", "--version"], self.doctor_commands)
+        self.assert_no_powershell_codex_probe()
+
+    def test_doctor_windows_codex_probe_without_launcher_fails_named(self) -> None:
+        output = self.run_doctor_on_simulated_host(windows=True, codex_launcher=None)
+
+        self.assertIn(
+            "[FAIL] codex: codex: no codex .exe/.com/.cmd/.bat launcher", output
+        )
+        self.assertIn("never run through PowerShell", output)
+        codex_spawns = [
+            command
+            for command in self.doctor_commands
+            if command[1:] == ["--version"] and "codex" in command[0].lower()
+        ]
+        self.assertEqual(codex_spawns, [])
+        self.assert_no_powershell_codex_probe()
+
+    def test_doctor_posix_codex_probe_is_unchanged(self) -> None:
+        output = self.run_doctor_on_simulated_host(
+            windows=False, codex_launcher=DOCTOR_FIXTURE_CODEX_LAUNCHER
+        )
+
+        self.assertIn("[ok] codex: codex fixture", output)
+        self.assertIn(["codex", "--version"], self.doctor_commands)
+        self.assertNotIn(
+            [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"], self.doctor_commands
+        )
+        self.assert_no_powershell_codex_probe()
 
     def test_doctor_guidance_identity_checks_each_runtime_target(self) -> None:
         repo = self.make_repo()
