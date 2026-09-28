@@ -83,7 +83,7 @@
     {
       "path": "replay_v0/README.md",
       "kind": "documentation",
-      "sha256": "15f5ed21bdfd9eff92e5aa46de97acd24cb211669feadb2aa3991e97b79b6398"
+      "sha256": "9d136513dd05e477feb7259181465dc398baf5ad87249204e63cc2027ecfe438"
     },
     {
       "path": "replay_v0/reports.py",
@@ -179,6 +179,13 @@
       "path": "replay_v0/tests/unit/test_recorded_source.py",
       "kind": "test",
       "sha256": "d0b1a99d1236a8c7fd0596a9222cbdc8d70d5f8bc03827ff787a53bed64f858c"
+    }
+  ],
+  "amendments": [
+    {
+      "date": "2026-09-29",
+      "approved_by": "owner (in chat)",
+      "change": "replay_v0/README.md gains the product first screen and the hook section"
     }
   ]
 }
