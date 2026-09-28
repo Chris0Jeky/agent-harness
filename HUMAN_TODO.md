@@ -97,7 +97,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   "merge first" order still binds. Original item: This item holds ONLY the human-only actions:
   every step below requires a new normal interactive session launched in an exact CWD, which an
   agent session cannot launch for itself, plus the `/hooks` review, individual trust, and enable
-  toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-28: the version owed is now floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). Marker PRs are open in EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167, and the deploy follows claude-config#461. Once each marker PR merges, what is yours per root is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then an allow canary (`git status`) and a deny canary (`echo x > .env` should deny once with a `FLOOR_ACK` key).
+  toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-28: the version owed is now floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). It is deployed to `~/.claude/hooks` on DESKTOP-IHKOOJS (doctor: canonical == deployed). The marker PRs merged in SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167; EvidenceDeck#35 waits on H-18. For each merged root, what is yours is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then an allow canary (`git status`) and a deny canary (`echo x > .env` should deny once with a `FLOOR_ACK` key).
 
   The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
   item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can

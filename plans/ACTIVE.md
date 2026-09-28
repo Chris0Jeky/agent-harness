@@ -87,7 +87,7 @@ Floor finding (issue #356, owner decision **H-17**): no Claude session runs the 
 | Audit: default-branch protection | #369 | **MERGED** `96068ca`. Muse drafted it and timed out; finished here. The check is advisory only. |
 | Doctor: `rules/laws.md` byte check | #371 | **MERGED** `43a6134` (closes #366). |
 | SPECS §1 law pointer | #364 | **MERGED** `dc90bfb` (closes #358). |
-| Rollout | claude-config#461; EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10, Pulseboard#167 | Open at 1.7.1. EvidenceDeck's CI cannot start (billing, H-18). The per-consumer re-trust is H-14. |
+| Rollout | claude-config#461; EvidenceDeck#35, SwarmingLilMen#79, collaborative-hill-lab#10, Pulseboard#167 | claude-config#461 **MERGED** `f0431b3` and deployed (doctor: canonical == deployed). Marker PRs **MERGED**: SwarmingLilMen#79 (`7e7b26e`), collaborative-hill-lab#10 (`8ad50d7`), Pulseboard#167 (`134ab8d`). EvidenceDeck#35 is parked: its CI cannot start (billing, H-18). The per-consumer re-trust is H-14. |
 
 ## Active implementation
 
