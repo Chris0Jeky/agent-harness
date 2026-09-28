@@ -158,11 +158,17 @@ class Scrubber:
             )
             for word in self.terms
         ]
+        self._spaced_term_patterns = [
+            pattern
+            for word, pattern in zip(self.terms, self._term_patterns)
+            if " " in word
+        ]
 
     def scrub(self, text: str) -> str:
-        # Whole names first: the home-path rule stops at whitespace, so a home
-        # directory name with a space must be replaced before it runs.
-        for pattern in self._term_patterns:
+        # Names containing a space go first: the home-path rule stops at
+        # whitespace. Every other term waits, so the repo and email rules still
+        # see whole `owner/repo` and `user@domain` shapes.
+        for pattern in self._spaced_term_patterns:
             text = pattern.sub("<redacted>", text)
         for pattern, replacement in _TOKEN_PATTERNS:
             text = pattern.sub(replacement, text)

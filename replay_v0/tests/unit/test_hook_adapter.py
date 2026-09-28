@@ -149,7 +149,14 @@ class CommandParsingTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(HookSpecError):
                     parse_hook_command(value)
-        self.assertEqual(parse_hook_command("hook --mode=a/b"), ("hook", "--mode=a/b"))
+        for value in (
+            "hook --mode=a/b",
+            "hook http://localhost:8080/decide",
+            'python -c "print(1/2)"',
+            "cmd /c hook.cmd",
+        ):
+            with self.subTest(value=value):
+                parse_hook_command(value)
 
     @unittest.skipUnless(os.name == "nt", "Windows command-line splitting")
     def test_windows_backslash_paths_survive(self) -> None:

@@ -85,6 +85,15 @@ class ScrubberTests(unittest.TestCase):
         self.assertNotIn("Doe", text)
         self.assertNotIn("Jane", text)
 
+    def test_identity_terms_do_not_shield_repos_or_emails(self) -> None:
+        scrubber = Scrubber(["ownerlogin", "mail.example.net"])
+        text = scrubber.scrub(
+            "gh pr view 1 --repo ownerlogin/secretproject; "
+            "git log --author someone@mail.example.net"
+        )
+        self.assertNotIn("secretproject", text)
+        self.assertNotIn("someone", text)
+
     def test_extra_terms_match_inside_joined_paths(self) -> None:
         text = self.scrubber.scrub("cd /src/ProjectPhoenix-app && ls xprojectphoenix")
         self.assertNotIn("phoenix", text.lower())

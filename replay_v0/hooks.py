@@ -132,8 +132,11 @@ def _unquote(word: str) -> str:
 
 
 def _looks_like_file(word: str) -> bool:
-    return not word.startswith("-") and (
-        "/" in word or "\\" in word or Path(word).suffix.lower() in _SCRIPT_SUFFIXES
+    # Only a script name: URLs, directories and inline code also contain slashes.
+    return (
+        not word.startswith("-")
+        and Path(word).suffix.lower() in _SCRIPT_SUFFIXES
+        and not Path(word).exists()
     )
 
 

@@ -215,7 +215,9 @@ def _run_hooks(args: argparse.Namespace) -> int:
             jobs=args.jobs,
         )
     # A report left by an earlier run must not be summarised as this one.
-    (output / "report" / "report.json").unlink(missing_ok=True)
+    for stale in (output / "report" / "report.json", output / SUMMARY_JSON):
+        stale.unlink(missing_ok=True)
+    (output / SUMMARY_MD).unlink(missing_ok=True)
     code = kernel.main(
         [
             "replay",
