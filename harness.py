@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 import uuid
 from collections.abc import Iterator, Mapping
 from datetime import date, datetime, time, timedelta, timezone
@@ -139,6 +140,18 @@ TIER_NAMES = {
     4: "live-wire",
 }
 CLAUDE_LINE_CAPS = {0: 3, 1: 40, 2: 100, 3: 150, 4: 150}
+
+
+def is_valid_tier(value: Any) -> bool:
+    """True only for a real integer tier 0-4.
+
+    `type(...) is int` mirrors the dispatcher: `True in TIER_NAMES` is True
+    (bool subclasses int), and an unhashable value such as `[4]` would raise
+    from the membership test instead of reading as invalid (#370).
+    """
+    return type(value) is int and value in TIER_NAMES
+
+
 FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
 # `"floor_wiring": "none"` is the owner's declaration that a repository runs
 # WITHOUT a floor (SPECS §5): no Codex adapter and no global Claude hook. It
@@ -4236,7 +4249,7 @@ def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any
     tiers = [
         declaration["tier"]
         for declaration in declarations
-        if declaration.get("tier") in TIER_NAMES
+        if is_valid_tier(declaration.get("tier"))
     ]
     if tiers:
         merged["tier"] = max(tiers)
@@ -4431,7 +4444,7 @@ def load_tier(repo: Path) -> tuple[list[Path], dict[str, Any]]:
 def validate_tier(data: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     tier = data.get("tier")
-    if tier not in TIER_NAMES:
+    if not is_valid_tier(tier):
         issues.append("tier must be an integer from 0 through 4")
     elif data.get("name") != TIER_NAMES[tier]:
         issues.append(f"name must be {TIER_NAMES[tier]!r} for tier {tier}")
@@ -5509,6 +5522,25 @@ def sensitive_data_findings(
 # below measures that premise.
 EFFECTIVE_FLOOR_POSTURES = frozenset({"wall", "guide", "core"})
 BRANCH_PROTECTION_CHECK = "default-branch history protection vs the floor posture"
+# One line per rule, `<type> <ruleset_id>`, so a paginated answer concatenates
+# cleanly and each rule names the ruleset whose bypass list must be read.
+BRANCH_RULES_JQ = '.[]|"\\(.type) \\(.ruleset_id // "")"'
+HISTORY_RULES = ("non_fast_forward", "deletion")
+HISTORY_RULE_LABELS = {"non_fast_forward": "force-push", "deletion": "deletion"}
+# `current_user_can_bypass` on a ruleset: the auditing token either cannot
+# bypass it for a direct push, or can.
+RULESET_BYPASS_BLOCKED = frozenset({"never", "pull_requests_only"})
+RULESET_BYPASS_ALLOWED = frozenset({"always", "exempt"})
+
+
+def parse_branch_rules(output: str) -> list[tuple[str, str]]:
+    """`(type, ruleset_id)` pairs from the rules probe; blank lines ignored."""
+    rules = []
+    for line in output.splitlines():
+        kind, _space, ruleset_id = line.strip().partition(" ")
+        if kind:
+            rules.append((kind, ruleset_id.strip()))
+    return rules
 
 
 def effective_floor_posture(tier_data: dict) -> str:
@@ -5516,15 +5548,15 @@ def effective_floor_posture(tier_data: dict) -> str:
 
     Mirrors `dispatch.floor_posture`'s structure: T4 and `wave_mode` are walls
     whatever is declared; below that a declared `floor_posture` binds; without
-    one, `sensitive_data` keeps the wall. The default differs on purpose:
-    dispatch on this base still defaults to "guide", while the 1.7.0 contract
-    (issue #356) is "core" — which no longer intercepts force-push or branch
-    deletion client-side — and "core" binds here when declared.
+    one, `sensitive_data` keeps the wall. The default matches
+    `dispatch.floor_posture` ("core" below T4/wave for a non-sensitive
+    repository) — which no longer intercepts force-push or branch deletion
+    client-side — and "core" binds here when declared.
     """
     # A malformed tier is reported by audit's own validation, never a crash
     # here (review of #369, M3): the merge passes an invalid raw value through.
     tier = tier_data.get("tier")
-    tier = tier if tier in TIER_NAMES else 1
+    tier = tier if is_valid_tier(tier) else 1
     flags = tier_data.get("flags", {}) or {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
@@ -5556,9 +5588,12 @@ def default_branch_protection_findings(
 
     The `origin` remote is resolved with the same helpers as
     `sensitive_data_findings`; a non-GitHub or missing origin is out of scope
-    and also emits nothing. Otherwise three `gh` probes, each host-pinned like
-    `github_visibility`, read the default branch, its branch ruleset, and —
-    only when the ruleset lacks both rules — classic branch protection. Every
+    and also emits nothing. Otherwise `gh` probes, each host-pinned like
+    `github_visibility`, read the default branch, its (paginated) branch rules
+    with their ruleset ids, classic branch protection — only when the rulesets
+    lack either rule; the union of both mechanisms must block both — and then
+    whether the auditing token can bypass what blocks them: each backing
+    ruleset's `current_user_can_bypass`, and classic `enforce_admins`. Every
     emitted status is `ok`, `advisory` (owner preference: a missing
     server-side rule never fails the audit) or `UNPROVEN`, never `MISMATCH`.
     An `--offline` run refuses the network probes through the runner and
@@ -5624,14 +5659,16 @@ def default_branch_protection_findings(
                 f"{evidence}",
             )
         ]
+    encoded_branch = urllib.parse.quote(branch, safe="/")
     rules_argv = [
         "gh",
         "api",
         "--hostname",
         "github.com",
-        f"repos/{rest_path}/rules/branches/{branch}",
+        "--paginate",
+        f"repos/{rest_path}/rules/branches/{encoded_branch}",
         "--jq",
-        '[.[].type]|join(",")',
+        BRANCH_RULES_JQ,
     ]
     resolved, output, failure = result_before_deadline(
         command_runner, rules_argv, repo, deadline
@@ -5646,76 +5683,195 @@ def default_branch_protection_findings(
                 f"{probe_failure_note(rules_argv, failure)}",
             )
         ]
-    rule_types = [part.strip() for part in output.split(",")]
-    if "non_fast_forward" in rule_types and "deletion" in rule_types:
-        return [
-            reality_finding(
-                BRANCH_PROTECTION_CHECK,
-                REALITY_OK,
-                f"{slug} default branch {branch} blocks force-push and deletion "
-                "server-side (ruleset rules non_fast_forward, deletion) — "
-                f"evidence: `{' '.join(rules_argv)}` -> {output.strip()}",
-            )
+    rules = parse_branch_rules(output)
+    rule_types = list(dict.fromkeys(kind for kind, _ruleset in rules))
+    rules_text = redact_probe_text(",".join(rule_types)) or "<none>"
+    rules_evidence = f"`{' '.join(rules_argv)}` -> {rules_text}"
+    by_ruleset = {kind: kind in rule_types for kind in HISTORY_RULES}
+    by_classic = {kind: False for kind in HISTORY_RULES}
+    enforce_admins = ""
+    protection_evidence = ""
+    if not all(by_ruleset.values()):
+        protection_argv = [
+            "gh",
+            "api",
+            "--hostname",
+            "github.com",
+            f"repos/{rest_path}/branches/{encoded_branch}/protection",
+            "--jq",
+            "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
+            '.enforce_admins.enabled]|map(tostring)|join(",")',
         ]
-    rules_text = output.strip() or "<none>"
-    protection_argv = [
-        "gh",
-        "api",
-        "--hostname",
-        "github.com",
-        f"repos/{rest_path}/branches/{branch}/protection",
-        "--jq",
-        "[.allow_force_pushes.enabled, .allow_deletions.enabled]"
-        '|map(tostring)|join(",")',
+        resolved, output, failure = result_before_deadline(
+            command_runner, protection_argv, repo, deadline
+        )
+        answer = output.strip()
+        fields = [field.strip() for field in answer.split(",")]
+        if resolved and (
+            len(fields) < 2
+            or any(field not in ("true", "false") for field in fields[:2])
+        ):
+            # An empty or null answer measured nothing (#370, item 5): it is
+            # not evidence that force-push or deletion is allowed.
+            shown = redact_probe_text(answer[:40]) or "<no output>"
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_UNPROVEN,
+                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
+                    f"deletion ({rules_text}) and classic protection is "
+                    f"unmeasured — `{' '.join(protection_argv)}` answered "
+                    f"{shown!r}, which is not a pair of booleans",
+                )
+            ]
+        if resolved:
+            by_classic = {
+                "non_fast_forward": fields[0] == "false",
+                "deletion": fields[1] == "false",
+            }
+            enforce_admins = fields[2] if len(fields) > 2 else ""
+            protection_evidence = (
+                f"`{' '.join(protection_argv)}` -> {redact_probe_text(answer[:40])}"
+            )
+        elif "branch not protected" in failure.lower():
+            protection_evidence = (
+                f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
+            )
+        else:
+            # Only GitHub's own "Branch not protected" proves absence; a missing
+            # admin scope, a rate limit or an expired budget measured nothing
+            # (review of #369, M2).
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_UNPROVEN,
+                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
+                    f"deletion ({rules_text}) and classic protection is unmeasured "
+                    f"— {probe_failure_note(protection_argv, failure)}",
+                )
+            ]
+    unblocked = [
+        HISTORY_RULE_LABELS[kind]
+        for kind in HISTORY_RULES
+        if not (by_ruleset[kind] or by_classic[kind])
     ]
-    resolved, output, failure = result_before_deadline(
-        command_runner, protection_argv, repo, deadline
-    )
-    if resolved and output.strip() == "false,false":
+    if unblocked:
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
-                REALITY_OK,
-                f"{slug} default branch {branch} blocks force-push and deletion "
-                "server-side (classic branch protection denies both) — "
-                f"evidence: `{' '.join(protection_argv)}` -> false,false",
+                REALITY_ADVISORY,
+                f"{slug} default branch {branch} has no server-side rule blocking "
+                f"{' and '.join(unblocked)} (ruleset rules: {rules_text}; "
+                f"{protection_evidence}) — the `core` floor does not intercept "
+                "either client-side, so protect it with "
+                f"`gh api -X POST repos/{rest_path}/rulesets` creating ruleset "
+                "'protect-default-branch' (target branch, enforcement active, "
+                "conditions ref_name include ~DEFAULT_BRANCH, rules "
+                "non_fast_forward + deletion); see issue #356 for the body",
             )
         ]
-    if resolved:
-        answer = redact_probe_text(output.strip()[:24]) or "<no output>"
-        protection_evidence = (
-            f"`{' '.join(protection_argv)}` answered {answer!r}, "
-            "which leaves force-push or deletion allowed"
+    # Both rules are blocked. A block the auditing token can bypass is not a
+    # block for an agent pushing with that token (#370, items 2 and 4).
+    unmeasured: list[str] = []
+    bypassable: list[str] = []
+    evidence = [rules_evidence]
+    classic_kinds = [
+        HISTORY_RULE_LABELS[kind]
+        for kind in HISTORY_RULES
+        if by_classic[kind] and not by_ruleset[kind]
+    ]
+    if classic_kinds:
+        blocked = " and ".join(classic_kinds)
+        if enforce_admins == "false":
+            bypassable.append(
+                f"classic protection is what blocks {blocked}, but "
+                "enforce_admins is false, so an admin token can bypass it — "
+                f"{protection_evidence}"
+            )
+        elif enforce_admins != "true":
+            shown = redact_probe_text(enforce_admins[:24]) or "<no value>"
+            unmeasured.append(
+                f"classic protection blocks {blocked}, but enforce_admins "
+                f"answered {shown!r}, so admin bypass is unmeasured — "
+                f"{protection_evidence}"
+            )
+        else:
+            evidence.append(protection_evidence)
+    backing: dict[str, list[str]] = {}
+    for kind, ruleset_id in rules:
+        if kind in HISTORY_RULES:
+            labels = backing.setdefault(ruleset_id, [])
+            if HISTORY_RULE_LABELS[kind] not in labels:
+                labels.append(HISTORY_RULE_LABELS[kind])
+    for ruleset_id, labels in backing.items():
+        blocked = " and ".join(labels)
+        if not (ruleset_id.isascii() and ruleset_id.isdigit()):
+            shown = redact_probe_text(ruleset_id[:24]) or "<none>"
+            unmeasured.append(
+                f"the ruleset rule blocking {blocked} carries ruleset id "
+                f"{shown!r}, so its bypass is unmeasured — {rules_evidence}"
+            )
+            continue
+        bypass_argv = [
+            "gh",
+            "api",
+            "--hostname",
+            "github.com",
+            f"repos/{rest_path}/rulesets/{ruleset_id}",
+            "--jq",
+            ".current_user_can_bypass",
+        ]
+        resolved, output, failure = result_before_deadline(
+            command_runner, bypass_argv, repo, deadline
         )
-    elif "branch not protected" in failure.lower():
-        protection_evidence = (
-            f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
-        )
-    else:
-        # Only GitHub's own "Branch not protected" proves absence; a missing
-        # admin scope, a rate limit or an expired budget measured nothing
-        # (review of #369, M2).
+        answer = output.strip()
+        if not resolved:
+            unmeasured.append(
+                f"ruleset {ruleset_id} ({blocked}) bypass is unmeasured — "
+                f"{probe_failure_note(bypass_argv, failure)}"
+            )
+        elif answer in RULESET_BYPASS_BLOCKED:
+            evidence.append(f"`{' '.join(bypass_argv)}` -> {answer}")
+        elif answer in RULESET_BYPASS_ALLOWED:
+            bypassable.append(
+                f"ruleset {ruleset_id} blocks {blocked}, but the auditing token "
+                f"can bypass it — `{' '.join(bypass_argv)}` -> {answer}"
+            )
+        else:
+            shown = redact_probe_text(answer[:24]) or "<no output>"
+            unmeasured.append(
+                f"ruleset {ruleset_id} ({blocked}) bypass is unmeasured — "
+                f"`{' '.join(bypass_argv)}` answered {shown!r}, which is not a "
+                "bypass mode"
+            )
+    if unmeasured:
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                f"{slug} branch {branch}: rulesets lack non_fast_forward and "
-                f"deletion ({rules_text}) and classic protection is unmeasured "
-                f"— {probe_failure_note(protection_argv, failure)}",
+                f"{slug} default branch {branch} has server-side rules blocking "
+                "force-push and deletion, but whether the auditing token can "
+                f"bypass them is unmeasured — {'; '.join(unmeasured + bypassable)}",
+            )
+        ]
+    if bypassable:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_ADVISORY,
+                f"{slug} default branch {branch} blocks force-push and deletion "
+                "server-side, but the auditing token can bypass the block, so an "
+                "agent pushing with that token can still force-push or delete it "
+                f"— {'; '.join(bypassable)}",
             )
         ]
     return [
         reality_finding(
             BRANCH_PROTECTION_CHECK,
-            REALITY_ADVISORY,
-            f"{slug} default branch {branch} has no server-side rule blocking "
-            f"force-push and deletion (ruleset rules: {rules_text}; "
-            f"{protection_evidence}) — the `core` floor does not intercept "
-            "either client-side, so protect it with "
-            f"`gh api -X POST repos/{rest_path}/rulesets` creating ruleset "
-            "'protect-default-branch' (target branch, enforcement active, "
-            "conditions ref_name include ~DEFAULT_BRANCH, rules "
-            "non_fast_forward + deletion); see issue #356 for the body",
+            REALITY_OK,
+            f"{slug} default branch {branch} blocks force-push and deletion "
+            "server-side and the auditing token cannot bypass the block — "
+            f"evidence: {'; '.join(evidence)}",
         )
     ]
 
@@ -6238,7 +6394,7 @@ def audit_repo(
                 else ""
             )
             issues.extend(f"{label}{issue}" for issue in validate_tier(data))
-        tier = tier_data.get("tier") if tier_data.get("tier") in TIER_NAMES else 1
+        tier = tier_data.get("tier") if is_valid_tier(tier_data.get("tier")) else 1
     if not (repo / "AGENTS.md").is_file():
         issues.append("missing root AGENTS.md")
     issues.extend(budget_issues(repo, tier))
@@ -10563,7 +10719,7 @@ def doctor(args: argparse.Namespace) -> int:
             _reality_configs, reality_tier_data = load_tier(reality_repo)
             reality_tier = (
                 reality_tier_data.get("tier")
-                if reality_tier_data.get("tier") in TIER_NAMES
+                if is_valid_tier(reality_tier_data.get("tier"))
                 else 1
             )
             findings = reality_findings(

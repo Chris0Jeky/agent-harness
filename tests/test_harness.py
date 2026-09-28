@@ -6775,6 +6775,30 @@ allow_local_binding = true
         )
         self.assertEqual(merged.get("floor_wiring"), "none")
 
+    def test_bool_and_unhashable_tiers_are_invalid_not_crashes(self) -> None:
+        # Issue #370: `True in TIER_NAMES` is True (bool subclasses int) and
+        # `[4] in TIER_NAMES` raised TypeError; both are invalid declarations.
+        base = {
+            "name": "sandbox",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        valid = {**base, "tier": 1}
+        for tier in (True, False, [4], {"tier": 4}):
+            with self.subTest(tier=tier):
+                declaration = {**base, "tier": tier}
+                self.assertIn(
+                    "tier must be an integer from 0 through 4",
+                    harness.validate_tier(declaration),
+                )
+                self.assertFalse(harness.is_valid_tier(tier))
+                merged = harness.merge_tier_declarations([declaration])
+                self.assertEqual(merged["tier"], tier)  # raw value passes through
+                merged = harness.merge_tier_declarations([declaration, valid])
+                self.assertEqual(merged["tier"], 1)
+                self.assertEqual(harness.effective_floor_posture(merged), "core")
+        self.assertEqual(harness.validate_tier(valid), [])
+
     def test_repo_floor_matches_blocking_handler_normalization(self) -> None:
         pin = "9" * 64
         posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
