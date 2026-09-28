@@ -278,6 +278,10 @@ def _load_process_source(
     if not policy_path.is_file():
         raise ReplayInputError("process source must end in a readable policy file")
     lexical_policy_path = policy_path.absolute()
+    try:
+        policy_tree_path = lexical_policy_path.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ReplayInputError("process policy parent could not be resolved") from exc
     resolved_executable = shutil.which(argv[0])
     executable_path = (
         Path(resolved_executable) if resolved_executable else Path(argv[0])
@@ -287,8 +291,8 @@ def _load_process_source(
         raise ReplayInputError("process executable could not be resolved to a file")
     bound_executable_path = executable_path.resolve()
     try:
-        policy_digest = sha256_file(policy_path)
-        policy_tree_digest = sha256_tree(lexical_policy_path.parent)
+        policy_digest = sha256_file(policy_tree_path / lexical_policy_path.name)
+        policy_tree_digest = sha256_tree(policy_tree_path)
         executable_digest = sha256_file(bound_executable_path)
         executable_permissions = permission_bits(bound_executable_path)
     except OSError as exc:
@@ -343,7 +347,7 @@ def _load_process_source(
             executable_invocation_name=invocation_name,
             executable_sha256=executable_digest,
             executable_permissions=executable_permissions,
-            policy_tree_path=lexical_policy_path.parent,
+            policy_tree_path=policy_tree_path,
             policy_sha256=policy_digest,
             policy_tree_sha256=policy_tree_digest,
             snapshot_identity=identity_sha256,
