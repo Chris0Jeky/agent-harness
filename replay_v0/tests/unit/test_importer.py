@@ -71,6 +71,20 @@ class ScrubberTests(unittest.TestCase):
         self.assertNotIn("someorg", text)
         self.assertNotIn("somerepo", text)
 
+    def test_flag_and_user_credentials_are_redacted(self) -> None:
+        text = self.scrubber.scrub(
+            "docker login -u me --password hunter2hunter2; tool --token abc123def; "
+            "curl -u admin:S3cretPw https://example.com"
+        )
+        for secret in ("hunter2hunter2", "abc123def", "S3cretPw"):
+            self.assertNotIn(secret, text)
+
+    def test_a_home_name_with_a_space_is_fully_removed(self) -> None:
+        scrubber = Scrubber(["Jane Doe", "Jane", "Doe"])
+        text = scrubber.scrub(r"cd C:\Users\Jane Doe\repo")
+        self.assertNotIn("Doe", text)
+        self.assertNotIn("Jane", text)
+
     def test_extra_terms_match_inside_joined_paths(self) -> None:
         text = self.scrubber.scrub("cd /src/ProjectPhoenix-app && ls xprojectphoenix")
         self.assertNotIn("phoenix", text.lower())
@@ -174,7 +188,10 @@ class GitBoundaryTests(unittest.TestCase):
             repo = Path(tmp)
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             self.assertFalse(output_is_private(repo / "corpus"))
-            (repo / ".gitignore").write_text("/corpus/\n", encoding="utf-8")
+            ignore = repo / ".gitignore"
+            ignore.write_text("/corpus/events.jsonl\n", encoding="utf-8")
+            self.assertFalse(output_is_private(repo / "corpus"))
+            ignore.write_text("/corpus/\n", encoding="utf-8")
             self.assertTrue(output_is_private(repo / "corpus"))
 
     def test_output_outside_any_work_tree_is_private(self) -> None:

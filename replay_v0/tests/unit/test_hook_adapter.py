@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -86,8 +87,28 @@ class ClassifyTests(unittest.TestCase):
             )
 
     def test_codex_has_no_ask(self) -> None:
-        body = json.dumps({"hookSpecificOutput": {"permissionDecision": "ask"}})
+        body = json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                }
+            }
+        )
         self.assertEqual(classify(0, body, "", runtime="codex")[0], "deny")
+
+    def test_replies_the_runtime_would_reject_are_invalid_output(self) -> None:
+        missing_event = {"hookSpecificOutput": {"permissionDecision": "deny"}}
+        other_event = {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "permissionDecision": "deny",
+            }
+        }
+        for value in (missing_event, other_event, {"decision": "deny"}):
+            with self.subTest(value=value):
+                outcome = classify(0, json.dumps(value), "", runtime="claude")[0]
+                self.assertEqual(outcome, "invalid-output")
 
 
 class EffectTests(unittest.TestCase):
@@ -99,6 +120,10 @@ class EffectTests(unittest.TestCase):
         self.assertEqual(effect_for("ask", "allow"), "allow")
         for outcome in ("timeout", "crash", "invalid-output", "start-failed"):
             self.assertEqual(effect_for(outcome, "deny"), "indeterminate")
+
+    def test_lone_surrogate_in_a_reason_stays_encodable(self) -> None:
+        outcome = HookOutcome("deny", "bad " + chr(0xD83D), 2, 1)
+        decision_record("e-2", outcome, "deny")["reason"].encode("utf-8")
 
     def test_reason_is_single_line_and_bounded(self) -> None:
         outcome = HookOutcome("deny", "line one\nline two " + "x" * 900, 2, 1)
@@ -117,6 +142,20 @@ class CommandParsingTests(unittest.TestCase):
         for value in ("", "[]", "[1]", "[", "hook 'open"):
             with self.assertRaises(HookSpecError):
                 parse_hook_command(value)
+
+    def test_missing_script_argument_is_refused(self) -> None:
+        # Recording it would turn the interpreter's exit 2 into a deny for all.
+        for value in ("python hooks/missing_guard.py", "node missing.js --x"):
+            with self.subTest(value=value):
+                with self.assertRaises(HookSpecError):
+                    parse_hook_command(value)
+        self.assertEqual(parse_hook_command("hook --mode=a/b"), ("hook", "--mode=a/b"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows command-line splitting")
+    def test_windows_backslash_paths_survive(self) -> None:
+        relative = os.path.relpath(FIXTURE).replace("/", "\\")
+        argv = parse_hook_command(f'python "{relative}"')
+        self.assertEqual(Path(argv[1]), FIXTURE)
 
     def test_existing_file_arguments_become_absolute(self) -> None:
         argv = parse_hook_command(f'["python", "{FIXTURE.as_posix()}"]')

@@ -175,6 +175,8 @@ jobs:
           code=$?
           set -e
           test "$code" -eq 1
+          # Exit 1 alone could be a crash; the summary proves the comparison ran.
+          grep -q '"newly-allowed": 4' "$RUNNER_TEMP/toy"/summary.json
 
   replay-fast:
     name: replay-fast

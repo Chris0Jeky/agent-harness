@@ -38,6 +38,17 @@ _FAMILY_WORD = re.compile(r"[^a-z0-9]+")
 # Order matters: specific credential shapes before generic ones, paths before
 # bare usernames.
 _TOKEN_PATTERNS = (
+    (
+        re.compile(
+            r"(?i)(--?(?:password|passwd|pass|token|secret|api-?key|client-secret)"
+            r"(?:=|\s+))(\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
+        ),
+        r"\1<redacted>",
+    ),
+    (
+        re.compile(r"((?:^|\s)(?:-u|--user)(?:=|\s+))[^\s:]+:[^\s;&|]+"),
+        r"\1<redacted>",
+    ),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}"), "<token>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{8,}"), "<token>"),
     (re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{12,}"), "<token>"),
@@ -127,6 +138,7 @@ class Scrubber:
     def __init__(self, terms: list[str] | None = None) -> None:
         words = {os.environ.get("USERNAME", ""), os.environ.get("USER", "")}
         words.add(Path.home().name)
+        words.update(Path.home().name.split())
         try:
             words.add(socket.gethostname())
         except OSError:
@@ -148,6 +160,10 @@ class Scrubber:
         ]
 
     def scrub(self, text: str) -> str:
+        # Whole names first: the home-path rule stops at whitespace, so a home
+        # directory name with a space must be replaced before it runs.
+        for pattern in self._term_patterns:
+            text = pattern.sub("<redacted>", text)
         for pattern, replacement in _TOKEN_PATTERNS:
             text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
@@ -295,22 +311,25 @@ def output_is_private(output: Path) -> bool:
     """True when `output` is outside every Git work tree or ignored by Git."""
 
     target = output.resolve()
-    probe = target / "events.jsonl"
     for parent in (target, *target.parents):
         if (parent / ".git").exists():
             break
     else:
         return True
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(parent), "check-ignore", "-q", str(probe)],
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+    # Every file the importer writes must be ignored, not just one of them.
+    for name in ("events.jsonl", "cases.jsonl", "corpus-manifest.json"):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(parent), "check-ignore", "-q", str(target / name)],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+    return True
 
 
 def build_private_corpus(

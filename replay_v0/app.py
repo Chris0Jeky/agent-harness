@@ -214,6 +214,8 @@ def _run_hooks(args: argparse.Namespace) -> int:
             workspace_template=_optional_path(workspace) or shared,
             jobs=args.jobs,
         )
+    # A report left by an earlier run must not be summarised as this one.
+    (output / "report" / "report.json").unlink(missing_ok=True)
     code = kernel.main(
         [
             "replay",

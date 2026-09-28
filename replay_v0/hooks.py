@@ -61,6 +61,11 @@ PASSTHROUGH_ENV = (
 )
 
 
+_SCRIPT_SUFFIXES = frozenset(
+    {".py", ".js", ".mjs", ".cjs", ".ts", ".sh", ".ps1", ".rb"}
+)
+
+
 class HookSpecError(ValueError):
     """A hook command or option cannot be used."""
 
@@ -96,16 +101,39 @@ def parse_hook_command(value: str) -> tuple[str, ...]:
             raise HookSpecError("hook command JSON must be an array of strings")
     else:
         try:
-            argv = shlex.split(text, posix=True)
+            # POSIX mode would eat Windows backslashes (`.\hooks\g.py`).
+            argv = shlex.split(text, posix=os.name != "nt")
         except ValueError as exc:
             raise HookSpecError("hook command has unbalanced quotes") from exc
+        if os.name == "nt":
+            argv = [_unquote(word) for word in argv]
     if not argv:
         raise HookSpecError("hook command is empty")
-    # The hook runs inside the replay workspace, so an argument naming an
-    # existing file relative to the caller is made absolute first.
-    return tuple(
-        str(Path(word).resolve()) if index and Path(word).is_file() else word
-        for index, word in enumerate(argv)
+    resolved = [argv[0]]
+    for word in argv[1:]:
+        path = Path(word)
+        if path.is_file():
+            # The hook runs inside the replay workspace, so an argument naming
+            # an existing file relative to the caller is made absolute first.
+            resolved.append(str(path.resolve()))
+        elif _looks_like_file(word):
+            # A missing script makes most interpreters exit 2, which would be
+            # recorded as a deny for every event and measure nothing.
+            raise HookSpecError(f"hook argument names a missing file: {word}")
+        else:
+            resolved.append(word)
+    return tuple(resolved)
+
+
+def _unquote(word: str) -> str:
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+        return word[1:-1]
+    return word
+
+
+def _looks_like_file(word: str) -> bool:
+    return not word.startswith("-") and (
+        "/" in word or "\\" in word or Path(word).suffix.lower() in _SCRIPT_SUFFIXES
     )
 
 
@@ -152,15 +180,18 @@ def _json_decision(value: object) -> tuple[str, str] | None:
         return "stop", str(value.get("stopReason") or "continue is false")
     specific = value.get("hookSpecificOutput")
     if isinstance(specific, dict) and "permissionDecision" in specific:
+        if specific.get("hookEventName") != "PreToolUse":
+            # The runtime rejects a decision without the matching event name.
+            return None
         decision = specific.get("permissionDecision")
         reason = str(specific.get("permissionDecisionReason") or "")
         if decision in ("allow", "deny", "ask"):
             return decision, reason
         return None
     legacy = value.get("decision")
-    if legacy in ("approve", "allow"):
+    if legacy == "approve":
         return "allow", str(value.get("reason") or "")
-    if legacy in ("block", "deny"):
+    if legacy == "block":
         return "deny", str(value.get("reason") or "")
     if legacy is not None:
         return None
@@ -234,7 +265,9 @@ def run_hook(
         completed.returncode, stdout, stderr, runtime=spec.runtime
     )
     # Keep the throwaway workspace location out of recorded reasons.
-    for form in {str(workspace), str(workspace).replace("\\", "\\\\")}:
+    forms = {str(workspace), workspace.as_posix()}
+    forms |= {form.replace("\\", "\\\\") for form in forms}
+    for form in sorted(forms, key=len, reverse=True):
         detail = detail.replace(form, "<workspace>")
     return HookOutcome(outcome, detail, completed.returncode, elapsed)
 
@@ -251,6 +284,8 @@ def effect_for(outcome: str, ask_effect: str) -> str:
 
 def decision_record(event_id: str, outcome: HookOutcome, ask_effect: str) -> dict:
     reason = _single_line(f"{outcome.outcome}: {outcome.detail}".strip())
+    # A lone surrogate from a hook's JSON would make the record unencodable.
+    reason = reason.encode("utf-8", "replace").decode("utf-8")
     if len(reason) > REASON_LIMIT:
         reason = reason[: REASON_LIMIT - 3] + "..."
     return {
@@ -283,7 +318,8 @@ def hook_identity(argv: Sequence[str]) -> str:
 def prepare_workspace(template: Path | None) -> Path:
     """Create a fresh workspace, copying a template tree when one is given."""
 
-    root = Path(tempfile.mkdtemp(prefix="hook-replay-"))
+    # Resolved, so a short (8.3) temporary path cannot hide from the reason scrub.
+    root = Path(tempfile.mkdtemp(prefix="hook-replay-")).resolve()
     workspace = root / "workspace"
     if template is not None:
         shutil.copytree(template, workspace)
