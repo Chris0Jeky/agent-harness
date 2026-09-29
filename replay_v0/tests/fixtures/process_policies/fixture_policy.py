@@ -130,6 +130,10 @@ elif mode in {"descendant-exit", "descendant-timeout"}:
             print(json.dumps(row, sort_keys=True, separators=(",", ":")))
 elif mode == "timeout":
     time.sleep(2)
+elif mode == "stderr-timeout":
+    sys.stderr.write("synthetic stderr before the deadline\n")
+    sys.stderr.flush()
+    time.sleep(10)
 elif mode == "malformed":
     print("{not-json")
     print(json.dumps(rows[1], sort_keys=True, separators=(",", ":")))

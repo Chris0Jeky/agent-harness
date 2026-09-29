@@ -52,6 +52,8 @@ EXIT_OK = 0
 EXIT_REGRESSION = 1
 EXIT_INPUT_INVALID = 2
 EXIT_SOURCE_FAILED = 3
+DIAGNOSTIC_LINES = 20
+DIAGNOSTIC_CHARS = 300
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
 PROCESS_IDENTITY_VERSION = "process-policy-identity.v9"
@@ -537,6 +539,31 @@ def _validated_output_path(
     return Path(raw_path)
 
 
+def _print_diagnostics(name: str, result: PolicySourceResult) -> None:
+    """Show a failed source's stderr lines on the terminal only (issue #141).
+
+    Policy stderr is policy-controlled text: it can carry local paths or data and
+    it varies by host, so it never enters report.json, report.md or the run
+    manifest. It is shown only when the source failed, bounded and made printable.
+    """
+    lines = [line for line in result.diagnostics if line.strip()]
+    if not result.failures or not lines:
+        return
+    # A character the caller's stderr cannot encode is escaped, not raised.
+    encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+    shown = [f"replay {name} stderr (not saved in the report):"]
+    for line in lines[:DIAGNOSTIC_LINES]:
+        text = "".join(char if char.isprintable() else "?" for char in line)
+        if len(text) > DIAGNOSTIC_CHARS:
+            text = text[: DIAGNOSTIC_CHARS - 3] + "..."
+        shown.append(f"  {text}")
+    if len(lines) > DIAGNOSTIC_LINES:
+        shown.append(f"  ({len(lines) - DIAGNOSTIC_LINES} more lines)")
+    for text in shown:
+        safe = text.encode(encoding, "backslashreplace").decode(encoding)
+        print(safe, file=sys.stderr)
+
+
 def _run_replay(args: argparse.Namespace) -> int:
     corpus = _load_charter_corpus(args.corpus)
     baseline = _load_policy_source(args.baseline, args.timeout)
@@ -600,9 +627,13 @@ def _run_replay(args: argparse.Namespace) -> int:
         )
     except OSError as exc:
         print(f"replay output failed: {exc}", file=sys.stderr)
+        _print_diagnostics("baseline", baseline_result)
+        _print_diagnostics("candidate", candidate_result)
         return EXIT_SOURCE_FAILED
 
     if baseline_result.failures or candidate_result.failures:
+        _print_diagnostics("baseline", baseline_result)
+        _print_diagnostics("candidate", candidate_result)
         return EXIT_SOURCE_FAILED
     if report["gate"]["triggered"]:
         return EXIT_REGRESSION

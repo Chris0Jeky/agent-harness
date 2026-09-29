@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "98ec5dac746129ba9274b56f2bc7408c98a38be3b29f202a142ca80fed028b4d"
+      "sha256": "d155d541d9c046ec4015da079b40f6edda6d8be560603ffea4c4f9dd2a381c41"
     },
     {
       "path": "replay_v0/compare.py",
@@ -78,7 +78,7 @@
     {
       "path": "replay_v0/policy_sources.py",
       "kind": "source",
-      "sha256": "7e1f7bd8c9a1896ef55d0a2d5e0266a01e0403c7e11b84f8ff5c64e1de9bf088"
+      "sha256": "8dcf5543d4ded61c2cf6faae7eae2f5dea2da643a808e425a440561e8f93d148"
     },
     {
       "path": "replay_v0/README.md",
@@ -128,12 +128,12 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "db16a62bd953cc0a0dd47e5c7f824c7ba0b2ca94890312ceadc13dbb8aa7c12a"
+      "sha256": "40644f95827f0492536ad187cd8f252426ca16293311c25d2ef3503844aaac96"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
       "kind": "test",
-      "sha256": "e24023580b8f9c2173dc9e9fdf3844400a90844407ee589ddaef1ab35bd946de"
+      "sha256": "f4c200240615ace435036f5f7c6842b146bbf872c2d9a6dcc5eb9c64252861c9"
     },
     {
       "path": "replay_v0/tests/contract/test_schemas.py",
@@ -143,7 +143,7 @@
     {
       "path": "replay_v0/tests/fixtures/process_policies/fixture_policy.py",
       "kind": "fixture",
-      "sha256": "023e59ef7a11433296a83b65a8daa0b904d0a98041db7f700e587f4d0750197b"
+      "sha256": "674b53d822f42b67fd8fcb866f4bc178650b0c5a1d674579a4df7719a992738b"
     },
     {
       "path": "replay_v0/tests/fixtures/process_policies/reference_candidate.py",
@@ -186,6 +186,11 @@
       "date": "2026-09-29",
       "approved_by": "owner (in chat)",
       "change": "replay_v0/README.md gains the product first screen and the hook section"
+    },
+    {
+      "date": "2026-09-29",
+      "approved_by": "agent under the owner's AH-10 approval (source of truth stays replay_v0/)",
+      "change": "replay_v0/cli.py prints a failed policy source's stderr to the terminal only, including after a timeout (policy_sources.py keeps the pre-deadline stderr) (#141)"
     }
   ]
 }

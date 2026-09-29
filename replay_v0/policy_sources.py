@@ -333,7 +333,10 @@ def _run_policy_process(
                 environment=environment,
             )
         if timed_out:
-            raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
+            # What the policy wrote before the deadline is its only diagnostic.
+            raise subprocess.TimeoutExpired(
+                list(argv), timeout_seconds, stderr=_read_process_stream(stderr_stream)
+            )
         stdout = _read_process_stream(stdout_stream)
         stderr = _read_process_stream(stderr_stream)
         if (
@@ -1157,12 +1160,17 @@ class ProcessDecisionSource:
                 cwd=cwd,
                 environment=self.environment,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             failure = SourceFailure(
                 "process-timeout",
                 "Policy process exceeded its configured timeout.",
             )
-            return _all_indeterminate(events, failure, "Process")
+            diagnostics = tuple(
+                (exc.stderr or b"").decode("utf-8", errors="replace").splitlines()
+            )
+            return _all_indeterminate(
+                events, failure, "Process", diagnostics=diagnostics
+            )
         except OSError as exc:
             failure = SourceFailure(
                 "process-start-failed",
