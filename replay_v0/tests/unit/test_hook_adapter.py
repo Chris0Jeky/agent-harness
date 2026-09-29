@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from replay_v0 import cli as kernel
 from replay_v0.corpus import validate_policy_decisions
 from replay_v0.hooks import (
+    ASK_EFFECTS,
+    PASSTHROUGH_ENV,
+    RUNTIMES,
     HookOutcome,
     HookSpec,
     HookSpecError,
+    _hook_env,
     build_payload,
     classify,
     decision_record,
@@ -267,6 +273,188 @@ class ProcessTests(unittest.TestCase):
             [json.loads(line)["outcome"] for line in outcome_lines],
             ["deny", "allow", "crash"],
         )
+
+
+class WorkspaceScrubTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name).resolve()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_hook(self, source: str) -> str:
+        hook = Path(self._tmp.name) / "echo_hook.py"
+        hook.write_text(source, encoding="utf-8", newline="\n")
+        return str(hook)
+
+    def _run(self, hook_path: str) -> HookOutcome:
+        spec = HookSpec(argv=(sys.executable, hook_path), timeout=20.0)
+        payload = build_payload(
+            _event("e", "x"), runtime="claude", workspace=self.workspace, index=0
+        )
+        return run_hook(spec, payload, workspace=self.workspace)
+
+    def test_run_hook_replaces_workspace_path_with_placeholder(self) -> None:
+        hook_path = self._write_hook(
+            "import os, sys\n" "sys.stderr.write(os.getcwd())\n" "sys.exit(2)\n"
+        )
+        outcome = self._run(hook_path)
+        self.assertEqual(outcome.outcome, "deny")
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(outcome.detail, "<workspace>")
+        self.assertNotIn(str(self.workspace), outcome.detail)
+
+    def test_run_hook_leaves_a_detail_without_the_workspace_untouched(self) -> None:
+        hook_path = self._write_hook(
+            "import sys\n" 'sys.stderr.write("blocked-no-path")\n' "sys.exit(2)\n"
+        )
+        outcome = self._run(hook_path)
+        self.assertEqual(outcome.outcome, "deny")
+        self.assertEqual(outcome.detail, "blocked-no-path")
+
+
+class HookEnvTests(unittest.TestCase):
+    def test_hook_env_drops_unlisted_names_and_sets_project_dir(self) -> None:
+        workspace = Path(tempfile.gettempdir()) / "ws-probe"
+        with mock.patch.dict(
+            os.environ,
+            {"HOOK_LEAK": "secret", "PATH": "/bin", "CUSTOM_X": "1"},
+            clear=True,
+        ):
+            env = _hook_env(workspace)
+        self.assertNotIn("HOOK_LEAK", env)
+        self.assertNotIn("CUSTOM_X", env)
+        self.assertEqual(
+            env,
+            {
+                "PATH": "/bin",
+                "CLAUDE_PROJECT_DIR": str(workspace),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONIOENCODING": "utf-8",
+            },
+        )
+        allowed = set(PASSTHROUGH_ENV) | {
+            "CLAUDE_PROJECT_DIR",
+            "PYTHONDONTWRITEBYTECODE",
+            "PYTHONIOENCODING",
+        }
+        self.assertLessEqual(set(env), allowed)
+
+    def test_hook_env_empty_caller_environment_still_sets_project_dir(self) -> None:
+        workspace = Path(tempfile.gettempdir()) / "ws-empty"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            env = _hook_env(workspace)
+        self.assertEqual(
+            env,
+            {
+                "CLAUDE_PROJECT_DIR": str(workspace),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONIOENCODING": "utf-8",
+            },
+        )
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_record_manifest_pins_policy_commit_and_decisions_digest(self) -> None:
+        events = [_event("e-1", "json-deny", "project"), _event("e-2", "anything")]
+        output = self.root / "out"
+        spec = HookSpec(argv=(sys.executable, str(FIXTURE)), timeout=20.0)
+        record_hook(spec, events, output, policy_id="fixture", jobs=1)
+        decisions_bytes = (output / "decisions.jsonl").read_bytes()
+        manifest = json.loads(
+            (output / "decisions.jsonl.manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["policy_commit"], hook_identity(spec.argv)[:40])
+        self.assertEqual(len(manifest["policy_commit"]), 40)
+        self.assertEqual(
+            manifest["decisions_sha256"], hashlib.sha256(decisions_bytes).hexdigest()
+        )
+        self.assertEqual(manifest["decisions_file"], "decisions.jsonl")
+        self.assertEqual(manifest["decision_count"], 2)
+
+    def test_record_manifest_empty_events_boundary(self) -> None:
+        output = self.root / "out-empty"
+        spec = HookSpec(argv=(sys.executable, str(FIXTURE)), timeout=20.0)
+        summary = record_hook(spec, [], output, policy_id="empty", jobs=1)
+        self.assertEqual(summary["events"], 0)
+        decisions_bytes = (output / "decisions.jsonl").read_bytes()
+        manifest = json.loads(
+            (output / "decisions.jsonl.manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["decision_count"], 0)
+        self.assertEqual(
+            manifest["decisions_sha256"], hashlib.sha256(decisions_bytes).hexdigest()
+        )
+
+
+class SpecRejectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_record_rejects_an_invalid_runtime(self) -> None:
+        expected = f"runtime must be one of: {', '.join(RUNTIMES)}"
+        for runtime in ("bogus", ""):
+            with self.subTest(runtime=runtime):
+                spec = HookSpec(argv=("hook",), runtime=runtime)
+                with self.assertRaises(HookSpecError) as caught:
+                    record_hook(
+                        spec,
+                        [_event("e-1", "x")],
+                        self.root / "out",
+                        policy_id="p",
+                    )
+                self.assertEqual(str(caught.exception), expected)
+
+    def test_record_rejects_an_invalid_ask_effect(self) -> None:
+        expected = f"ask effect must be one of: {', '.join(ASK_EFFECTS)}"
+        for ask_effect in ("maybe", ""):
+            with self.subTest(ask_effect=ask_effect):
+                spec = HookSpec(argv=("hook",), ask_effect=ask_effect)
+                with self.assertRaises(HookSpecError) as caught:
+                    record_hook(
+                        spec,
+                        [_event("e-1", "x")],
+                        self.root / "out",
+                        policy_id="p",
+                    )
+                self.assertEqual(str(caught.exception), expected)
+
+
+class IdentityTests(unittest.TestCase):
+    def test_executable_contributes_its_basename_only(self) -> None:
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            first = Path(one, "hookbin")
+            second = Path(two, "hookbin")
+            first.write_bytes(b"bytes-a")
+            second.write_bytes(b"bytes-b")
+            self.assertEqual(hook_identity([str(first)]), hook_identity([str(second)]))
+            self.assertNotEqual(
+                hook_identity([str(first)]),
+                hook_identity([str(Path(one, "otherbin"))]),
+            )
+
+    def test_argument_files_contribute_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            first = Path(one, "hook.py")
+            second = Path(two, "hook.py")
+            first.write_text("print(1)\n", encoding="utf-8", newline="\n")
+            second.write_text("print(2)\n", encoding="utf-8", newline="\n")
+            self.assertNotEqual(
+                hook_identity(["python", str(first)]),
+                hook_identity(["python", str(second)]),
+            )
 
 
 if __name__ == "__main__":
