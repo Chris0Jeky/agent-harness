@@ -41,6 +41,7 @@ This repository's own deltas from the global merge rules:
   },
   "budgets": { "standing_context_tokens": 6000, "session_baseline_tokens": null },
   "human_todo": "HUMAN_TODO.md",
+  "status_doc": "plans/ACTIVE.md",
   "last_reviewed": "2026-07-06"
 }
 ```
@@ -68,6 +69,9 @@ This repository's own deltas from the global merge rules:
   `OWNER/REPOSITORY`. It authorizes only an explicit named-branch/`HEAD` push to that remote's
   single matching push URL; it does not authorize a refspec-less or forced push and does not
   disable any other `sensitive_data` rule.
+- `status_doc` (optional, issue #247): repo-relative path (or `null`) of the routed "now"/STATUS
+  doc. When declared, `audit` holds it to the §3 head budget and reports a missing file as a
+  MISMATCH; a non-string, absolute or `..`-escaping value is an audit issue; absent, no check.
 - `model_routing` is NOT part of the schema: `seed` no longer emits it. The model ladder lives
   in ONE place (BLUEPRINT §5 / SPECS §8); a per-repo copy is a third place for it to go stale.
   Repos seeded before 2026-07-25 still carry a `model_routing` block — it is inert, read by
@@ -81,7 +85,7 @@ This repository's own deltas from the global merge rules:
   (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. The publication
   relaxation likewise applies only when EVERY declaration contains the exact same valid object.
   Non-posture fields
-  (`name`, `human_todo`, `budgets`, `last_reviewed`) come from `.agent-harness/tier.json` when
+  (`name`, `human_todo`, `status_doc`, `budgets`, `last_reviewed`) come from `.agent-harness/tier.json` when
   it declares them; each file is still validated on its own.
 - The human-readable `Tier: workshop (T3) — authority: push free / merge gated` line at the
   top of repo CLAUDE.md is GENERATED from this file by `harness audit` (never hand-edited);
@@ -135,7 +139,7 @@ Consequences, all of which the tests pin:
 |---|---|---|
 | repo CLAUDE.md | T1 ≤40 / T2 ≤100 / T3+ ≤150 lines | rotate detail to linked docs |
 | AGENTS.md (rulebook, T3+) | ≤80 lines | one home per policy; link out |
-| "now"/STATUS doc head | ≤150 lines | rotate to `docs/archive/status-YYYY-MM.md` |
+| "now"/STATUS doc head (the declared `status_doc`; enforced by `harness.py audit`) | ≤150 lines | rotate to `docs/archive/status-YYYY-MM.md` |
 | MEMORY.md index | ≤30 lines / ≤3KB | fold + prune (Gardener) |
 | SKILL.md | ≤80 lines (target 60) | split or demote to doc |
 | AGENT_MAP.md | ≤100 lines | split into `docs/regions/*.md` |

@@ -21,5 +21,6 @@
     "standing_context_tokens": 6000
   },
   "human_todo": "HUMAN_TODO.md",
+  "status_doc": "plans/ACTIVE.md",
   "last_reviewed": "2026-09-07"
 }
