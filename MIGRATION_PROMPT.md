@@ -46,8 +46,9 @@ DO, IN ORDER:
    counts + read-first ladders), CLAUDE.md/AGENTS.md sizes, canonical docs sizes, CI lanes +
    their last 5 conclusions (gh run list), failure-ledger size, memory dir size, .codex/ plane
    if any. Produce a one-screen gap table: current vs the tier profile in BLUEPRINT §1.
-2. FLOOR: decide whether this repo runs a floor. If not, declare `floor_wiring: none` in
-   tier.json and skip the rest of this step. Otherwise copy
+2. FLOOR: decide whether this repo runs a floor. If not, skip copying, wiring and smoke-testing the
+   dispatcher, but still write `.agent-harness/tier.json` (tier/flags/authority plus
+   `"floor_wiring": "none"`) and retire superseded floor hooks. Otherwise copy
    agent-harness/templates/hooks/{dispatch.py,smoke_test.py} into .claude/hooks/, wire per SPECS §5 ($CLAUDE_PROJECT_DIR-relative, one dispatcher per event), write
    `.agent-harness/tier.json` (tier/flags/authority from the appendix; note any intentional
    stricter-local-floor layering in a "notes" field). Run smoke_test.py — must be green.

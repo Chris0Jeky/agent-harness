@@ -348,7 +348,7 @@ agent-harness/
 
 - **CONSTRAINT:** Apply `CLAUDE_CONFIG_OPERATIONS.md#autonomy-boundary` without restatement.
 - **CONSTRAINT:** Use the failure schema and manual promotion process from `CLAUDE_CONFIG_OPERATIONS.md`; the local recommended ledger path is `.local/failure-ledger.jsonl`, ignored by Git.
-- **CONSTRAINT:** Any destructive Git operation, tag creation, dependency change, licence change, policy change, or extraction-scope change requires owner review. Pushes to this public repository within its declared authority run autonomously once `tests/check-no-secret-literals.ps1` from claude-config passes with `-RepoRoot <this checkout> -Range origin/main..HEAD` (owner decision 2026-09-29, claude-config CC-009); content the private/public boundary keeps out stays owner-scoped.
+- **CONSTRAINT:** Any destructive Git operation, tag creation, dependency change, licence change, or extraction-scope change requires owner review; policy changes merge per `CLAUDE_CONFIG_OPERATIONS.md#autonomy-boundary`. Pushes to this public repository within its declared authority run autonomously once `tests/check-no-secret-literals.ps1` from claude-config passes with `-RepoRoot <this checkout> -Range origin/main..HEAD` (owner decision 2026-09-29, claude-config CC-009); content the private/public boundary keeps out stays owner-scoped.
 - **CONSTRAINT:** An agent must halt when the legacy environment is missing rather than repairing it. Recorded decisions are the fallback.
 
 # Quality gates
