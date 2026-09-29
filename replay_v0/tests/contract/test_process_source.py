@@ -124,6 +124,13 @@ class ProcessSourceTests(unittest.TestCase):
         self.assertEqual(["indeterminate", "indeterminate"], self.effects(result))
         self.assertEqual(["process-timeout"], self.failure_codes(result))
 
+    def test_timeout_keeps_the_stderr_written_before_the_deadline(self) -> None:
+        # Issue #141 / review of #392: a timed-out source is still exit 3, and
+        # its stderr is the only clue to why.
+        result = self.evaluate("stderr-timeout", timeout_seconds=3.0)
+        self.assertEqual(["process-timeout"], self.failure_codes(result))
+        self.assertEqual(("synthetic stderr before the deadline",), result.diagnostics)
+
     def test_timeout_terminates_descendants_in_the_root_process_group(
         self,
     ) -> None:

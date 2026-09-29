@@ -452,8 +452,29 @@ for index, event in enumerate(events):
             )
         shown = stderr.getvalue().splitlines()
         self.assertEqual(DIAGNOSTIC_LINES + 2, len(shown))
+        ascii_stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        with redirect_stderr(ascii_stderr):
+            _print_diagnostics(
+                "candidate",
+                PolicySourceResult((), failed.failures, ("caf\u00e9 \u2603",)),
+            )
+        ascii_stderr.seek(0)
+        self.assertIn("caf\\xe9 \\u2603", ascii_stderr.read())
         self.assertEqual(f"  ({30 - DIAGNOSTIC_LINES} more lines)", shown[-1])
         self.assertEqual(DIAGNOSTIC_CHARS + 2, len(shown[1]))
+
+    def test_publication_failure_still_shows_a_failed_source_stderr(self) -> None:
+        with self.fixture("failure") as (directory, corpus, recording, candidate):
+            output = directory / "unpublishable"
+            stderr = io.StringIO()
+            with mock.patch(
+                "replay_v0.cli._publish_report_set",
+                side_effect=PermissionError("synthetic locked report"),
+            ), redirect_stderr(stderr):
+                exit_code = main(self.replay_args(corpus, recording, candidate, output))
+            self.assertEqual(3, exit_code)
+            self.assertIn("replay output failed", stderr.getvalue())
+            self.assertIn("replay candidate stderr", stderr.getvalue())
 
     def test_output_publication_failure_restores_the_previous_report_set(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):

@@ -549,14 +549,19 @@ def _print_diagnostics(name: str, result: PolicySourceResult) -> None:
     lines = [line for line in result.diagnostics if line.strip()]
     if not result.failures or not lines:
         return
-    print(f"replay {name} stderr (not saved in the report):", file=sys.stderr)
+    # A character the caller's stderr cannot encode is escaped, not raised.
+    encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+    shown = [f"replay {name} stderr (not saved in the report):"]
     for line in lines[:DIAGNOSTIC_LINES]:
         text = "".join(char if char.isprintable() else "?" for char in line)
         if len(text) > DIAGNOSTIC_CHARS:
             text = text[: DIAGNOSTIC_CHARS - 3] + "..."
-        print(f"  {text}", file=sys.stderr)
+        shown.append(f"  {text}")
     if len(lines) > DIAGNOSTIC_LINES:
-        print(f"  ({len(lines) - DIAGNOSTIC_LINES} more lines)", file=sys.stderr)
+        shown.append(f"  ({len(lines) - DIAGNOSTIC_LINES} more lines)")
+    for text in shown:
+        safe = text.encode(encoding, "backslashreplace").decode(encoding)
+        print(safe, file=sys.stderr)
 
 
 def _run_replay(args: argparse.Namespace) -> int:
@@ -622,6 +627,8 @@ def _run_replay(args: argparse.Namespace) -> int:
         )
     except OSError as exc:
         print(f"replay output failed: {exc}", file=sys.stderr)
+        _print_diagnostics("baseline", baseline_result)
+        _print_diagnostics("candidate", candidate_result)
         return EXIT_SOURCE_FAILED
 
     if baseline_result.failures or candidate_result.failures:
