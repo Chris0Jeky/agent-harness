@@ -17,7 +17,9 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Lint runs first so a slow runner cannot hide it; the Windows leg's tests
+    # and smoke matrix took 13-18 minutes on 2026-09-29 (#402).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,15 +40,6 @@ jobs:
 
       - name: Install development tools
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
-
-      - name: Run replay tests on the supported host
-        run: python -m unittest discover -s replay_v0/tests -v
-
-      - name: Run deny-floor smoke matrix
-        run: python templates/hooks/smoke_test.py
 
       - name: Run Ruff
         run: >-
@@ -152,6 +145,15 @@ jobs:
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run replay tests on the supported host
+        run: python -m unittest discover -s replay_v0/tests -v
+
+      - name: Run deny-floor smoke matrix
+        run: python templates/hooks/smoke_test.py
 
 
   replay-package:
