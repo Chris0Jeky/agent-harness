@@ -120,14 +120,40 @@ class IdentityTests(unittest.TestCase):
 
     def test_fingerprint_normalises_path_case_separators_and_line_bucket(self):
         one = ledger.fingerprint("r", "bug-hunt", "Src\\A.py", 41, "The Cache, leaks!")
-        two = ledger.fingerprint("r", "bug-hunt", "./src/a.py", 59, "the cache leaks")
+        two = ledger.fingerprint("r", "bug-hunt", "./src/a.py", 79, "the cache leaks")
         self.assertEqual(one, two)
         self.assertNotEqual(
-            one, ledger.fingerprint("r", "bug-hunt", "src/a.py", 60, "the cache leaks")
+            one, ledger.fingerprint("r", "bug-hunt", "src/a.py", 80, "the cache leaks")
         )
         self.assertNotEqual(
             one, ledger.fingerprint("r", "test-gaps", "src/a.py", 41, "the cache leaks")
         )
+
+    def test_fingerprint_matches_the_coordinator_vectors(self):
+        # Computed with claude-config tools/muse_coordinator.py fingerprint() at
+        # 08ada37 (issue #387): a 40-line bucket, int() coercion, "-" when the
+        # line is not a number. If the producer changes, these fail first.
+        vectors = [
+            (("r", "bug-hunt", "Src\\A.py", 41, "The Cache, leaks!"), "584c86f167d4"),
+            (("r", "bug-hunt", "src/a.py", 80, "the cache leaks"), "1f1a523f0c21"),
+            (
+                (
+                    "action-stack",
+                    "test-gaps",
+                    "server/briefs/store.ts",
+                    None,
+                    "No test covers the expiry path when the clock skews backwards "
+                    "by more than a minute",
+                ),
+                "530d0a05e8b6",
+            ),
+            (("r", "", "a.py", "12", "x"), "f65bb6684865"),
+            (("r", "review-range", "a.py", True, "y"), "03c8ca8f26db"),
+            (("r", "review-range", "a.py", "abc", "y"), "ae4ed7c51024"),
+        ]
+        for args, expected in vectors:
+            with self.subTest(args=args):
+                self.assertEqual(ledger.fingerprint(*args), expected)
 
     def test_split_ignores_recipe_so_one_defect_never_straddles(self):
         a = ledger.cluster_key("r", "src/a.py", 3, "same defect")
@@ -337,6 +363,22 @@ class ExtractTests(unittest.TestCase):
         self.assertTrue(merged["gone/f-0000000000"]["carried"])
         self.assertIn("supersedes", merged[f"lane/{self.fake_id}"])
         self.assertNotIn("supersedes", merged[f"lane/{self.real_id}"])
+
+    def test_a_carried_finding_is_rekeyed_under_the_current_rule(self):
+        records, _ = self.run_extract()
+        stale = dict(
+            records[f"lane/{self.real_id}"],
+            id="gone/f-0000000001",
+            fingerprint="000000000000",
+            cluster="000000000000",
+            split="holdout",
+        )
+        merged, carried = ledger.merge_prior(records, {stale["id"]: stale})
+        self.assertEqual(carried, 1)
+        carried_record = merged["gone/f-0000000001"]
+        live = records[f"lane/{self.real_id}"]
+        for field in ("fingerprint", "cluster", "split"):
+            self.assertEqual(carried_record[field], live[field], field)
 
     def test_pr_states_join_on_url(self):
         states = {

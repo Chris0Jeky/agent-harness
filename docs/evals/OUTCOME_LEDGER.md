@@ -52,16 +52,20 @@ unreadable, or whose coordinator overlay fails, is listed under `problems` and t
 to receipt-only findings; wrong-typed fields degrade to nulls rather than aborting the run.
 
 `fingerprint` is autonomy-v2 C8's identity: sha256 of repo | recipe | normalised path | line
-bucket (`line // 20`) | first 12 normalised claim words, truncated to 12 hex. The coordinator
-does not compute it yet; this is the reference definition. `cluster` is the same without the
-recipe.
+bucket (`int(line) // 40`, or `-` when the line is not a number) | first 12 normalised claim
+words, truncated to 12 hex. The coordinator computes the same value (claude-config
+`tools/muse_coordinator.py` `fingerprint()`); the ledger restates it as a data contract and the
+tests pin the coordinator's vectors (#387). `cluster` is the same without the recipe. A carried
+record is re-keyed under the current rule. The bucket was `line // 20` before 2026-09-29, so the
+split was redrawn then; the B-015 figures below predate it. MESH's claim key (no recipe, full
+hash) is a different identity and does not join on `fingerprint`.
 
 ## Sealed hold-out
 
 `split` is a salted hash of `cluster`, 20% hold-out. Keying on the recipe-free cluster keeps a
 finding re-reported by another recipe with the same path, line bucket and first twelve
 normalised claim words on one side. It does not catch the same defect described in different
-words or 20+ lines apart; that leakage is bounded, not excluded. `metrics` reads only `dev`
+words or in another 40-line window; that leakage is bounded, not excluded. `metrics` reads only `dev`
 unless `--split holdout|all` comes with `--unseal REASON`, which is echoed in the output. Every
 metrics run prints a `holdout_manifest` (cluster count and digest of the hold-out cluster set,
 no labels), so a tuning run can show which hold-out it never read. The set grows as the swarm

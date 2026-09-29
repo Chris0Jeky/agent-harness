@@ -38,6 +38,7 @@ PR_STATES_SCHEMA = "outcome-ledger/pr-states/v1"
 PRODUCER = "agent-harness:scripts/outcome_ledger.py@1"
 SPLIT_SALT = "outcome-ledger/v1/split"
 HOLDOUT_PERCENT = 20
+LINE_BUCKET = 40  # the coordinator's fingerprint window
 MATURATION_DAYS = 7
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SIGHTINGS = 50
@@ -147,13 +148,20 @@ def _claim_words(claim, count=12):
 
 
 def _line_bucket(line):
-    return (
-        str(line // 20) if isinstance(line, int) and not isinstance(line, bool) else ""
-    )
+    # The coordinator's rule, value for value: int() coercion, "-" when it fails.
+    try:
+        return str(int(line) // LINE_BUCKET)
+    except (TypeError, ValueError, OverflowError):
+        return "-"
 
 
 def fingerprint(repo, recipe, path, line, claim):
-    """Autonomy-v2 C8 fingerprint: repo|recipe|path|line bucket|first 12 claim words."""
+    """Autonomy-v2 C8 fingerprint: repo|recipe|path|line bucket|first 12 claim words.
+
+    This is claude-config tools/muse_coordinator.py fingerprint() restated as a
+    data contract (issue #387); tests pin its vectors, so a coordinator receipt
+    and a ledger record key the same finding the same way.
+    """
     basis = "|".join(
         (
             str(repo),
@@ -254,14 +262,14 @@ def _job_record(lane, wave, job, path, sha, data, observed_at):
 def _new_finding(lane, repo, fid, raw, job_record):
     recipe = job_record.get("recipe") if job_record else None
     path, line, claim = raw.get("file"), _int_or_none(raw.get("line")), raw.get("claim")
-    cluster = cluster_key(repo, path, line, claim)
+    cluster = cluster_key(repo, path, raw.get("line"), claim)
     return {
         "type": "finding",
         "id": f"{lane}/{fid}",
         "lane": lane,
         "repo": repo,
         "item_id": fid,
-        "fingerprint": fingerprint(repo, recipe, path, line, claim),
+        "fingerprint": fingerprint(repo, recipe, path, raw.get("line"), claim),
         "cluster": cluster,
         "split": split_for(cluster),
         "file": path,
@@ -564,6 +572,28 @@ def _label_rank(record):
     return 3 if status in DECIDED_STATUSES else 1
 
 
+def _rekey(record):
+    """Recompute a carried finding's identity under the current fingerprint rule.
+
+    A prior ledger may predate a rule change (the 20-line bucket, issue #387); a
+    carried finding keyed the old way would neither join coordinator receipts nor
+    share a cluster with its own re-report.
+    """
+    if record.get("type") != "finding":
+        return record
+    origin = record.get("origin") or {}
+    repo, path, line, claim = (
+        record.get("repo"),
+        record.get("file"),
+        record.get("line"),
+        record.get("claim"),
+    )
+    record["fingerprint"] = fingerprint(repo, origin.get("recipe"), path, line, claim)
+    record["cluster"] = cluster_key(repo, path, line, claim)
+    record["split"] = split_for(record["cluster"])
+    return record
+
+
 def merge_prior(current, prior):
     """Carry what the swarm has since pruned; note what current supersedes.
 
@@ -576,7 +606,7 @@ def merge_prior(current, prior):
     for record_id, old in prior.items():
         new = merged.get(record_id)
         if new is None:
-            merged[record_id] = dict(old, carried=True)
+            merged[record_id] = _rekey(dict(old, carried=True))
             carried += 1
             continue
         if new["type"] == "finding" and old.get("type") == "finding":
