@@ -59,6 +59,13 @@ COVERAGE = (
     ("prod.pfx", False, False, "extension not covered (#130)"),
     ("prod.crt", False, False, "extension not covered (#130)"),
     ("prod.netrc", False, False, "extension not covered (#130)"),
+    ("prod.secret", False, False, "extension not covered (#130)"),
+    ("prod.jks", False, False, "extension not covered (#130)"),
+    ("prod.keystore", False, False, "extension not covered (#130)"),
+    ("prod.ppk", False, False, "extension not covered (#130)"),
+    ("prod.asc", False, False, "extension not covered (#130)"),
+    ("prod.gpg", False, False, "extension not covered (#130)"),
+    ("prod.kdbx", False, False, "extension not covered (#130)"),
     ("notes.txt", False, False, "ordinary file"),
 )
 
