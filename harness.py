@@ -4685,40 +4685,57 @@ def budget_issues(
                 "rotate to docs/archive/status-YYYY-MM.md",
             )
         )
-    if (repo / "CLAUDE.md").is_file():
-        checks.append(
-            (
-                repo / "CLAUDE.md",
-                CLAUDE_LINE_CAPS[tier],
-                "rotate detail into linked docs",
-            )
-        )
-    if (repo / "AGENTS.md").is_file():
-        checks.append(
-            (repo / "AGENTS.md", 80, "move detail to the repo map or domain docs")
-        )
-    if (repo / "AGENT_MAP.md").is_file():
-        checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
+    issues = []
     # The deny-floor ledger declares its own cap and rotation target in its
     # header (SPECS §3). Unregistered, an overflowing ledger was reported by
     # nothing at all.
-    if (repo / "FLOOR_LIMITATIONS.md").is_file():
-        checks.append(
-            (
-                repo / "FLOOR_LIMITATIONS.md",
-                120,
-                "rotate to archive/floor-limitations-<year>.md",
+    fixed_rows = (
+        ("CLAUDE.md", CLAUDE_LINE_CAPS[tier], "rotate detail into linked docs"),
+        ("AGENTS.md", 80, "move detail to the repo map or domain docs"),
+        ("AGENT_MAP.md", 100, "split detail into docs/regions"),
+        (
+            "FLOOR_LIMITATIONS.md",
+            120,
+            "rotate to archive/floor-limitations-<year>.md",
+        ),
+    )
+    for name, cap, remedy in fixed_rows:
+        present, error = file_presence(repo / name)
+        if present:
+            checks.append((repo / name, cap, remedy))
+        elif error:
+            # An access failure is not absence: say the budget went unmeasured
+            # (Codex on #391).
+            issues.append(
+                f"{name}: cannot measure the {cap}-line budget (existence "
+                "unproven); FIX: make it a readable UTF-8 file"
             )
+    skills = repo / ".agents" / "skills"
+    try:
+        skill_docs = sorted(skills.glob("*/SKILL.md")) if skills.is_dir() else []
+    except OSError as exc:
+        skill_docs = []
+        issues.append(
+            f".agents/skills: cannot list skills to measure their 80-line budget "
+            f"({exc.__class__.__name__}); FIX: make the directory readable"
         )
-    for skill in (
-        (repo / ".agents" / "skills").glob("*/SKILL.md")
-        if (repo / ".agents" / "skills").is_dir()
-        else ()
-    ):
+    for skill in skill_docs:
         checks.append((skill, 80, "split detail into a directly linked reference"))
-    issues = []
     for path, cap, remedy in checks:
-        actual = line_count(path)
+        try:
+            actual = line_count(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            rel = path.relative_to(repo).as_posix()
+            reason = (
+                "not valid UTF-8"
+                if isinstance(exc, UnicodeDecodeError)
+                else exc.__class__.__name__
+            )
+            issues.append(
+                f"{rel}: cannot measure the {cap}-line budget ({reason}); "
+                "FIX: make it a readable UTF-8 file"
+            )
+            continue
         if actual > cap:
             issues.append(
                 f"{path.relative_to(repo).as_posix()}: {actual}>{cap} lines; "

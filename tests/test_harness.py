@@ -1584,6 +1584,72 @@ class HarnessTests(unittest.TestCase):
             ],
         )
 
+    def test_budgets_report_a_non_utf8_doc_instead_of_aborting(self) -> None:
+        repo = Path(self.temp.name) / "budgets-non-utf8"
+        repo.mkdir()
+        (repo / "CLAUDE.md").write_bytes(b"\xff\xfe\x00bad")
+        (repo / "AGENTS.md").write_text("guidance\n" * 81, encoding="utf-8")
+        cap = harness.CLAUDE_LINE_CAPS[3]
+        self.assertEqual(
+            harness.budget_issues(repo, 3),
+            [
+                f"CLAUDE.md: cannot measure the {cap}-line budget (not valid UTF-8); "
+                "FIX: make it a readable UTF-8 file",
+                "AGENTS.md: 81>80 lines; "
+                "ROTATE: move detail to the repo map or domain docs",
+            ],
+        )
+
+    def test_budgets_report_an_unreadable_doc_instead_of_aborting(self) -> None:
+        repo = Path(self.temp.name) / "budgets-unreadable"
+        repo.mkdir()
+        (repo / "FLOOR_LIMITATIONS.md").write_text("ledger\n", encoding="utf-8")
+        with mock.patch.object(
+            harness, "line_count", side_effect=PermissionError("denied")
+        ):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(len(issues), 1)
+        self.assertIn(
+            "FLOOR_LIMITATIONS.md: cannot measure the 120-line budget "
+            "(PermissionError)",
+            issues[0],
+        )
+
+    def test_budgets_report_a_doc_whose_presence_is_unproven(self) -> None:
+        repo = Path(self.temp.name) / "budgets-unproven"
+        repo.mkdir()
+        original = harness.file_presence
+
+        def refuse_agents(path: Path) -> tuple[bool, str]:
+            if path.name == "AGENTS.md":
+                return False, f"{path} could not be inspected (denied)"
+            return original(path)
+
+        with mock.patch.object(harness, "file_presence", side_effect=refuse_agents):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(
+            issues,
+            [
+                "AGENTS.md: cannot measure the 80-line budget (existence unproven); "
+                "FIX: make it a readable UTF-8 file"
+            ],
+        )
+
+    def test_budgets_report_an_unlistable_skills_directory(self) -> None:
+        repo = Path(self.temp.name) / "budgets-skills"
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        with mock.patch.object(
+            Path, "glob", side_effect=PermissionError("denied"), autospec=True
+        ):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(
+            issues,
+            [
+                ".agents/skills: cannot list skills to measure their 80-line budget "
+                "(PermissionError); FIX: make the directory readable"
+            ],
+        )
+
     def test_stale_path_issues_prunes_nested_worktree_checkouts(self) -> None:
         repo = self.make_repo()
         stale = "C:/Users/jekyt/source/repo"
