@@ -2572,17 +2572,135 @@ def claude_target_overlap(left: list[str], right: list[str]) -> list[str]:
 
 def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
     """Recognize the controlled dispatcher path without POSIX case folding."""
-    expected = str(dispatcher.resolve()).replace("\\", "/")
+    expected = _dispatcher_identity_key(str(dispatcher))
+    if expected is None:
+        return False
     candidate = command.replace("\\", "/")
     if os.name == "nt":
-        expected = expected.casefold()
         candidate = candidate.casefold()
     # This is intentionally a token check, not a shell parser: static Doctor
     # can identify the exact controlled path but cannot prove what a shell will
     # execute. The boundaries reject a path merely embedded in another token.
-    return bool(
-        re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate)
-    )
+    if re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate):
+        return True
+    if _claude_command_names_dispatcher_alias(command, dispatcher, expected):
+        return True
+    return _claude_command_uses_default_home_dispatcher(command, dispatcher)
+
+
+# One quoted string (either quote) or one unquoted run is one path token; the
+# unquoted run stops at the same separators the literal match treats as ends.
+_COMMAND_PATH_TOKEN = re.compile(r"\"([^\"]*)\"|'([^']*)'|([^\s\"';|&]+)")
+# Resolution touches the filesystem, so a pathological command is capped.
+_DISPATCHER_ALIAS_CANDIDATE_LIMIT = 32
+
+
+def _dispatcher_identity_key(path_text: str) -> str | None:
+    """Resolve a path to its comparison key; a resolution error is no identity."""
+    try:
+        resolved = os.path.realpath(path_text)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    key = resolved.replace("\\", "/")
+    # Windows names are case-insensitive; POSIX keeps case distinct, and
+    # realpath never rewrites a POSIX component's case, even on a
+    # case-insensitive volume.
+    return key.casefold() if os.name == "nt" else key
+
+
+def _claude_command_names_dispatcher_alias(
+    command: str, dispatcher: Path, expected: str
+) -> bool:
+    """Match an absolute path token that resolves to the controlled dispatcher.
+
+    A valid spelling of the same file differs from the resolved one when the
+    path crosses a symlink or junction, a Windows 8.3 short name, or macOS's
+    /var -> /private/var link. Each whole token is resolved and compared by
+    identity, so a foreign file reached through an alias, a decoy name, or a
+    path fragment inside a larger token never matches.
+    """
+    names = {dispatcher.name, expected.rsplit("/", 1)[-1]}
+    if os.name == "nt":
+        names = {name.casefold() for name in names}
+    checked = 0
+    for match in _COMMAND_PATH_TOKEN.finditer(command):
+        token = next(group for group in match.groups() if group is not None)
+        options = [token]
+        # `--hook=/abs/dispatch.py`: the literal match accepts `=` as a start.
+        # Bounded so a pathological `=` run cannot build quadratic slices.
+        starts = [index for index, char in enumerate(token) if char == "="][:8]
+        options.extend(token[index + 1 :] for index in starts)
+        for option in options:
+            if option[:2].replace("\\", "/") == "//":
+                # A UNC or `//host` path names a NETWORK location: resolving it
+                # would contact that host (on Windows, an SMB session that can
+                # hand over NTLM credentials) from repo-controlled settings,
+                # and `--offline` promises no network (review of #345).
+                continue
+            name = option.replace("\\", "/").rsplit("/", 1)[-1]
+            if os.name == "nt":
+                name = name.casefold()
+            if name not in names or any(char in option for char in "$%`"):
+                # Only a candidate with the dispatcher's name is resolved, and
+                # a shell-expanded spelling is not statically provable.
+                continue
+            if not os.path.isabs(option) or (
+                os.sep == "\\" and not os.path.splitdrive(option)[0]
+            ):
+                # A relative or drive-relative token depends on the process
+                # cwd, which static Doctor does not share with the hook.
+                continue
+            if checked >= _DISPATCHER_ALIAS_CANDIDATE_LIMIT:
+                return False
+            checked += 1
+            if _dispatcher_identity_key(option) == expected:
+                return True
+    return False
+
+
+def _claude_command_uses_default_home_dispatcher(
+    command: str, dispatcher: Path
+) -> bool:
+    """Recognize HOME spellings only when they identify the default Claude home."""
+    try:
+        expected = str(dispatcher.resolve()).replace("\\", "/")
+        default_dispatcher = str(
+            (Path.home() / ".claude" / "hooks" / "dispatch.py").resolve()
+        ).replace("\\", "/")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    windows = os.name == "nt"
+    if windows:
+        expected = expected.casefold()
+        default_dispatcher = default_dispatcher.casefold()
+    if expected != default_dispatcher:
+        return False
+
+    normalized = command.replace("\\", "/")
+    dispatcher_suffix = r"/\.claude/hooks/dispatch\.py"
+    home_variables = [r"\$HOME", r"\$\{HOME\}"]
+    if windows:
+        home_variables.extend((r"\$env:USERPROFILE", r"\$\{env:USERPROFILE\}"))
+    flags = re.IGNORECASE if windows else 0
+
+    # Tilde expansion does not occur inside shell quotes. Environment
+    # variables do expand inside double quotes, but not single quotes.
+    patterns = [
+        rf"(?:^|\s)~{dispatcher_suffix}(?=$|[\s;|&])",
+    ]
+    for variable in home_variables:
+        patterns.extend(
+            (
+                rf"(?:^|\s){variable}{dispatcher_suffix}(?=$|[\s;|&])",
+                rf'"{variable}{dispatcher_suffix}"(?=$|[\s;|&])',
+            )
+        )
+    if windows:
+        patterns.extend(
+            rf"(?:^|\s)join-path\s+{variable}\s+'\.claude/hooks/dispatch\.py'(?=$|[\s;|&])"
+            for variable in home_variables
+        )
+    return any(re.search(pattern, normalized, flags=flags) for pattern in patterns)
 
 
 def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
@@ -4311,12 +4429,14 @@ def claude_settings_register_floor(claude_home: Path, repo: Path) -> Path | None
         repo / ".claude" / "settings.json",
         repo / ".claude" / "settings.local.json",
     ):
-        if _settings_file_registers_floor(source):
+        if _settings_file_registers_floor(
+            source, claude_home / "hooks" / "dispatch.py"
+        ):
             return source
     return None
 
 
-def _settings_file_registers_floor(source: Path) -> bool:
+def _settings_file_registers_floor(source: Path, dispatcher: Path) -> bool:
     try:
         text = read_optional_text(source)
         if text is None:
@@ -4332,7 +4452,9 @@ def _settings_file_registers_floor(source: Path) -> bool:
         handlers = group.get("hooks") if isinstance(group, dict) else None
         for handler in handlers if isinstance(handlers, list) else []:
             command = handler.get("command") if isinstance(handler, dict) else None
-            if isinstance(command, str) and "dispatch.py" in command.lower():
+            if isinstance(command, str) and claude_command_points_to_dispatcher(
+                command, dispatcher
+            ):
                 return True
     return False
 
@@ -4344,10 +4466,18 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
     declaring `sensitive_data`, whose default wall is a vote; `guide` binds
     only when at least one declaration sets it and none says `wall`; `core`
     binds only when nothing stricter is declared.
+
+    A posture that is not one of `FLOOR_POSTURES` — a list, an object, a
+    number, an unknown string — is no vote: `validate_tier` reports it per
+    file, and it reads as undeclared here, so a `sensitive_data` default wall
+    still votes. Adding an unhashable value to the vote set raised TypeError
+    and crashed audit (issue #379).
     """
     votes = set()
     for declaration in declarations:
         posture = declaration.get("floor_posture")
+        if not (isinstance(posture, str) and posture in FLOOR_POSTURES):
+            posture = None
         flags = declaration.get("flags")
         if posture is None and isinstance(flags, dict) and flags.get("sensitive_data"):
             posture = "wall"
@@ -4378,17 +4508,21 @@ def merge_public_synthetic_publication(
     return dict(first)
 
 
-def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
-    """OR every tightening flag; require unanimity for the one relaxation."""
+def merge_tier_flags(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+    """OR every tightening flag; require unanimity for the one relaxation.
+
+    Always a dict: a declaration whose `flags` is not an object (`["x"]`) is
+    skipped here and reported per file by `validate_tier`, so every consumer
+    downstream can call `.get` on the result (issue #379). The dispatcher
+    refuses such a file outright (fail closed), so it never agrees to the
+    relaxation either: a malformed `flags` counts as a declaration that does
+    not grant `relaxed_work_loss_guards`.
+    """
     flag_sets = [
         declaration.get("flags")
         for declaration in declarations
         if isinstance(declaration.get("flags"), dict)
     ]
-    if not flag_sets:
-        # Nothing mergeable: keep what the highest-precedence file declared so
-        # `validate_tier` still reports the malformed value it reported before.
-        return declarations[0].get("flags")
     flags: dict[str, Any] = {}
     for flag_set in flag_sets:
         for key, value in flag_set.items():
@@ -4398,8 +4532,10 @@ def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
                 flags[key] = bool(flags.get(key)) or value
             elif key not in flags:
                 flags[key] = value
-    flags["relaxed_work_loss_guards"] = all(
-        bool(flag_set.get("relaxed_work_loss_guards")) for flag_set in flag_sets
+    flags["relaxed_work_loss_guards"] = bool(declarations) and all(
+        isinstance(declaration.get("flags"), dict)
+        and bool(declaration["flags"].get("relaxed_work_loss_guards"))
+        for declaration in declarations
     )
     return flags
 
@@ -4459,7 +4595,10 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
                 )
     flags = data.get("flags")
     if not isinstance(flags, dict):
-        issues.append("flags must be an object")
+        issues.append(
+            "flags must be an object mapping flag names to booleans, "
+            + (f"not {json_type_name(flags)}" if "flags" in data else "not missing")
+        )
     elif any(not isinstance(value, bool) for value in flags.values()):
         issues.append("all flag values must be booleans")
     if "public_synthetic_publication" in data:
@@ -4472,12 +4611,18 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
     if posture is not None and not (
         isinstance(posture, str) and posture in FLOOR_POSTURES
     ):
-        issues.append(f"floor_posture must be one of {sorted(FLOOR_POSTURES)}")
+        issues.append(
+            f"floor_posture must be one of {sorted(FLOOR_POSTURES)}"
+            + wrong_type_suffix(posture)
+        )
     wiring = data.get("floor_wiring")
     if wiring is not None and not (
         isinstance(wiring, str) and wiring in FLOOR_WIRING_VALUES
     ):
-        issues.append(f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}")
+        issues.append(
+            f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}"
+            + wrong_type_suffix(wiring)
+        )
     # Optional (issue #247); null is a declaration of "none", as for `human_todo`.
     status_doc = data.get("status_doc")
     if status_doc is not None and not (
@@ -4489,6 +4634,29 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
             f"status_doc must be a repo-relative path or null, not {status_doc!r}"
         )
     return issues
+
+
+def json_type_name(value: Any) -> str:
+    """The JSON name of a parsed value's type, for a malformed-field message."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    if isinstance(value, dict):
+        return "an object"
+    return type(value).__name__
+
+
+def wrong_type_suffix(value: Any) -> str:
+    """`, not an array` for a non-string value; nothing for a wrong string,
+    whose allowed-values list already says what is wrong."""
+    return "" if isinstance(value, str) else f", not {json_type_name(value)}"
 
 
 STATUS_DOC_LINE_CAP = 150
@@ -5588,14 +5756,17 @@ def effective_floor_posture(tier_data: dict) -> str:
     # here (review of #369, M3): the merge passes an invalid raw value through.
     tier = tier_data.get("tier")
     tier = tier if is_valid_tier(tier) else 1
-    flags = tier_data.get("flags", {}) or {}
+    # The same for a non-object `flags` or an unhashable `floor_posture` handed
+    # in unmerged (issue #379): `.get` on a list and `[..] in frozenset` raised.
+    flags = tier_data.get("flags")
+    flags = flags if isinstance(flags, dict) else {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
     sensitive = bool(flags.get("sensitive_data"))
     declared = tier_data.get("floor_posture")
     if declared == "core" and sensitive:
         return "guide"  # a sensitive repository never runs core (review of #363)
-    if declared in EFFECTIVE_FLOOR_POSTURES:
+    if isinstance(declared, str) and declared in EFFECTIVE_FLOOR_POSTURES:
         return declared
     if sensitive:
         return "wall"
