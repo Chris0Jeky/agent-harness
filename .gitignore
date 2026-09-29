@@ -4,3 +4,8 @@
 __pycache__/
 *.py[cod]
 /.claude/worktrees
+
+# Private replay corpora built by `charter-replay import` never enter Git.
+**/private-corpus/
+/build/
+*.egg-info/

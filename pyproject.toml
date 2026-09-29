@@ -1,0 +1,26 @@
+# Packages only the replay tool (`replay_v0`); the rest of this repository is not
+# installed. The distribution and command names are provisional (owner decision).
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "charter-replay"
+version = "0.1.0.dev0"
+description = "Measure a coding-agent command hook: replay a corpus through two versions and diff the decisions."
+readme = "replay_v0/README.md"
+dependencies = []
+# Python 3.11+. requires-python is deliberately omitted: Black would read it as
+# the formatting target and reformat the rest of this repository.
+classifiers = ["Programming Language :: Python :: 3.11"]
+
+[project.scripts]
+charter-replay = "replay_v0.app:main"
+
+[tool.setuptools.packages.find]
+include = ["replay_v0*"]
+exclude = ["replay_v0.tests*"]
+
+[tool.setuptools.package-data]
+replay_v0 = ["schemas/*.json", "corpora/*/*.jsonl", "corpora/*/*.json"]
+
