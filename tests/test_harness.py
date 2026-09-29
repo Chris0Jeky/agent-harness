@@ -1615,6 +1615,21 @@ class HarnessTests(unittest.TestCase):
             issues[0],
         )
 
+    def test_budgets_report_an_unlistable_skills_directory(self) -> None:
+        repo = Path(self.temp.name) / "budgets-skills"
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        with mock.patch.object(
+            Path, "glob", side_effect=PermissionError("denied"), autospec=True
+        ):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(
+            issues,
+            [
+                ".agents/skills: cannot list skills to measure their 80-line budget "
+                "(PermissionError); FIX: make the directory readable"
+            ],
+        )
+
     def test_stale_path_issues_prunes_nested_worktree_checkouts(self) -> None:
         repo = self.make_repo()
         stale = "C:/Users/jekyt/source/repo"

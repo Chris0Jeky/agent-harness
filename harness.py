@@ -4710,13 +4710,18 @@ def budget_issues(
                 "rotate to archive/floor-limitations-<year>.md",
             )
         )
-    for skill in (
-        (repo / ".agents" / "skills").glob("*/SKILL.md")
-        if (repo / ".agents" / "skills").is_dir()
-        else ()
-    ):
-        checks.append((skill, 80, "split detail into a directly linked reference"))
     issues = []
+    skills = repo / ".agents" / "skills"
+    try:
+        skill_docs = sorted(skills.glob("*/SKILL.md")) if skills.is_dir() else []
+    except OSError as exc:
+        skill_docs = []
+        issues.append(
+            f".agents/skills: cannot list skills to measure their 80-line budget "
+            f"({exc.__class__.__name__}); FIX: make the directory readable"
+        )
+    for skill in skill_docs:
+        checks.append((skill, 80, "split detail into a directly linked reference"))
     for path, cap, remedy in checks:
         try:
             actual = line_count(path)
