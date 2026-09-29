@@ -7131,6 +7131,123 @@ allow_local_binding = true
                 self.assertEqual(harness.effective_floor_posture(merged), "core")
         self.assertEqual(harness.validate_tier(valid), [])
 
+    def test_wrongly_typed_flags_and_postures_merge_to_usable_values(self) -> None:
+        # Issue #379: a non-object `flags` passed straight through the merge and
+        # `effective_floor_posture` called `.get` on it; an unhashable
+        # `floor_posture` raised TypeError from the vote set.
+        base = {
+            "tier": 2,
+            "name": "daily-driver",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        for flags in (["x"], "sensitive_data", 1, None):
+            with self.subTest(flags=flags):
+                declaration = {**base, "flags": flags}
+                issues = harness.validate_tier(declaration)
+                self.assertTrue(
+                    any(
+                        issue.startswith("flags must be an object") for issue in issues
+                    ),
+                    issues,
+                )
+                merged = harness.merge_tier_declarations([declaration])
+                self.assertIsInstance(merged["flags"], dict)
+                self.assertFalse(merged["flags"]["relaxed_work_loss_guards"])
+                self.assertEqual(harness.effective_floor_posture(merged), "core")
+        self.assertIn(
+            "flags must be an object mapping flag names to booleans, not an array",
+            harness.validate_tier({**base, "flags": ["x"]}),
+        )
+        # A malformed declaration never agrees to the one relaxation, exactly as
+        # the dispatcher refuses the file outright; a valid co-located one still
+        # contributes its tightening flags.
+        relaxed = {**base, "flags": {"relaxed_work_loss_guards": True}}
+        merged = harness.merge_tier_declarations([relaxed, {**base, "flags": ["x"]}])
+        self.assertFalse(merged["flags"]["relaxed_work_loss_guards"])
+        merged = harness.merge_tier_declarations(
+            [{**base, "flags": ["x"]}, {**base, "flags": {"sensitive_data": True}}]
+        )
+        self.assertTrue(merged["flags"]["sensitive_data"])
+        self.assertEqual(harness.effective_floor_posture(merged), "wall")
+
+        for posture in (["core"], {"core": True}, 3, True):
+            with self.subTest(posture=posture):
+                declaration = {**base, "floor_posture": posture}
+                self.assertTrue(
+                    any(
+                        issue.startswith("floor_posture must be one of")
+                        for issue in harness.validate_tier(declaration)
+                    )
+                )
+                merged = harness.merge_tier_declarations([declaration])
+                self.assertNotIn("floor_posture", merged)
+                self.assertEqual(harness.effective_floor_posture(merged), "core")
+                # Strictest-wins still holds among the valid votes, and an
+                # invalid posture reads as undeclared, so sensitive_data's
+                # default wall keeps its vote.
+                merged = harness.merge_tier_declarations(
+                    [declaration, {**base, "floor_posture": "guide"}]
+                )
+                self.assertEqual(merged["floor_posture"], "guide")
+                sensitive = {**declaration, "flags": {"sensitive_data": True}}
+                merged = harness.merge_tier_declarations(
+                    [sensitive, {**base, "floor_posture": "core"}]
+                )
+                self.assertEqual(merged["floor_posture"], "wall")
+        # The consumer is robust on its own, not only behind the merge.
+        self.assertEqual(
+            harness.effective_floor_posture(
+                {"tier": 2, "flags": ["x"], "floor_posture": ["core"]}
+            ),
+            "core",
+        )
+
+        for wiring in (["none"], {"none": True}, 0):
+            with self.subTest(wiring=wiring):
+                declaration = {**base, "floor_wiring": wiring}
+                self.assertTrue(
+                    any(
+                        issue.startswith("floor_wiring must be one of ['none'], not ")
+                        for issue in harness.validate_tier(declaration)
+                    )
+                )
+                self.assertNotIn(
+                    "floor_wiring", harness.merge_tier_declarations([declaration])
+                )
+
+    def test_doctor_reports_wrongly_typed_tier_fields_without_crashing(self) -> None:
+        # Issue #379: `doctor --repo` runs the same reality checks as audit over
+        # `load_tier`, so a malformed field must degrade to a report there too.
+        for field, value in (
+            ("flags", ["x"]),
+            ("floor_posture", ["core"]),
+            ("floor_wiring", ["none"]),
+            ("human_todo", ["HUMAN_TODO.md"]),
+        ):
+            with self.subTest(field=field):
+                repo = Path(self.temp.name) / f"repo-{field}"
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+                target = repo / ".agent-harness" / "tier.json"
+                target.parent.mkdir(parents=True)
+                declaration: dict[str, object] = {
+                    "tier": 2,
+                    "name": "daily-driver",
+                    "authority": {"push": "free", "merge": "free"},
+                    "flags": {},
+                }
+                declaration[field] = value
+                target.write_text(json.dumps(declaration), encoding="utf-8")
+
+                result, output = self.run_doctor_with_fixture_globals(
+                    repo, offline=True
+                )
+
+                self.assertEqual(result, 1, output)
+                if field == "human_todo":
+                    self.assertIn("human_todo must be a repo-relative path", output)
+
     def test_repo_floor_matches_blocking_handler_normalization(self) -> None:
         pin = "9" * 64
         posix = f"expected={pin}; python $HOME/.claude/hooks/dispatch.py --event pre --runtime codex"
@@ -11038,6 +11155,107 @@ class RealityCheckTests(unittest.TestCase):
         self.assertEqual(
             [finding["status"] for finding in payload["reality"]], ["ok", "advisory"]
         )
+
+
+class MalformedTierFieldAuditTests(unittest.TestCase):
+    """A wrongly typed tier.json field is REPORTED, never an audit crash (#379).
+
+    The default-branch protection leg is deliberately NOT mocked here: it is
+    where `effective_floor_posture` called `.get` on a list `flags`.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def audit_with(self, **fields: object) -> dict[str, object]:
+        repo = self.root / f"repo-{len(list(self.root.glob('repo-*')))}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
+        declaration: dict[str, object] = {
+            "tier": 2,
+            "name": "daily-driver",
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        declaration.update(fields)
+        (repo / ".agent-harness").mkdir()
+        (repo / ".agent-harness" / "tier.json").write_text(
+            json.dumps(declaration), encoding="utf-8"
+        )
+        return harness.audit_repo(
+            repo,
+            harness_root=self.root / "harness",
+            claude_home=self.root / "claude-home",
+            command_runner=FakeCommandRunner(),
+        )
+
+    def test_wrongly_typed_fields_are_issues_not_crashes(self) -> None:
+        cases = (
+            ("flags", ["x"], "flags must be an object mapping flag names to booleans"),
+            ("flags", "sensitive_data", "flags must be an object"),
+            ("flags", 7, "flags must be an object"),
+            ("floor_posture", ["core"], "floor_posture must be one of"),
+            ("floor_posture", {"core": True}, "floor_posture must be one of"),
+            ("floor_posture", 1, "floor_posture must be one of"),
+            ("floor_wiring", ["none"], "floor_wiring must be one of"),
+            ("floor_wiring", {"none": True}, "floor_wiring must be one of"),
+            ("floor_wiring", 0, "floor_wiring must be one of"),
+        )
+        for field, value, expected in cases:
+            with self.subTest(field=field, value=value):
+                result = self.audit_with(**{field: value})
+                self.assertFalse(result["ok"])
+                self.assertTrue(
+                    any(expected in issue for issue in result["issues"]),
+                    result["issues"],
+                )
+
+    def test_a_malformed_flags_beside_a_valid_legacy_file_is_reported(self) -> None:
+        # The co-located valid declaration supplies the merged flags; the
+        # malformed one is still named as the file at fault.
+        repo = self.root / "repo-colocated"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
+        base = {
+            "tier": 2,
+            "name": "daily-driver",
+            "authority": {"push": "free", "merge": "free"},
+        }
+        for directory, flags in ((".agent-harness", ["x"]), (".claude", {})):
+            (repo / directory).mkdir()
+            (repo / directory / "tier.json").write_text(
+                json.dumps({**base, "flags": flags}), encoding="utf-8"
+            )
+        result = harness.audit_repo(
+            repo,
+            harness_root=self.root / "harness",
+            claude_home=self.root / "claude-home",
+            command_runner=FakeCommandRunner(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn(
+            ".agent-harness/tier.json: flags must be an object mapping flag names "
+            "to booleans, not an array",
+            result["issues"],
+        )
+
+    def test_wrongly_typed_human_todo_is_a_mismatch_not_a_crash(self) -> None:
+        for value in (["HUMAN_TODO.md"], {"path": "HUMAN_TODO.md"}, 5, True):
+            with self.subTest(value=value):
+                result = self.audit_with(human_todo=value)
+                self.assertFalse(result["ok"])
+                statuses = [
+                    finding["status"]
+                    for finding in result["reality"]
+                    if "human_todo" in finding["check"]
+                ]
+                self.assertEqual(statuses, ["MISMATCH"])
 
 
 class WorktreeCloseoutTests(unittest.TestCase):

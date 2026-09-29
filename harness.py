@@ -4466,10 +4466,18 @@ def merge_floor_postures(declarations: list[dict[str, Any]]) -> str | None:
     declaring `sensitive_data`, whose default wall is a vote; `guide` binds
     only when at least one declaration sets it and none says `wall`; `core`
     binds only when nothing stricter is declared.
+
+    A posture that is not one of `FLOOR_POSTURES` — a list, an object, a
+    number, an unknown string — is no vote: `validate_tier` reports it per
+    file, and it reads as undeclared here, so a `sensitive_data` default wall
+    still votes. Adding an unhashable value to the vote set raised TypeError
+    and crashed audit (issue #379).
     """
     votes = set()
     for declaration in declarations:
         posture = declaration.get("floor_posture")
+        if not (isinstance(posture, str) and posture in FLOOR_POSTURES):
+            posture = None
         flags = declaration.get("flags")
         if posture is None and isinstance(flags, dict) and flags.get("sensitive_data"):
             posture = "wall"
@@ -4500,17 +4508,21 @@ def merge_public_synthetic_publication(
     return dict(first)
 
 
-def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
-    """OR every tightening flag; require unanimity for the one relaxation."""
+def merge_tier_flags(declarations: list[dict[str, Any]]) -> dict[str, Any]:
+    """OR every tightening flag; require unanimity for the one relaxation.
+
+    Always a dict: a declaration whose `flags` is not an object (`["x"]`) is
+    skipped here and reported per file by `validate_tier`, so every consumer
+    downstream can call `.get` on the result (issue #379). The dispatcher
+    refuses such a file outright (fail closed), so it never agrees to the
+    relaxation either: a malformed `flags` counts as a declaration that does
+    not grant `relaxed_work_loss_guards`.
+    """
     flag_sets = [
         declaration.get("flags")
         for declaration in declarations
         if isinstance(declaration.get("flags"), dict)
     ]
-    if not flag_sets:
-        # Nothing mergeable: keep what the highest-precedence file declared so
-        # `validate_tier` still reports the malformed value it reported before.
-        return declarations[0].get("flags")
     flags: dict[str, Any] = {}
     for flag_set in flag_sets:
         for key, value in flag_set.items():
@@ -4520,8 +4532,10 @@ def merge_tier_flags(declarations: list[dict[str, Any]]) -> Any:
                 flags[key] = bool(flags.get(key)) or value
             elif key not in flags:
                 flags[key] = value
-    flags["relaxed_work_loss_guards"] = all(
-        bool(flag_set.get("relaxed_work_loss_guards")) for flag_set in flag_sets
+    flags["relaxed_work_loss_guards"] = bool(declarations) and all(
+        isinstance(declaration.get("flags"), dict)
+        and bool(declaration["flags"].get("relaxed_work_loss_guards"))
+        for declaration in declarations
     )
     return flags
 
@@ -4581,7 +4595,10 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
                 )
     flags = data.get("flags")
     if not isinstance(flags, dict):
-        issues.append("flags must be an object")
+        issues.append(
+            "flags must be an object mapping flag names to booleans, "
+            + (f"not {json_type_name(flags)}" if "flags" in data else "not missing")
+        )
     elif any(not isinstance(value, bool) for value in flags.values()):
         issues.append("all flag values must be booleans")
     if "public_synthetic_publication" in data:
@@ -4594,12 +4611,18 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
     if posture is not None and not (
         isinstance(posture, str) and posture in FLOOR_POSTURES
     ):
-        issues.append(f"floor_posture must be one of {sorted(FLOOR_POSTURES)}")
+        issues.append(
+            f"floor_posture must be one of {sorted(FLOOR_POSTURES)}"
+            + wrong_type_suffix(posture)
+        )
     wiring = data.get("floor_wiring")
     if wiring is not None and not (
         isinstance(wiring, str) and wiring in FLOOR_WIRING_VALUES
     ):
-        issues.append(f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}")
+        issues.append(
+            f"floor_wiring must be one of {sorted(FLOOR_WIRING_VALUES)}"
+            + wrong_type_suffix(wiring)
+        )
     # Optional (issue #247); null is a declaration of "none", as for `human_todo`.
     status_doc = data.get("status_doc")
     if status_doc is not None and not (
@@ -4611,6 +4634,29 @@ def validate_tier(data: dict[str, Any]) -> list[str]:
             f"status_doc must be a repo-relative path or null, not {status_doc!r}"
         )
     return issues
+
+
+def json_type_name(value: Any) -> str:
+    """The JSON name of a parsed value's type, for a malformed-field message."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    if isinstance(value, dict):
+        return "an object"
+    return type(value).__name__
+
+
+def wrong_type_suffix(value: Any) -> str:
+    """`, not an array` for a non-string value; nothing for a wrong string,
+    whose allowed-values list already says what is wrong."""
+    return "" if isinstance(value, str) else f", not {json_type_name(value)}"
 
 
 STATUS_DOC_LINE_CAP = 150
@@ -5710,14 +5756,17 @@ def effective_floor_posture(tier_data: dict) -> str:
     # here (review of #369, M3): the merge passes an invalid raw value through.
     tier = tier_data.get("tier")
     tier = tier if is_valid_tier(tier) else 1
-    flags = tier_data.get("flags", {}) or {}
+    # The same for a non-object `flags` or an unhashable `floor_posture` handed
+    # in unmerged (issue #379): `.get` on a list and `[..] in frozenset` raised.
+    flags = tier_data.get("flags")
+    flags = flags if isinstance(flags, dict) else {}
     if tier >= 4 or bool(flags.get("wave_mode")):
         return "wall"
     sensitive = bool(flags.get("sensitive_data"))
     declared = tier_data.get("floor_posture")
     if declared == "core" and sensitive:
         return "guide"  # a sensitive repository never runs core (review of #363)
-    if declared in EFFECTIVE_FLOOR_POSTURES:
+    if isinstance(declared, str) and declared in EFFECTIVE_FLOOR_POSTURES:
         return declared
     if sensitive:
         return "wall"
