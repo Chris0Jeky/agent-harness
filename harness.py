@@ -4685,7 +4685,7 @@ def budget_issues(
                 "rotate to docs/archive/status-YYYY-MM.md",
             )
         )
-    if (repo / "CLAUDE.md").is_file():
+    if file_presence(repo / "CLAUDE.md")[0]:
         checks.append(
             (
                 repo / "CLAUDE.md",
@@ -4693,16 +4693,16 @@ def budget_issues(
                 "rotate detail into linked docs",
             )
         )
-    if (repo / "AGENTS.md").is_file():
+    if file_presence(repo / "AGENTS.md")[0]:
         checks.append(
             (repo / "AGENTS.md", 80, "move detail to the repo map or domain docs")
         )
-    if (repo / "AGENT_MAP.md").is_file():
+    if file_presence(repo / "AGENT_MAP.md")[0]:
         checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
     # The deny-floor ledger declares its own cap and rotation target in its
     # header (SPECS §3). Unregistered, an overflowing ledger was reported by
     # nothing at all.
-    if (repo / "FLOOR_LIMITATIONS.md").is_file():
+    if file_presence(repo / "FLOOR_LIMITATIONS.md")[0]:
         checks.append(
             (
                 repo / "FLOOR_LIMITATIONS.md",
@@ -4718,7 +4718,20 @@ def budget_issues(
         checks.append((skill, 80, "split detail into a directly linked reference"))
     issues = []
     for path, cap, remedy in checks:
-        actual = line_count(path)
+        try:
+            actual = line_count(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            rel = path.relative_to(repo).as_posix()
+            reason = (
+                "not valid UTF-8"
+                if isinstance(exc, UnicodeDecodeError)
+                else exc.__class__.__name__
+            )
+            issues.append(
+                f"{rel}: cannot measure the {cap}-line budget ({reason}); "
+                "FIX: make it a readable UTF-8 file"
+            )
+            continue
         if actual > cap:
             issues.append(
                 f"{path.relative_to(repo).as_posix()}: {actual}>{cap} lines; "

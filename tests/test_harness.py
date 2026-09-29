@@ -1584,6 +1584,37 @@ class HarnessTests(unittest.TestCase):
             ],
         )
 
+    def test_budgets_report_a_non_utf8_doc_instead_of_aborting(self) -> None:
+        repo = Path(self.temp.name) / "budgets-non-utf8"
+        repo.mkdir()
+        (repo / "CLAUDE.md").write_bytes(b"\xff\xfe\x00bad")
+        (repo / "AGENTS.md").write_text("guidance\n" * 81, encoding="utf-8")
+        cap = harness.CLAUDE_LINE_CAPS[3]
+        self.assertEqual(
+            harness.budget_issues(repo, 3),
+            [
+                f"CLAUDE.md: cannot measure the {cap}-line budget (not valid UTF-8); "
+                "FIX: make it a readable UTF-8 file",
+                "AGENTS.md: 81>80 lines; "
+                "ROTATE: move detail to the repo map or domain docs",
+            ],
+        )
+
+    def test_budgets_report_an_unreadable_doc_instead_of_aborting(self) -> None:
+        repo = Path(self.temp.name) / "budgets-unreadable"
+        repo.mkdir()
+        (repo / "FLOOR_LIMITATIONS.md").write_text("ledger\n", encoding="utf-8")
+        with mock.patch.object(
+            harness, "line_count", side_effect=PermissionError("denied")
+        ):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(len(issues), 1)
+        self.assertIn(
+            "FLOOR_LIMITATIONS.md: cannot measure the 120-line budget "
+            "(PermissionError)",
+            issues[0],
+        )
+
     def test_stale_path_issues_prunes_nested_worktree_checkouts(self) -> None:
         repo = self.make_repo()
         stale = "C:/Users/jekyt/source/repo"
