@@ -47,7 +47,7 @@ _TOKEN_PATTERNS = (
     ),
     (
         re.compile(
-            r"(?i)\b(mysqldump|mysqladmin|mariadb-dump|mysql|mariadb)"
+            r"\b(?i:(mysqldump|mysqladmin|mariadb-dump|mysql|mariadb))"
             r"([^;&|\n]*?\s-p)"
             r"(\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
         ),
@@ -61,7 +61,7 @@ _TOKEN_PATTERNS = (
     ),
     (
         re.compile(
-            r"(?i)\b(redis-cli)([^;&|\n]*?\s-a\s+)" r"(\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
+            r"(?i)\b(redis-cli)([^;&|\n]*?\s-a\s*)" r"(\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
         ),
         r"\1\2<redacted>",
     ),
@@ -159,6 +159,35 @@ _HOST_COMMANDS = frozenset(
         "ssh-copy-id",
     }
 )
+_SSH_DESTINATION_COMMANDS = frozenset(
+    {"ssh", "mosh", "sftp", "ssh-copy-id", "ssh-keyscan"}
+)
+_SSH_VALUE_FLAGS = frozenset(
+    {
+        "-B",
+        "-b",
+        "-c",
+        "-D",
+        "-E",
+        "-e",
+        "-F",
+        "-I",
+        "-i",
+        "-J",
+        "-L",
+        "-l",
+        "-m",
+        "-O",
+        "-o",
+        "-p",
+        "-Q",
+        "-R",
+        "-S",
+        "-W",
+        "-w",
+    }
+)
+_SINGLE_LABEL_HOST = re.compile(r"[A-Za-z0-9_-]+")
 _SCP_COMMANDS = frozenset({"scp", "rsync"})
 _CONTAINER_COMMANDS = frozenset({"docker", "podman"})
 _CONTAINER_SUBCOMMANDS = frozenset({"pull", "push", "run", "tag", "login", "create"})
@@ -221,14 +250,14 @@ def _redact_scp_token(chunk: str) -> str:
     user, host = match.group(1) or "", match.group(2)
     if host.lower() in _PUBLIC_HOSTS:
         return chunk
-    if not user and "." not in host:
+    if not user and len(host) == 1:
         return chunk
     return f"{quote}<host>:/<path>{quote}"
 
 
 def _redact_image_token(chunk: str) -> str:
     quote, body, _ = _split_quote(chunk)
-    if not body or body[0] == "-" or "://" in body or "@" in body or "=" in body:
+    if not body or body[0] == "-" or "://" in body or "=" in body:
         return chunk
     if body.startswith("<") and body.endswith(">"):
         return chunk
@@ -241,6 +270,66 @@ def _redact_image_token(chunk: str) -> str:
     if registry.lower() in _PUBLIC_HOSTS:
         return chunk
     return f"{quote}<registry>/{rest}{quote}"
+
+
+def _redact_login_server(chunk: str) -> str:
+    quote, body, _ = _split_quote(chunk)
+    if not body or body[0] == "-" or "=" in body or "/" in body or "://" in body:
+        return _redact_image_token(chunk)
+    host = body.split(":", 1)[0]
+    if host.lower() in _PUBLIC_HOSTS or not _DOTTED_HOST.fullmatch(host):
+        return chunk
+    return f"{quote}<registry>{quote}"
+
+
+def _redact_ssh_destination(chunk: str) -> str:
+    if "://" in chunk:
+        return chunk
+    quote, body, _ = _split_quote(chunk)
+    if not body or body[0] == "-" or "/" in body or "=" in body:
+        return chunk
+    if body.startswith("<") and body.endswith(">"):
+        return chunk
+    user, sep, host = body.rpartition("@")
+    if sep:
+        if not host or "/" in user or ":" in user:
+            return chunk
+    else:
+        host = body
+    lowered = host.lower()
+    if lowered in _PUBLIC_HOSTS or lowered == "localhost" or host == "127.0.0.1":
+        return chunk
+    if _IPV4_LITERAL.fullmatch(host):
+        if host == "127.0.0.1":
+            return chunk
+        host = "<ip>"
+    elif _DOTTED_HOST.fullmatch(host):
+        if lowered in _PUBLIC_HOSTS:
+            return chunk
+        host = "<host>"
+    elif _SINGLE_LABEL_HOST.fullmatch(host):
+        host = "<host>"
+    else:
+        return chunk
+    return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
+
+
+def _scrub_ssh_segment(segment: str) -> str:
+    parts = re.split(r"(\s+)", segment)
+    positions = [i for i, part in enumerate(parts) if i % 2 == 0 and part]
+    pos = 1
+    while pos < len(positions):
+        index = positions[pos]
+        token = parts[index]
+        if token.startswith("-"):
+            if token in _SSH_VALUE_FLAGS and pos + 1 < len(positions):
+                pos += 2
+            else:
+                pos += 1
+            continue
+        parts[index] = _redact_ssh_destination(token)
+        break
+    return "".join(parts)
 
 
 def _redact_after_command(segment: str, skip: int, func: Callable[[str], str]) -> str:
@@ -261,7 +350,9 @@ def _scrub_bare_hosts(text: str) -> str:
     for index in range(0, len(segments), 2):
         segment = segments[index]
         head = _command_head(segment)
-        if head in _HOST_COMMANDS:
+        if head in _SSH_DESTINATION_COMMANDS:
+            segments[index] = _scrub_ssh_segment(segment)
+        elif head in _HOST_COMMANDS:
             segments[index] = _redact_after_command(segment, 1, _redact_host_token)
         elif head in _SCP_COMMANDS:
             segments[index] = _redact_after_command(segment, 1, _redact_scp_token)
@@ -271,7 +362,12 @@ def _scrub_bare_hosts(text: str) -> str:
                 for position, part in enumerate(re.split(r"(\s+)", segment))
                 if position % 2 == 0 and part
             ]
-            if len(words) >= 2 and words[1].lower() in _CONTAINER_SUBCOMMANDS:
+            if len(words) >= 2 and words[1].lower() == "login":
+                # `docker login <server>` names the registry with no image path.
+                segments[index] = _redact_after_command(
+                    segment, 2, _redact_login_server
+                )
+            elif len(words) >= 2 and words[1].lower() in _CONTAINER_SUBCOMMANDS:
                 segments[index] = _redact_after_command(segment, 2, _redact_image_token)
     return "".join(segments)
 

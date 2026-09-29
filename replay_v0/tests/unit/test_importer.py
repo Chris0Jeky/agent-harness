@@ -161,6 +161,56 @@ class ScrubberTests(unittest.TestCase):
         self.assertIn("a.txt", scp_text)
         self.assertNotIn("/srv/x", scp_text)
 
+    def test_scrub2_redis_attached_password_is_redacted(self) -> None:
+        text = self.scrubber.scrub("redis-cli -h example.com -aS3cretPw get k")
+        self.assertNotIn("S3cretPw", text)
+        self.assertIn("-a<redacted>", text)
+
+    def test_scrub2_digest_pinned_registry_is_redacted(self) -> None:
+        digest = "a" * 64
+        text = self.scrubber.scrub(
+            f"docker pull registry.acme.io/team/img@sha256:{digest}"
+        )
+        self.assertNotIn("registry.acme.io", text)
+        self.assertIn("@sha256:", text)
+
+    def test_scrub2_ssh_destination_parsing(self) -> None:
+        text = self.scrubber.scrub("ssh buildhost")
+        self.assertNotIn("buildhost", text)
+        text = self.scrubber.scrub("ssh -p 2222 deploy@buildhost uptime")
+        self.assertNotIn("buildhost", text)
+        self.assertIn("uptime", text)
+        text = self.scrubber.scrub("ssh example-host.corp cat notes.txt")
+        self.assertIn("cat notes.txt", text)
+        text = self.scrubber.scrub("ssh -i key.pem build.corp")
+        self.assertIn("-i key.pem", text)
+        self.assertEqual(self.scrubber.scrub("ssh localhost"), "ssh localhost")
+
+    def test_scrub2_single_label_scp_without_user(self) -> None:
+        text = self.scrubber.scrub("scp a.txt buildhost:/srv/x")
+        self.assertNotIn("buildhost", text)
+        self.assertNotIn("/srv/x", text)
+        self.assertIn("a.txt", text)
+        text = self.scrubber.scrub("scp C:/x/a.txt example.com:/tmp")
+        self.assertIn("C:/x/a.txt", text)
+
+    def test_scrub2_mysql_port_flag_is_unchanged(self) -> None:
+        self.assertEqual(
+            self.scrubber.scrub("mysql -P3306 -uroot db"), "mysql -P3306 -uroot db"
+        )
+
+    def test_a_docker_login_server_is_redacted(self) -> None:
+        for command in (
+            "docker login registry.acme.io",
+            "docker login -u bot registry.acme.io:5000",
+            "podman login registry.acme.io",
+        ):
+            with self.subTest(command=command):
+                self.assertNotIn("acme", self.scrubber.scrub(command))
+        self.assertEqual(
+            self.scrubber.scrub("docker login -u bot"), "docker login -u bot"
+        )
+
     def test_documented_safe_commands_are_unchanged(self) -> None:
         for command in (
             "mkdir -p build/out",
