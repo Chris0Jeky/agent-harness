@@ -1514,6 +1514,55 @@ class HarnessTests(unittest.TestCase):
         result = harness.audit_repo(repo)
         self.assertTrue(result["ok"], result["issues"])
 
+    def seed_args(self, repo: Path, **overrides: object) -> SimpleNamespace:
+        values = {
+            "path": str(repo),
+            "tier": 2,
+            "push": "free",
+            "merge": "free",
+            "human_todo": None,
+            "sensitive_data": False,
+            "relaxed_work_loss_guards": False,
+            "dry_run": False,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_seed_gitignores_the_claude_worktree_root(self) -> None:
+        # Issue #236: worktree isolation would otherwise commit this line
+        # straight to the default branch on its first run.
+        repo = self.make_repo()
+        (repo / ".gitignore").write_bytes(b"node_modules/\r\n.env")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(harness.seed_repo(self.seed_args(repo)), 0)
+        self.assertEqual(
+            (repo / ".gitignore").read_bytes(),
+            b"node_modules/\r\n.env\r\n/.claude/worktrees/\r\n",
+        )
+
+    def test_seed_leaves_an_existing_worktree_ignore_alone(self) -> None:
+        for index, line in enumerate(
+            ("/.claude/worktrees", ".claude/worktrees/", ".claude/")
+        ):
+            with self.subTest(line=line):
+                repo = Path(self.temp.name) / f"ignored-{index}"
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+                original = f"dist/\n{line}\n".encode("utf-8")
+                (repo / ".gitignore").write_bytes(original)
+                with redirect_stdout(io.StringIO()):
+                    harness.seed_repo(self.seed_args(repo))
+                self.assertEqual((repo / ".gitignore").read_bytes(), original)
+
+    def test_seed_dry_run_writes_nothing(self) -> None:
+        repo = self.make_repo()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            harness.seed_repo(self.seed_args(repo, dry_run=True))
+        self.assertFalse((repo / ".gitignore").exists())
+        self.assertFalse((repo / ".agent-harness" / "tier.json").exists())
+        self.assertIn("would add /.claude/worktrees/", output.getvalue())
+
     def test_seed_refuses_overwrite(self) -> None:
         repo = self.make_repo()
         target = repo / ".agent-harness" / "tier.json"

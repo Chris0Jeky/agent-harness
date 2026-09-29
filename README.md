@@ -158,7 +158,8 @@ be the checkout root of the harness origin's `claude-config` sibling, clean on `
 its published `origin/main`, and free of hidden index flags on all three guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
 byte mismatch or absent deployed target fails.
 
-`seed` refuses to overwrite an existing runtime-neutral tier declaration. `sync-global` backs
+`seed` refuses to overwrite an existing runtime-neutral tier declaration, and adds
+`/.claude/worktrees/` to `.gitignore` when nothing ignores it yet (#236). `sync-global` backs
 up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed
 `codex/agents/*.toml` definitions before replacing them. Agent definitions deploy to
 `<codex-home>/agents`; the durable managed-entry record permits stale removal only when the

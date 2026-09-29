@@ -653,7 +653,9 @@ changes only when that shape changes.
 Home: this repo. Implemented in the dependency-free `harness.py` (one implementation, no
 `.sh`/`.ps1` twins):
 - `harness.py seed <path> --tier N` — writes only the runtime-neutral tier germ and refuses
-  overwrite. Repo instructions remain judgment work and are not generated blindly.
+  overwrite, plus one `/.claude/worktrees/` line appended to `.gitignore` when no line already
+  ignores that root (#236: otherwise worktree isolation commits it straight to the default branch).
+  Repo instructions remain judgment work and are not generated blindly.
 - `harness.py audit <path>` — validates tier schema, instruction/skill budgets, Git state, and
   stale user-profile paths, and default-branch server-side history protection
   (`non_fast_forward` + `deletion` ruleset or classic equivalent), reported as an advisory

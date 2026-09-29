@@ -6700,6 +6700,41 @@ def audit_repo(
     }
 
 
+# Claude Code's worktree isolation gitignores its own worktree root the first
+# time it runs in a repo and commits that straight to the default branch, with
+# no PR (issue #236). Seeding the line first leaves it nothing to do.
+WORKTREE_IGNORE = "/.claude/worktrees/"
+_WORKTREE_IGNORE_COVERED = {
+    "/.claude/worktrees",
+    ".claude/worktrees",
+    "/.claude",
+    ".claude",
+}
+
+
+def worktree_ignore_missing(repo: Path) -> bool:
+    """Whether `.gitignore` lacks a line that ignores `.claude/worktrees`."""
+    path = repo / ".gitignore"
+    try:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HarnessError(f"cannot read {path}: {exc}") from exc
+    lines = {line.strip().rstrip("/") for line in text.splitlines()}
+    return not lines & _WORKTREE_IGNORE_COVERED
+
+
+def add_worktree_ignore(repo: Path) -> None:
+    path = repo / ".gitignore"
+    try:
+        existing = path.read_bytes() if path.exists() else b""
+        newline = b"\r\n" if b"\r\n" in existing else b"\n"
+        prefix = b"" if not existing or existing.endswith(b"\n") else newline
+        with path.open("ab") as handle:
+            handle.write(prefix + WORKTREE_IGNORE.encode("utf-8") + newline)
+    except OSError as exc:
+        raise HarnessError(f"cannot update {path}: {exc}") from exc
+
+
 def seed_repo(args: argparse.Namespace) -> int:
     repo = git_root(Path(args.path))
     target = repo / ".agent-harness" / "tier.json"
@@ -6725,9 +6760,16 @@ def seed_repo(args: argparse.Namespace) -> int:
         "human_todo": args.human_todo,
         "last_reviewed": date.today().isoformat(),
     }
+    ignore_missing = worktree_ignore_missing(repo)
     if args.dry_run:
         print(json.dumps(payload, indent=2))
+        if ignore_missing:
+            print(f"would add {WORKTREE_IGNORE} to {repo / '.gitignore'}")
         return 0
+    # Before the tier file: a failed append then leaves nothing half-seeded.
+    if ignore_missing:
+        add_worktree_ignore(repo)
+        print(f"added {WORKTREE_IGNORE} to {repo / '.gitignore'}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"created {target}")
