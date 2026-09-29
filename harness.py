@@ -2572,17 +2572,135 @@ def claude_target_overlap(left: list[str], right: list[str]) -> list[str]:
 
 def claude_command_points_to_dispatcher(command: str, dispatcher: Path) -> bool:
     """Recognize the controlled dispatcher path without POSIX case folding."""
-    expected = str(dispatcher.resolve()).replace("\\", "/")
+    expected = _dispatcher_identity_key(str(dispatcher))
+    if expected is None:
+        return False
     candidate = command.replace("\\", "/")
     if os.name == "nt":
-        expected = expected.casefold()
         candidate = candidate.casefold()
     # This is intentionally a token check, not a shell parser: static Doctor
     # can identify the exact controlled path but cannot prove what a shell will
     # execute. The boundaries reject a path merely embedded in another token.
-    return bool(
-        re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate)
-    )
+    if re.search(rf"(?:^|[\s\"'=]){re.escape(expected)}(?=$|[\s\"';|&])", candidate):
+        return True
+    if _claude_command_names_dispatcher_alias(command, dispatcher, expected):
+        return True
+    return _claude_command_uses_default_home_dispatcher(command, dispatcher)
+
+
+# One quoted string (either quote) or one unquoted run is one path token; the
+# unquoted run stops at the same separators the literal match treats as ends.
+_COMMAND_PATH_TOKEN = re.compile(r"\"([^\"]*)\"|'([^']*)'|([^\s\"';|&]+)")
+# Resolution touches the filesystem, so a pathological command is capped.
+_DISPATCHER_ALIAS_CANDIDATE_LIMIT = 32
+
+
+def _dispatcher_identity_key(path_text: str) -> str | None:
+    """Resolve a path to its comparison key; a resolution error is no identity."""
+    try:
+        resolved = os.path.realpath(path_text)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    key = resolved.replace("\\", "/")
+    # Windows names are case-insensitive; POSIX keeps case distinct, and
+    # realpath never rewrites a POSIX component's case, even on a
+    # case-insensitive volume.
+    return key.casefold() if os.name == "nt" else key
+
+
+def _claude_command_names_dispatcher_alias(
+    command: str, dispatcher: Path, expected: str
+) -> bool:
+    """Match an absolute path token that resolves to the controlled dispatcher.
+
+    A valid spelling of the same file differs from the resolved one when the
+    path crosses a symlink or junction, a Windows 8.3 short name, or macOS's
+    /var -> /private/var link. Each whole token is resolved and compared by
+    identity, so a foreign file reached through an alias, a decoy name, or a
+    path fragment inside a larger token never matches.
+    """
+    names = {dispatcher.name, expected.rsplit("/", 1)[-1]}
+    if os.name == "nt":
+        names = {name.casefold() for name in names}
+    checked = 0
+    for match in _COMMAND_PATH_TOKEN.finditer(command):
+        token = next(group for group in match.groups() if group is not None)
+        options = [token]
+        # `--hook=/abs/dispatch.py`: the literal match accepts `=` as a start.
+        # Bounded so a pathological `=` run cannot build quadratic slices.
+        starts = [index for index, char in enumerate(token) if char == "="][:8]
+        options.extend(token[index + 1 :] for index in starts)
+        for option in options:
+            if option[:2].replace("\\", "/") == "//":
+                # A UNC or `//host` path names a NETWORK location: resolving it
+                # would contact that host (on Windows, an SMB session that can
+                # hand over NTLM credentials) from repo-controlled settings,
+                # and `--offline` promises no network (review of #345).
+                continue
+            name = option.replace("\\", "/").rsplit("/", 1)[-1]
+            if os.name == "nt":
+                name = name.casefold()
+            if name not in names or any(char in option for char in "$%`"):
+                # Only a candidate with the dispatcher's name is resolved, and
+                # a shell-expanded spelling is not statically provable.
+                continue
+            if not os.path.isabs(option) or (
+                os.sep == "\\" and not os.path.splitdrive(option)[0]
+            ):
+                # A relative or drive-relative token depends on the process
+                # cwd, which static Doctor does not share with the hook.
+                continue
+            if checked >= _DISPATCHER_ALIAS_CANDIDATE_LIMIT:
+                return False
+            checked += 1
+            if _dispatcher_identity_key(option) == expected:
+                return True
+    return False
+
+
+def _claude_command_uses_default_home_dispatcher(
+    command: str, dispatcher: Path
+) -> bool:
+    """Recognize HOME spellings only when they identify the default Claude home."""
+    try:
+        expected = str(dispatcher.resolve()).replace("\\", "/")
+        default_dispatcher = str(
+            (Path.home() / ".claude" / "hooks" / "dispatch.py").resolve()
+        ).replace("\\", "/")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    windows = os.name == "nt"
+    if windows:
+        expected = expected.casefold()
+        default_dispatcher = default_dispatcher.casefold()
+    if expected != default_dispatcher:
+        return False
+
+    normalized = command.replace("\\", "/")
+    dispatcher_suffix = r"/\.claude/hooks/dispatch\.py"
+    home_variables = [r"\$HOME", r"\$\{HOME\}"]
+    if windows:
+        home_variables.extend((r"\$env:USERPROFILE", r"\$\{env:USERPROFILE\}"))
+    flags = re.IGNORECASE if windows else 0
+
+    # Tilde expansion does not occur inside shell quotes. Environment
+    # variables do expand inside double quotes, but not single quotes.
+    patterns = [
+        rf"(?:^|\s)~{dispatcher_suffix}(?=$|[\s;|&])",
+    ]
+    for variable in home_variables:
+        patterns.extend(
+            (
+                rf"(?:^|\s){variable}{dispatcher_suffix}(?=$|[\s;|&])",
+                rf'"{variable}{dispatcher_suffix}"(?=$|[\s;|&])',
+            )
+        )
+    if windows:
+        patterns.extend(
+            rf"(?:^|\s)join-path\s+{variable}\s+'\.claude/hooks/dispatch\.py'(?=$|[\s;|&])"
+            for variable in home_variables
+        )
+    return any(re.search(pattern, normalized, flags=flags) for pattern in patterns)
 
 
 def claude_policy_source_identity(command: str, claude_home: Path) -> tuple[str, str]:
@@ -4311,12 +4429,14 @@ def claude_settings_register_floor(claude_home: Path, repo: Path) -> Path | None
         repo / ".claude" / "settings.json",
         repo / ".claude" / "settings.local.json",
     ):
-        if _settings_file_registers_floor(source):
+        if _settings_file_registers_floor(
+            source, claude_home / "hooks" / "dispatch.py"
+        ):
             return source
     return None
 
 
-def _settings_file_registers_floor(source: Path) -> bool:
+def _settings_file_registers_floor(source: Path, dispatcher: Path) -> bool:
     try:
         text = read_optional_text(source)
         if text is None:
@@ -4332,7 +4452,9 @@ def _settings_file_registers_floor(source: Path) -> bool:
         handlers = group.get("hooks") if isinstance(group, dict) else None
         for handler in handlers if isinstance(handlers, list) else []:
             command = handler.get("command") if isinstance(handler, dict) else None
-            if isinstance(command, str) and "dispatch.py" in command.lower():
+            if isinstance(command, str) and claude_command_points_to_dispatcher(
+                command, dispatcher
+            ):
                 return True
     return False
 

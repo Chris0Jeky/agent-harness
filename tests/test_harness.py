@@ -336,11 +336,12 @@ class HarnessTests(unittest.TestCase):
         as_json: bool = False,
         config_root: Path | None = None,
         guidance_reference: tuple[bool, str] | None = None,
+        claude_home_path: Path | None = None,
         codex_launcher: str | None = DOCTOR_FIXTURE_CODEX_LAUNCHER,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
-        claude_home = root / "claude-home"
+        claude_home = claude_home_path or root / "claude-home"
         skills_home = root / "skills-home"
         (codex_home / "AGENTS.md").parent.mkdir(exist_ok=True)
         (codex_home / "AGENTS.md").write_text("# Codex\n", encoding="utf-8")
@@ -788,6 +789,215 @@ class HarnessTests(unittest.TestCase):
                     f'python3 "{different_case}"', dispatcher
                 )
             )
+
+    def test_claude_dispatcher_identity_recognizes_controlled_home_aliases(
+        self,
+    ) -> None:
+        fake_home = (Path(self.temp.name) / "user-home").resolve()
+        claude_home = fake_home / ".claude"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
+        aliases = (
+            "python ~/.claude/hooks/dispatch.py --event pre",
+            "python $HOME/.claude/hooks/dispatch.py --event pre",
+            "python ${HOME}/.claude/hooks/dispatch.py --event pre",
+        )
+        with mock.patch.object(Path, "home", return_value=fake_home):
+            for command in aliases:
+                with self.subTest(command=command):
+                    with mock.patch.object(harness.os, "name", "posix"):
+                        self.assertTrue(
+                            harness.claude_command_points_to_dispatcher(
+                                command, dispatcher
+                            )
+                        )
+            windows_aliases = (
+                "py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre",
+                "powershell -Command Join-Path $env:USERPROFILE '.claude/hooks/dispatch.py'",
+            )
+            for command in windows_aliases:
+                with self.subTest(command=command):
+                    with mock.patch.object(harness.os, "name", "nt"):
+                        self.assertTrue(
+                            harness.claude_command_points_to_dispatcher(
+                                command, dispatcher
+                            )
+                        )
+            foreign_dispatcher = (
+                Path(self.temp.name) / "other" / ".claude" / "hooks" / "dispatch.py"
+            )
+            with mock.patch.object(harness.os, "name", "posix"):
+                self.assertFalse(
+                    harness.claude_command_points_to_dispatcher(
+                        aliases[1], foreign_dispatcher
+                    )
+                )
+
+    def make_aliased_claude_home(self) -> tuple[Path, Path, Path]:
+        """Real Claude home with a dispatcher, a foreign dispatcher and decoys,
+        plus the aliased root that reaches all of them. Returns (dispatcher,
+        link root, real root)."""
+        real = (Path(self.temp.name) / "alias-real").resolve()
+        hooks = real / "claude-home" / "hooks"
+        hooks.mkdir(parents=True)
+        for name in ("dispatch.py", "xdispatch.py", "dispatch.py.bak"):
+            (hooks / name).write_text("# fixture\n", encoding="utf-8")
+        foreign = real / "other" / "hooks" / "dispatch.py"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("# foreign\n", encoding="utf-8")
+        link = Path(self.temp.name) / "alias-link"
+        # The temp-root cleanup removes the alias without following it.
+        self.make_directory_alias(real, link)
+        return hooks / "dispatch.py", link, real
+
+    def test_claude_dispatcher_identity_matches_alias_spellings_by_resolution(
+        self,
+    ) -> None:
+        # Issue #275 / PR #345: CI's temp roots are aliases (Windows 8.3
+        # RUNNER~1, macOS /var -> /private/var), and a literal comparison of
+        # the command's spelling with the RESOLVED dispatcher missed them.
+        dispatcher, link, _real = self.make_aliased_claude_home()
+        aliased = link / "claude-home" / "hooks" / "dispatch.py"
+        self.assertNotEqual(str(aliased), str(dispatcher.resolve()))
+        forward = str(aliased).replace("\\", "/")
+        matching = [
+            f'python "{aliased}" --event pre',
+            f"python '{aliased}' --event pre",
+            f'python "{forward}" --event pre',
+            f'echo ok; python "{aliased}"',
+            f'python --hook="{aliased}"',
+        ]
+        if " " not in str(aliased):
+            matching.extend(
+                (f"python {aliased} --event pre", f"python --hook={aliased}")
+            )
+        if os.name == "nt":
+            upper = str(aliased).replace("dispatch.py", "DISPATCH.PY")
+            matching.append(f'py -3 "{upper}" --event pre')
+        for command in matching:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    harness.claude_command_points_to_dispatcher(command, dispatcher)
+                )
+        # Identity is symmetric: the alias as the controlled path, the real
+        # spelling in the command.
+        self.assertTrue(
+            harness.claude_command_points_to_dispatcher(
+                f'python "{dispatcher}"', aliased
+            )
+        )
+
+    def test_claude_dispatcher_identity_rejects_foreign_and_decoy_alias_spellings(
+        self,
+    ) -> None:
+        dispatcher, link, _real = self.make_aliased_claude_home()
+        aliased = link / "claude-home" / "hooks" / "dispatch.py"
+        hooks = aliased.parent
+        rejected = [
+            # A foreign file with the dispatcher's name, reached via the alias.
+            f'python "{link / "other" / "hooks" / "dispatch.py"}" --event pre',
+            # Suffix/prefix decoys that exist beside the real dispatcher.
+            f'python "{hooks / "xdispatch.py"}" --event pre',
+            f'python "{hooks / "dispatch.py.bak"}" --event pre',
+            f'python "{hooks / "dispatch.pyc"}" --event pre',
+            # The aliased path embedded in a larger token.
+            f'python "x{aliased}" --event pre',
+            f'python "{aliased}x" --event pre',
+            f'python "{aliased}.bak" --event pre',
+            # A shell-expanded segment that would collapse onto the dispatcher.
+            f'python "{link}/$SEGMENT/../claude-home/hooks/dispatch.py"',
+            # A relative spelling depends on a cwd static Doctor does not share.
+            "python claude-home/hooks/dispatch.py --event pre",
+        ]
+        if os.name != "nt":
+            # POSIX keeps case distinct even through an alias.
+            upper = str(aliased).replace("dispatch.py", "DISPATCH.PY")
+            rejected.append(f'python "{upper}" --event pre')
+        for command in rejected:
+            with self.subTest(command=command):
+                self.assertFalse(
+                    harness.claude_command_points_to_dispatcher(command, dispatcher)
+                )
+
+    def test_claude_dispatcher_identity_never_resolves_network_paths(self) -> None:
+        # Review of #345: resolving a repo-controlled UNC token would contact
+        # the named host (an SMB session on Windows) despite --offline.
+        dispatcher, _link, _real = self.make_aliased_claude_home()
+        resolved = []
+        real_realpath = os.path.realpath
+
+        def recording(path, *args, **kwargs):
+            resolved.append(str(path))
+            return real_realpath(path, *args, **kwargs)
+
+        commands = [
+            r"python \\host.example\share\hooks\dispatch.py --event pre",
+            "python //host.example/share/hooks/dispatch.py --event pre",
+            r'python "\\?\UNC\host.example\share\dispatch.py"',
+            "python --hook=//host.example/share/dispatch.py",
+        ]
+        with mock.patch.object(harness.os.path, "realpath", recording):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertFalse(
+                        harness.claude_command_points_to_dispatcher(command, dispatcher)
+                    )
+        self.assertFalse(
+            [path for path in resolved if "host.example" in path], resolved
+        )
+        started = time.perf_counter()
+        harness.claude_command_points_to_dispatcher(
+            "python " + "=" * 20000 + "/dispatch.py", dispatcher
+        )
+        self.assertLess(time.perf_counter() - started, 2.0)
+
+    def test_claude_dispatcher_identity_resolution_error_is_no_match(self) -> None:
+        dispatcher, link, _real = self.make_aliased_claude_home()
+        aliased = link / "claude-home" / "hooks" / "dispatch.py"
+        command = f'python "{aliased}" --event pre'
+        real_realpath = os.path.realpath
+
+        def failing_for_alias(path, *args, **kwargs):
+            if "alias-link" in str(path):
+                raise OSError("simulated resolution failure")
+            return real_realpath(path, *args, **kwargs)
+
+        with mock.patch.object(harness.os.path, "realpath", failing_for_alias):
+            self.assertFalse(
+                harness.claude_command_points_to_dispatcher(command, dispatcher)
+            )
+        with mock.patch.object(
+            harness.os.path, "realpath", side_effect=ValueError("embedded null")
+        ):
+            self.assertFalse(
+                harness.claude_command_points_to_dispatcher(command, dispatcher)
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows short paths are platform-specific")
+    def test_claude_dispatcher_identity_matches_windows_short_path(self) -> None:
+        home = (Path(self.temp.name) / "long-claude-home-directory").resolve()
+        dispatcher = home / "hooks" / "dispatch.py"
+        dispatcher.parent.mkdir(parents=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        foreign = home / "foreign" / "dispatch.py"
+        foreign.parent.mkdir()
+        foreign.write_text("# foreign\n", encoding="utf-8")
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            str(home), buffer, len(buffer)
+        )
+        if not length or Path(buffer.value) == home:
+            self.skipTest("8.3 short-path spelling is unavailable on this volume")
+        short = Path(buffer.value)
+        self.assertTrue(
+            harness.claude_command_points_to_dispatcher(
+                f'py -3 "{short / "hooks" / "dispatch.py"}" --event pre', dispatcher
+            )
+        )
+        self.assertFalse(
+            harness.claude_command_points_to_dispatcher(
+                f'py -3 "{short / "foreign" / "dispatch.py"}" --event pre', dispatcher
+            )
+        )
 
     def test_claude_hook_topology_invalid_unreadable_unknown_and_linked_are_unproven(
         self,
@@ -6615,6 +6825,7 @@ allow_local_binding = true
         repo = self.make_repo()
         self.write_floorless_tier(repo)
         claude_home = Path(self.temp.name) / "claude-home"
+        dispatcher = claude_home / "hooks" / "dispatch.py"
         claude_home.mkdir(exist_ok=True)
         (claude_home / "settings.json").write_text(
             json.dumps(
@@ -6626,7 +6837,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "python ~/.claude/hooks/dispatch.py --event pre",
+                                        "command": f'python "{dispatcher}" --event pre',
                                     }
                                 ],
                             }
@@ -6646,14 +6857,96 @@ allow_local_binding = true
         )
         self.assertIn("still registers the PreToolUse dispatcher", output)
 
+    def test_doctor_rejects_floorless_declaration_with_home_anchored_dispatcher(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+        fake_home = (Path(self.temp.name) / "user-home").resolve()
+        claude_home = fake_home / ".claude"
+        settings = claude_home / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": 'python "$HOME/.claude/hooks/dispatch.py" --event pre',
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(Path, "home", return_value=fake_home):
+            result, output = self.run_doctor_with_fixture_globals(
+                repo, claude_home_path=claude_home
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] project Codex floor: tier.json declares floor_wiring: none but",
+            output,
+        )
+        self.assertIn("still registers the PreToolUse dispatcher", output)
+
+    def test_doctor_rejects_floorless_declaration_with_aliased_dispatcher_path(
+        self,
+    ) -> None:
+        # The CI failure of PR #345, made deterministic on every platform: the
+        # Claude home registers its dispatcher through an alias spelling of
+        # the same file, which is still a floor running in this repo.
+        repo = self.make_repo()
+        self.write_floorless_tier(repo)
+        dispatcher, link, _real = self.make_aliased_claude_home()
+        claude_home = dispatcher.parent.parent
+        aliased = link / "claude-home" / "hooks" / "dispatch.py"
+        self.write_claude_settings(
+            claude_home / "settings.json",
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'python "{aliased}" --event pre',
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        result, output = self.run_doctor_with_fixture_globals(
+            repo, claude_home_path=claude_home
+        )
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "[FAIL] project Codex floor: tier.json declares floor_wiring: none but",
+            output,
+        )
+        self.assertIn("still registers the PreToolUse dispatcher", output)
+
     def test_doctor_rejects_floorless_declaration_with_project_claude_floor(
         self,
     ) -> None:
         # Project and local Claude settings are inspected scopes too; a handler
-        # there wires the floor for this repo whatever the home says. Case is
-        # ignored in the dispatcher name because Windows resolves it anyway.
+        # there wires the floor for this repo whatever the home says. Preserve
+        # the current host's filesystem case semantics in this path fixture.
         repo = self.make_repo()
         self.write_floorless_tier(repo)
+        dispatcher = Path(self.temp.name) / "claude-home" / "hooks" / "dispatch.py"
         local = repo / ".claude" / "settings.local.json"
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(
@@ -6666,7 +6959,7 @@ allow_local_binding = true
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "py -3 $env:USERPROFILE/.claude/hooks/DISPATCH.PY --event pre",
+                                        "command": f'py -3 "{str(dispatcher).replace("dispatch.py", "DISPATCH.PY") if os.name == "nt" else dispatcher}" --event pre',
                                     }
                                 ],
                             }
@@ -6682,6 +6975,45 @@ allow_local_binding = true
         self.assertEqual(result, 1)
         self.assertIn(
             "settings.local.json still registers the PreToolUse dispatcher", output
+        )
+
+    def test_claude_settings_register_floor_matches_only_controlled_dispatcher(
+        self,
+    ) -> None:
+        repo = self.make_repo()
+        claude_home = (Path(self.temp.name) / "claude-home").resolve()
+        dispatcher = (claude_home / "hooks" / "dispatch.py").resolve()
+        dispatcher.parent.mkdir(parents=True, exist_ok=True)
+        dispatcher.write_text("# fixture\n", encoding="utf-8")
+        user_source = claude_home / "settings.json"
+        foreign = "python /tmp/foreign/dispatch.py --event pre"
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": foreign}],
+                    }
+                ]
+            },
+        )
+        self.assertIsNone(harness.claude_settings_register_floor(claude_home, repo))
+        windows_dispatcher = str(dispatcher).replace("/", "\\")
+        controlled = f'python3 "{windows_dispatcher}" --event pre'
+        self.write_claude_settings(
+            user_source,
+            {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": controlled}],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            harness.claude_settings_register_floor(claude_home, repo), user_source
         )
 
     def test_doctor_accepts_floorless_repo_with_lifecycle_only_hooks(self) -> None:
