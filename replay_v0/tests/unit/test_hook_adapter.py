@@ -164,6 +164,10 @@ class CommandParsingTests(unittest.TestCase):
         argv = parse_hook_command("hook http://localhost:8080/check.py")
         self.assertEqual(argv[-1], "http://localhost:8080/check.py")
 
+    def test_a_scheme_mid_word_is_still_a_missing_script(self) -> None:
+        with self.assertRaises(HookSpecError):
+            parse_hook_command("python ./hooks://missing.py")
+
     def test_the_named_transcript_exists_and_is_empty(self) -> None:
         workspace = prepare_workspace(None)
         try:

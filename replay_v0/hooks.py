@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shlex
 import shutil
@@ -135,11 +136,14 @@ def _unquote(word: str) -> str:
     return word
 
 
+_URL_WORD = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
 def _looks_like_file(word: str) -> bool:
     # Only a script name: URLs, directories and inline code also contain slashes.
     return (
         not word.startswith("-")
-        and "://" not in word
+        and not _URL_WORD.match(word)
         and Path(word).suffix.lower() in _SCRIPT_SUFFIXES
         and not Path(word).exists()
     )
