@@ -20,6 +20,7 @@ Owner: Cristian Tcaci
   owner question. `CharterReplay` / `charter-replay` remains only a candidate.
 - **DEFERRED RP-005:** Licensing is an AH-10 decision after provenance review, not the next owner
   question. No licence recommendation authorises a change.
+- **DECISION RP-006 (2026-09-29, owner in chat):** RP-004 and RP-005 are decided: the repository, package and CLI are `charter-replay`, licensed Apache-2.0, published from `Chris0Jeky/charter-replay`. See AGENT_HARNESS_OPERATIONS AH-006.
 
 # Deferred repository design
 

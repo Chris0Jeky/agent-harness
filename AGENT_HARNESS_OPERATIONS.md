@@ -13,6 +13,7 @@ Owner: Cristian Tcaci
 - **DECISION AH-005:** The owner removed the calendar launch deadline. The original 13-hour replay
   extraction allocation plus 11-hour public-product allocation is retained as historical
   accounting for that programme. It is not a cap on the wider workbench mission.
+- **DECISION AH-006 (2026-09-29, owner in chat):** AH-10 is unlocked for the replay tool. The owner approved a clean public repository, the name `charter-replay`, the Apache-2.0 licence, publication and the demo GIF. `replay_v0/` stays the source of truth; the public repository is a fresh-history extraction.
 
 # Authority and operating decision
 
