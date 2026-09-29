@@ -89,6 +89,97 @@ class HookDiffTests(unittest.TestCase):
                 )
             self.assertEqual(code, 2)
 
+    def test_hooks_replaces_stale_report_and_summaries(self) -> None:
+        sentinel = "stale-sentinel-9f3c4a"
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "run"
+            (output / "report").mkdir(parents=True)
+            (output / "report" / "report.json").write_text(sentinel, encoding="utf-8")
+            (output / "summary.json").write_text(
+                json.dumps({"stale": sentinel}), encoding="utf-8"
+            )
+            (output / "summary.md").write_text(sentinel, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "hooks",
+                        "--baseline",
+                        _hook("guard_v1.py"),
+                        "--candidate",
+                        _hook("guard_v2.py"),
+                        "--corpus",
+                        str(CORPUS),
+                        "--output",
+                        str(output),
+                        "--jobs",
+                        "4",
+                    ]
+                )
+            self.assertEqual(code, 1)
+            raw = (output / "summary.json").read_text(encoding="utf-8")
+            self.assertNotIn(sentinel, raw)
+            summary = json.loads(raw)
+            self.assertEqual(summary["counts"]["newly-allowed"], 4)
+            self.assertEqual(summary["counts"]["newly-denied"], 1)
+            self.assertEqual(summary["counts"]["newly-indeterminate"], 0)
+            markdown = (output / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("# Hook decision diff", markdown)
+            self.assertNotIn(sentinel, markdown)
+            report_raw = (output / "report" / "report.json").read_text(encoding="utf-8")
+            self.assertNotIn(sentinel, report_raw)
+
+    def test_record_workspace_pointing_at_file_is_input_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_file = Path(tmp) / "workspace-file"
+            workspace_file.write_text("not a directory", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = main(
+                    [
+                        "record",
+                        "--hook",
+                        _hook("guard_v1.py"),
+                        "--corpus",
+                        str(CORPUS),
+                        "--output",
+                        str(Path(tmp) / "out"),
+                        "--workspace",
+                        str(workspace_file),
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn(
+                f"workspace template is not a directory: {workspace_file}",
+                err.getvalue(),
+            )
+
+    def test_hooks_workspace_pointing_at_file_is_input_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_file = Path(tmp) / "workspace-file"
+            workspace_file.write_text("not a directory", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = main(
+                    [
+                        "hooks",
+                        "--baseline",
+                        _hook("guard_v1.py"),
+                        "--candidate",
+                        _hook("guard_v1.py"),
+                        "--corpus",
+                        str(CORPUS),
+                        "--output",
+                        str(Path(tmp) / "run"),
+                        "--workspace",
+                        str(workspace_file),
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn(
+                f"workspace template is not a directory: {workspace_file}",
+                err.getvalue(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
