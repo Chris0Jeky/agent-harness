@@ -139,6 +139,7 @@ def _looks_like_file(word: str) -> bool:
     # Only a script name: URLs, directories and inline code also contain slashes.
     return (
         not word.startswith("-")
+        and "://" not in word
         and Path(word).suffix.lower() in _SCRIPT_SUFFIXES
         and not Path(word).exists()
     )
@@ -332,6 +333,11 @@ def prepare_workspace(template: Path | None) -> Path:
         shutil.copytree(template, workspace)
     else:
         workspace.mkdir()
+    # The payload names a transcript; a hook that opens it finds an empty one
+    # rather than crashing on every event.
+    transcript = workspace / ".replay" / "transcript.jsonl"
+    transcript.parent.mkdir(exist_ok=True)
+    transcript.touch()
     return workspace
 
 

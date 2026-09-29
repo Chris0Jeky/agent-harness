@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from replay_v0.app import main
 
@@ -19,6 +20,52 @@ GUARDS = REPO / "examples" / "toy-guard"
 
 def _hook(name: str) -> str:
     return json.dumps([sys.executable, str(GUARDS / name)])
+
+
+class HookOptionTests(unittest.TestCase):
+    def _record(self, *extra: str, output: str) -> int:
+        return main(
+            [
+                "record",
+                "--hook",
+                _hook("guard_v1.py"),
+                "--corpus",
+                str(CORPUS),
+                "--output",
+                output,
+                *extra,
+            ]
+        )
+
+    def test_out_of_range_timeouts_and_jobs_are_refused(self) -> None:
+        # The kernel's --timeout refuses these; the hook runner must too, or a
+        # zero timeout records every event as a timeout and still exits 0.
+        cases = (
+            ("--hook-timeout", "0"),
+            ("--hook-timeout", "-1"),
+            ("--hook-timeout", "nan"),
+            ("--hook-timeout", "inf"),
+            ("--jobs", "0"),
+            ("--jobs", "65"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for flag, value in cases:
+                with self.subTest(flag=flag, value=value):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as caught:
+                            self._record(flag, value, output=tmp)
+                    self.assertEqual(caught.exception.code, 2)
+
+    def test_a_filesystem_failure_is_a_clean_exit_three(self) -> None:
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch(
+                "replay_v0.app.record_hook", side_effect=PermissionError("denied")
+            ), contextlib.redirect_stderr(stderr):
+                code = self._record(output=tmp)
+        self.assertEqual(code, 3)
+        self.assertIn("PermissionError: denied", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 class HookDiffTests(unittest.TestCase):
