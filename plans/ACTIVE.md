@@ -58,8 +58,8 @@ Afternoon wave (Muse workers and lenses, one Sonnet helper, merges after a fresh
 and exact-head CI): #390 (ledger fingerprint parity, #387), #391 (unreadable budget docs, #383),
 #392 (terminal-only policy stderr, #141), #393 (hook adapter test gaps), #394 (hook CLI
 hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) and #400
-(`seed` gitignores `/.claude/worktrees/`, #236), then #396 (importer scrub leaks) and #403 (CI:
-Verify lints first with a 30-minute budget, #402).
+(`seed` gitignores `/.claude/worktrees/`, #236), then #403 (CI: Verify lints
+first with a 30-minute budget, #402) and, last, #396 (importer scrub leaks).
 
 ## Open pull requests
 
