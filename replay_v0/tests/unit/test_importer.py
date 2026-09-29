@@ -103,6 +103,16 @@ class ScrubberTests(unittest.TestCase):
         for private in ("private.corp", "acme", "secret", "build.internal", "proj"):
             self.assertNotIn(private, text)
 
+    def test_url_scrub_keeps_the_following_command(self) -> None:
+        text = self.scrubber.scrub(
+            "curl https://private.corp/a;rm -rf /tmp/x && "
+            "git clone git@buildhost:team/secret.git|wc"
+        )
+        self.assertIn(";rm -rf /tmp/x && ", text)
+        self.assertIn("|wc", text)
+        for private in ("private.corp", "buildhost", "team", "secret"):
+            self.assertNotIn(private, text)
+
     def test_extra_terms_match_inside_joined_paths(self) -> None:
         text = self.scrubber.scrub("cd /src/ProjectPhoenix-app && ls xprojectphoenix")
         self.assertNotIn("phoenix", text.lower())
