@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from replay_v0 import cli as kernel
@@ -210,6 +211,21 @@ class ScrubberTests(unittest.TestCase):
         self.assertEqual(
             self.scrubber.scrub("docker login -u bot"), "docker login -u bot"
         )
+
+    def test_long_dotted_runs_scrub_in_linear_time(self) -> None:
+        # #397: unbounded leading classes made this 8.5 s for 40,000 characters.
+        for text in ("echo " + "x." * 20000, "echo " + "a-" * 20000 + "@"):
+            started = time.perf_counter()
+            self.scrubber.scrub(text)
+            self.assertLess(time.perf_counter() - started, 2.0)
+
+    def test_bounded_patterns_still_scrub_their_targets(self) -> None:
+        text = self.scrubber.scrub(
+            "curl -Lhttps://bot:S3cretPw@build.private.corp/x; "
+            "mail jane.q.public.person.example.user@corp.example.net"
+        )
+        for private in ("S3cretPw", "private.corp", "corp.example.net"):
+            self.assertNotIn(private, text)
 
     def test_documented_safe_commands_are_unchanged(self) -> None:
         for command in (
