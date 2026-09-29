@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-09-29, evening. `main` head `22d153f` (PR #398's merge). The 2026-09-02 snapshot and
+Snapshot: 2026-09-29, evening. `main` head `2f704c2` (PR #396's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
 
 ## Owner decisions in force (2026-09-29)
@@ -51,18 +51,20 @@ controlled-dispatcher checks; #339 closed as superseded), #382 (tier.json wrong-
 #384 (replay adapter). The conflicts #345/#380 and #382/#381 were resolved on the PR branches; the
 combined tree passed 1,322 unit and 186 replay tests locally before the sequential merges.
 
+Morning, also merged: #386 (the late Codex P2s on #384: relative hook executables, non-HTTP private
+hosts) and #388 (another session: BLUEPRINT and SPECS follow the laws changes).
+
 Afternoon wave (Muse workers and lenses, one Sonnet helper, merges after a fresh-context review
 and exact-head CI): #390 (ledger fingerprint parity, #387), #391 (unreadable budget docs, #383),
 #392 (terminal-only policy stderr, #141), #393 (hook adapter test gaps), #394 (hook CLI
 hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) and #400
-(`seed` gitignores `/.claude/worktrees/`, #236).
+(`seed` gitignores `/.claude/worktrees/`, #236), then #396 (importer scrub leaks) and #403 (CI:
+Verify lints first with a 30-minute budget, #402).
 
 ## Open pull requests
 
 | PR | State |
 |---|---|
-| #396 | importer scrub leaks (passphrases, tool passwords, `~user`, bare private hosts); two rounds closed |
-| #403 | CI: Verify lints first and gets 30 minutes (#402) |
 | #332 | older parked lane from another session; not touched here |
 
 ## Open follow-ups
