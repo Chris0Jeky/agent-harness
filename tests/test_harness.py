@@ -21,6 +21,8 @@ from unittest import mock
 
 import harness
 
+DOCTOR_FIXTURE_CODEX_LAUNCHER = r"C:\fixture\npm\codex.cmd"
+
 
 class HarnessTests(unittest.TestCase):
     def make_repo(self) -> Path:
@@ -334,6 +336,7 @@ class HarnessTests(unittest.TestCase):
         as_json: bool = False,
         config_root: Path | None = None,
         guidance_reference: tuple[bool, str] | None = None,
+        codex_launcher: str | None = DOCTOR_FIXTURE_CODEX_LAUNCHER,
     ) -> tuple[int, str]:
         root = Path(self.temp.name)
         codex_home = root / "codex-home"
@@ -379,11 +382,15 @@ class HarnessTests(unittest.TestCase):
         def fixture_run(
             command: list[str], cwd: Path | None = None
         ) -> subprocess.CompletedProcess[str]:
+            self.doctor_commands.append(list(command))
             if command == [sys.executable, "--version"]:
                 return subprocess.CompletedProcess(command, 0, "Python fixture", "")
             if command == ["git", "--version"]:
                 return subprocess.CompletedProcess(command, 0, "git fixture", "")
-            if command == ["codex", "--version"] or command[-1:] == ["codex --version"]:
+            if command in (
+                ["codex", "--version"],
+                [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"],
+            ):
                 return subprocess.CompletedProcess(command, 0, "codex fixture", "")
             return original_run(command, cwd)
 
@@ -392,7 +399,17 @@ class HarnessTests(unittest.TestCase):
             True,
             "fixture guidance source is canonical",
         )
-        with mock.patch.object(harness, "run", side_effect=fixture_run):
+        self.doctor_commands: list[list[str]] = []
+        # The Windows Codex probe resolves its launcher before spawning (#276);
+        # pin that resolution so no test depends on the host's own install.
+        with (
+            mock.patch.object(harness, "run", side_effect=fixture_run),
+            mock.patch.object(
+                harness,
+                "resolve_codex_launcher",
+                return_value=codex_launcher,
+            ),
+        ):
             with mock.patch.object(
                 harness,
                 "codex_system_config_path",
@@ -957,6 +974,69 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotIn("synthetic-secret", human + rendered_json)
         self.assertNotIn("--token", human + rendered_json)
+
+    def run_doctor_on_simulated_host(
+        self, *, windows: bool, codex_launcher: str | None
+    ) -> str:
+        """Run Doctor with the Codex probe forced onto one host family (#276)."""
+        real_codex_version_argv = harness.codex_version_argv
+
+        def simulated(env=None, **_host):
+            return real_codex_version_argv(env, windows=windows)
+
+        with mock.patch.object(harness, "codex_version_argv", side_effect=simulated):
+            _result, output = self.run_doctor_with_fixture_globals(
+                self.make_repo(), offline=True, codex_launcher=codex_launcher
+            )
+        return output
+
+    def assert_no_powershell_codex_probe(self) -> None:
+        for command in self.doctor_commands:
+            for token in command:
+                self.assertNotIn("powershell", token.lower(), command)
+                self.assertFalse(token.lower().endswith(".ps1"), command)
+            self.assertNotIn("codex --version", command)
+
+    def test_doctor_windows_codex_probe_spawns_the_cmd_launcher_directly(
+        self,
+    ) -> None:
+        output = self.run_doctor_on_simulated_host(
+            windows=True, codex_launcher=DOCTOR_FIXTURE_CODEX_LAUNCHER
+        )
+
+        self.assertIn("[ok] codex: codex fixture", output)
+        self.assertIn(
+            [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"], self.doctor_commands
+        )
+        self.assertNotIn(["codex", "--version"], self.doctor_commands)
+        self.assert_no_powershell_codex_probe()
+
+    def test_doctor_windows_codex_probe_without_launcher_fails_named(self) -> None:
+        output = self.run_doctor_on_simulated_host(windows=True, codex_launcher=None)
+
+        self.assertIn(
+            "[FAIL] codex: codex: no codex .exe/.com/.cmd/.bat launcher", output
+        )
+        self.assertIn("never run through PowerShell", output)
+        codex_spawns = [
+            command
+            for command in self.doctor_commands
+            if command[1:] == ["--version"] and "codex" in command[0].lower()
+        ]
+        self.assertEqual(codex_spawns, [])
+        self.assert_no_powershell_codex_probe()
+
+    def test_doctor_posix_codex_probe_is_unchanged(self) -> None:
+        output = self.run_doctor_on_simulated_host(
+            windows=False, codex_launcher=DOCTOR_FIXTURE_CODEX_LAUNCHER
+        )
+
+        self.assertIn("[ok] codex: codex fixture", output)
+        self.assertIn(["codex", "--version"], self.doctor_commands)
+        self.assertNotIn(
+            [DOCTOR_FIXTURE_CODEX_LAUNCHER, "--version"], self.doctor_commands
+        )
+        self.assert_no_powershell_codex_probe()
 
     def test_doctor_guidance_identity_checks_each_runtime_target(self) -> None:
         repo = self.make_repo()
@@ -8781,6 +8861,7 @@ class RealityCheckTests(unittest.TestCase):
         sensitive_data: bool = False,
         public_synthetic_publication: dict[str, str] | None = None,
         human_todo: object = "unset",
+        status_doc: object = "unset",
         agents_text: str = "# Agent guidance\n",
     ) -> Path:
         repo = self.root / f"repo-{len(list(self.root.glob('repo-*')))}"
@@ -8795,6 +8876,8 @@ class RealityCheckTests(unittest.TestCase):
         }
         if human_todo != "unset":
             declaration["human_todo"] = human_todo
+        if status_doc != "unset":
+            declaration["status_doc"] = status_doc
         if public_synthetic_publication is not None:
             declaration["public_synthetic_publication"] = public_synthetic_publication
         (repo / ".agent-harness").mkdir()
@@ -9953,6 +10036,107 @@ class RealityCheckTests(unittest.TestCase):
         result = self.audit(repo, FakeCommandRunner())
         self.assertEqual(self.statuses(result, "human_todo"), ["advisory"])
         self.assertTrue(result["ok"], result["issues"])
+
+    # --- status_doc: SPECS §3's "now"/STATUS head budget (issue #247) ---------
+
+    def write_status_doc(self, repo: Path, lines: int) -> None:
+        target = repo / "plans" / "ACTIVE.md"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("status line\n" * lines, encoding="utf-8")
+
+    def test_an_over_budget_status_doc_fails_with_a_rotate_instruction(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 151)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(
+            result["issues"],
+            [
+                "plans/ACTIVE.md: 151>150 lines; "
+                "ROTATE: rotate to docs/archive/status-YYYY-MM.md"
+            ],
+        )
+        self.assertFalse(result["ok"])
+
+    def test_an_at_budget_status_doc_passes(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 150)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_unreadable_status_doc_path_is_unproven_not_a_crash(self) -> None:
+        # Review of #381: `is_file()` raises PermissionError/ENAMETOOLONG on
+        # 3.11, which aborted the budget pass before the reality leg ran.
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 10)
+        real_stat = Path.stat
+
+        def denied(path, *args, **kwargs):
+            if path.name == "ACTIVE.md":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", denied):
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["UNPROVEN"])
+
+    def test_a_status_doc_naming_a_missing_file_is_a_mismatch(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["MISMATCH"])
+        self.assertIn("no such file exists", self.details(result))
+        self.assertEqual(result["issues"], [])
+        self.assertFalse(result["ok"])
+
+    def test_an_invalid_status_doc_is_a_reported_issue_not_a_crash(self) -> None:
+        for declared in (
+            42,
+            ["plans/ACTIVE.md"],
+            "",
+            "   ",
+            "/etc/ACTIVE.md",
+            "../ACTIVE.md",
+            "plans/../../ACTIVE.md",
+            "C:/Users/someone/ACTIVE.md",
+            "C:ACTIVE.md",
+            "\\\\server\\share\\ACTIVE.md",
+            "plans/ACT\x00IVE.md",
+        ):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(status_doc=declared)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(len(result["issues"]), 1, result["issues"])
+                self.assertIn("status_doc must be", result["issues"][0])
+                # Reported once, by validation — not again as a reality leg.
+                self.assertEqual(self.statuses(result, "status_doc"), [])
+                self.assertFalse(result["ok"])
+
+    def test_an_absent_or_null_status_doc_runs_no_check(self) -> None:
+        for declared in ("unset", None):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(status_doc=declared)
+                # An undeclared "now" doc is not measured, however long.
+                self.write_status_doc(repo, 500)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(self.statuses(result, "status_doc"), [])
+                self.assertEqual(result["issues"], [])
+                self.assertTrue(result["ok"], result["issues"])
+
+    def test_validate_tier_accepts_a_repo_relative_status_doc(self) -> None:
+        base = {
+            "tier": 2,
+            "name": harness.TIER_NAMES[2],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        self.assertEqual(
+            harness.validate_tier({**base, "status_doc": "plans/ACTIVE.md"}), []
+        )
+        self.assertEqual(harness.validate_tier({**base, "status_doc": None}), [])
+        self.assertEqual(
+            harness.validate_tier({**base, "status_doc": 7}),
+            ["status_doc must be a repo-relative path or null, not 7"],
+        )
 
     # --- vendored floor bytes versus template versus deployed global ----------
 
