@@ -1615,6 +1615,26 @@ class HarnessTests(unittest.TestCase):
             issues[0],
         )
 
+    def test_budgets_report_a_doc_whose_presence_is_unproven(self) -> None:
+        repo = Path(self.temp.name) / "budgets-unproven"
+        repo.mkdir()
+        original = harness.file_presence
+
+        def refuse_agents(path: Path) -> tuple[bool, str]:
+            if path.name == "AGENTS.md":
+                return False, f"{path} could not be inspected (denied)"
+            return original(path)
+
+        with mock.patch.object(harness, "file_presence", side_effect=refuse_agents):
+            issues = harness.budget_issues(repo, 3)
+        self.assertEqual(
+            issues,
+            [
+                "AGENTS.md: cannot measure the 80-line budget (existence unproven); "
+                "FIX: make it a readable UTF-8 file"
+            ],
+        )
+
     def test_budgets_report_an_unlistable_skills_directory(self) -> None:
         repo = Path(self.temp.name) / "budgets-skills"
         (repo / ".agents" / "skills").mkdir(parents=True)

@@ -4685,32 +4685,31 @@ def budget_issues(
                 "rotate to docs/archive/status-YYYY-MM.md",
             )
         )
-    if file_presence(repo / "CLAUDE.md")[0]:
-        checks.append(
-            (
-                repo / "CLAUDE.md",
-                CLAUDE_LINE_CAPS[tier],
-                "rotate detail into linked docs",
-            )
-        )
-    if file_presence(repo / "AGENTS.md")[0]:
-        checks.append(
-            (repo / "AGENTS.md", 80, "move detail to the repo map or domain docs")
-        )
-    if file_presence(repo / "AGENT_MAP.md")[0]:
-        checks.append((repo / "AGENT_MAP.md", 100, "split detail into docs/regions"))
+    issues = []
     # The deny-floor ledger declares its own cap and rotation target in its
     # header (SPECS §3). Unregistered, an overflowing ledger was reported by
     # nothing at all.
-    if file_presence(repo / "FLOOR_LIMITATIONS.md")[0]:
-        checks.append(
-            (
-                repo / "FLOOR_LIMITATIONS.md",
-                120,
-                "rotate to archive/floor-limitations-<year>.md",
+    fixed_rows = (
+        ("CLAUDE.md", CLAUDE_LINE_CAPS[tier], "rotate detail into linked docs"),
+        ("AGENTS.md", 80, "move detail to the repo map or domain docs"),
+        ("AGENT_MAP.md", 100, "split detail into docs/regions"),
+        (
+            "FLOOR_LIMITATIONS.md",
+            120,
+            "rotate to archive/floor-limitations-<year>.md",
+        ),
+    )
+    for name, cap, remedy in fixed_rows:
+        present, error = file_presence(repo / name)
+        if present:
+            checks.append((repo / name, cap, remedy))
+        elif error:
+            # An access failure is not absence: say the budget went unmeasured
+            # (Codex on #391).
+            issues.append(
+                f"{name}: cannot measure the {cap}-line budget (existence "
+                "unproven); FIX: make it a readable UTF-8 file"
             )
-        )
-    issues = []
     skills = repo / ".agents" / "skills"
     try:
         skill_docs = sorted(skills.glob("*/SKILL.md")) if skills.is_dir() else []
