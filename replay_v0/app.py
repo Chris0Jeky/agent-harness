@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any
@@ -23,6 +24,23 @@ SUMMARY_JSON = "summary.json"
 SUMMARY_MD = "summary.md"
 
 
+MAX_JOBS = 64
+
+
+def _timeout(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return seconds
+
+
+def _jobs(value: str) -> int:
+    jobs = int(value)
+    if not 1 <= jobs <= MAX_JOBS:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_JOBS}")
+    return jobs
+
+
 def _add_hook_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime", choices=RUNTIMES, default="claude")
     parser.add_argument(
@@ -33,11 +51,17 @@ def _add_hook_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--hook-timeout",
-        type=float,
+        type=_timeout,
         default=10.0,
         help="seconds per hook invocation (default: 10)",
     )
-    parser.add_argument("--jobs", type=int, default=4, help="parallel invocations")
+    parser.add_argument(
+        "--jobs",
+        type=_jobs,
+        default=4,
+        help="parallel invocations (default: 4); they share one workspace, so "
+        "use 1 for a hook that keeps state in its working directory",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -252,7 +276,20 @@ def _run_hooks(args: argparse.Namespace) -> int:
 def _run_import(args: argparse.Namespace) -> int:
     from replay_v0.importer import run_import
 
-    return run_import(args)
+    # A missing or unreadable terms file is bad input (exit 2), not the
+    # filesystem failure that `main` maps to exit 3 (review of #394).
+    if args.redact_terms and not Path(args.redact_terms).is_file():
+        raise HookSpecError(
+            f"--redact-terms is not a readable file: {args.redact_terms}"
+        )
+    try:
+        return run_import(args)
+    except PermissionError as exc:
+        if args.redact_terms and exc.filename == args.redact_terms:
+            raise HookSpecError(
+                f"--redact-terms is not a readable file: {args.redact_terms}"
+            ) from exc
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -269,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     except (HookSpecError, kernel.ReplayInputError, ValueError) as exc:
         print(f"{PROG}: {exc}", file=sys.stderr)
         return kernel.EXIT_INPUT_INVALID
+    except OSError as exc:
+        # A filesystem failure while recording or writing output: the same
+        # exit the kernel uses when it cannot publish its report.
+        print(f"{PROG}: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return kernel.EXIT_SOURCE_FAILED
 
 
 if __name__ == "__main__":

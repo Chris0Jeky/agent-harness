@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -27,6 +28,7 @@ from replay_v0.hooks import (
     effect_for,
     hook_identity,
     parse_hook_command,
+    prepare_workspace,
     record_hook,
     run_hook,
 )
@@ -163,6 +165,37 @@ class CommandParsingTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 parse_hook_command(value)
+
+    def test_a_url_with_a_script_suffix_is_not_a_missing_file(self) -> None:
+        argv = parse_hook_command("hook http://localhost:8080/check.py")
+        self.assertEqual(argv[-1], "http://localhost:8080/check.py")
+
+    def test_a_scheme_mid_word_is_still_a_missing_script(self) -> None:
+        with self.assertRaises(HookSpecError):
+            parse_hook_command("python ./hooks://missing.py")
+
+    def test_the_named_transcript_exists_and_is_empty(self) -> None:
+        workspace = prepare_workspace(None)
+        try:
+            payload = build_payload(
+                _event("e", "x"), runtime="claude", workspace=workspace, index=0
+            )
+            self.assertEqual(Path(payload["transcript_path"]).read_bytes(), b"")
+        finally:
+            shutil.rmtree(workspace.parent, ignore_errors=True)
+
+    def test_a_template_transcript_is_emptied(self) -> None:
+        with tempfile.TemporaryDirectory() as template:
+            carried = Path(template, ".replay", "transcript.jsonl")
+            carried.parent.mkdir()
+            carried.write_text('{"old": true}\n', encoding="utf-8")
+            workspace = prepare_workspace(Path(template))
+            try:
+                transcript = workspace / ".replay" / "transcript.jsonl"
+                self.assertEqual(transcript.read_bytes(), b"")
+                self.assertTrue(carried.read_bytes())
+            finally:
+                shutil.rmtree(workspace.parent, ignore_errors=True)
 
     @unittest.skipUnless(os.name == "nt", "Windows command-line splitting")
     def test_windows_backslash_paths_survive(self) -> None:
