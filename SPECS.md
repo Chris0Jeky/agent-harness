@@ -854,4 +854,5 @@ law it executes — one review round, one severity-bar triage (confirmed CRITICA
 commits only; the rest tracked or declined on the thread), one fix round verified against the
 fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
 law 2g; a manual `@codex review` is never a per-fix step, law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
-round gets (T3 one independent pass, T4 two adversarial reviews), never how many rounds run.
+round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
+high-risk work; T4 two adversarial reviews), never how many rounds run.
