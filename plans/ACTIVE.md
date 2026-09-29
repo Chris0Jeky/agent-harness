@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-09-29. `main` head `2753d34` (PR #381's merge). The 2026-09-02 snapshot and
+Snapshot: 2026-09-29. `main` head `f29f0ab` (PR #384's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
 
 ## Owner decisions in force (2026-09-29)
@@ -31,7 +31,7 @@ and one P2 false positive, now tracked in #365.
 
 ## Replay product ("measure your hook")
 
-- **#384** adds the hook adapter, `charter-replay` entry point, private transcript importer,
+- **#384** (merged) adds the hook adapter, `charter-replay` entry point, private transcript importer,
   charter-v0.2 corpus (494 events) and examples. Review was two rounds, both closed.
 - The clean public repository `Chris0Jeky/charter-replay` exists (public, private vulnerability
   reporting on, squash merges off). Extraction runs from merged `main`: package renamed to
@@ -40,14 +40,19 @@ and one P2 false positive, now tracked in #365.
 - Private corpus measurement (local only, aggregates in #384): 130,624 unique scrubbed commands;
   on a 10,000 sample, the floor at 1.7.2 denies 1.18% at tier 3 and 9.12% at tier 4.
 
+## Merged 2026-09-29
+
+#376 (floor 1.7.2), #380 (Doctor Codex launcher probe), #381 (status_doc budget), #345 (Doctor
+controlled-dispatcher checks; #339 closed as superseded), #382 (tier.json wrong-type reporting) and
+#384 (replay adapter). The conflicts #345/#380 and #382/#381 were resolved on the PR branches; the
+combined tree passed 1,322 unit and 186 replay tests locally before the sequential merges.
+
 ## Open pull requests
 
 | PR | State |
 |---|---|
-| #345 | Doctor floor checks for the controlled dispatcher; conflict with #380 resolved, re-proving CI |
-| #382 | tier.json wrong-type flags and posture; conflict with #381 resolved, re-proving CI |
-| #384 | replay adapter; base refreshed, re-proving CI |
-| #339, #332 | older lanes from other sessions; not touched here |
+| #386 | the two late Codex P2s on #384 (relative hook executable, non-HTTP private hosts) |
+| #332 | older parked lane from another session; not touched here |
 
 ## Open follow-ups
 
