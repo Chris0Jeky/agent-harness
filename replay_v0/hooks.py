@@ -109,7 +109,11 @@ def parse_hook_command(value: str) -> tuple[str, ...]:
             argv = [_unquote(word) for word in argv]
     if not argv:
         raise HookSpecError("hook command is empty")
-    resolved = [argv[0]]
+    head = Path(argv[0])
+    # A path-shaped executable (`./hook`, `tools/hook`) must survive the move
+    # into the workspace; a bare name keeps its PATH lookup.
+    path_shaped = "/" in argv[0] or "\\" in argv[0]
+    resolved = [str(head.resolve()) if path_shaped and head.exists() else argv[0]]
     for word in argv[1:]:
         path = Path(word)
         if path.is_file():
