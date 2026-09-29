@@ -117,6 +117,64 @@ class ScrubberTests(unittest.TestCase):
         text = self.scrubber.scrub("cd /src/ProjectPhoenix-app && ls xprojectphoenix")
         self.assertNotIn("phoenix", text.lower())
 
+    def test_passphrase_and_attached_tool_passwords_are_redacted(self) -> None:
+        cases = [
+            ("deploy --passphrase hunter2hunter2", "hunter2hunter2"),
+            ("deploy --passphrase=hunter2hunter2", "hunter2hunter2"),
+            ("mysql -uroot -pS3cretPw db", "S3cretPw"),
+            ("mysqldump -uroot -pS3cretPw db", "S3cretPw"),
+            ("mysqladmin -uroot -pS3cretPw status", "S3cretPw"),
+            ("mariadb -uroot -pS3cretPw db", "S3cretPw"),
+            ("mariadb-dump -uroot -pS3cretPw db", "S3cretPw"),
+            ("sshpass -p S3cretPw ssh deploy@example.com", "S3cretPw"),
+            ("sshpass -pS3cretPw ssh deploy@example.com", "S3cretPw"),
+            ("redis-cli -h example.com -a S3cretPw get mykey", "S3cretPw"),
+        ]
+        for command, secret in cases:
+            with self.subTest(command=command):
+                self.assertNotIn(secret, self.scrubber.scrub(command))
+        self.assertEqual(
+            self.scrubber.scrub("mysql -uroot -p db"), "mysql -uroot -p db"
+        )
+
+    def test_tilde_user_forms_are_redacted(self) -> None:
+        for command in ("cat ~alice/notes", "cd ~alice"):
+            with self.subTest(command=command):
+                self.assertNotIn("alice", self.scrubber.scrub(command))
+        self.assertEqual(
+            self.scrubber.scrub("echo ~ ~+ ~- @~2 main~3"),
+            "echo ~ ~+ ~- @~2 main~3",
+        )
+
+    def test_bare_private_hosts_are_redacted(self) -> None:
+        cases = [
+            ("ssh build.internal.corp", "build.internal.corp"),
+            ("ssh -p 2222 deploy-box.lan", "deploy-box.lan"),
+            ("ping db01.acme.net", "db01.acme.net"),
+            ("docker pull registry.acme.io/team/img:1", "registry.acme.io"),
+            ("scp a.txt files.acme.net:/srv/x", "files.acme.net"),
+        ]
+        for command, secret in cases:
+            with self.subTest(command=command):
+                self.assertNotIn(secret, self.scrubber.scrub(command))
+        scp_text = self.scrubber.scrub("scp a.txt files.acme.net:/srv/x")
+        self.assertIn("a.txt", scp_text)
+        self.assertNotIn("/srv/x", scp_text)
+
+    def test_documented_safe_commands_are_unchanged(self) -> None:
+        for command in (
+            "mkdir -p build/out",
+            "ssh -p 2222 github.com",
+            "psql -p 5432 -h localhost",
+            "git -p log",
+            "git reset HEAD~1",
+            "cd ~/src",
+            "python setup.py sdist",
+            "ping 127.0.0.1",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.scrubber.scrub(command), command)
+
 
 class ExtractionTests(unittest.TestCase):
     def setUp(self) -> None:
