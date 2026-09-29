@@ -18,7 +18,7 @@
     {
       "path": "replay_v0/cli.py",
       "kind": "source",
-      "sha256": "98ec5dac746129ba9274b56f2bc7408c98a38be3b29f202a142ca80fed028b4d"
+      "sha256": "ab0a39b0a380fe064274cb7c814f20c6bcf4d99a46675c683fcdeb1e30c5af09"
     },
     {
       "path": "replay_v0/compare.py",
@@ -128,7 +128,7 @@
     {
       "path": "replay_v0/tests/contract/test_cli.py",
       "kind": "test",
-      "sha256": "db16a62bd953cc0a0dd47e5c7f824c7ba0b2ca94890312ceadc13dbb8aa7c12a"
+      "sha256": "cb9c8b6f6be56367fc3ab3d77de7b6274e50cdb4a1c6741bee5f68850c456e38"
     },
     {
       "path": "replay_v0/tests/contract/test_process_source.py",
@@ -186,6 +186,11 @@
       "date": "2026-09-29",
       "approved_by": "owner (in chat)",
       "change": "replay_v0/README.md gains the product first screen and the hook section"
+    },
+    {
+      "date": "2026-09-29",
+      "approved_by": "agent under the owner's AH-10 approval (source of truth stays replay_v0/)",
+      "change": "replay_v0/cli.py prints a failed policy source's stderr to the terminal only (#141)"
     }
   ]
 }

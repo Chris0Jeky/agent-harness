@@ -16,9 +16,12 @@ from unittest import mock
 
 import replay_v0.policy_sources as policy_sources
 from replay_v0.cli import (
+    DIAGNOSTIC_CHARS,
+    DIAGNOSTIC_LINES,
     _load_charter_corpus,
     _load_process_source,
     _load_recorded_source,
+    _print_diagnostics,
     main,
 )
 from replay_v0.manifests import (
@@ -144,6 +147,7 @@ for index, event in enumerate(events):
         "reason": "Synthetic CLI candidate returned " + effect + ".",
     }}, sort_keys=True, separators=(",", ":")))
     if {mode!r} == "failure" and index == 0:
+        print("synthetic failure detail[31m", file=sys.stderr)
         raise SystemExit(9)
 """
 
@@ -410,9 +414,21 @@ for index, event in enumerate(events):
             candidate,
         ):
             output = directory / "failure-report"
-            exit_code = main(self.replay_args(corpus, recording, candidate, output))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = main(self.replay_args(corpus, recording, candidate, output))
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(3, exit_code)
+            # Issue #141: the failed source's stderr reaches the terminal,
+            # printable and bounded, and never the persisted report set.
+            self.assertIn("replay candidate stderr", stderr.getvalue())
+            self.assertIn("  synthetic failure detail?[31m", stderr.getvalue())
+            self.assertNotIn("replay baseline stderr", stderr.getvalue())
+            for name in ("report.json", "report.md", "run-manifest.json"):
+                self.assertNotIn(
+                    "synthetic failure detail",
+                    (output / name).read_text(encoding="utf-8"),
+                )
             self.assertEqual("error", report["gate"]["status"])
             self.assertEqual(
                 ["process-exit-nonzero", "process-missing-event"],
@@ -420,6 +436,24 @@ for index, event in enumerate(events):
             )
             self.assertTrue((output / "report.md").is_file())
             self.assertTrue((output / "run-manifest.json").is_file())
+
+    def test_terminal_diagnostics_are_bounded_and_silent_without_failure(
+        self,
+    ) -> None:
+        lines = tuple(f"line {index} " + "x" * 400 for index in range(30))
+        failed = PolicySourceResult((), (SourceFailure("process-exit-nonzero", "x"),))
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _print_diagnostics("candidate", PolicySourceResult((), (), lines))
+            self.assertEqual("", stderr.getvalue())
+            _print_diagnostics(
+                "candidate",
+                PolicySourceResult(failed.decisions, failed.failures, lines),
+            )
+        shown = stderr.getvalue().splitlines()
+        self.assertEqual(DIAGNOSTIC_LINES + 2, len(shown))
+        self.assertEqual(f"  ({30 - DIAGNOSTIC_LINES} more lines)", shown[-1])
+        self.assertEqual(DIAGNOSTIC_CHARS + 2, len(shown[1]))
 
     def test_output_publication_failure_restores_the_previous_report_set(self) -> None:
         with self.fixture("same") as (directory, corpus, recording, candidate):
