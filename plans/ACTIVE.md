@@ -1,6 +1,6 @@
 # Active workstreams
 
-Snapshot: 2026-09-29. `main` head `f29f0ab` (PR #384's merge). The 2026-09-02 snapshot and
+Snapshot: 2026-09-29, evening. `main` head `2f704c2` (PR #396's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
 
 ## Owner decisions in force (2026-09-29)
@@ -39,6 +39,10 @@ and one P2 false positive, now tracked in #365.
 - PyPI publication needs a trusted publisher on pypi.org; that is a human step (H-19).
 - Private corpus measurement (local only, aggregates in #384): 130,624 unique scrubbed commands;
   on a 10,000 sample, the floor at 1.7.2 denies 1.18% at tier 3 and 9.12% at tier 4.
+- charter-replay v0.1.0 is released on GitHub (wheel and sdist); PyPI waits on H-19.
+- Source of truth: still `replay_v0/` here, extracted to the public repository. Once product
+  work lands in `Chris0Jeky/charter-replay` directly (the owner is starting an outside
+  architecture effort there), the direction flips; decide it before the two trees diverge.
 
 ## Merged 2026-09-29
 
@@ -47,11 +51,20 @@ controlled-dispatcher checks; #339 closed as superseded), #382 (tier.json wrong-
 #384 (replay adapter). The conflicts #345/#380 and #382/#381 were resolved on the PR branches; the
 combined tree passed 1,322 unit and 186 replay tests locally before the sequential merges.
 
+Morning, also merged: #386 (the late Codex P2s on #384: relative hook executables, non-HTTP private
+hosts) and #388 (another session: BLUEPRINT and SPECS follow the laws changes).
+
+Afternoon wave (Muse workers and lenses, one Sonnet helper, merges after a fresh-context review
+and exact-head CI): #390 (ledger fingerprint parity, #387), #391 (unreadable budget docs, #383),
+#392 (terminal-only policy stderr, #141), #393 (hook adapter test gaps), #394 (hook CLI
+hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) and #400
+(`seed` gitignores `/.claude/worktrees/`, #236), then #403 (CI: Verify lints
+first with a 30-minute budget, #402) and, last, #396 (importer scrub leaks).
+
 ## Open pull requests
 
 | PR | State |
 |---|---|
-| #386 | the two late Codex P2s on #384 (relative hook executable, non-HTTP private hosts) |
 | #332 | older parked lane from another session; not touched here |
 
 ## Open follow-ups
@@ -62,9 +75,11 @@ combined tree passed 1,322 unit and 186 replay tests locally before the sequenti
 
 - #365: remaining core false positives (57 T3 denies in the decider; `py`/`python3.12` heads;
   gh body-heredoc; prose punctuation as path shape).
-- #370 and #375: audit protection and sync follow-ups.
+- #370 and #375: audit protection and sync follow-ups (#370 status comment 2026-09-29: the
+  empty-leg item is resolved).
+- #395 (owner): relax the extraction manifest's byte pin to a path pin.
+- #397 and #401: importer scrub speed on long inputs, and the remaining bare-host gaps.
 - #378: wrapped downloaders (taskset, flock, watch, wsl) under the feature freeze.
-- #383: an unreadable or non-UTF-8 budgeted doc aborts `audit` (from #381's Codex review).
 
 ## Human items
 
