@@ -97,11 +97,11 @@ _TOKEN_PATTERNS = (
     (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "<hex>"),
     (re.compile(r"[A-Za-z0-9+/]{48,}={0,2}"), "<blob>"),
 )
-# The leading classes are bounded (a scheme is short, an email local part is at
-# most 64 characters). Unbounded, every start inside a long `x.x.x...` run
+# The leading classes are bounded generously (64 scheme characters, 128 for an
+# email local part or scp user). Unbounded, every start inside a long `x.x.x...` run
 # scanned to its end: 8.5 s for 40,000 characters (#397).
-_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}://)[^/\s@]+@")
+_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]{1,128}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)[^/\s@]+@")
 _GITHUB_REPO = re.compile(r"(?i)(github\.com[:/])[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REPOS_API = re.compile(r"\b(repos/)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REPO_FLAG = re.compile(
@@ -110,13 +110,13 @@ _REPO_FLAG = re.compile(
 # Any scheme (https, ssh, git, ...): a private host loses its path too. Paths
 # stop at shell control characters so `url;next-command` keeps its command.
 _URL_HOST = re.compile(
-    r"(?i)\b([a-z][a-z0-9+.-]{0,31}://)([A-Za-z0-9.-]+)(:[0-9]+)?"
+    r"(?i)\b([a-z][a-z0-9+.-]{0,63}://)([A-Za-z0-9.-]+)(:[0-9]+)?"
     r"(/[^\s\"';&|<>()`]*)?"
 )
 # scp-style remotes, dotted or single-label: `git@code.example.corp:team/x.git`,
 # `git@buildhost:team/x.git`.
 _SCP_REMOTE = re.compile(
-    r"\b[\w.-]{1,64}@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*):(?!//)" r"([^\s\"';&|<>()`]+)"
+    r"\b[\w.-]{1,128}@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*):(?!//)" r"([^\s\"';&|<>()`]+)"
 )
 _PUBLIC_HOSTS = frozenset(
     {
