@@ -35,7 +35,7 @@ Owner: Cristian Tcaci
 
 - **DECISION:** The immutable tag is `floor-v1-final` and points to the last owner-reviewed universal-parser state, `02bd14cfe094f9b6af85b966de481ff3f45264cf`.
 - **CONSTRAINT:** Creating or pushing the tag requires owner review.
-- **CONSTRAINT:** After the tag, the legacy dispatcher path is read-only except for a security-critical preservation fix explicitly approved by the owner.
+- **CONSTRAINT:** After the tag, changes to the dispatcher follow `BLUEPRINT.md` §2's FEATURE-FROZEN classes (false-positive fixes, the ratified slices, charter repairs) under review; the `floor-v1-final` tag stays the immutable replay baseline (owner decision 2026-09-29: the freeze wording aligns with the blueprint).
 - **CONSTRAINT:** New bypasses, false positives, and environment incompatibilities are recorded as evidence or corpus candidates; they are not automatically fixed in the legacy parser.
 - **CONSTRAINT:** The freeze record must contain the commit SHA, dispatcher path, line count, test command, known environment assumptions, known false-positive families, known false-negative families, and the location of recorded decisions.
 - **CONSTRAINT:** Any future public extraction must not require the legacy code, its private configuration, or its machine environment at runtime.
@@ -348,7 +348,7 @@ agent-harness/
 
 - **CONSTRAINT:** Apply `CLAUDE_CONFIG_OPERATIONS.md#autonomy-boundary` without restatement.
 - **CONSTRAINT:** Use the failure schema and manual promotion process from `CLAUDE_CONFIG_OPERATIONS.md`; the local recommended ledger path is `.local/failure-ledger.jsonl`, ignored by Git.
-- **CONSTRAINT:** Any destructive Git operation, tag creation, dependency change, public push, licence change, policy change, or extraction-scope change requires owner review.
+- **CONSTRAINT:** Any destructive Git operation, tag creation, dependency change, licence change, policy change, or extraction-scope change requires owner review. Pushes to this public repository within its declared authority run autonomously once `tests/check-no-secret-literals.ps1` from claude-config passes with `-RepoRoot <this checkout> -Range origin/main..HEAD` (owner decision 2026-09-29, claude-config CC-009); content the private/public boundary keeps out stays owner-scoped.
 - **CONSTRAINT:** An agent must halt when the legacy environment is missing rather than repairing it. Recorded decisions are the fallback.
 
 # Quality gates

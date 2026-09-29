@@ -101,16 +101,16 @@ policies:
 
 ## Work agents may complete autonomously
 
-- **DECISION:** Within an owner-approved task contract, agents may read repository files, create or edit files in the named paths, run non-destructive local commands, run existing tests and lint, append redacted failure records, create a local branch, create local commits, and draft a PR description.
+- **DECISION:** Autonomy comes from the global laws plus each repository's `.agent-harness/tier.json`; this section does not narrow them (the canonical copy is claude-config's `CLAUDE_CONFIG_OPERATIONS.md`, which carries the owner decisions CC-008 and CC-009 of 2026-09-29). Within an approved task, agents may read and edit files in the named paths, run non-destructive local commands, tests and lint, append redacted failure records, create branches and commits, push scoped branches, open ready-for-review PRs, and merge within the tier's gate.
 - **CONSTRAINT:** Autonomous work must stay inside the task's explicit paths, acceptance criteria, time box, and out-of-scope list.
 - **CONSTRAINT:** Agents may make the smallest repair required to make the named acceptance criteria pass. They may not opportunistically refactor adjacent systems.
-- **CONSTRAINT:** Agents must stop after the acceptance command passes; additional cleanup becomes a backlog proposal.
+- **CONSTRAINT:** A slice ends when its acceptance command passes; additional cleanup becomes a backlog proposal, and the next ready slice may start.
 
 ## Work requiring owner review before execution or merge
 
-- **CONSTRAINT:** Destructive operations, dependency additions or upgrades, public pushes, releases, tags, scope changes, licence edits, policy edits, CI permission changes, secret or credential handling, hook activation, scheduler activation, repository-history rewriting, and deletion or mass movement of files always require owner review.
+- **CONSTRAINT:** Destructive operations, dependency additions or upgrades, releases, tags, visibility changes, publication of private material, scope changes, licence edits, CI permission changes, secret or credential handling, activating a new hook or scheduled task outside the lanes claude-config CC-008/CC-009 authorize, repository-history rewriting, and deletion or mass movement of files require owner review. Pushes to `agent-harness`'s public repository within its declared authority run autonomously once claude-config `tests/check-no-secret-literals.ps1` passes with `-RepoRoot <this checkout> -Range origin/main..HEAD` (owner decision 2026-09-29, CC-009).
 - **CONSTRAINT:** A local commit containing any item above may be prepared only when the task explicitly requests a proposal; the action itself must not be executed before review.
-- **CONSTRAINT:** Every policy change requires a PR that identifies the single canonical policy home and proves that no duplicate normative statement was added.
+- **CONSTRAINT:** Every policy change uses a PR that identifies the single canonical policy home and proves that no duplicate normative statement was added; it merges under the repository's declared authority.
 
 ## Work routed to `HUMAN_TODO.md`
 

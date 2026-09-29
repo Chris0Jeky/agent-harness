@@ -31,9 +31,9 @@ GROUND RULES:
 - Second-occurrence law: do NOT build speculative scaffolding (no empty region dirs, no skills
   for workflows that haven't recurred, no memory hierarchies for future growth).
 - Out-of-scope findings become tracked issues, never silent drops. Tracked-issue-or-it-doesn't-exist.
-- Autonomy-first defaults (BLUEPRINT §1): tiers add verification, never permission — T1/T2
-  merge on green proving checks (self-review), T3 adds ONE bounded independent review round,
-  T4 the full declared two-review gate; reviews are bounded (one review round + one fix round,
+- Autonomy-first defaults (BLUEPRINT §1): tiers add verification, never permission — every
+  tier merges behind global law 2's risk-calibrated gate, T3 adds a second lens only for
+  genuinely high-risk work, T4 runs its full declared gate; reviews are bounded (one review round + one fix round,
   CRITICAL/HIGH-confirmed bar — the `review-and-ship` skill). Seed tier.json authority to
   match. Replace zero-skip / unbounded-fix-round RESTATEMENTS with a link to the global laws
   (one home per policy) — but keep any gate the repo has DECLARED (tier.json authority, a T4
@@ -46,13 +46,15 @@ DO, IN ORDER:
    counts + read-first ladders), CLAUDE.md/AGENTS.md sizes, canonical docs sizes, CI lanes +
    their last 5 conclusions (gh run list), failure-ledger size, memory dir size, .codex/ plane
    if any. Produce a one-screen gap table: current vs the tier profile in BLUEPRINT §1.
-2. FLOOR: copy agent-harness/templates/hooks/{dispatch.py,smoke_test.py} into .claude/hooks/,
-   wire per SPECS §5 ($CLAUDE_PROJECT_DIR-relative, one dispatcher per event), write
+2. FLOOR: decide whether this repo runs a floor. If not, declare `floor_wiring: none` in
+   tier.json and skip the rest of this step. Otherwise copy
+   agent-harness/templates/hooks/{dispatch.py,smoke_test.py} into .claude/hooks/, wire per SPECS §5 ($CLAUDE_PROJECT_DIR-relative, one dispatcher per event), write
    `.agent-harness/tier.json` (tier/flags/authority from the appendix; note any intentional
    stricter-local-floor layering in a "notes" field). Run smoke_test.py — must be green.
    Retire superseded old hooks in the same PR (don't double-spawn processes per Bash call).
-3. SETTINGS HYGIENE: committed settings.json gets defaultMode acceptEdits + the repo's stack
-   allowlist; bypassPermissions (if wanted) moves to gitignored settings.local.json. Verify
+3. SETTINGS HYGIENE: committed settings.json gets the repo's stack allowlist and deny rules, and
+   no defaultMode (a committed one outranks the user's; bypass comes only from user settings or a
+   launch flag — global laws, "Claude Code runtime facts"). Verify
    worktree/clone behavior: every protocol-mandated first command must be allowlisted.
 4. DIET (apply BLUEPRINT laws 2/3/4): one home per policy (collapse restatements to links);
    strip skill read-first ladders (skills may point only at the seam map + the "now"-doc head,
@@ -60,7 +62,7 @@ DO, IN ORDER:
    ROTATE-to-archive, never trim-to-pass; superseded docs leave the routed path; delete or
    CI-diff any hand-mirrored vendor artifact.
 5. MEMORY GRADUATION: in ~/.claude/projects/<this-repo>/memory/, delete feedback files now
-   covered by the global laws (~/.claude/CLAUDE.md) — list each deletion in your report;
+   covered by the global laws (~/.claude/rules/laws.md) — list each deletion in your report;
    resolve contradictory memories; prune session logs >14 days; superseded strategies collapse
    to one SUPERSEDED line; index entries become one-liners.
 6. CI RIGHT-SIZING (per tier profile): single-OS required lane for T3; red-lane law — any
@@ -122,7 +124,7 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
 - tier.json: tier 2, authority per its written working-style (push gated like merge).
 - First gardener cycle on the 2,324-line ledger.
 - Its consolidated working-style-eng-practices.md is cross-repo canon — check nothing in it
-  contradicts ~/.claude/CLAUDE.md; reconcile in favor of the global file and slim the local copy.
+  contradicts ~/.claude/rules/laws.md; reconcile in favor of the global file and slim the local copy.
 
 ### hq-private (target: T1 sandbox + sensitive_data)
 - MINIMAL touch. Keep the 34-line privacy-contract CLAUDE.md as-is (it is the T1 template).
@@ -142,8 +144,9 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
 ### Any NEW repo
 - Run `py -3 <agent-harness-root>/harness.py seed <repo> --tier 1`; it writes the
   runtime-neutral tier declaration only. It does not create CLAUDE.md, AGENTS.md, settings, or
-  hook scaffolds. Every active Codex repo must still add exactly one reviewed root
-  `.codex/hooks.json` PreToolUse floor adapter per SPECS §5; lifecycle hooks and all other
+  hook scaffolds. A Codex repo that runs a floor adds exactly one reviewed root
+  `.codex/hooks.json` PreToolUse floor adapter per SPECS §5 (a floorless one declares
+  `floor_wiring: none`); lifecycle hooks and all other
   scaffolds are need-based.
 - When a repo-specific doc is needed, keep the generated tier/authority header at the top of its
   CLAUDE.md. Below that header, keep the tailored content in this order: **identity** (what the
