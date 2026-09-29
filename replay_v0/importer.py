@@ -84,7 +84,16 @@ _REPOS_API = re.compile(r"\b(repos/)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REPO_FLAG = re.compile(
     r"((?:--repo(?:=|\s+)|-R\s+))[\"']?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[\"']?"
 )
-_URL_HOST = re.compile(r"(?i)\b(https?://)([A-Za-z0-9.-]+)")
+# Any scheme (https, ssh, git, ...): a private host loses its path too. Paths
+# stop at shell control characters so `url;next-command` keeps its command.
+_URL_HOST = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)([A-Za-z0-9.-]+)(:[0-9]+)?(/[^\s\"';&|<>()`]*)?"
+)
+# scp-style remotes, dotted or single-label: `git@code.example.corp:team/x.git`,
+# `git@buildhost:team/x.git`.
+_SCP_REMOTE = re.compile(
+    r"\b[\w.-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*):(?!//)([^\s\"';&|<>()`]+)"
+)
 _PUBLIC_HOSTS = frozenset(
     {
         "github.com",
@@ -174,6 +183,7 @@ class Scrubber:
             text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
         text = _GITHUB_REPO.sub(r"\1<owner>/<repo>", text)
+        text = _SCP_REMOTE.sub(self._scp, text)
         text = _EMAIL.sub("<email>", text)
         text = _REPOS_API.sub(r"\1<owner>/<repo>", text)
         text = _REPO_FLAG.sub(r"\1<owner>/<repo>", text)
@@ -189,7 +199,13 @@ class Scrubber:
         host = match.group(2).lower()
         if host in _PUBLIC_HOSTS:
             return match.group(0)
-        return f"{match.group(1)}<host>"
+        return f"{match.group(1)}<host>" + ("/<path>" if match.group(4) else "")
+
+    @staticmethod
+    def _scp(match: re.Match[str]) -> str:
+        if match.group(1).lower() in _PUBLIC_HOSTS:
+            return match.group(0)
+        return "<host>:<path>"
 
 
 def _iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:

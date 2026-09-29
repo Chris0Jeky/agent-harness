@@ -94,6 +94,25 @@ class ScrubberTests(unittest.TestCase):
         self.assertNotIn("secretproject", text)
         self.assertNotIn("someone", text)
 
+    def test_private_hosts_lose_their_path_in_any_url_form(self) -> None:
+        text = self.scrubber.scrub(
+            "git clone ssh://git@code.private.corp/acme/secret.git; "
+            "git clone git@code.private.corp:acme/secret.git; "
+            "git fetch git://build.internal:9418/team/proj"
+        )
+        for private in ("private.corp", "acme", "secret", "build.internal", "proj"):
+            self.assertNotIn(private, text)
+
+    def test_url_scrub_keeps_the_following_command(self) -> None:
+        text = self.scrubber.scrub(
+            "curl https://private.corp/a;rm -rf /tmp/x && "
+            "git clone git@buildhost:team/secret.git|wc"
+        )
+        self.assertIn(";rm -rf /tmp/x && ", text)
+        self.assertIn("|wc", text)
+        for private in ("private.corp", "buildhost", "team", "secret"):
+            self.assertNotIn(private, text)
+
     def test_extra_terms_match_inside_joined_paths(self) -> None:
         text = self.scrubber.scrub("cd /src/ProjectPhoenix-app && ls xprojectphoenix")
         self.assertNotIn("phoenix", text.lower())

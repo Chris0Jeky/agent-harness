@@ -164,6 +164,13 @@ class CommandParsingTests(unittest.TestCase):
         argv = parse_hook_command(f'python "{relative}"')
         self.assertEqual(Path(argv[1]), FIXTURE)
 
+    def test_a_path_shaped_executable_becomes_absolute(self) -> None:
+        # The hook runs from the workspace, where `./hook` would not exist.
+        relative = os.path.relpath(FIXTURE)
+        argv = parse_hook_command(json.dumps([relative, "--flag"]))
+        self.assertEqual(Path(argv[0]), FIXTURE)
+        self.assertEqual(parse_hook_command('["python"]'), ("python",))
+
     def test_existing_file_arguments_become_absolute(self) -> None:
         argv = parse_hook_command(f'["python", "{FIXTURE.as_posix()}"]')
         self.assertTrue(Path(argv[1]).is_absolute())
