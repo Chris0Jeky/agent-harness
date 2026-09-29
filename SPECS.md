@@ -177,7 +177,8 @@ Docs sync / Next safe slice`.
 command, `Region map: docs/regions/<domain>.md`, and any region-local rules. Nothing global.
 
 **HUMAN_TODO.md**: IDs (`H-1`, `H-2`…), one line each + link; `## Changelog` at bottom;
-rules header: read at session start, surface in every summary, human-only check-off.
+rules header: read at session start, surface in every summary, check off per global law 5 (direct
+evidence; a human decision is never inferred).
 
 **Tombstone CLAUDE.md** (3 lines): `Tier: T0 TOMBSTONE` / `FROZEN <date> — do not develop
 here.` / `Live successor: <path or "none">`.
@@ -187,7 +188,8 @@ here.` / `Live successor: <path or "none">`.
 ## §5 Dispatcher hook wiring
 
 The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
-globally. Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
+at user scope on hosts that keep one (none on DESKTOP-IHKOOJS; a repo may declare
+`floor_wiring: none`). Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
 the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. A repository's owner
 may declare it floorless (agent-harness itself and claude-config, owner decision 2026-09-07): it then
 wires no adapter and no global Claude hook, and no floor runs there — declared as tier.json
@@ -615,7 +617,8 @@ blast-radius ladder.
 |---|---|---|---|
 | Deny floor / dispatcher changes, promotion audits | top | xhigh | wall: agent `model:` pins + review requirement |
 | Region maps, skills, ADRs, global laws | top | xhigh | convention |
-| Adversarial review, merge decisions | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
+| Merge decisions; second lens on high-risk work | top | high (xhigh only if irreversible / wide blast radius) | wall at T4 (gate), tripwire below |
+| Adversarial review gate | default | high | convention |
 | Code implementation, debugging, feature slices in mapped regions | default | high | convention |
 | Gardener triage, tombstone classification, promotion routing | default | low | wall: `~/.claude/agents/gardener.md` pin + PR-only output |
 | Judgment-bearing subagent work (a lens, a call, a triage), lookups, conversation | default | low | convention |
@@ -640,9 +643,9 @@ class is unclear, because a cheap model on judgment work is the expensive mistak
 model fills `top` / `default` / `cheap`, and the fan-out fleet caps (≤3–5, ≤8–12 for a sweep),
 live in the `model-effort-routing` global skill — the single home. A named model written in two
 files is how a stale routing row survives repeated prose bans; if this table and the skill ever
-disagree, the skill wins and the local copy is the bug. The one model-level statement that is law
-rather than calibration — the standing family-wide Haiku ban — is declared in BLUEPRINT §5 and
-enforced by the config repo's `tests/check-agent-models.ps1`; it is deliberately not restated here. This table is the durable judgment-vs-mechanical shape and
+disagree, the skill wins and the local copy is the bug. Model bans and admissions are declared in the
+`model-effort-routing` skill and enforced by the config repo's `tests/check-agent-models.ps1`;
+they are deliberately not restated here. This table is the durable judgment-vs-mechanical shape and
 changes only when that shape changes.
 
 ## §9 Bootstrapper CLI + ESTATE.md
@@ -781,7 +784,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
      conventional rather than checkable. Making it checkable — a declared tier next to the pin,
      and a check that compares the two — is the substance of issue #76.
   3. `tests/check-agent-models.ps1` in the config repo is the enforcement surface. Today it
-     asserts only that no definition pins a banned model (the family-wide Haiku ban); extending
+     asserts only that no definition pins a banned model (the set the `model-effort-routing` skill declares); extending
      it to assert that each `model:` equals the skill's model for the declared tier is tracked
      in agent-harness issue #76. Until that lands, rule 1 is a convention with a review step,
      and this spec says so rather than implying a check that does not exist.
@@ -851,4 +854,5 @@ law it executes — one review round, one severity-bar triage (confirmed CRITICA
 commits only; the rest tracked or declined on the thread), one fix round verified against the
 fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
 law 2g; a manual `@codex review` is never a per-fix step, law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
-round gets (T3 one independent pass, T4 two adversarial reviews), never how many rounds run.
+round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
+high-risk work; T4 two adversarial reviews), never how many rounds run.

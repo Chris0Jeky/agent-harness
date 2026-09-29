@@ -81,23 +81,24 @@ half-worked. Nothing is speculative.
 ## 1. The Tier Ladder
 
 **Tiers add verification, never permission.** Every tier ships autonomously on its own
-authority; what rises with blast radius is how much independent verification a merge must carry
-— none at T1/T2 beyond green proving checks, ONE bounded independent review round at T3, the
-full declared two-review gate at T4. A tier is never a reason to wait, ask, or leave finished
+authority behind global law 2's risk-calibrated gate (green proving checks; a clean connector
+outcome for documentation-only or very-low-risk work, otherwise one fresh-context adversarial
+review); what rises with blast radius is the extra verification — a second distinct lens for
+genuinely high-risk work at T3, the full declared gate at T4. A tier is never a reason to wait, ask, or leave finished
 work unmerged — within the repo's declared authority: `.agent-harness/tier.json` binds over
 these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 
 | Tier | Name | Defined by (blast radius) | Standing context | CI | Authority (default) | Estate examples |
 |---|---|---|---|---|---|---|
 | T0 | **Tombstone** | Nothing runs here | ≤200 tokens | none | none | jekyt, repos, Taskdeck-gemini, pr812-fixes, junk wrappers |
-| T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | full, incl. main; no review owed | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
-| T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free; self-review on green checks | extract-api (reference implementation), NavSentinel |
-| T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push free; merge on green + one bounded independent review round | Taskdeck (after diet), wealthlens-hq |
+| T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | push+merge free behind global law 2's gate | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
+| T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free behind global law 2's gate | extract-api (reference implementation), NavSentinel |
+| T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push+merge free behind global law 2's gate, plus a second lens for high-risk work | Taskdeck (after diet), wealthlens-hq |
 | T4 | **Live wire** | Other people, money, or production data | ≤8k | full gate + branch protection | push/merge behind the full declared gate (two independent reviews + green CI) | olb/series_tools_python, staticprofit (if revived) |
 
 **Overlay flags** (orthogonal to tier, set in `tier.json`):
-- `sensitive_data` — adds privacy denies (block pushes to public remotes, `gh repo create --public`)
-  at ANY tier. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity. One ratified
+- `sensitive_data` — where a floor is wired, adds privacy denies (block pushes to public remotes,
+  `gh repo create --public`) at ANY tier; where none runs, the agent alone holds that wall. hq-private is low code-trust but radioactive-data; tier ≠ sensitivity. One ratified
   exemption (issue #48): a push ATTRIBUTABLE to a non-sensitive repository is exempt from the
   *contextual* overlay a sensitive session root spreads over cross-repo work. Attributable means
   ALL of: the command's git globals cannot redirect which repository git operates on (only
@@ -126,7 +127,7 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
   `gh api` exfiltration surfaces (repo/gist creation, visibility flips, non-branch DELETEs; since
   1.6.28 routine PR/issue/comment mutations pass), remain active.
 - `wave_mode` — multi-agent batch work in progress: worktree protocol mandatory, work-loss
-  guards escalate to deny (another agent's work is in the blast radius), coordinator verifies
+  guards escalate to deny where a floor is wired (another agent's work is in the blast radius), coordinator verifies
   clean main after every wave.
 - `dormant_production` — frozen but revivable live system: strip to a ≤20-line REVIVAL.md
   (how to run, hazards, re-seed tier) + the floor. (identity/platform-identity, staticprofit.)
@@ -139,11 +140,12 @@ Gardener skips these dirs entirely. **Exit:** human revives → `harness seed --
 the tombstone in the same commit that installs the floor.
 
 ### T1 — Sandbox
-The current *global* posture, demoted to an explicit per-repo choice. `bypassPermissions` in
-uncommitted `settings.local.json`. Global deny floor (§2) rides along free. CLAUDE.md ≤40
+The lightest posture. Bypass comes only from user settings or a launch flag; the repo commits no
+`defaultMode` (global laws, "Claude Code runtime facts"). A deny floor (§2) rides along only where
+a host or the repo wires one. CLAUDE.md ≤40
 lines: what this is, how to run it, any hard data rule. No CI, no STATUS, no skills beyond the
-global process three, no review policy, no read-first list. Fan-out banned — inline is always
-cheaper here. **Promote to T2** on evidence of durable use: 3rd+ return session, something
+global process three, no repo review policy beyond global law 2, no read-first list. Start inline;
+a read-only review subagent is always allowed (law 2's independent review). **Promote to T2** on evidence of durable use: 3rd+ return session, something
 consuming its output, or the first "wish I had a test" moment.
 
 ### T2 — Daily driver (template: extract-api, the estate's cleanest instance)
@@ -153,7 +155,8 @@ consuming its output, or the first "wish I had a test" moment.
   the skill is the home, the hook only points at it.
 - `HUMAN_TODO.md` (standard name; existing wired names like Taskdeck's OUTSTANDING_TASKS.md
   are grandfathered — note the alias in ESTATE.md): human-only items with IDs, surfaced in
-  every summary, cleared only by the human.
+  every summary, checked off per global law 5 (direct evidence of completion; a human decision is
+  never inferred).
 - `tasks/BACKLOG.md` session protocol (law 9 starts here).
 - PostToolUseFailure → sanitized JSONL ledger, with a triage cadence (Gardener, §4).
 - 3–5 process skills ≤60 lines (onramp, safe-slice, verification-closeout, failure-capture).
@@ -174,12 +177,11 @@ Everything in T2, plus:
   red-lane law (below).
 - **Branch protection requiring the lane by name** (verify via `gh api`, don't assume).
 - **Region system ON** (§3) — the promotion trigger and the cure are the same thing.
-- **Bounded review pipeline** (the `review-and-ship` skill is the concrete home): ONE review
-  round — publish ready-for-review, request the bot review, post findings on the PR. The round
-  counts only once an independent review has actually arrived: the requested bot review, or an
-  independent agent review when no bot lands within a bounded wait — never merge at T3+
-  without an arrived independent review, and a clean review (zero findings) satisfies the
-  round: the PR ships on it. Then one severity-bar triage: only confirmed CRITICAL/HIGH
+- **Bounded review pipeline** (global law 2; the `review-and-ship` skill is the concrete home):
+  ONE review round — publish ready-for-review (marking ready triggers the Codex connector; do not
+  post a routine `@codex review`), post findings on the PR. A clean connector outcome is the whole
+  gate only for documentation-only or very-low-risk work; other changes need one fresh-context
+  adversarial review, and a clean one (zero findings) satisfies the round. Then one severity-bar triage: only confirmed CRITICAL/HIGH
   defects earn fix commits, and everything else becomes a tracked issue or a one-line decline
   on the thread. Severity is judged by the finding's content, never the reviewer's label — a
   bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
@@ -234,8 +236,9 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 ## 2. The Floor (the only thing that never varies)
 
 One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
-at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE. Claude wires the
-shared dispatcher globally; each active Codex repo owns one project adapter carrying an
+at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE — wherever it is
+wired. Claude wires the shared dispatcher at user scope on hosts that keep one (DESKTOP-IHKOOJS
+runs none by owner decision; a repository can declare `floor_wiring: none`); each active Codex repo owns one project adapter carrying an
 **audit-only** normalized dispatcher marker — a declaration the runtime never verifies, so a
 dispatcher change obliges refreshing every consumer marker and re-trusting each adapter in a
 fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor:
@@ -394,7 +397,8 @@ blast-radius ladder in §1.
 | Work | Model tier | Effort |
 |---|---|---|
 | Harness growth: deny floor/dispatcher, region maps, skills, hooks, ADRs, global laws; promotion/demotion audits; anything irreversible | top | xhigh |
-| Adversarial review, merge decisions | top | high (xhigh when irreversible or wide blast radius) |
+| Merge decisions; second lens on high-risk work | top | high (xhigh when irreversible or wide blast radius) |
+| Adversarial review gate | default | high |
 | Code implementation, debugging, feature slices inside mapped regions, routine PRs | default | high |
 | Gardener triage, tombstone classification, routing/promotion calls, judgment-bearing subagent work, lookups | default | low |
 | Doc rotation, formatting sweeps, mechanical transforms that are hard to get wrong — including wide mechanical fan-out (§3) | cheap | medium–high, never low |
@@ -429,13 +433,9 @@ pinned to a cheap model through three separate prose bans.
   above, effort-first, judgment-vs-mechanical, default-up — so the calibration can change without
   a blueprint edit. A model name written in two places is how a stale routing row outlives three
   separate prose bans; when in doubt, delete the local copy and point at the skill.
-  The one model-level statement that is law rather than calibration, and therefore does belong
-  here: **never Haiku, any version** (standing owner directive — quality too low). Family-wide
-  on purpose: a ban pinned to one version number reads as permission for the next one. This
-  prose is where the ban is DECLARED; the enforced banned set lives in the config repo's
-  `tests/check-agent-models.ps1`, which is what actually rejects a definition. If the two ever
-  disagree, the script is the one that binds and the mismatch is the bug — so widening the ban
-  means editing both in the same change.
+  Model bans and admissions are the owner's calibration too: they are declared in the
+  `model-effort-routing` skill and enforced by the config repo's `tests/check-agent-models.ps1`;
+  this blueprint carries none.
 - **Spend the top tier on STRUCTURE, not chores** — global CLAUDE.md, deny floor + dispatcher,
   region maps for Taskdeck/olb, agent definitions, this repo — then adversarially review them
   with it. Judgment encoded in structure is judgment a cheaper model inherits for free. Mechanical
@@ -465,8 +465,9 @@ from gone.
   unreadable, or noncanonical source is `UNPROVEN`; a readable mismatch fails. This document
   itself asserts nothing about deployment.
 - **Global settings diet**: strip the 23 dotnet/npm stack entries into repo-tier settings;
-  global `defaultMode` returns to prompt/acceptEdits; remove global
-  `skipDangerousModePermissionPrompt` — max trust becomes a per-repo T1 declaration.
+  remove global `skipDangerousModePermissionPrompt`. Bypass stays a user-settings or launch-flag
+  choice: a project `defaultMode` of bypass is ignored, and a committed project `defaultMode`
+  outranks the user's (global laws, "Claude Code runtime facts").
 - **`~/.claude/ESTATE.md`** registry: repo → root (source/, Desktop/, …) → tier → status →
   live path → wrapper warnings → HUMAN_TODO alias. Covers ALL roots; doubles as the
   promotion-audit worksheet. New-repo intake: `harness seed --tier 1` at creation; human
@@ -521,9 +522,9 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 
 - **Keep external bot reviewers everywhere at T3+** (Codex on PRs — Codex only, never Copilot):
   a free independent review tier that caught real bugs self-review missed. Publish
-  ready-for-review (a draft invites no bots), request the review, and triage what arrives once
-  by the severity bar — the bots supply T3's independent round; they never license an unbounded
-  comment loop (law 11).
+  ready-for-review (a draft invites no bots; marking ready triggers the review) and triage what
+  arrives once by the severity bar. Its clean outcome is the whole gate only under global law 2g;
+  it never licenses an unbounded comment loop (law 11).
 - **If a second runtime is real** (olb today): thin vendor shim only — routing README +
   runtime config + one dated `00_ACTIVE.md` pointer (edited on pivots; it propagated the
   archive pivot in one 54-line edit). Shared skill BODIES with 4-line vendor adapters, plus a
@@ -636,5 +637,5 @@ create a parallel plan (law 9).
 - **Gate fatigue at T3+.** Every local gate ≤60s; demotion must feel like honest right-sizing,
   not failure — otherwise the ladder gets climbed once and then ignored.
 - **Promotion-by-incident** means most tier boundaries are paid for with one real failure.
-  Acceptable for a solo dev ONLY because irreversible-loss classes are floor-level from day 0
-  and never promotion-gated.
+  Acceptable for a solo dev ONLY because irreversible-loss classes are walls from day 0 (held
+  by the floor where one is wired, by the agent where none is) and never promotion-gated.
