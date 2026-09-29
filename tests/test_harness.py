@@ -9193,6 +9193,7 @@ class RealityCheckTests(unittest.TestCase):
         sensitive_data: bool = False,
         public_synthetic_publication: dict[str, str] | None = None,
         human_todo: object = "unset",
+        status_doc: object = "unset",
         agents_text: str = "# Agent guidance\n",
     ) -> Path:
         repo = self.root / f"repo-{len(list(self.root.glob('repo-*')))}"
@@ -9207,6 +9208,8 @@ class RealityCheckTests(unittest.TestCase):
         }
         if human_todo != "unset":
             declaration["human_todo"] = human_todo
+        if status_doc != "unset":
+            declaration["status_doc"] = status_doc
         if public_synthetic_publication is not None:
             declaration["public_synthetic_publication"] = public_synthetic_publication
         (repo / ".agent-harness").mkdir()
@@ -10365,6 +10368,107 @@ class RealityCheckTests(unittest.TestCase):
         result = self.audit(repo, FakeCommandRunner())
         self.assertEqual(self.statuses(result, "human_todo"), ["advisory"])
         self.assertTrue(result["ok"], result["issues"])
+
+    # --- status_doc: SPECS §3's "now"/STATUS head budget (issue #247) ---------
+
+    def write_status_doc(self, repo: Path, lines: int) -> None:
+        target = repo / "plans" / "ACTIVE.md"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("status line\n" * lines, encoding="utf-8")
+
+    def test_an_over_budget_status_doc_fails_with_a_rotate_instruction(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 151)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(
+            result["issues"],
+            [
+                "plans/ACTIVE.md: 151>150 lines; "
+                "ROTATE: rotate to docs/archive/status-YYYY-MM.md"
+            ],
+        )
+        self.assertFalse(result["ok"])
+
+    def test_an_at_budget_status_doc_passes(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 150)
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["ok"])
+        self.assertTrue(result["ok"], result["issues"])
+
+    def test_an_unreadable_status_doc_path_is_unproven_not_a_crash(self) -> None:
+        # Review of #381: `is_file()` raises PermissionError/ENAMETOOLONG on
+        # 3.11, which aborted the budget pass before the reality leg ran.
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        self.write_status_doc(repo, 10)
+        real_stat = Path.stat
+
+        def denied(path, *args, **kwargs):
+            if path.name == "ACTIVE.md":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", denied):
+            result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["UNPROVEN"])
+
+    def test_a_status_doc_naming_a_missing_file_is_a_mismatch(self) -> None:
+        repo = self.make_repo(status_doc="plans/ACTIVE.md")
+        result = self.audit(repo, FakeCommandRunner())
+        self.assertEqual(self.statuses(result, "status_doc"), ["MISMATCH"])
+        self.assertIn("no such file exists", self.details(result))
+        self.assertEqual(result["issues"], [])
+        self.assertFalse(result["ok"])
+
+    def test_an_invalid_status_doc_is_a_reported_issue_not_a_crash(self) -> None:
+        for declared in (
+            42,
+            ["plans/ACTIVE.md"],
+            "",
+            "   ",
+            "/etc/ACTIVE.md",
+            "../ACTIVE.md",
+            "plans/../../ACTIVE.md",
+            "C:/Users/someone/ACTIVE.md",
+            "C:ACTIVE.md",
+            "\\\\server\\share\\ACTIVE.md",
+            "plans/ACT\x00IVE.md",
+        ):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(status_doc=declared)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(len(result["issues"]), 1, result["issues"])
+                self.assertIn("status_doc must be", result["issues"][0])
+                # Reported once, by validation — not again as a reality leg.
+                self.assertEqual(self.statuses(result, "status_doc"), [])
+                self.assertFalse(result["ok"])
+
+    def test_an_absent_or_null_status_doc_runs_no_check(self) -> None:
+        for declared in ("unset", None):
+            with self.subTest(declared=declared):
+                repo = self.make_repo(status_doc=declared)
+                # An undeclared "now" doc is not measured, however long.
+                self.write_status_doc(repo, 500)
+                result = self.audit(repo, FakeCommandRunner())
+                self.assertEqual(self.statuses(result, "status_doc"), [])
+                self.assertEqual(result["issues"], [])
+                self.assertTrue(result["ok"], result["issues"])
+
+    def test_validate_tier_accepts_a_repo_relative_status_doc(self) -> None:
+        base = {
+            "tier": 2,
+            "name": harness.TIER_NAMES[2],
+            "authority": {"push": "free", "merge": "free"},
+            "flags": {},
+        }
+        self.assertEqual(
+            harness.validate_tier({**base, "status_doc": "plans/ACTIVE.md"}), []
+        )
+        self.assertEqual(harness.validate_tier({**base, "status_doc": None}), [])
+        self.assertEqual(
+            harness.validate_tier({**base, "status_doc": 7}),
+            ["status_doc must be a repo-relative path or null, not 7"],
+        )
 
     # --- vendored floor bytes versus template versus deployed global ----------
 
