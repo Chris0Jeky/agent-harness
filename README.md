@@ -289,8 +289,9 @@ client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes 
 project or through an unresolved operand, secret-file mutation, downloaded program text run
 directly, and privilege elevation. Force-push, ref deletion, git config execution, work-loss and
 pure opacity proceed. A `sensitive_data` repository never runs core (its declared `core` renders
-as `guide`), and `guide`/`wall` stay declarable. 1.7.1 is deployed to `~/.claude/hooks` on the owner's main box
-(claude-config#461); 1.7.2's deploy and consumer markers follow in the SPECS §5.3 rollout order. History before 1.7.0 (2026-09-03): the immutable
+as `guide`), and `guide`/`wall` stay declarable. 1.7.2 is deployed to `~/.claude/hooks` on the owner's main box
+(2026-09-29: vendored in claude-config#530; consumer markers merged in SwarmingLilMen#80, collaborative-hill-lab#14 and
+Pulseboard#168; EvidenceDeck#35 waits on H-18; each root's re-trust and canaries are H-14). History before 1.7.0 (2026-09-03): the immutable
 `floor-v1-final` tag preserves 1.6.21, and 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
 T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
 the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
@@ -324,11 +325,11 @@ configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`
 command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
 security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
 ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. **Deployed state (2026-09-03):** claude-config PR #199 merged the byte-identical 1.6.33
+fail-closed. **Deployed state on 2026-09-03 (historical; current state is above):** claude-config PR #199 merged the byte-identical 1.6.33
 `hooks/` (smoke 2383/2383), `sync-global --apply` installed the two files into `~/.claude/hooks`
 with a backup, `doctor` proves canonical 1.6.33 == deployed 1.6.33, and the **Claude** runtime
 canary trio of SPECS §5.4 plus the 1.6.33-specific `gh … --help` pair passed live in the deploying
-session. **Deployed and canonical are both 1.6.33**; the producer's own Codex re-trust and canaries are
+session. **Deployed and canonical were both 1.6.33 then**; the producer's own Codex re-trust and canaries are
 VOID since 2026-09-07 (the producer is floorless by owner decision, PR #274; H-15 is closed) and
 only the consumer roots' legs remain — **H-14** step 3 in `HUMAN_TODO.md` carries them. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
 current Codex consumers (EvidenceDeck PR #20, SwarmingLilMen PR #51, collaborative-hill-lab PR #4
