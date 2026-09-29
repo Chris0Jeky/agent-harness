@@ -55,8 +55,9 @@ to receipt-only findings; wrong-typed fields degrade to nulls rather than aborti
 bucket (`int(line) // 40`, or `-` when the line is not a number) | first 12 normalised claim
 words, truncated to 12 hex. The coordinator computes the same value (claude-config
 `tools/muse_coordinator.py` `fingerprint()`); the ledger restates it as a data contract and the
-tests pin the coordinator's vectors (#387). `cluster` is the same without the recipe. A carried
-record is re-keyed under the current rule. The bucket was `line // 20` before 2026-09-29, so the
+tests pin the coordinator's vectors (#387). `cluster` is the same without the recipe. Each
+finding names its `key_rule`; a carried record keyed before that rule is re-keyed from its stored
+fields and names the digest it `supersedes`, while a current-rule record keeps its key. The bucket was `line // 20` before 2026-09-29, so the
 split was redrawn then; the B-015 figures below predate it. MESH's claim key (no recipe, full
 hash) is a different identity and does not join on `fingerprint`.
 

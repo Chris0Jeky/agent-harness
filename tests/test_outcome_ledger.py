@@ -373,12 +373,29 @@ class ExtractTests(unittest.TestCase):
             cluster="000000000000",
             split="holdout",
         )
+        del stale["key_rule"]  # a record keyed before the rule was named
         merged, carried = ledger.merge_prior(records, {stale["id"]: stale})
         self.assertEqual(carried, 1)
         carried_record = merged["gone/f-0000000001"]
         live = records[f"lane/{self.real_id}"]
-        for field in ("fingerprint", "cluster", "split"):
+        for field in ("fingerprint", "cluster", "split", "key_rule"):
             self.assertEqual(carried_record[field], live[field], field)
+        self.assertEqual(carried_record["supersedes"], ledger._digest(stale))
+
+    def test_a_current_rule_key_is_carried_unchanged(self):
+        # The stored line is normalised; re-keying from it would move a finding
+        # whose receipt carried a string line (Codex on #390).
+        records, _ = self.run_extract()
+        current = dict(
+            records[f"lane/{self.real_id}"],
+            id="gone/f-0000000002",
+            line=None,
+            fingerprint="keyed-from-raw",
+        )
+        merged, _ = ledger.merge_prior(records, {current["id"]: current})
+        carried = merged["gone/f-0000000002"]
+        self.assertEqual(carried["fingerprint"], "keyed-from-raw")
+        self.assertNotIn("supersedes", carried)
 
     def test_pr_states_join_on_url(self):
         states = {

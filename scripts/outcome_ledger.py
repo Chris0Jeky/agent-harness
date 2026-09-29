@@ -39,6 +39,9 @@ PRODUCER = "agent-harness:scripts/outcome_ledger.py@1"
 SPLIT_SALT = "outcome-ledger/v1/split"
 HOLDOUT_PERCENT = 20
 LINE_BUCKET = 40  # the coordinator's fingerprint window
+# Names the identity rule a finding was keyed under, so a carried record
+# keyed by the current rule keeps the key it got from its raw receipt.
+KEY_RULE = "c8-coordinator-40"
 MATURATION_DAYS = 7
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SIGHTINGS = 50
@@ -270,6 +273,7 @@ def _new_finding(lane, repo, fid, raw, job_record):
         "repo": repo,
         "item_id": fid,
         "fingerprint": fingerprint(repo, recipe, path, raw.get("line"), claim),
+        "key_rule": KEY_RULE,
         "cluster": cluster,
         "split": split_for(cluster),
         "file": path,
@@ -579,7 +583,9 @@ def _rekey(record):
     carried finding keyed the old way would neither join coordinator receipts nor
     share a cluster with its own re-report.
     """
-    if record.get("type") != "finding":
+    if record.get("type") != "finding" or record.get("key_rule") == KEY_RULE:
+        # Current-rule keys came from the raw receipt line; the stored `line`
+        # is normalised and could re-key a string line differently (Codex on #390).
         return record
     origin = record.get("origin") or {}
     repo, path, line, claim = (
@@ -591,6 +597,7 @@ def _rekey(record):
     record["fingerprint"] = fingerprint(repo, origin.get("recipe"), path, line, claim)
     record["cluster"] = cluster_key(repo, path, line, claim)
     record["split"] = split_for(record["cluster"])
+    record["key_rule"] = KEY_RULE
     return record
 
 
@@ -606,7 +613,11 @@ def merge_prior(current, prior):
     for record_id, old in prior.items():
         new = merged.get(record_id)
         if new is None:
-            merged[record_id] = _rekey(dict(old, carried=True))
+            carried_record = _rekey(dict(old, carried=True))
+            if _digest(carried_record) != _digest(old):
+                # A migrated identity changes ledger content; name what it replaced.
+                carried_record["supersedes"] = _digest(old)
+            merged[record_id] = carried_record
             carried += 1
             continue
         if new["type"] == "finding" and old.get("type") == "finding":
