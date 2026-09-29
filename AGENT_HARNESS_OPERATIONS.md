@@ -13,6 +13,7 @@ Owner: Cristian Tcaci
 - **DECISION AH-005:** The owner removed the calendar launch deadline. The original 13-hour replay
   extraction allocation plus 11-hour public-product allocation is retained as historical
   accounting for that programme. It is not a cap on the wider workbench mission.
+- **DECISION AH-006 (2026-09-29, owner in chat):** AH-10 is unlocked for the replay tool. The owner approved a clean public repository, the name `charter-replay`, the Apache-2.0 licence, publication and the demo GIF. `replay_v0/` stays the source of truth; the public repository is a fresh-history extraction.
 
 # Authority and operating decision
 
@@ -23,8 +24,8 @@ Owner: Cristian Tcaci
 - **DECISION:** This document's implementation scope is the decision-replay kernel defined below.
   Doctor v2, Pattern Guard v2, estate operations, adapters, measurement, and Claude-config
   integration remain active workbench roadmap domains under `AGENT_HARNESS_AGENT_BRIEF.md`.
-- **DECISION:** No clean public replay repository is created now. Public extraction is deferred to
-  AH-10, after internal stability and demonstrated demand.
+- **DECISION (superseded 2026-09-29 by AH-006):** No clean public replay repository is created now.
+  Public extraction is deferred to AH-10, after internal stability and demonstrated demand.
 - **CONSTRAINT:** Cross-repository autonomy, mandatory owner review, `HUMAN_TODO.md`, failure-ledger schema, and manual promotion policy are defined only in `CLAUDE_CONFIG_OPERATIONS.md`; agents must apply those rules by reference.
 - **CONSTRAINT:** Work outside this replay contract follows the workbench roadmap and active-plan
   limits; this file does not defer or authorise it.
