@@ -17,9 +17,9 @@ Owner: Cristian Tcaci
   global workbench cap.
 - **HISTORICAL RP-003:** A 2026-09-30 continuation review was recorded for the former launch plan;
   the date does not trigger extraction.
-- **SUPERSEDED by RP-006 — RP-004:** Final repository, package, and CLI naming is an AH-10 decision, not the next
+- **RP-004 (superseded by RP-006):** Final repository, package, and CLI naming is an AH-10 decision, not the next
   owner question. `CharterReplay` / `charter-replay` remains only a candidate.
-- **SUPERSEDED by RP-006 — RP-005:** Licensing is an AH-10 decision after provenance review, not the next owner
+- **RP-005 (superseded by RP-006):** Licensing is an AH-10 decision after provenance review, not the next owner
   question. No licence recommendation authorises a change.
 - **DECISION RP-006 (2026-09-29, owner in chat):** RP-004 and RP-005 are decided: the repository, package and CLI are `charter-replay`, licensed Apache-2.0, published from `Chris0Jeky/charter-replay`. See AGENT_HARNESS_OPERATIONS AH-006.
 
