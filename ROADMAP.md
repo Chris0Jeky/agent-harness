@@ -135,5 +135,5 @@ Every base or head change re-proves affected evidence.
 4. Advance AH-4/AH-6 only from reproduced configuration and estate failures; keep diagnosis and
    mutation separate.
 5. Preserve AH-7's evidence boundary: a future consumer, source path, marker, or handler change
-   requires its own bounded review/trust/canary wave. Leave AH-10 deferred until its explicit
-   evidence gates change.
+   requires its own bounded review/trust/canary wave. AH-10 is unlocked for the replay tool
+   only (AH-006, 2026-09-29); the blueprint-plugin extraction stays deferred.

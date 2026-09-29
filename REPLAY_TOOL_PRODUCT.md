@@ -1,6 +1,7 @@
 Purpose: Preserved candidate product brief for a possible future public decision-replay extraction.
-Status: DEFERRED under AH-10. Do not create a clean repository, launch a product, choose a final
-name or licence, publish, or send outreach from this document.
+Status: ACTIVE for the replay tool since 2026-09-29 (RP-006, AGENT_HARNESS_OPERATIONS AH-006): the
+owner approved the clean repository, name, licence and publication. Outreach still needs owner
+direction. Text below that says DEFERRED records the earlier plan.
 Authority relationship: `AGENT_HARNESS_AGENT_BRIEF.md` wins for current repository mission and
 defers public extraction until internal stability and demonstrated demand. If AH-10 is later
 unlocked, this document supplies candidate product requirements; `AGENT_HARNESS_OPERATIONS.md`
@@ -16,9 +17,9 @@ Owner: Cristian Tcaci
   global workbench cap.
 - **HISTORICAL RP-003:** A 2026-09-30 continuation review was recorded for the former launch plan;
   the date does not trigger extraction.
-- **DEFERRED RP-004:** Final repository, package, and CLI naming is an AH-10 decision, not the next
+- **SUPERSEDED by RP-006 — RP-004:** Final repository, package, and CLI naming is an AH-10 decision, not the next
   owner question. `CharterReplay` / `charter-replay` remains only a candidate.
-- **DEFERRED RP-005:** Licensing is an AH-10 decision after provenance review, not the next owner
+- **SUPERSEDED by RP-006 — RP-005:** Licensing is an AH-10 decision after provenance review, not the next owner
   question. No licence recommendation authorises a change.
 - **DECISION RP-006 (2026-09-29, owner in chat):** RP-004 and RP-005 are decided: the repository, package and CLI are `charter-replay`, licensed Apache-2.0, published from `Chris0Jeky/charter-replay`. See AGENT_HARNESS_OPERATIONS AH-006.
 

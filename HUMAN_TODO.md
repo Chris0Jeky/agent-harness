@@ -100,13 +100,13 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   toggles that only a human can perform. Tracked durably as issue #232. **Update 2026-09-29: the version owed is now floor 1.7.2** (`326afdad8078f5dc…`, agent-harness#376). It is deployed to `~/.claude/hooks` (normalized digest equals the marker), vendored in claude-config#530, and its marker PRs merged in SwarmingLilMen#80, collaborative-hill-lab#14 and Pulseboard#168; EvidenceDeck#35 carries 1.7.2 and still waits on H-18. The canary steps below are unchanged. **Earlier update 2026-09-28: the version owed was floor 1.7.1** (`9b98e3f845b38648…`, the `core` posture). It is deployed to `~/.claude/hooks` on DESKTOP-IHKOOJS (doctor: canonical == deployed). The marker PRs merged in SwarmingLilMen#79, collaborative-hill-lab#10 and Pulseboard#167; EvidenceDeck#35 waits on H-18. For each merged root, what is yours is the fresh-session Codex `/hooks` review and re-trust in that root's exact CWD, then three inert canaries. None of them changes anything even if the hook is not running.
   1. Allow: `git status`.
   2. Core allow, which only 1.7.x passes: `git push --dry-run --no-verify --force . HEAD:refs/heads/codex-core-canary` must proceed.
-  3. Deny: `rm -rf ../floor-canary-1-7-1-does-not-exist` must deny once. Its banner must read `[floor 1.7.1 (2026-09-28)]` and it must carry a `FLOOR_ACK` key. **Never re-run a canary with the key.**
-  Pulseboard's live checkout is on Kraspyon, so that machine's `~/.claude` has to pull claude-config `main` (1.7.1) before its canary means anything (review of #373).
+  3. Deny: `rm -rf ../floor-canary-1-7-2-does-not-exist` must deny once. Its banner must read `[floor 1.7.2 (2026-09-28)]` and it must carry a `FLOOR_ACK` key. **Never re-run a canary with the key.**
+  Pulseboard's live checkout is on Kraspyon, so that machine's `~/.claude` has to pull claude-config `main` (1.7.2, claude-config#530) before its canary means anything (review of #373).
 
   The **consumer marker refresh itself is ordinary agent work** and is deliberately NOT part of this
   item — `CLAUDE_CONFIG_OPERATIONS.md` requires that `HUMAN_TODO.md` not hold work an agent can
   safely complete, and SPECS §5 treats marker refresh as separate reviewed rollout work. It lives in
-  `plans/ACTIVE.md` (phases P4/P5) and issue #232, blocked until steps 1 and 2 below both pass. What
+  `docs/archive/status-2026-09.md` (phases P4/P5) and issue #232, blocked until steps 1 and 2 below both pass. What
   this item owes you is steps 1 and 2, and then the per-root trust/canary half of step 3.
 
   **Why this exists even though H-2 is closed.** H-2 closed on a complete, directly-evidenced
@@ -202,7 +202,7 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
   `origin/main`, with locally modified hook and memory files — that is H-16's runtime-home item,
   untouched here. **Still owed — human-only:** a new normal Codex TUI in
   each enabled Codex root for the `/hooks` re-trust and the same trio there (the producer first,
-  `plans/ACTIVE.md` P3). The 1.6.33-specific pair for that trio, in a guide-posture repo. Both
+  `docs/archive/status-2026-09.md` P3). The 1.6.33-specific pair for that trio, in a guide-posture repo. Both
   carry `--help`, so each is **inert if the hook is missing or disabled** — which is exactly the
   case the probe exists to detect (the H-16 reasoning below):
   1. `echo hi > $target; gh repo view --help` must be **ALLOWED**. On the deployed 1.6.32 this same

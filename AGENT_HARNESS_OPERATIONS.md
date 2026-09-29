@@ -24,8 +24,8 @@ Owner: Cristian Tcaci
 - **DECISION:** This document's implementation scope is the decision-replay kernel defined below.
   Doctor v2, Pattern Guard v2, estate operations, adapters, measurement, and Claude-config
   integration remain active workbench roadmap domains under `AGENT_HARNESS_AGENT_BRIEF.md`.
-- **DECISION:** No clean public replay repository is created now. Public extraction is deferred to
-  AH-10, after internal stability and demonstrated demand.
+- **DECISION (superseded 2026-09-29 by AH-006):** No clean public replay repository is created now.
+  Public extraction is deferred to AH-10, after internal stability and demonstrated demand.
 - **CONSTRAINT:** Cross-repository autonomy, mandatory owner review, `HUMAN_TODO.md`, failure-ledger schema, and manual promotion policy are defined only in `CLAUDE_CONFIG_OPERATIONS.md`; agents must apply those rules by reference.
 - **CONSTRAINT:** Work outside this replay contract follows the workbench roadmap and active-plan
   limits; this file does not defer or authorise it.

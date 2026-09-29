@@ -56,6 +56,10 @@ combined tree passed 1,322 unit and 186 replay tests locally before the sequenti
 
 ## Open follow-ups
 
+- #233 (open): the declared two-workstream cap versus region-disjoint lanes. Until it
+  rules, a region-disjoint lane does not consume a workstream slot (the assumption recorded in
+  `docs/archive/status-2026-09.md`).
+
 - #365: remaining core false positives (57 T3 denies in the decider; `py`/`python3.12` heads;
   gh body-heredoc; prose punctuation as path shape).
 - #370 and #375: audit protection and sync follow-ups.
