@@ -174,6 +174,19 @@ class CommandParsingTests(unittest.TestCase):
         finally:
             shutil.rmtree(workspace.parent, ignore_errors=True)
 
+    def test_a_template_transcript_is_emptied(self) -> None:
+        with tempfile.TemporaryDirectory() as template:
+            carried = Path(template, ".replay", "transcript.jsonl")
+            carried.parent.mkdir()
+            carried.write_text('{"old": true}\n', encoding="utf-8")
+            workspace = prepare_workspace(Path(template))
+            try:
+                transcript = workspace / ".replay" / "transcript.jsonl"
+                self.assertEqual(transcript.read_bytes(), b"")
+                self.assertTrue(carried.read_bytes())
+            finally:
+                shutil.rmtree(workspace.parent, ignore_errors=True)
+
     @unittest.skipUnless(os.name == "nt", "Windows command-line splitting")
     def test_windows_backslash_paths_survive(self) -> None:
         relative = os.path.relpath(FIXTURE).replace("/", "\\")

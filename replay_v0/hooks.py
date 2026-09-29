@@ -337,7 +337,8 @@ def prepare_workspace(template: Path | None) -> Path:
     # rather than crashing on every event.
     transcript = workspace / ".replay" / "transcript.jsonl"
     transcript.parent.mkdir(exist_ok=True)
-    transcript.touch()
+    # Empty even when the template carried one (review of #394).
+    transcript.write_bytes(b"")
     return workspace
 
 

@@ -276,7 +276,20 @@ def _run_hooks(args: argparse.Namespace) -> int:
 def _run_import(args: argparse.Namespace) -> int:
     from replay_v0.importer import run_import
 
-    return run_import(args)
+    # A missing or unreadable terms file is bad input (exit 2), not the
+    # filesystem failure that `main` maps to exit 3 (review of #394).
+    if args.redact_terms and not Path(args.redact_terms).is_file():
+        raise HookSpecError(
+            f"--redact-terms is not a readable file: {args.redact_terms}"
+        )
+    try:
+        return run_import(args)
+    except PermissionError as exc:
+        if args.redact_terms and exc.filename == args.redact_terms:
+            raise HookSpecError(
+                f"--redact-terms is not a readable file: {args.redact_terms}"
+            ) from exc
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

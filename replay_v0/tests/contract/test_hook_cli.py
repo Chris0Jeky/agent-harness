@@ -56,6 +56,22 @@ class HookOptionTests(unittest.TestCase):
                             self._record(flag, value, output=tmp)
                     self.assertEqual(caught.exception.code, 2)
 
+    def test_a_missing_redact_terms_file_is_input_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "import",
+                        "--output",
+                        str(Path(tmp) / "corpus"),
+                        "--redact-terms",
+                        str(Path(tmp) / "absent.txt"),
+                    ]
+                )
+        self.assertEqual(code, 2)
+        self.assertIn("--redact-terms is not a readable file", stderr.getvalue())
+
     def test_a_filesystem_failure_is_a_clean_exit_three(self) -> None:
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
