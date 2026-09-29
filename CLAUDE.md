@@ -27,9 +27,10 @@ py -3 -m unittest discover -s tests -p "test_*.py" -v
 py -3 templates\hooks\smoke_test.py            # deny-floor bypass matrix
 # ruff/black/py_compile run over an EXPLICIT file list that lives in ci.yml and grows with
 # every new module. Read it from there rather than from a copy here that goes stale:
-$files = (Select-String -Path .github\workflows\ci.yml -Pattern '[a-z_/]+\.py' -AllMatches).Matches.Value | Sort-Object -Unique
+$files = (Select-String -Path .github\workflows\ci.yml -Pattern '[A-Za-z0-9_/-]+\.py' -AllMatches).Matches.Value | Sort-Object -Unique
 py -3 -m ruff check $files
 py -3 -m black --check $files
+py -3 -m black --check replay_v0                # CI's second Black step covers the whole package
 
 # Single test
 py -3 -m unittest tests.test_harness.<TestClass>.<test_method> -v
