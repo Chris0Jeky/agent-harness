@@ -70,7 +70,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.7.2 (2026-09-28)"
+FLOOR_VERSION = "1.7.3 (2026-10-01)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -13513,17 +13513,16 @@ def masked_segment_verdict(
         fragment = fragment.strip()
         if not fragment or fragment == whole:
             continue
-        try:
-            decision, reason = checker(
-                fragment,
-                tier_cfg,
-                project_dir,
-                command_cwd,
-                _remote_cache=remote_cache,
-                _remote_deadline=remote_deadline,
-            )
-        except Exception:  # a fragment the analyzer cannot parse is not evidence
-            continue
+        # Unexpected analyzer errors reach main's unscaled fail-closed handler,
+        # just as errors in the whole-command check do (SPECS §5.4).
+        decision, reason = checker(
+            fragment,
+            tier_cfg,
+            project_dir,
+            command_cwd,
+            _remote_cache=remote_cache,
+            _remote_deadline=remote_deadline,
+        )
         if accepts(decision, reason):
             return decision, reason
     return None
