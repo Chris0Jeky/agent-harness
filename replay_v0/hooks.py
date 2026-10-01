@@ -21,6 +21,7 @@ import re
 from pathlib import Path, PurePosixPath
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -346,6 +347,68 @@ def prepare_workspace(template: Path | None) -> Path:
     return workspace
 
 
+def _write_recording(output: Path, files: dict[str, bytes]) -> None:
+    """Stage the recording and recover earlier outputs after a write failure.
+
+    Promotion is per-file, not a lock excluding other writers. If another writer
+    changes a promoted file, retain its contents and the prior recovery copy.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".recording-", dir=output))
+    fresh = stage / "new"
+    previous = stage / "previous"
+    fresh.mkdir()
+    previous.mkdir()
+    modes: dict[str, int] = {}
+    promoted: list[str] = []
+
+    def cleanup() -> None:
+        for directory in (fresh, previous):
+            for path in directory.iterdir():
+                path.chmod(path.stat().st_mode | stat.S_IWRITE)
+                path.unlink()
+            directory.rmdir()
+        stage.rmdir()
+
+    try:
+        for name, contents in files.items():
+            target = output / name
+            if target.is_symlink():
+                raise HookSpecError(f"recording output must not be a symlink: {target}")
+            if target.exists():
+                modes[name] = stat.S_IMODE(target.stat().st_mode)
+                (previous / name).write_bytes(target.read_bytes())
+            (fresh / name).write_bytes(contents)
+            if name in modes:
+                (fresh / name).chmod(modes[name])
+        for name in files:
+            (fresh / name).replace(output / name)
+            promoted.append(name)
+    except (OSError, HookSpecError) as error:
+        problems = []
+        for name in reversed(promoted):
+            target = output / name
+            backup = previous / name
+            try:
+                if target.is_symlink() or target.read_bytes() != files[name]:
+                    raise OSError(f"recording output changed during recovery: {target}")
+                if backup.exists():
+                    backup.chmod(modes[name])
+                    backup.replace(target)
+                else:
+                    target.unlink()
+            except OSError as recovery_error:
+                problems.append(str(recovery_error))
+        if problems:
+            raise OSError(
+                f"recording recovery incomplete; prior outputs retained at {previous}: "
+                + "; ".join(problems)
+            ) from error
+        cleanup()
+        raise
+    cleanup()
+
+
 def record_hook(
     spec: HookSpec,
     events: list[dict[str, Any]],
@@ -382,7 +445,6 @@ def record_hook(
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
-    output.mkdir(parents=True, exist_ok=True)
     lines = [
         json.dumps(
             decision_record(event["event_id"], outcome, spec.ask_effect),
@@ -392,7 +454,6 @@ def record_hook(
         for event, outcome in zip(events, outcomes)
     ]
     decisions_bytes = ("\n".join(lines) + "\n").encode("utf-8")
-    (output / "decisions.jsonl").write_bytes(decisions_bytes)
     manifest = {
         "schema_version": "recorded-policy-manifest.v1",
         "policy_id": policy_id,
@@ -403,9 +464,6 @@ def record_hook(
         "decisions_sha256": sha256_bytes(decisions_bytes),
         "decision_count": len(lines),
     }
-    (output / "decisions.jsonl.manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
-    )
     outcome_lines = [
         json.dumps(
             {
@@ -418,8 +476,15 @@ def record_hook(
         )
         for event, outcome in zip(events, outcomes)
     ]
-    (output / "outcomes.jsonl").write_text(
-        "\n".join(outcome_lines) + "\n", encoding="utf-8", newline="\n"
+    _write_recording(
+        output,
+        {
+            "decisions.jsonl": decisions_bytes,
+            "decisions.jsonl.manifest.json": (
+                json.dumps(manifest, indent=2) + "\n"
+            ).encode("utf-8"),
+            "outcomes.jsonl": ("\n".join(outcome_lines) + "\n").encode("utf-8"),
+        },
     )
     counts = {name: 0 for name in OUTCOMES}
     for outcome in outcomes:
