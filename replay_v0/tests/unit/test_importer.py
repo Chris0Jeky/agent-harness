@@ -378,7 +378,7 @@ class ScrubberTests(unittest.TestCase):
             "docker login",
             "docker login -u bot",
             "docker login --password-stdin",
-            "docker login -u \"my user\"",
+            'docker login -u "my user"',
             "docker login --username 'my user'",
             "podman login",
             "podman login --password-stdin",
