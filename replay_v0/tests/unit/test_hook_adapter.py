@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -306,6 +307,134 @@ class ProcessTests(unittest.TestCase):
             [json.loads(line)["outcome"] for line in outcome_lines],
             ["deny", "allow", "crash"],
         )
+
+
+class RecordingRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.output = Path(self.temp.name) / "recording"
+        self.spec = HookSpec(argv=(sys.executable,))
+        self.record("old")
+        self.previous = {
+            name: (self.output / name).read_bytes()
+            for name in (
+                "decisions.jsonl",
+                "decisions.jsonl.manifest.json",
+                "outcomes.jsonl",
+            )
+        }
+
+    def tearDown(self) -> None:
+        for path in self.output.rglob("*"):
+            if path.is_file():
+                path.chmod(stat.S_IREAD | stat.S_IWRITE)
+        self.temp.cleanup()
+
+    def record(self, event_id: str) -> dict:
+        with mock.patch(
+            "replay_v0.hooks.run_hook", return_value=HookOutcome("allow", "", 0, 1)
+        ):
+            return record_hook(
+                self.spec,
+                [_event(event_id, "echo synthetic")],
+                self.output,
+                policy_id="fixture",
+            )
+
+    def assert_previous_recording(self) -> None:
+        for name, contents in self.previous.items():
+            self.assertEqual((self.output / name).read_bytes(), contents, name)
+        loaded = kernel._load_recorded_source(str(self.output / "decisions.jsonl"))
+        self.assertEqual(
+            loaded.source.evaluate([_event("old", "echo synthetic")]).failures, ()
+        )
+
+    @unittest.skipUnless(os.name == "nt", "native Windows read-only file semantics")
+    def test_read_only_manifest_preserves_existing_recording(self) -> None:
+        manifest = self.output / "decisions.jsonl.manifest.json"
+        manifest.chmod(stat.S_IREAD)
+        with self.assertRaises(OSError):
+            self.record("new")
+        self.assert_previous_recording()
+
+    def test_late_promotion_failure_restores_all_previous_outputs(self) -> None:
+        original_replace = Path.replace
+
+        def replace(path, target):
+            if (
+                path.name == "outcomes.jsonl"
+                and Path(target) == self.output / path.name
+            ):
+                raise PermissionError("synthetic promotion refusal")
+            return original_replace(path, target)
+
+        with mock.patch.object(Path, "replace", replace):
+            with self.assertRaises(OSError):
+                self.record("new")
+        self.assert_previous_recording()
+
+    def test_successful_replacement_keeps_unrelated_files(self) -> None:
+        sentinel = self.output / "notes.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+        summary = self.record("new")
+        self.assertEqual(summary["events"], 1)
+        loaded = kernel._load_recorded_source(str(self.output / "decisions.jsonl"))
+        self.assertEqual(
+            loaded.source.evaluate([_event("new", "echo synthetic")]).failures, ()
+        )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_failed_first_recording_removes_promoted_outputs(self) -> None:
+        self.output = Path(self.temp.name) / "first-recording"
+        original_replace = Path.replace
+
+        def replace(path, target):
+            if (
+                path.name == "outcomes.jsonl"
+                and Path(target) == self.output / path.name
+            ):
+                raise PermissionError("synthetic promotion refusal")
+            return original_replace(path, target)
+
+        with mock.patch.object(Path, "replace", replace):
+            with self.assertRaises(OSError):
+                self.record("new")
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_staging_failure_preserves_previous_outputs(self) -> None:
+        original_write = Path.write_bytes
+
+        def write(path, contents):
+            if path.name == "outcomes.jsonl" and path.parent.name == "new":
+                raise OSError("synthetic staging refusal")
+            return original_write(path, contents)
+
+        with mock.patch.object(Path, "write_bytes", write):
+            with self.assertRaises(OSError):
+                self.record("new")
+        self.assert_previous_recording()
+        self.assertEqual(list(self.output.glob(".recording-*")), [])
+
+    def test_recovery_keeps_a_later_write_and_previous_backup(self) -> None:
+        original_replace = Path.replace
+        concurrent = b"later writer contents\n"
+
+        def replace(path, target):
+            if (
+                path.name == "outcomes.jsonl"
+                and Path(target) == self.output / path.name
+            ):
+                (self.output / "decisions.jsonl").write_bytes(concurrent)
+                raise OSError("synthetic promotion refusal")
+            return original_replace(path, target)
+
+        with mock.patch.object(Path, "replace", replace):
+            with self.assertRaisesRegex(OSError, "recovery incomplete"):
+                self.record("new")
+        self.assertEqual((self.output / "decisions.jsonl").read_bytes(), concurrent)
+        recovery = list(self.output.glob(".recording-*/previous/decisions.jsonl"))
+        self.assertEqual(len(recovery), 1)
+        self.assertEqual(recovery[0].read_bytes(), self.previous["decisions.jsonl"])
 
 
 class WorkspaceScrubTests(unittest.TestCase):
