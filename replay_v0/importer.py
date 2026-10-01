@@ -73,7 +73,8 @@ _TOKEN_PATTERNS = (
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}"), "<token>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{8,}"), "<token>"),
     (re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{12,}"), "<token>"),
-    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "<token>"),
+    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9_-]{16,}"), "<token>"),
+    (re.compile(r"\b(?:xapp|xox[abeoprs])-[A-Za-z0-9-]{10,}"), "<token>"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "<token>"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"), "<token>"),
     (

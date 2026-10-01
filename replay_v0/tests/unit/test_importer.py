@@ -49,6 +49,70 @@ class ScrubberTests(unittest.TestCase):
             with self.subTest(prefix=secret[:4]):
                 self.assertNotIn(secret, self.scrubber.scrub(f"use {secret} now"))
 
+    def test_stripe_secret_and_restricted_keys_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        prefixes = [
+            "s" + "k_" + "live" + "_",
+            "s" + "k_" + "test" + "_",
+            "r" + "k_" + "live" + "_",
+            "r" + "k_" + "test" + "_",
+        ]
+        bodies = ["A" * 30, "A1b2" * 5, "Ab3_" * 5, "Ab3-" * 5]
+        for prefix in prefixes:
+            for body in bodies:
+                with self.subTest(prefix=prefix, body=body):
+                    token = prefix + body
+                    self.assertEqual(
+                        scrubber.scrub("deploy " + token), "deploy <token>"
+                    )
+
+    def test_slack_tokens_old_and_new_forms_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        prefixes = [
+            "xa" + "pp-",
+            "xo" + "xe-",
+            "xo" + "xo-",
+            "xo" + "xa-",
+            "xo" + "xb-",
+            "xo" + "xp-",
+            "xo" + "xr-",
+            "xo" + "xs-",
+        ]
+        bodies = ["A" * 30, "A1b2" * 5, "AbC-123-XyZ-4567"]
+        for prefix in prefixes:
+            for body in bodies:
+                with self.subTest(prefix=prefix, body=body):
+                    token = prefix + body
+                    self.assertEqual(
+                        scrubber.scrub("deploy " + token), "deploy <token>"
+                    )
+
+    def test_openai_preserved_and_safe_controls_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        openai = "s" + "k-" + "q" * 30
+        self.assertEqual(scrubber.scrub("deploy " + openai), "deploy <token>")
+        for prefix in ["p" + "k_" + "live" + "_", "p" + "k_" + "test" + "_"]:
+            with self.subTest(prefix=prefix):
+                command = "deploy " + prefix + "A" * 30
+                self.assertEqual(scrubber.scrub(command), command)
+        short_tokens = [
+            "s" + "k_" + "live" + "_" + "ABC123",
+            "r" + "k_" + "test" + "_" + "abc",
+            "xo" + "xe-" + "abc",
+            "xa" + "pp-" + "abc",
+        ]
+        for token in short_tokens:
+            with self.subTest(token=token):
+                command = "deploy " + token
+                self.assertEqual(scrubber.scrub(command), command)
+        ordinary = [
+            "deploy " + "s" + "k_" + "live" + " status",
+            "deploy " + "xo" + "xe" + " check",
+        ]
+        for command in ordinary:
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
     def test_assignments_and_headers_are_redacted(self) -> None:
         text = self.scrubber.scrub(
             'API_TOKEN=abc123 curl -H "Authorization: Bearer abcdefghij" x'
