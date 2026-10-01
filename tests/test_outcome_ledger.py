@@ -104,6 +104,74 @@ def fid(repo, raw):
     return ledger.coordinator_finding_id(repo, raw)
 
 
+class JsonInputTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Root()
+        self.addCleanup(self.root.cleanup)
+        self.root.put("valid", "001", "app--good", receipt(findings=[finding("valid")]))
+        self.root.coordinator("valid", {})
+
+    def assert_bad_input_is_counted(self, text, *, coordinator=False):
+        if coordinator:
+            self.root.coordinator("broken", {})
+            path = self.root.path / "broken" / "coordinator" / "state.json"
+            path.write_text(text, encoding="utf-8")
+            count = "unreadable_states"
+        else:
+            self.root.put("broken", "001", "app--bad", text)
+            path = self.root.path / "broken/state/waves/001/run/app--bad/result.json"
+            count = "unreadable_receipts"
+        before = self.root.tree_digest()
+        records, summary = ledger.extract(self.root.path, OBSERVED)
+        self.assertEqual(summary["counts"][count], 1)
+        self.assertEqual(summary["counts"]["jobs"], 1)
+        self.assertEqual(summary["counts"]["findings"], 1)
+        self.assertEqual(summary["counts"]["coordinated_lanes"], 1)
+        self.assertEqual(summary["problems"][0]["path"], str(path))
+        valid_path = self.root.path / "valid/state/waves/001/run/app--good/result.json"
+        provenance = records["valid/001/app--good"]["provenance"]
+        self.assertEqual(
+            provenance["source_sha256"],
+            hashlib.sha256(valid_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(before, self.root.tree_digest())
+        path.unlink()
+
+    def test_deep_receipt_is_counted_and_valid_receipts_continue(self):
+        text = '{"nested":' + "[" * 50000 + "0" + "]" * 50000 + "}"
+        self.assert_bad_input_is_counted(text)
+
+    def test_deep_coordinator_state_is_counted_and_valid_receipts_continue(self):
+        text = '{"items":{},"nested":' + "[" * 50000 + "0" + "]" * 50000 + "}"
+        self.assert_bad_input_is_counted(text, coordinator=True)
+
+    def test_duplicate_keys_are_counted_in_receipts_and_coordinator_state(self):
+        for text in (
+            '{"items":{},"items":{}}',
+            '{"items":{},"extra":{"key":1,"key":2}}',
+        ):
+            for coordinator in (False, True):
+                with self.subTest(text=text, coordinator=coordinator):
+                    self.assert_bad_input_is_counted(text, coordinator=coordinator)
+
+    def test_nonfinite_numbers_are_counted_in_receipts_and_coordinator_state(self):
+        for number in ("NaN", "Infinity", "-Infinity", "1e400", "-1e400"):
+            text = '{"items":{},"extra":' + number + "}"
+            for coordinator in (False, True):
+                with self.subTest(number=number, coordinator=coordinator):
+                    self.assert_bad_input_is_counted(text, coordinator=coordinator)
+
+    def test_finite_json_preserves_values_and_digest_of_original_bytes(self):
+        path = self.root.path / "finite.json"
+        raw = b'{ "large": 1e308, "small": -1e-308, "nested": {"value": 1.25} }\n'
+        path.write_bytes(raw)
+        data, digest = ledger._read_json(path)
+        self.assertEqual(
+            data, {"large": 1e308, "small": -1e-308, "nested": {"value": 1.25}}
+        )
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+
+
 class IdentityTests(unittest.TestCase):
     def test_coordinator_id_matches_the_producer_contract(self):
         # Measured against a live claude-config coordinator item on 2026-09-27.
