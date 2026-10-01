@@ -384,17 +384,23 @@ def _scrub_login_segment(segment: str) -> str:
     positions = [i for i, part in enumerate(parts) if part and not part.isspace()]
     if len(positions) < 2:
         return segment
-    skip_next = False
+    value_flag: str | None = None
     for pos in positions[2:]:
-        if skip_next:
-            skip_next = False
+        if value_flag is not None:
+            if value_flag in {"-p", "--password"}:
+                quote, _, tail = _split_quote(parts[pos])
+                parts[pos] = f"{quote}<redacted>{tail}"
+            value_flag = None
             continue
         token = parts[pos]
-        _, body, _ = _split_quote(token)
+        quote, body, tail = _split_quote(token)
         effective = body if body else token
         if effective.startswith("-"):
             if effective in _LOGIN_VALUE_FLAGS:
-                skip_next = True
+                value_flag = effective
+            elif effective.startswith("-p") and not effective.startswith("--"):
+                prefix = "-p=" if effective.startswith("-p=") else "-p"
+                parts[pos] = f"{quote}{prefix}<redacted>{tail}"
             continue
         parts[pos] = _redact_login_server(token)
     return "".join(parts)

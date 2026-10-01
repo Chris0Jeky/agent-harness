@@ -448,6 +448,28 @@ class ScrubberTests(unittest.TestCase):
                         f"{tool} login -u {username} <registry>",
                     )
 
+    def test_login_password_values_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        for tool in ("docker", "podman"):
+            for option, expected in (
+                ("-p private.password", "-p <redacted>"),
+                ('-p "private password"', '-p "<redacted>"'),
+                ("-p 'private password'", "-p '<redacted>'"),
+                ("-pprivate.password", "-p<redacted>"),
+                ("-p=private.password", "-p=<redacted>"),
+                ("--password private.password", "--password <redacted>"),
+                ("--password=private.password", "--password=<redacted>"),
+            ):
+                with self.subTest(tool=tool, option=option):
+                    self.assertEqual(
+                        scrubber.scrub(f"{tool} login {option} private.corp:5000"),
+                        f"{tool} login {expected} <registry>",
+                    )
+            self.assertEqual(
+                scrubber.scrub(f"{tool} login --password-stdin example.com"),
+                f"{tool} login --password-stdin example.com",
+            )
+
     def test_long_dotted_runs_scrub_in_linear_time(self) -> None:
         # #397: unbounded leading classes made this 8.5 s for 40,000 characters.
         for text in ("echo " + "x." * 20000, "echo " + "a-" * 20000 + "@"):
@@ -549,6 +571,22 @@ class ExtractionTests(unittest.TestCase):
         found = [item[0] for item in codex_commands(self.root / "codex", stats)]
         self.assertEqual(found, ["ls -la", "make"])
         self.assertEqual(stats["codex-unparsed-calls"], 2)
+
+    def test_login_password_does_not_reach_private_corpus_events(self) -> None:
+        commands = [
+            (
+                f"{tool} login -p private.password private.corp:5000",
+                "2026-01-01T00:00:00Z",
+                None,
+            )
+            for tool in ("docker", "podman")
+        ]
+        events, _, _ = build_private_corpus([("claude", iter(commands))], Scrubber([]))
+        self.assertEqual(len(events), 2)
+        for event in events:
+            self.assertNotIn("private.password", event["command"])
+            self.assertNotIn("private.corp", event["command"])
+            self.assertIn("-p <redacted>", event["command"])
 
     def test_corpus_is_scrubbed_deduplicated_and_loadable(self) -> None:
         commands = [
