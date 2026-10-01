@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import ipaddress
 import json
 import os
 import random
@@ -280,10 +281,113 @@ def _redact_login_server(chunk: str) -> str:
     quote, body, _ = _split_quote(chunk)
     if not body or body[0] == "-" or "=" in body or "/" in body or "://" in body:
         return _redact_image_token(chunk)
-    host = body.split(":", 1)[0]
-    if host.lower() in _PUBLIC_HOSTS or not _DOTTED_HOST.fullmatch(host):
+    if body.startswith("<") and body.endswith(">"):
         return chunk
-    return f"{quote}<registry>{quote}"
+    if body.startswith("["):
+        end = body.find("]")
+        if end == -1:
+            return chunk
+        inner = body[1:end]
+        rest = body[end + 1 :]
+        if rest:
+            if not rest.startswith(":") or not rest[1:].isdigit():
+                return chunk
+        try:
+            address = ipaddress.ip_address(inner)
+        except ValueError:
+            return chunk
+        if address.is_loopback:
+            return chunk
+        return f"{quote}<registry>{quote}"
+    if body == "::1":
+        return chunk
+    if "::" in body:
+        return chunk
+    host, sep, port = body.partition(":")
+    if sep:
+        if not port.isdigit():
+            return chunk
+    else:
+        host = body
+    if not host:
+        return chunk
+    if host.lower() in _PUBLIC_HOSTS:
+        return chunk
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.is_loopback:
+            return chunk
+        return f"{quote}<registry>{quote}"
+    if _DOTTED_HOST.fullmatch(host):
+        return f"{quote}<registry>{quote}"
+    if _SINGLE_LABEL_HOST.fullmatch(host):
+        return f"{quote}<registry>{quote}"
+    return chunk
+
+
+_LOGIN_VALUE_FLAGS = frozenset({"-u", "--username", "-p", "--password"})
+
+
+def _split_login_parts(segment: str) -> list[str]:
+    parts: list[str] = []
+    buf = ""
+    buf_is_space: bool | None = None
+    in_quote: str | None = None
+    for ch in segment:
+        if in_quote is not None:
+            buf += ch
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ("'", '"'):
+            if buf_is_space:
+                parts.append(buf)
+                buf = ""
+                buf_is_space = None
+            buf += ch
+            buf_is_space = False
+            in_quote = ch
+        elif ch.isspace():
+            if buf_is_space is False:
+                parts.append(buf)
+                buf = ""
+                buf_is_space = None
+            buf += ch
+            buf_is_space = True
+        else:
+            if buf_is_space:
+                parts.append(buf)
+                buf = ""
+                buf_is_space = None
+            buf += ch
+            buf_is_space = False
+    if buf:
+        parts.append(buf)
+    return parts
+
+
+def _scrub_login_segment(segment: str) -> str:
+    parts = _split_login_parts(segment)
+    positions = [i for i, part in enumerate(parts) if part and not part.isspace()]
+    if len(positions) < 2:
+        return segment
+    skip_next = False
+    for pos in positions[2:]:
+        if skip_next:
+            skip_next = False
+            continue
+        token = parts[pos]
+        _, body, _ = _split_quote(token)
+        effective = body if body else token
+        if effective.startswith("-"):
+            if effective in _LOGIN_VALUE_FLAGS:
+                skip_next = True
+            continue
+        parts[pos] = _redact_login_server(token)
+    return "".join(parts)
 
 
 def _redact_ssh_destination(chunk: str) -> str:
@@ -368,9 +472,7 @@ def _scrub_bare_hosts(text: str) -> str:
             ]
             if len(words) >= 2 and words[1].lower() == "login":
                 # `docker login <server>` names the registry with no image path.
-                segments[index] = _redact_after_command(
-                    segment, 2, _redact_login_server
-                )
+                segments[index] = _scrub_login_segment(segment)
             elif len(words) >= 2 and words[1].lower() in _CONTAINER_SUBCOMMANDS:
                 segments[index] = _redact_after_command(segment, 2, _redact_image_token)
     return "".join(segments)

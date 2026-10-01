@@ -212,6 +212,166 @@ class ScrubberTests(unittest.TestCase):
             self.scrubber.scrub("docker login -u bot"), "docker login -u bot"
         )
 
+    def test_login_private_ipv4_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login 10.0.0.5", "docker login <registry>", "10.0.0.5"),
+            (
+                "docker login 10.0.0.5:5000",
+                "docker login <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "podman login 192.168.1.10",
+                "podman login <registry>",
+                "192.168.1.10",
+            ),
+            (
+                "podman login 192.168.1.10:5000",
+                "podman login <registry>",
+                "192.168.1.10",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
+    def test_login_single_label_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login myregistry", "docker login <registry>"),
+            ("docker login myregistry:5000", "docker login <registry>"),
+            ("podman login myregistry", "podman login <registry>"),
+            ("podman login myregistry:5000", "podman login <registry>"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn("myregistry", text)
+
+    def test_login_bracket_ipv6_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login [fd00::1]", "docker login <registry>"),
+            ("docker login [fd00::1]:5000", "docker login <registry>"),
+            ("podman login [fd00::1]", "podman login <registry>"),
+            ("podman login [fd00::1]:5000", "podman login <registry>"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn("fd00", text)
+
+    def test_login_quoted_registries_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            (
+                'docker login "10.0.0.5:5000"',
+                'docker login "<registry>"',
+                "10.0.0.5",
+            ),
+            (
+                "docker login 'myregistry:5000'",
+                "docker login '<registry>'",
+                "myregistry",
+            ),
+            (
+                'podman login "[fd00::1]:5000"',
+                'podman login "<registry>"',
+                "fd00",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
+    def test_login_public_and_loopback_endpoints_are_preserved(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "docker login example.com",
+            "docker login example.com:5000",
+            "docker login localhost",
+            "docker login localhost:5000",
+            "docker login 127.0.0.1",
+            "docker login 127.0.0.1:5000",
+            "docker login [::1]",
+            "docker login [::1]:5000",
+            "podman login localhost:5000",
+            "podman login example.com:5000",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_login_missing_endpoint_and_flags_are_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "docker login",
+            "docker login -u bot",
+            "docker login --password-stdin",
+            "docker login -u \"my user\"",
+            "docker login --username 'my user'",
+            "podman login",
+            "podman login --password-stdin",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_login_option_values_do_not_become_endpoints(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            (
+                "docker login -u bot 10.0.0.5:5000",
+                "docker login -u bot <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "docker login --username bot myregistry:5000",
+                "docker login --username bot <registry>",
+                "myregistry",
+            ),
+            (
+                'docker login -u "my user" 10.0.0.5:5000',
+                'docker login -u "my user" <registry>',
+                "10.0.0.5",
+            ),
+            (
+                "docker login --password-stdin myregistry:5000",
+                "docker login --password-stdin <registry>",
+                "myregistry",
+            ),
+            (
+                "docker login --username=bot myregistry:5000",
+                "docker login --username=bot <registry>",
+                "myregistry",
+            ),
+            (
+                "podman login -u bot myregistry",
+                "podman login -u bot <registry>",
+                "myregistry",
+            ),
+            (
+                "docker  login   10.0.0.5:5000",
+                "docker  login   <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "docker login 10.0.0.5:5000; echo done",
+                "docker login <registry>; echo done",
+                "10.0.0.5",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
     def test_long_dotted_runs_scrub_in_linear_time(self) -> None:
         # #397: unbounded leading classes made this 8.5 s for 40,000 characters.
         for text in ("echo " + "x." * 20000, "echo " + "a-" * 20000 + "@"):
