@@ -1,0 +1,215 @@
+{
+  "schema": "ux-scenario-pack/0",
+  "pack_id": "workspace-handoff",
+  "status": "draft",
+  "authority": "advisory",
+  "gate_eligible": false,
+  "local_only": true,
+  "subject": {
+    "repository": "example/workspace",
+    "source_revision": "1111111111111111111111111111111111111111"
+  },
+  "journeys": [
+    {
+      "id": "durable-capture",
+      "goal": "Distinguish local queueing from one durable capture after a lost response.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "submit",
+          "action": "Submit one synthetic message with a stable operation key; interrupt its response after persistence.",
+          "assertions": [
+            "The client shows an uncertain outcome rather than claiming failure or durable acceptance without a receipt.",
+            "The fixture records the actual commit boundary; do not infer it from HTTP timing."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "reconcile",
+          "action": "Restart the adapter, query the operation receipt, and replay the same semantic request using the same key.",
+          "assertions": [
+            "Exactly one durable capture exists for that scoped request; the original receipt identifies it.",
+            "No proposal was approved, no board mutation occurred, and no new operation key was silently minted."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "conflict",
+          "action": "Reuse the operation key with a different semantic payload.",
+          "assertions": [
+            "The service rejects the conflict without changing the first record or leaking it to another principal."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "stale-scope",
+      "goal": "A changed proposal or revoked scope cannot be executed using stale approval context.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "inspect",
+          "action": "Read a proposal and record its exact revision, target, operation set and actor.",
+          "assertions": [
+            "The inspection is not itself an approval or authority grant."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "stale",
+          "action": "Keep actor scope valid, change the target revision, and attempt execution using the previously reviewed revision.",
+          "assertions": [
+            "The stale-revision control alone rejects execution with zero mutation effects; authorization is still valid.",
+            "The adapter reloads for review rather than silently replacing the expected revision."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "revoked",
+          "action": "Read the current target revision, revoke actor scope without changing that revision, and attempt execution.",
+          "assertions": [
+            "The permission control alone rejects execution with zero mutation effects; the revision is current.",
+            "The adapter does not retry using human credentials, a different principal or an unreviewed replacement proposal."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "recover",
+          "action": "Restore only the fixture-required scope, reload, and inspect the newly authorized current proposal.",
+          "assertions": [
+            "Review is bound to the new proposal tuple; the previous approval is not reused."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "attempt-is-not-outcome",
+      "goal": "Attempt progress and worker exit cannot fabricate completed human work.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "admit",
+          "action": "Authorize one bounded synthetic investigation, lose the admission acknowledgement, then reconcile.",
+          "assertions": [
+            "One intent links to one admitted attempt; each transport retry does not create a new job."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "cancel",
+          "action": "Request cancellation, deliver a late progress event and then a successful worker exit with incomplete acceptance evidence.",
+          "assertions": [
+            "Cancellation requested is distinct from stopped effects; late progress does not overwrite newer authoritative state.",
+            "The human commitment remains incomplete; incomplete evidence and the late result remain inspectable."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "complete",
+          "action": "Supply valid acceptance evidence through the fixture and perform the separately authorized human-work transition.",
+          "assertions": [
+            "The completion receipt identifies actor, current revision, actual effects and supporting evidence.",
+            "The earlier failed, cancelled or uncertain states remain in history rather than being rewritten as uninterrupted success."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    }
+  ]
+}
