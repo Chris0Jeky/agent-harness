@@ -1113,6 +1113,21 @@ class HookRoundTripTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIsNotNone(self.key_in(reason), reason)
 
+    def test_fragment_analyzer_error_fails_closed_in_both_runtimes(self):
+        # The real brace analyzer raises OverflowError before expanding this range.
+        # An earlier opaque redirect must not hide that dispatcher error.
+        fragment = "echo x > {1..100000000000000000000}"
+        command = "echo hi > $target; " + fragment
+        for posture in ("guide", "core"):
+            self.declare(3, posture=posture)
+            for runtime in ("claude", "codex"):
+                for suffix in ("", " # FLOOR_ACK=0000000000"):
+                    with self.subTest(posture=posture, runtime=runtime, suffix=suffix):
+                        decision, reason = self.invoke(command + suffix, runtime)
+                        self.assertEqual(decision, "deny")
+                        self.assertIn("dispatcher error (OverflowError)", reason)
+                        self.assertNotIn("FLOOR_ACK", reason)
+
     def test_invalid_posture_fails_closed_and_is_not_acknowledgeable(self):
         self.declare(
             1, raw=json.dumps({"tier": 1, "flags": {}, "floor_posture": "open"})
