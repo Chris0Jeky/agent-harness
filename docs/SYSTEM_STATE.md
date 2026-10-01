@@ -85,6 +85,13 @@ No agent may reorder those steps or infer any of them from static deployment or 
 
 ## Capability ledger
 
+**Source/deployment checkpoint (2026-10-01 quality integration):** producer floor source is
+1.7.3, with the source adapter's matching audit marker. The installed dispatcher remains 1.7.2;
+the clean primary checkout's doctor verified its byte identity before the producer update.
+No consumer marker or runtime trust state changed in this pass. H-14 still owns live trust/canaries,
+and 1.7.3 deployment waits on that gate. The older dated floor observations below are historical;
+they do not establish live execution of the new source. See `plans/ACTIVE.md` for the quality pass.
+
 | Capability | Outcome state | Direct evidence | Limitation and next executable handoff |
 |---|---|---|---|
 | Repository mission and authority | implemented | `AGENT_HARNESS_AGENT_BRIEF.md`; `.agent-harness/tier.json` declares T3, push free, merge free; PR #182 raised the unchanged aggregate Verify budget from 15 to 20 minutes and closed #179 | Authority can change; re-read every co-located tier declaration before mutation. #185 remains mapped; #186 is owned by the canonical `review-and-ship` skill in `claude-config`, not a harness runtime collector. |
