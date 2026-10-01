@@ -436,6 +436,18 @@ class ScrubberTests(unittest.TestCase):
                 self.assertEqual(text, expected)
                 self.assertNotIn(private, text)
 
+    def test_login_escaped_username_quotes_preserve_endpoint_redaction(self) -> None:
+        scrubber = Scrubber([])
+        usernames = (r'"build\"bot"', r"build\"bot", r"'build\bot'", r'"build\\"')
+        for tool in ("docker", "podman"):
+            for username in usernames:
+                with self.subTest(tool=tool, username=username):
+                    command = f"{tool} login -u {username} private.corp:5000"
+                    self.assertEqual(
+                        scrubber.scrub(command),
+                        f"{tool} login -u {username} <registry>",
+                    )
+
     def test_long_dotted_runs_scrub_in_linear_time(self) -> None:
         # #397: unbounded leading classes made this 8.5 s for 40,000 characters.
         for text in ("echo " + "x." * 20000, "echo " + "a-" * 20000 + "@"):

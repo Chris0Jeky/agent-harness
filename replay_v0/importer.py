@@ -337,10 +337,17 @@ def _split_login_parts(segment: str) -> list[str]:
     buf = ""
     buf_is_space: bool | None = None
     in_quote: str | None = None
+    escaped = False
     for ch in segment:
+        if escaped:
+            buf += ch
+            escaped = False
+            continue
         if in_quote is not None:
             buf += ch
-            if ch == in_quote:
+            if ch == "\\" and in_quote == '"':
+                escaped = True
+            elif ch == in_quote:
                 in_quote = None
             continue
         if ch in ("'", '"'):
@@ -365,6 +372,8 @@ def _split_login_parts(segment: str) -> list[str]:
                 buf_is_space = None
             buf += ch
             buf_is_space = False
+            if ch == "\\":
+                escaped = True
     if buf:
         parts.append(buf)
     return parts
