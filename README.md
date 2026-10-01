@@ -281,7 +281,11 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-28): canonical source is **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
+Producer source (2026-10-01): **1.7.3** restores the unscaled dispatcher-error deny when a
+later-fragment analyzer raises; the source adapter's audit marker matches those bytes. It is not
+deployed: installed 1.7.2, consumer markers and H-14 runtime trust/canaries remain unchanged.
+
+Posture baseline (2026-09-28): **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
 false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core
 hint reads commands rather than PR-body or heredoc prose), the **core posture** (SPECS §5.4,
 owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a

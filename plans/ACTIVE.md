@@ -1,7 +1,34 @@
 # Active workstreams
 
-Snapshot: 2026-09-29, evening. `main` head `2f704c2` (PR #396's merge). The 2026-09-02 snapshot and
+Snapshot: 2026-10-01 13:18 UTC, before quality integration. Observed `main` head `7c10099`
+(PR #409's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
+
+## Quality pass (2026-10-01)
+
+Eight Muse review lenses completed with two file-only worker candidates, at two-worker capacity
+and a 2048 MB memory floor. The coordinator reproduced accepted defects and ran each candidate's
+required checks; the supervisor is stopped with no in-flight jobs. Raw reports and logs remain
+outside Git. No estate process, installed floor or consumer marker was changed.
+
+- **#408 merged:** out-of-range UTC normalization in worktree leases now follows the malformed
+  lease/keep path rather than raising; real Git fixtures prove plan/apply preserve the tree.
+- **#409 merged:** re-recording stages all artifacts and recovers prior outputs after a later
+  write failure, while preserving a later writer and retaining recovery bytes when necessary.
+- **#412, reviewed source PR:** private Docker/Podman login endpoints and additional credential forms are
+  scrubbed. Independent review caught an escaped-quote regression, fixed before publication.
+- **#413, reviewed source PR:** malformed receipt/coordinator JSON is isolated by the outcome ledger, including
+  nesting, duplicate keys and non-finite/overflow floats.
+- **Integration branch:** includes the reviewed #412/#413 commits and floor 1.7.3, which restores
+  the existing unscaled dispatcher-error deny for errors
+  in later-fragment checks. Its separator semantics remain pinned by #267/#268 controls. The
+  pathological quoted-brace availability edge is tracked in #365; #411 tracks positional
+  `gh repo` selector scrubbing. Neither is a claim that scrubbed corpora are public-safe.
+
+Floor 1.7.2 remains deployed. The 1.7.3 producer source may merge under the gate, but deployment,
+consumer marker refresh and live trust/canaries still wait on H-14. Recording recovery does not
+claim process-crash atomicity or exclusion of concurrent writers. Public replay extraction/release
+is a separate step; H-19 remains open.
 
 ## Owner decisions in force (2026-09-29)
 
@@ -61,11 +88,14 @@ hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) 
 (`seed` gitignores `/.claude/worktrees/`, #236), then #403 (CI: Verify lints
 first with a 30-minute budget, #402) and, last, #396 (importer scrub leaks).
 
-## Open pull requests
+## PR checkpoint (2026-10-01, before integration)
 
 | PR | State |
 |---|---|
 | #332 | older parked lane from another session; not touched here |
+| #406 | another session's draft architecture synthesis; not touched here |
+| #412 | reviewed quality privacy source; commits included in the integration branch |
+| #413 | reviewed quality ledger source; commits included in the integration branch |
 
 ## Open follow-ups
 
