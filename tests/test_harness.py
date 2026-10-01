@@ -11373,6 +11373,28 @@ class MalformedTierFieldAuditTests(unittest.TestCase):
                 self.assertEqual(statuses, ["MISMATCH"])
 
 
+class WorktreeLeaseTimestampTests(unittest.TestCase):
+    def test_out_of_range_utc_conversion_is_malformed(self) -> None:
+        for value in (
+            "0001-01-01T00:00:00+23:59",
+            "9999-12-31T23:59:59-23:59",
+        ):
+            with self.subTest(value=value):
+                self.assertIsNone(harness.parse_worktree_lease_timestamp(value))
+
+    def test_timezone_offsets_are_normalized(self) -> None:
+        for value in (
+            "2026-10-01T13:30:00+01:00",
+            "2026-10-01T11:30:00-01:00",
+            "2026-10-01T12:30:00Z",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    harness.parse_worktree_lease_timestamp(value),
+                    datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc),
+                )
+
+
 class WorktreeCloseoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -11598,6 +11620,26 @@ class WorktreeCloseoutTests(unittest.TestCase):
         harness.write_worktree_lease(lease_path, record)
         mismatched = self.candidate(self.plan(), worktree)
         self.assertIn("cooperative_lease_identity_mismatch", mismatched["reasons"])
+
+    def test_out_of_range_lease_timestamps_retain_the_worktree(self) -> None:
+        worktree = self.add_worktree("overflow-lease")
+        original = self.candidate(self.plan(), worktree)["lease"]
+        lease_path = Path(original["path"])
+        for field in ("created_at", "renewed_at", "expires_at"):
+            for value in (
+                "0001-01-01T00:00:00+23:59",
+                "9999-12-31T23:59:59-23:59",
+            ):
+                with self.subTest(field=field, value=value):
+                    record = original["record"].copy()
+                    record[field] = value
+                    harness.write_worktree_lease(lease_path, record)
+                    plan = self.plan()
+                    candidate = self.candidate(plan, worktree)
+                    self.assertIn("cooperative_lease_malformed", candidate["reasons"])
+                    self.assertEqual(candidate["verdict"], "keep")
+                    self.assertTrue(harness.apply_worktree_plan(plan))
+                    self.assertTrue(worktree.is_dir())
 
     def test_canonical_identity_collapses_aliases_and_drives_reported_path(
         self,
