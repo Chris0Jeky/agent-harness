@@ -105,6 +105,34 @@ class ReceiptLabTests(unittest.TestCase):
         self.alter("UPDATE work SET epoch=2 WHERE scope='alpha'")
         self.rejected('epoch')
 
+    def test_independent_restored_owners_accept_divergent_results_with_copied_fence(self):
+        # SQLite backup copies committed WAL state into a separate database owner.
+        clone_path = Path(self.tmp.name) / 'restored.db'
+        destination = lab.sqlite3.connect(clone_path)
+        try:
+            self.store.db.backup(destination)
+        finally:
+            destination.close()
+        clone = lab.ReceiptLab(clone_path)
+        self.addCleanup(clone.close)
+        identity_sql = 'SELECT revision,epoch,policy,fence,holder,until_ms FROM work'
+        self.assertEqual(tuple(self.store.db.execute(identity_sql).fetchone()),
+                         tuple(clone.db.execute(identity_sql).fetchone()))
+        self.assertEqual(self.counts(), (0, 0, 0))
+        self.assertEqual(clone.counts('alpha', 'work'), (0, 0, 0))
+
+        original = self.apply(key='original-result', result_digest='a' * 64)
+        restored = clone.accept(**self.request(key='restored-result', result_digest='b' * 64))
+        self.assertNotEqual(original['id'], restored['id'])
+        self.assertNotEqual(original['result_digest'], restored['result_digest'])
+        self.assertEqual(self.counts(), (1, 1, 1))
+        self.assertEqual(clone.counts('alpha', 'work'), (1, 1, 1))
+        for store in (self.store, clone):
+            self.assertEqual(tuple(store.db.execute(
+                'SELECT epoch,fence,human_state FROM work').fetchone()),
+                (1, self.fence, 'open'))
+        # Two local acceptances are the counterexample, not a failover PASS.
+
     def test_cancelled_work_rejects_late_success(self):
         self.alter("UPDATE work SET state='cancelled' WHERE scope='alpha'")
         self.rejected('state')

@@ -29,6 +29,23 @@ The three authored journeys cover durable capture after a lost response, stale/r
 
 A product implementation must add genuine crash-boundary, duplicate-delivery, out-of-order event, permission revocation and cancellation controls. Isolate revision and permission failures: first test a stale revision with valid scope, then revoked scope with the current revision. Otherwise one working gate can conceal another broken gate. Include a worker that exits successfully without satisfying acceptance criteria. Complete the journey only through the application's current authorized transition. Test fixtures must not borrow personal databases, cloud credentials or real messages.
 
+## Fictional adoption profile
+
+This table assigns conformance questions to generic roles. It records no native adoption; the example pack remains `ux-scenario-pack/0`, advisory and `not_run`. Keep any real repository map and native receipts in the adopter's private evidence record.
+
+| Reference question | Native proof owner | Required observation |
+|---|---|---|
+| Lost capture response, duplicate key and changed-payload conflict | Work application | One persisted capture and its authoritative receipt through the actual client; independent scope/revision controls |
+| Lost admission response and duplicate enqueue | Admission runtime and receiver | Stable intent/attempt mapping, actual admission receipt and one admitted job after reconciliation |
+| Duplicate or out-of-order progress | Attempt/report owners | Identical-sequence replay, stale/conflicting report rejection and durable recovery after restart |
+| Cancellation and late success | Runtime, receiver and effect owner | Separately observed request, admission stop, process acknowledgement and reconciled effects; unavailable observations stay unknown |
+| Successful worker without accepted human outcome | Work application | Attempt result/evidence recorded while human work remains open; completion uses a separate authorized transition |
+| Restored owners with copied epoch/fence | Effect receiver | Receiver-enforced fencing or explicit old-writer isolation; the receipt lab's two-owner counterexample proves neither |
+
+Cancellation requested does not establish that admission stopped. Admission stopped does not establish process acknowledgement, and process acknowledgement does not establish reconciled effects. Record each observation separately, including `blocked` or `not_run` where appropriate. Repeating the receipt lab's cancelled-work/late-success case is reference coverage, not native adoption evidence.
+
+For each native receipt record the subject/input revision, exact source and fixture revision, environment, proof kind, command, outcome and unavailable observations. Existing binding validates declarations only; it never invokes a runner, checks permissions or decides merge eligibility. Do not add fixture/identity fields to the strict schema merely to turn a pending proof request into an apparent executed observation.
+
 ## Qualification boundary
 
 Nothing here changes the enforcement floor, execution framework, scheduling ownership, model routing, telemetry collection or the existing merge boundary. Deterministic product assertions may become qualification evidence only through the normal review process. Model judgment and a well-written scenario stay advisory. Never manufacture screenshots, receipts, observations or PASS results from declared expectations.
