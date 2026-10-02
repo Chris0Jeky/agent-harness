@@ -212,6 +212,37 @@ class ContextualPrivacyTests(unittest.TestCase):
         self.assertEqual(scrubber.scrub("echo " + "a" * 32), "echo <hex>")
         self.assertEqual(scrubber.scrub("echo " + "z" * 48), "echo <blob>")
 
+    def test_digest_shape_and_username_roles_remain_deterministic(self):
+        scrubber = Scrubber([])
+        digest = "ab" * 32
+        self.assertEqual(
+            scrubber.scrub(f"docker pull example.com/team/app@sha256:{digest}"),
+            "docker pull example.com/team/app@sha256:<hex>",
+        )
+        self.assertEqual(
+            scrubber.scrub("git fetch git@sha256:secret/path"),
+            "git fetch <host>:<path>",
+        )
+        for command, expected in (
+            ("ssh deploy@targetbox uptime", "ssh deploy@<host> uptime"),
+            (
+                "ssh -J deploy@jumpbox:22 targetbox uptime",
+                "ssh -J deploy@<host>:22 <host> uptime",
+            ),
+            (
+                "docker login --username=deploy registrybox",
+                "docker login --username=deploy <registry>",
+            ),
+            (
+                "ssh -J deploy@example.com:22 targetbox uptime",
+                "ssh -J <email>:22 <host> uptime",
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+                self.assertEqual(scrubber.scrub(command), scrubber.scrub(command))
+                self.assertEqual(scrubber.scrub(expected), expected)
+
     def test_endpoint_and_email_roundtrip(self):
         self.assert_private_roundtrip(
             (
