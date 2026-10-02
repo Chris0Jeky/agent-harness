@@ -295,9 +295,20 @@ def _scrub_gh_repo_segment(parts: list[str]) -> str:
                 skip_value = not equals
             elif flag in booleans:
                 continue
-            elif not body.startswith("--") and body[:2] in values and len(body) > 2:
-                # Short options allow attached values: `-bfeature/topic`.
-                continue
+            elif not body.startswith("--") and len(body) > 2:
+                # Boolean shorthands may precede a value shorthand: `-wbfoo`
+                # or `-wb foo`. The first value flag consumes the remainder.
+                known_cluster = True
+                for offset, shorthand in enumerate(body[1:], start=1):
+                    short_flag = "-" + shorthand
+                    if short_flag in values:
+                        skip_value = offset == len(body) - 1
+                        break
+                    if short_flag not in booleans:
+                        known_cluster = False
+                        break
+                if not known_cluster:
+                    break
             else:
                 break
             continue

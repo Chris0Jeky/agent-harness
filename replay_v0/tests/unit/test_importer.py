@@ -243,6 +243,25 @@ class ScrubberTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(scrubber.scrub(command), command)
 
+    def test_gh_repo_short_clusters_preserve_option_values(self) -> None:
+        scrubber = Scrubber([])
+        for option in ("-wbfeature/topic", "-wb feature/topic"):
+            with self.subTest(option=option):
+                self.assertEqual(
+                    scrubber.scrub(f"gh repo view {option} acme-private/secret-proj"),
+                    f"gh repo view {option} <owner>/<repo>",
+                )
+        for command in (
+            "gh repo view -wbfeature/topic",
+            "gh repo view -wb feature/topic",
+            "gh repo view -wtgroup/project",
+            "gh repo view -wt 'group/project'",
+            "gh repo view -wx group/project acme-private/secret-proj",
+            "gh repo view -wxbfeature/topic acme-private/secret-proj",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
     def test_gh_repo_urls_keep_existing_host_rules(self) -> None:
         scrubber = Scrubber([])
         for command, expected in (
