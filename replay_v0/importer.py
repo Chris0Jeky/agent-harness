@@ -267,58 +267,83 @@ def _scrub_gh_repo_segment(parts: list[str]) -> str:
         return "".join(parts)
     head = _split_quote(parts[positions[0]])[1]
     head = head.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
-    if head != "gh" or parts[positions[1]] != "repo":
+    if head != "gh" or _split_quote(parts[positions[1]])[1] != "repo":
         return "".join(parts)
-    command = parts[positions[2]]
+    command = _split_quote(parts[positions[2]])[1]
     if command == "new":
         command = "create"
     if command not in _GH_REPO_VALUE_FLAGS:
         return "".join(parts)
     values = set(_GH_REPO_VALUE_FLAGS[command].split())
     booleans = set(_GH_REPO_BOOL_FLAGS[command].split()) | {"--help"}
-    skip_value = False
+    private_values = {
+        "sync": {"--source": "repo", "-s": "repo"},
+        "create": {"--template": "repo", "-p": "repo"},
+        "fork": {"--org": "owner", "--fork-name": "name"},
+    }.get(command, {})
+
+    def redact_value(value: str, kind: str | None) -> str:
+        quote, body, tail = _split_quote(value)
+        if kind == "repo" and _GH_REPO_SELECTOR.fullmatch(body):
+            return f"{quote}<owner>/<repo>{tail}"
+        if kind in {"repo", "name", "owner"} and _GH_REPO_NAME.fullmatch(body):
+            return f"{quote}<{('owner' if kind == 'owner' else 'repo')}>{tail}"
+        return value
+
+    pending: str | None = None
     options = True
+    operand_seen = False
     for position in positions[3:]:
         quote, body, tail = _split_quote(parts[position])
-        if skip_value:
-            skip_value = False
+        if pending is not None:
+            parts[position] = redact_value(parts[position], private_values.get(pending))
+            pending = None
             continue
         if options and body == "--":
-            # These commands forward the remainder to git, not to gh.
             if command in {"clone", "fork"}:
-                break
+                break  # Remaining flags belong to git.
             options = False
             continue
         if options and body.startswith("-"):
-            flag, equals, _ = body.partition("=")
+            flag, equals, value = body.partition("=")
             if flag in values:
-                skip_value = not equals
+                if equals:
+                    parts[position] = (
+                        f"{quote}{flag}={redact_value(value, private_values.get(flag))}{tail}"
+                    )
+                else:
+                    pending = flag
             elif flag in booleans:
                 continue
             elif not body.startswith("--") and len(body) > 2:
-                # Boolean shorthands may precede a value shorthand: `-wbfoo`
-                # or `-wb foo`. The first value flag consumes the remainder.
-                known_cluster = True
                 for offset, shorthand in enumerate(body[1:], start=1):
                     short_flag = "-" + shorthand
                     if short_flag in values:
-                        skip_value = offset == len(body) - 1
+                        if offset == len(body) - 1:
+                            pending = short_flag
+                        else:
+                            prefix = body[: offset + 1]
+                            value = body[offset + 1 :]
+                            # pflag accepts both -pVALUE and -p=VALUE.
+                            marker = "=" if value.startswith("=") else ""
+                            value = value.removeprefix("=")
+                            parts[position] = (
+                                f"{quote}{prefix}{marker}{redact_value(value, private_values.get(short_flag))}{tail}"
+                            )
                         break
                     if short_flag not in booleans:
-                        known_cluster = False
-                        break
-                if not known_cluster:
-                    break
+                        return "".join(parts)
             else:
                 break
             continue
-        if _GH_REPO_SELECTOR.fullmatch(body):
-            parts[position] = f"{quote}<owner>/<repo>{tail}"
-        elif command in {"clone", "create"} and _GH_REPO_NAME.fullmatch(body):
-            # Only these commands document omission of the authenticated owner.
-            parts[position] = f"{quote}<repo>{tail}"
-        # Exactly one selector. Clone's next operand is its local directory.
-        break
+        if not operand_seen:
+            if _GH_REPO_SELECTOR.fullmatch(body):
+                parts[position] = f"{quote}<owner>/<repo>{tail}"
+            elif command in {"clone", "create"} and _GH_REPO_NAME.fullmatch(body):
+                parts[position] = f"{quote}<repo>{tail}"
+            operand_seen = True
+        # Keep scanning known gh flags after the first operand. Local directory
+        # operands and formatting values retain their distinct roles.
     return "".join(parts)
 
 
