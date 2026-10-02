@@ -177,6 +177,13 @@ overlaps the configured `skills-home`, or a selected source tree, is refused bef
 `<skills-home>/.harness-backups/` copies are left untouched; inspecting or moving those existing
 copies is a separate recovery operation.
 
+Changed managed Codex skill trees preflight source names with disposable, empty probes on the
+destination filesystem before live copies or backups. Dry-run removes those sibling probes and
+leaves the destination unchanged. Native NTFS fixtures cover absent/existing targets and preserve
+per-directory case sensitivity and Unicode-distinct names. Unavailable lookup flags or a different
+probe volume refuse safely. Non-inherited POSIX directory lookup flags and normalization-collapsing
+filesystems still need their own platform qualification; final digest/recovery checks remain in place.
+
 `--only claude-skill:<name>` is a separate, opt-in lane from
 `<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. Every selected source and
 destination is validated before a write. Selectors are basenames; aliases, reparse points,
