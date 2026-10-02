@@ -631,14 +631,48 @@ def _scrub_ssh_segment(segment: str) -> str:
         .removesuffix(".exe")
     )
     keyscan = head == "ssh-keyscan"
-    values = {"-f", "-O", "-p", "-T", "-t"} if keyscan else _SSH_VALUE_FLAGS | {"-P"}
-    booleans = set("46cDHv") if keyscan else set("46AaCfGgKkMNnqsTtVvXxYy")
+    if keyscan:
+        values = {"-f", "-O", "-p", "-T", "-t"}
+        booleans = set("46cDHv")
+    elif head == "sftp":
+        values = {
+            "-B",
+            "-b",
+            "-c",
+            "-D",
+            "-F",
+            "-i",
+            "-J",
+            "-l",
+            "-o",
+            "-P",
+            "-R",
+            "-S",
+            "-s",
+            "-X",
+        }
+        booleans = set("46AaCfNpqrv")
+    elif head == "ssh-copy-id":
+        values = {"-i", "-o", "-p", "-F", "-t"}
+        booleans = set("fnsxh?")
+    else:
+        values = _SSH_VALUE_FLAGS | {"-P"}
+        booleans = set("46AaCfGgKkMNnqsTtVvXxYy")
+    private_flags = (
+        {"-J", "-o", "-b"}
+        if head == "ssh"
+        else (
+            {"-J", "-o"}
+            if head == "sftp"
+            else {"-o"} if head == "ssh-copy-id" else set()
+        )
+    )
     options = True
     pending: str | None = None
     for index in positions[1:]:
         quote, token, tail = _split_quote(parts[index])
         if pending is not None:
-            if head == "ssh":
+            if pending in private_flags:
                 parts[index] = _redact_ssh_option(parts[index], pending)
             pending = None
             continue
@@ -653,7 +687,7 @@ def _scrub_ssh_segment(segment: str) -> str:
                 if flag in values:
                     if offset == len(token) - 1:
                         pending = flag
-                    elif head == "ssh":
+                    elif flag in private_flags:
                         parts[index] = (
                             f"{quote}{token[:offset + 1]}{_redact_ssh_option(token[offset + 1:], flag)}{tail}"
                         )

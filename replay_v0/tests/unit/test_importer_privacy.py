@@ -154,6 +154,41 @@ class ContextualPrivacyTests(unittest.TestCase):
             with self.subTest(control=command):
                 self.assertEqual(scrubber.scrub(command), command)
 
+    def test_ssh_family_option_roles(self):
+        scrubber = Scrubber([])
+        cases = (
+            ("sftp -J jumpbox targetbox", "sftp -J <host> <host>"),
+            (
+                "sftp -vJalice@jumpbox:22 -oHostName=realbox -b batch.txt -B 65536 -P 2222 targetbox",
+                "sftp -vJalice@<host>:22 -oHostName=<host> -b batch.txt -B 65536 -P 2222 <host>",
+            ),
+            (
+                'sftp -o "ProxyJump=alice@jumpbox:22,bob@[fd00::2]:33" targetbox',
+                'sftp -o "ProxyJump=alice@<host>:22,bob@[<ip>]:33" <host>',
+            ),
+            (
+                "ssh-copy-id -o HostName=realbox -oProxyJump=jumpbox -i key.pem -p 2222 targetbox",
+                "ssh-copy-id -o HostName=<host> -oProxyJump=<host> -i key.pem -p 2222 <host>",
+            ),
+            ("ssh -p 2222 alice@[fd00::2] uptime", "ssh -p 2222 alice@[<ip>] uptime"),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+        for command in (
+            "sftp -b batch.txt -B 65536 -P 2222 example.com",
+            "ssh-copy-id -i key.pem -p 2222 example.com",
+            "ssh -o BindInterface=Ethernet -B Ethernet example.com",
+            'sftp -o "BindInterface Ethernet" example.com',
+            "ssh-copy-id -o BindInterface=Ethernet example.com",
+        ):
+            with self.subTest(control=command):
+                self.assertEqual(scrubber.scrub(command), command)
+        self.assert_private_roundtrip(
+            ("sftp -J jumpbox targetbox", "ssh-copy-id -o HostName=realbox targetbox"),
+            ("jumpbox", "targetbox", "realbox"),
+        )
+
     def test_login_endpoint_controls_and_quoted_chains(self):
         scrubber = Scrubber([])
         for tool in ("docker", "podman"):

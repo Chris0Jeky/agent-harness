@@ -60,7 +60,11 @@ The importer recognizes literal `gh repo` operands and known options, including
 local `--source` directory and view's formatting `--template` retain their roles.
 SSH destinations, all literal `ssh-keyscan` hosts, SSH jump lists (`-J` and
 `-o ProxyJump`), `HostName`, and bind addresses (`-b`/`-o BindAddress`) are scrubbed;
-`-B` names an interface, and ordinary option/remote-command arguments are preserved.
+`-B` names an SSH interface, and ordinary option/remote-command arguments are preserved.
+SFTP's `-J`/`-o` and ssh-copy-id's `-o` share the host-valued option rules;
+SFTP's batchfile (`-b`), buffer size (`-B`) and port (`-P`) retain their meanings.
+Direct SSH ports use `-p`; literal host:port recognition is conservative scrubbing,
+while jump destinations support the host:port grammar.
 Container login recognizes literal single-label, IP and bracketed IPv6 registries
 with numeric ports, preserving public/loopback endpoints and username options.
 Complete emails are scrubbed before generic long-token replacement.
