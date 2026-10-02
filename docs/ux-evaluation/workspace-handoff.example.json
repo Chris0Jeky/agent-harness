@@ -171,6 +171,20 @@
           ]
         },
         {
+          "id": "progress-replay",
+          "action": "Record progress at sequence 2, replay that identical report, then deliver the earlier sequence 1 report using valid current scope.",
+          "assertions": [
+            "The identical report recovers the current attempt state without a second result or admission.",
+            "The older report is identified as stale; it cannot regress the authoritative progress sequence or state.",
+            "Observed report receipts and stored state remain separate from these authored expectations; human work remains incomplete."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
           "id": "cancel",
           "action": "Request cancellation, deliver a late progress event and then a successful worker exit with incomplete acceptance evidence.",
           "assertions": [

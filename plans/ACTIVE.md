@@ -1,5 +1,12 @@
 # Active workstreams
 
+## Workspace reference qualification (2026-10-02)
+
+- #414 and #417 are merged: the handoff pack is an advisory authoring profile and the SQLite receipt lab is a single-owner reference, not native adoption.
+- The receipt suite now backs up one leased fictional row into two independent databases and demonstrates that copied epoch/fence values allow both owners to accept divergent local results. Receiver fencing and old-writer isolation still require native proof.
+- The handoff profile maps generic conformance cases to their native proof owners and separates cancellation request, admission stop, process acknowledgement and effects reconciliation. Native receipts remain with adopters; no runner, permission checker or gate is added.
+- #410 remains open for its remaining profile cases/acceptance; #416's source acceptance is qualified separately from native adoption. Human gates remain in `HUMAN_TODO.md`.
+
 Snapshot: 2026-10-01 13:18 UTC, before quality integration. Observed `main` head `7c10099`
 (PR #409's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
