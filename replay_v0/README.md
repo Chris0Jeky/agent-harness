@@ -67,6 +67,10 @@ Direct SSH ports use `-p`; literal host:port recognition is conservative scrubbi
 while jump destinations support the host:port grammar.
 Container login recognizes literal single-label, IP and bracketed IPv6 registries
 with numeric ports, preserving public/loopback endpoints and username options.
+Mosh's declared literal option grammar preserves server/client paths, UDP port
+values, booleans and remote command text; literal bind IPs are scrubbed while
+`any`/`ssh` selectors remain. The `--ssh` parameter is preserved as a value,
+without recursively interpreting its inner command.
 Complete emails are scrubbed before generic long-token replacement.
 
 These are bounded command recognizers, not a shell parser. Quoted arguments and

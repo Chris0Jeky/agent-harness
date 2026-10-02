@@ -235,6 +235,32 @@ _SSH_VALUE_FLAGS = frozenset(
         "-w",
     }
 )
+# Upstream scripts/mosh.pl GetOptions: these values are not SSH flags.
+_MOSH_VALUE_FLAGS = frozenset(
+    {
+        "--client",
+        "--server",
+        "--predict",
+        "--family",
+        "--port",
+        "--ssh",
+        "--bind-server",
+        "--experimental-remote-ip",
+        "-p",
+    }
+)
+_MOSH_BOOL_FLAGS = frozenset(
+    {
+        "--predict-overwrite",
+        "--ssh-pty",
+        "--no-ssh-pty",
+        "--init",
+        "--no-init",
+        "--local",
+        "--help",
+        "--version",
+    }
+)
 _SINGLE_LABEL_HOST = re.compile(r"[A-Za-z0-9_-]+")
 _SCP_COMMANDS = frozenset({"scp", "rsync"})
 _CONTAINER_COMMANDS = frozenset({"docker", "podman"})
@@ -597,6 +623,13 @@ def _redact_ssh_destination(chunk: str) -> str:
 
 def _redact_ssh_option(value: str, flag: str) -> str:
     quote, body, tail = _split_quote(value)
+    if flag == "--bind-server":
+        # mosh accepts "any"/"ssh" selectors as well as literal bind IPs.
+        try:
+            ipaddress.ip_address(body)
+        except ValueError:
+            return value
+        return _redact_ssh_destination(value)
     if flag == "-J":
         if body.lower() == "none":
             return value
@@ -634,6 +667,9 @@ def _scrub_ssh_segment(segment: str) -> str:
     if keyscan:
         values = {"-f", "-O", "-p", "-T", "-t"}
         booleans = set("46cDHv")
+    elif head == "mosh":
+        values = _MOSH_VALUE_FLAGS
+        booleans = set("ano46")
     elif head == "sftp":
         values = {
             "-B",
@@ -659,12 +695,16 @@ def _scrub_ssh_segment(segment: str) -> str:
         values = _SSH_VALUE_FLAGS | {"-P"}
         booleans = set("46AaCfGgKkMNnqsTtVvXxYy")
     private_flags = (
-        {"-J", "-o", "-b"}
-        if head == "ssh"
+        {"--bind-server"}
+        if head == "mosh"
         else (
-            {"-J", "-o"}
-            if head == "sftp"
-            else {"-o"} if head == "ssh-copy-id" else set()
+            {"-J", "-o", "-b"}
+            if head == "ssh"
+            else (
+                {"-J", "-o"}
+                if head == "sftp"
+                else {"-o"} if head == "ssh-copy-id" else set()
+            )
         )
     )
     options = True
@@ -681,6 +721,17 @@ def _scrub_ssh_segment(segment: str) -> str:
             continue
         if options and token.startswith("-"):
             if token.startswith("--"):
+                flag, equals, value = token.partition("=")
+                if head == "mosh" and flag in values:
+                    if not equals:
+                        pending = flag
+                    elif flag in private_flags:
+                        parts[index] = (
+                            f"{quote}{flag}={_redact_ssh_option(value, flag)}{tail}"
+                        )
+                    continue
+                if head == "mosh" and token in _MOSH_BOOL_FLAGS:
+                    continue
                 break  # Unknown option grammar is outside the bounded recognizer.
             for offset, letter in enumerate(token[1:], start=1):
                 flag = "-" + letter

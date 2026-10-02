@@ -154,6 +154,62 @@ class ContextualPrivacyTests(unittest.TestCase):
             with self.subTest(control=command):
                 self.assertEqual(scrubber.scrub(command), command)
 
+    def test_mosh_literal_option_roles(self):
+        scrubber = Scrubber([])
+        for option in (
+            "--port=60001",
+            '--port="60001"',
+            "--port 60001",
+            '--port "60001"',
+            "-p60001",
+            "-p 60001",
+            '-p"60001"',
+            "-p=60001",
+            "-o",
+            "-ap60001",
+            "--server /opt/bin/mosh-server",
+            '--ssh "ssh -i key.pem"',
+            "--client /opt/bin/mosh-client",
+            "--predict adaptive",
+            "--family inet",
+            "--experimental-remote-ip remote",
+            "--bind-server any",
+            "--bind-server ssh",
+            "--no-init",
+            "--ssh-pty",
+        ):
+            with self.subTest(option=option):
+                self.assertEqual(
+                    scrubber.scrub(f"mosh {option} targetbox cat notes.txt"),
+                    f"mosh {option} <host> cat notes.txt",
+                )
+        for command, expected in (
+            ("mosh --bind-server=10.2.3.4 targetbox", "mosh --bind-server=<ip> <host>"),
+            (
+                'mosh --bind-server "10.2.3.4" targetbox',
+                'mosh --bind-server "<ip>" <host>',
+            ),
+            (
+                "mosh -- targetbox --port=60001 && echo done",
+                "mosh -- <host> --port=60001 && echo done",
+            ),
+        ):
+            self.assertEqual(scrubber.scrub(command), expected)
+        for command in (
+            "mosh --port=60001 example.com cat notes.txt",
+            'mosh -o --server /opt/bin/mosh-server --ssh "ssh -i key.pem" example.com',
+            "mosh --unknown targetbox",
+            "mosh --bind-server any example.com",
+        ):
+            self.assertEqual(scrubber.scrub(command), command)
+        self.assert_private_roundtrip(
+            (
+                "mosh --port=60001 targetbox cat notes.txt",
+                "mosh --bind-server=10.2.3.4 targetbox",
+            ),
+            ("targetbox", "10.2.3.4"),
+        )
+
     def test_ssh_family_option_roles(self):
         scrubber = Scrubber([])
         cases = (
