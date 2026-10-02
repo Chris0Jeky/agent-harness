@@ -540,6 +540,11 @@ def _scrub_login_segment(segment: str) -> str:
         if effective.startswith("-"):
             if effective in _LOGIN_VALUE_FLAGS:
                 value_flag = effective
+            elif effective.startswith("--password="):
+                value_quote, _, value_tail = _split_quote(effective.partition("=")[2])
+                parts[pos] = (
+                    f"{quote}--password={value_quote}<redacted>{value_tail}{tail}"
+                )
             elif effective.startswith("-p") and not effective.startswith("--"):
                 prefix = "-p=" if effective.startswith("-p=") else "-p"
                 parts[pos] = f"{quote}{prefix}<redacted>{tail}"
@@ -549,52 +554,122 @@ def _scrub_login_segment(segment: str) -> str:
 
 
 def _redact_ssh_destination(chunk: str) -> str:
-    if "://" in chunk:
-        return chunk
-    quote, body, _ = _split_quote(chunk)
-    if not body or body[0] == "-" or "/" in body or "=" in body:
-        return chunk
-    if body.startswith("<") and body.endswith(">"):
+    quote, body, tail = _split_quote(chunk)
+    if not body or body[0] == "-" or "/" in body or "=" in body or "://" in body:
         return chunk
     user, sep, host = body.rpartition("@")
-    if sep:
-        if not host or "/" in user or ":" in user:
-            return chunk
-    else:
+    if not sep:
         host = body
-    lowered = host.lower()
-    if lowered in _PUBLIC_HOSTS or lowered == "localhost" or host == "127.0.0.1":
+    elif not host or "/" in user or ":" in user:
         return chunk
-    if _IPV4_LITERAL.fullmatch(host):
-        if host == "127.0.0.1":
+    port = ""
+    bracketed = host.startswith("[")
+    if bracketed:
+        match = re.fullmatch(r"\[([^]\s]+)\](:[0-9]+)?", host)
+        if match is None:
             return chunk
-        host = "<ip>"
-    elif _DOTTED_HOST.fullmatch(host):
-        if lowered in _PUBLIC_HOSTS:
+        host, port = match.group(1), match.group(2) or ""
+    elif host.count(":") == 1:
+        host, separator, number = host.partition(":")
+        if not number.isdigit():
             return chunk
-        host = "<host>"
-    elif _SINGLE_LABEL_HOST.fullmatch(host):
-        host = "<host>"
+        port = separator + number
+    if host.lower() in _PUBLIC_HOSTS or host.startswith("<"):
+        return chunk
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.is_loopback:
+            return chunk
+        replacement = "<ip>"
+    elif bracketed:
+        return chunk
+    elif _DOTTED_HOST.fullmatch(host) or _SINGLE_LABEL_HOST.fullmatch(host):
+        replacement = "<host>"
     else:
         return chunk
-    return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
+    if bracketed:
+        replacement = f"[{replacement}]"
+    return f"{quote}{(user + '@' if sep else '')}{replacement}{port}{tail}"
+
+
+def _redact_ssh_option(value: str, flag: str) -> str:
+    quote, body, tail = _split_quote(value)
+    if flag == "-J":
+        if body.lower() == "none":
+            return value
+        return (
+            quote
+            + ",".join(_redact_ssh_destination(host) for host in body.split(","))
+            + tail
+        )
+    if flag == "-b":
+        return _redact_ssh_destination(value)
+    if flag == "-o":
+        match = re.fullmatch(r"(?i)(ProxyJump|HostName|BindAddress)([=\s]+)(.+)", body)
+        if match:
+            option, separator, argument = match.groups()
+            kind = "-J" if option.lower() == "proxyjump" else "-b"
+            return (
+                f"{quote}{option}{separator}{_redact_ssh_option(argument, kind)}{tail}"
+            )
+    return value
 
 
 def _scrub_ssh_segment(segment: str) -> str:
-    parts = re.split(r"(\s+)", segment)
-    positions = [i for i, part in enumerate(parts) if i % 2 == 0 and part]
-    pos = 1
-    while pos < len(positions):
-        index = positions[pos]
-        token = parts[index]
-        if token.startswith("-"):
-            if token in _SSH_VALUE_FLAGS and pos + 1 < len(positions):
-                pos += 2
-            else:
-                pos += 1
+    parts = _split_login_parts(segment)
+    positions = [i for i, part in enumerate(parts) if part and not part.isspace()]
+    if not positions:
+        return segment
+    head = (
+        _split_quote(parts[positions[0]])[1]
+        .replace("\\", "/")
+        .rsplit("/", 1)[-1]
+        .lower()
+        .removesuffix(".exe")
+    )
+    keyscan = head == "ssh-keyscan"
+    values = {"-f", "-O", "-p", "-T", "-t"} if keyscan else _SSH_VALUE_FLAGS | {"-P"}
+    booleans = set("46cDHv") if keyscan else set("46AaCfGgKkMNnqsTtVvXxYy")
+    options = True
+    pending: str | None = None
+    for index in positions[1:]:
+        quote, token, tail = _split_quote(parts[index])
+        if pending is not None:
+            if head == "ssh":
+                parts[index] = _redact_ssh_option(parts[index], pending)
+            pending = None
             continue
-        parts[index] = _redact_ssh_destination(token)
-        break
+        if options and token == "--":
+            options = False
+            continue
+        if options and token.startswith("-"):
+            if token.startswith("--"):
+                break  # Unknown option grammar is outside the bounded recognizer.
+            for offset, letter in enumerate(token[1:], start=1):
+                flag = "-" + letter
+                if flag in values:
+                    if offset == len(token) - 1:
+                        pending = flag
+                    elif head == "ssh":
+                        parts[index] = (
+                            f"{quote}{token[:offset + 1]}{_redact_ssh_option(token[offset + 1:], flag)}{tail}"
+                        )
+                    break
+                if letter not in booleans:
+                    return "".join(parts)
+            continue
+        if keyscan:
+            parts[index] = (
+                quote
+                + ",".join(_redact_ssh_destination(host) for host in token.split(","))
+                + tail
+            )
+        else:
+            parts[index] = _redact_ssh_destination(parts[index])
+            break  # Remote command arguments are not local SSH destinations.
     return "".join(parts)
 
 
@@ -612,7 +687,13 @@ def _redact_after_command(segment: str, skip: int, func: Callable[[str], str]) -
 
 
 def _scrub_bare_hosts(text: str) -> str:
-    segments = re.split(r"([;&|\n]+)", text)
+    segments = [""]
+    for match in _GH_REPO_PARTS.finditer(text):
+        part = match.group(0)
+        if part[0] in ";&|\n":
+            segments.extend((part, ""))
+        else:
+            segments[-1] += part
     for index in range(0, len(segments), 2):
         segment = segments[index]
         head = _command_head(segment)
@@ -697,16 +778,20 @@ class Scrubber:
         for pattern in self._spaced_term_patterns:
             text = pattern.sub("<redacted>", text)
         text = _scrub_gh_repo(text)
-        for pattern, replacement in _TOKEN_PATTERNS:
+        text = _scrub_bare_hosts(text)
+        for pattern, replacement in _TOKEN_PATTERNS[:-2]:
             text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
         text = _GITHUB_REPO.sub(r"\1<owner>/<repo>", text)
         text = _SCP_REMOTE.sub(self._scp, text)
+        # Preserve structured URL/scp matching, but replace complete emails
+        # before generic long-token rules can erase only their local part.
         text = _EMAIL.sub("<email>", text)
+        for pattern, replacement in _TOKEN_PATTERNS[-2:]:
+            text = pattern.sub(replacement, text)
         text = _REPOS_API.sub(r"\1<owner>/<repo>", text)
         text = _REPO_FLAG.sub(r"\1<owner>/<repo>", text)
         text = _URL_HOST.sub(self._host, text)
-        text = _scrub_bare_hosts(text)
         for pattern in _HOME_PATHS:
             text = pattern.sub(r"\1<user>", text)
         for pattern in self._term_patterns:
@@ -722,7 +807,10 @@ class Scrubber:
 
     @staticmethod
     def _scp(match: re.Match[str]) -> str:
-        if match.group(1).lower() in _PUBLIC_HOSTS:
+        if match.group(1).lower() in _PUBLIC_HOSTS or (
+            match.group(1).lower() == "sha256"
+            and re.fullmatch(r"[0-9a-fA-F]{32,}", match.group(2))
+        ):
             return match.group(0)
         return "<host>:<path>"
 
