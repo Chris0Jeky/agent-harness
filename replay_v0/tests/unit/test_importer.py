@@ -144,6 +144,124 @@ class ScrubberTests(unittest.TestCase):
         for secret in ("hunter2hunter2", "abc123def", "S3cretPw"):
             self.assertNotIn(secret, text)
 
+    def test_gh_repo_positional_selectors_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        for subcommand in (
+            "archive",
+            "clone",
+            "create",
+            "new",
+            "delete",
+            "edit",
+            "fork",
+            "set-default",
+            "sync",
+            "unarchive",
+            "view",
+        ):
+            for selector in (
+                "acme-private/secret-proj",
+                "'acme-private/secret-proj'",
+                '"acme-private/secret-proj"',
+            ):
+                with self.subTest(subcommand=subcommand, selector=selector):
+                    quote = selector[0] if selector[0] in "\"'" else ""
+                    self.assertEqual(
+                        scrubber.scrub(f"gh repo {subcommand} {selector}"),
+                        f"gh repo {subcommand} {quote}<owner>/<repo>{quote}",
+                    )
+
+    def test_gh_repo_options_and_later_arguments_keep_their_roles(self) -> None:
+        scrubber = Scrubber([])
+        cases = (
+            (
+                "gh repo view --branch feature/topic acme-private/secret-proj --web",
+                "gh repo view --branch feature/topic <owner>/<repo> --web",
+            ),
+            (
+                "gh repo view -bfeature/topic --json name --jq '.name' acme-private/secret-proj",
+                "gh repo view -bfeature/topic --json name --jq '.name' <owner>/<repo>",
+            ),
+            (
+                'gh repo view --template "a/b; c/d" acme-private/secret-proj',
+                'gh repo view --template "a/b; c/d" <owner>/<repo>',
+            ),
+            (
+                "gh repo clone -u source/remote acme-private/secret-proj workspace/checkout -- --reference cache/repo",
+                "gh repo clone -u source/remote <owner>/<repo> workspace/checkout -- --reference cache/repo",
+            ),
+            (
+                "gh repo create --source src/project --private acme-private/secret-proj",
+                "gh repo create --source src/project --private <owner>/<repo>",
+            ),
+            (
+                "gh repo edit --description 'group/project' --enable-issues=false acme-private/secret-proj",
+                "gh repo edit --description 'group/project' --enable-issues=false <owner>/<repo>",
+            ),
+            (
+                "gh repo sync --branch=feature/topic acme-private/secret-proj",
+                "gh repo sync --branch=feature/topic <owner>/<repo>",
+            ),
+            (
+                "gh repo view -- acme-private/secret-proj",
+                "gh repo view -- <owner>/<repo>",
+            ),
+            (
+                "gh repo clone secret-proj workspace/checkout -- --reference cache/repo",
+                "gh repo clone <repo> workspace/checkout -- --reference cache/repo",
+            ),
+            ("gh repo create --private secret-proj", "gh repo create --private <repo>"),
+            (
+                '"C:/fictional tools/gh.exe" repo view acme-private/secret-proj',
+                '"C:/fictional tools/gh.exe" repo view <owner>/<repo>',
+            ),
+            (
+                "echo done && gh repo view acme-private/secret-proj; gh repo clone acme-private/secret-proj workspace/checkout",
+                "echo done && gh repo view <owner>/<repo>; gh repo clone <owner>/<repo> workspace/checkout",
+            ),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+
+    def test_gh_repo_nonselectors_are_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "echo acme-private/secret-proj",
+            "gh repo list group/project",
+            "gh repo rename group/project",
+            "gh repo gitignore view group/project",
+            "gh repo view --branch feature/topic",
+            "gh repo view --template 'group/project'",
+            "gh repo fork -- --reference cache/repo",
+            "gh repo create --source src/project --private",
+            "gh repo set-default origin",
+            "gh repo unknown group/project",
+            "gh repo view --future-option group/project",
+            'echo "gh repo view acme-private/secret-proj"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_gh_repo_urls_keep_existing_host_rules(self) -> None:
+        scrubber = Scrubber([])
+        for command, expected in (
+            (
+                "gh repo view https://github.com/acme-private/secret-proj",
+                "gh repo view https://github.com/<owner>/<repo>",
+            ),
+            (
+                "gh repo clone https://code.private.corp/acme-private/secret-proj workspace/checkout",
+                "gh repo clone https://<host>/<path> workspace/checkout",
+            ),
+            (
+                "gh repo view --template https://example.com/a/b",
+                "gh repo view --template https://example.com/a/b",
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+
     def test_a_home_name_with_a_space_is_fully_removed(self) -> None:
         scrubber = Scrubber(["Jane Doe", "Jane", "Doe"])
         text = scrubber.scrub(r"cd C:\Users\Jane Doe\repo")
@@ -605,6 +723,35 @@ class ExtractionTests(unittest.TestCase):
         loaded = kernel._load_charter_corpus(str(output))
         self.assertEqual(loaded.event_count, 2)
         self.assertEqual(loaded.events[0]["source"], "historical-redacted")
+
+    def test_gh_repo_selectors_do_not_reach_imported_corpus(self) -> None:
+        _write_jsonl(
+            self.root / "codex" / "fictional.jsonl",
+            [
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": command}),
+                    }
+                }
+                for command in (
+                    "gh repo view acme-private/secret-proj --web",
+                    "gh repo clone acme-private/secret-proj workspace/checkout",
+                )
+            ],
+        )
+        events, cases, _ = build_private_corpus(
+            [("codex", codex_commands(self.root / "codex", Counter()))], Scrubber([])
+        )
+        output = self.root / "gh-corpus"
+        write_corpus(output, events, cases)
+        loaded = kernel._load_charter_corpus(str(output))
+        self.assertEqual(loaded.event_count, 2)
+        for event in loaded.events:
+            self.assertIn("<owner>/<repo>", event["command"])
+            self.assertNotIn("acme-private", event["command"])
+            self.assertNotIn("secret-proj", event["command"])
 
 
 @unittest.skipUnless(HAS_GIT, "git is not installed")

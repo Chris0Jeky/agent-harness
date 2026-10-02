@@ -109,6 +109,48 @@ _REPOS_API = re.compile(r"\b(repos/)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REPO_FLAG = re.compile(
     r"((?:--repo(?:=|\s+)|-R\s+))[\"']?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[\"']?"
 )
+# Only commands whose first operand names a repository. `list` names an owner,
+# `rename` names the new name, and the nested commands have different operands.
+# Value flags come from `gh repo <command> --help`; unknown flags stop this
+# positional pass rather than mistaking an unknown option's value for a repo.
+_GH_REPO_VALUE_FLAGS = {
+    "archive": "",
+    "clone": "-u --upstream-remote-name",
+    "create": "-d --description -g --gitignore -h --homepage -l --license "
+    "-r --remote -s --source -t --team -p --template",
+    "delete": "",
+    "edit": "--add-topic --default-branch -d --description -h --homepage "
+    "--remove-topic --visibility",
+    "fork": "--fork-name --org --remote-name",
+    "set-default": "",
+    "sync": "-b --branch -s --source",
+    "unarchive": "",
+    "view": "-b --branch -q --jq --json -t --template",
+}
+_GH_REPO_BOOL_FLAGS = {
+    "archive": "-y --yes",
+    "clone": "",
+    "create": "--add-readme -c --clone --disable-issues --disable-wiki "
+    "--include-all-branches --internal --private --public --push",
+    "delete": "--yes",
+    "edit": "--accept-visibility-change-consequences --allow-forking "
+    "--allow-update-branch --delete-branch-on-merge --enable-advanced-security "
+    "--enable-auto-merge --enable-discussions --enable-issues --enable-merge-commit "
+    "--enable-projects --enable-rebase-merge --enable-secret-scanning "
+    "--enable-secret-scanning-push-protection --enable-squash-merge --enable-wiki --template",
+    "fork": "--clone --default-branch-only --remote",
+    "set-default": "-u --unset -v --view",
+    "sync": "--force",
+    "unarchive": "-y --yes",
+    "view": "-w --web",
+}
+_GH_REPO_SELECTOR = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_GH_REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+")
+# Keep quotes/whitespace verbatim, including shell operators inside quoted
+# option values. This is a bounded command recognizer, not a shell interpreter.
+_GH_REPO_PARTS = re.compile(
+    r"(?:[^\s;&|'\"]+|'[^']*'|\"(?:\\.|[^\"\\])*\")+|[;&|\n]+|[ \t\r]+|."
+)
 # Any scheme (https, ssh, git, ...): a private host loses its path too. Paths
 # stop at shell control characters so `url;next-command` keeps its command.
 _URL_HOST = re.compile(
@@ -217,6 +259,70 @@ def _split_quote(chunk: str) -> tuple[str, str, str]:
     if len(chunk) >= 2 and chunk[0] in "\"'" and chunk[-1] == chunk[0]:
         return chunk[0], chunk[1:-1], chunk[0]
     return "", chunk, ""
+
+
+def _scrub_gh_repo_segment(parts: list[str]) -> str:
+    positions = [i for i, part in enumerate(parts) if not part.isspace()]
+    if len(positions) < 4:
+        return "".join(parts)
+    head = _split_quote(parts[positions[0]])[1]
+    head = head.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if head != "gh" or parts[positions[1]] != "repo":
+        return "".join(parts)
+    command = parts[positions[2]]
+    if command == "new":
+        command = "create"
+    if command not in _GH_REPO_VALUE_FLAGS:
+        return "".join(parts)
+    values = set(_GH_REPO_VALUE_FLAGS[command].split())
+    booleans = set(_GH_REPO_BOOL_FLAGS[command].split()) | {"--help"}
+    skip_value = False
+    options = True
+    for position in positions[3:]:
+        quote, body, tail = _split_quote(parts[position])
+        if skip_value:
+            skip_value = False
+            continue
+        if options and body == "--":
+            # These commands forward the remainder to git, not to gh.
+            if command in {"clone", "fork"}:
+                break
+            options = False
+            continue
+        if options and body.startswith("-"):
+            flag, equals, _ = body.partition("=")
+            if flag in values:
+                skip_value = not equals
+            elif flag in booleans:
+                continue
+            elif not body.startswith("--") and body[:2] in values and len(body) > 2:
+                # Short options allow attached values: `-bfeature/topic`.
+                continue
+            else:
+                break
+            continue
+        if _GH_REPO_SELECTOR.fullmatch(body):
+            parts[position] = f"{quote}<owner>/<repo>{tail}"
+        elif command in {"clone", "create"} and _GH_REPO_NAME.fullmatch(body):
+            # Only these commands document omission of the authenticated owner.
+            parts[position] = f"{quote}<repo>{tail}"
+        # Exactly one selector. Clone's next operand is its local directory.
+        break
+    return "".join(parts)
+
+
+def _scrub_gh_repo(text: str) -> str:
+    output: list[str] = []
+    parts: list[str] = []
+    for match in _GH_REPO_PARTS.finditer(text):
+        part = match.group(0)
+        if part[0] in ";&|\n":
+            output.extend((_scrub_gh_repo_segment(parts), part))
+            parts = []
+        else:
+            parts.append(part)
+    output.append(_scrub_gh_repo_segment(parts))
+    return "".join(output)
 
 
 def _redact_host_token(chunk: str) -> str:
@@ -554,6 +660,7 @@ class Scrubber:
         # see whole `owner/repo` and `user@domain` shapes.
         for pattern in self._spaced_term_patterns:
             text = pattern.sub("<redacted>", text)
+        text = _scrub_gh_repo(text)
         for pattern, replacement in _TOKEN_PATTERNS:
             text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
