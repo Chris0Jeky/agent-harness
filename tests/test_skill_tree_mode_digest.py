@@ -12,6 +12,8 @@ test skips there.
 """
 
 import importlib.util
+import ctypes
+import io
 import os
 import shutil
 import stat
@@ -19,6 +21,8 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
+from contextlib import redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,6 +107,233 @@ class SkillTreeModeDigestTests(unittest.TestCase):
 
 
 class SkillTreeFilesystemLookupTests(unittest.TestCase):
+    def set_case_sensitive(self, directory: Path) -> None:
+        if os.name != "nt":
+            return
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = (
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        )
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.SetFileInformationByHandle.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        )
+        kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+        handle = kernel.CreateFileW(str(directory), 0x100, 7, None, 3, 0x02000000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            self.skipTest("host cannot open directory to enable NTFS case sensitivity")
+        try:
+            flags = ctypes.c_uint32(1)
+            if not kernel.SetFileInformationByHandle(
+                handle, 23, ctypes.byref(flags), 4
+            ):
+                self.skipTest(
+                    f"host cannot enable NTFS case sensitivity: {ctypes.get_last_error()}"
+                )
+        finally:
+            kernel.CloseHandle(handle)
+
+    def collision_fixture(self, root, names, kind, target_present):
+        source = root / "config" / "codex" / "skills" / "sample"
+        source.mkdir(parents=True)
+        self.set_case_sensitive(source)
+        (source / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        for name in names:
+            entry = source / name
+            try:
+                if kind == "directory":
+                    entry.mkdir()
+                    (entry / "payload.txt").write_text(name, encoding="utf-8")
+                else:
+                    with entry.open("x", encoding="utf-8") as stream:
+                        stream.write(name)
+            except FileExistsError:
+                self.skipTest("source filesystem cannot represent distinct names")
+        target = root / "skills-home" / "sample"
+        target.parent.mkdir()
+        if target_present:
+            target.mkdir()
+            (target / "SKILL.md").write_text("old skill", encoding="utf-8")
+        args = SimpleNamespace(
+            config_root=str(root / "config"),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(target.parent),
+            only=["skill:sample"],
+            apply=False,
+        )
+        return source, target, args
+
+    def test_source_collision_refuses_before_any_sync_mutation(self):
+        for apply in (False, True):
+            for present in (False, True):
+                for kind in ("file", "directory"):
+                    with self.subTest(
+                        apply=apply, present=present, kind=kind
+                    ), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        source, target, args = self.collision_fixture(
+                            root, ("Foo", "foo"), kind, present
+                        )
+                        if not harness.skill_tree_destination_is_case_insensitive(
+                            target.parent
+                        ):
+                            self.skipTest("destination filesystem is case sensitive")
+                        before = harness.tree_digest(root)
+                        args.apply = apply
+                        with mock.patch.object(
+                            harness.shutil, "copytree", wraps=shutil.copytree
+                        ) as copy:
+                            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                                harness.HarnessError, "source skill entries collide"
+                            ):
+                                harness.sync_global(args)
+                            copy.assert_not_called()
+                        self.assertEqual(before, harness.tree_digest(root))
+                        self.assertFalse(Path(args.codex_home).exists())
+
+    def test_case_sensitive_destination_retains_source_case_pair(self):
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, args = self.collision_fixture(
+                    root, ("Foo", "foo"), "file", present
+                )
+                if present:
+                    (target / "SKILL.md").unlink()
+                self.set_case_sensitive(target if present else target.parent)
+                if present:
+                    (target / "SKILL.md").write_text("old skill", encoding="utf-8")
+                args.apply = True
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, harness.sync_global(args))
+                self.assertEqual(
+                    harness.tree_digest(source), harness.tree_digest(target)
+                )
+                self.assertFalse((target / "Foo").samefile(target / "foo"))
+
+    def test_nested_source_collision_refuses_before_copy(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, args = self.collision_fixture(
+                    root, ("Foo", "foo"), "file", True
+                )
+                nested = source / "scripts"
+                nested.mkdir()
+                self.set_case_sensitive(nested)
+                for name in ("Foo", "foo"):
+                    (source / name).rename(nested / name)
+                if not harness.skill_tree_destination_is_case_insensitive(
+                    target.parent
+                ):
+                    self.skipTest("destination filesystem is case sensitive")
+                before = harness.tree_digest(root)
+                args.apply = apply
+                with redirect_stdout(io.StringIO()), mock.patch.object(
+                    harness.shutil, "copytree"
+                ) as copy:
+                    with self.assertRaisesRegex(
+                        harness.HarnessError, "source skill entries collide"
+                    ):
+                        harness.sync_global(args)
+                    copy.assert_not_called()
+                self.assertEqual(before, harness.tree_digest(root))
+
+    def test_collision_with_absent_destination_parent_leaves_it_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, target, args = self.collision_fixture(
+                root, ("Foo", "foo"), "file", False
+            )
+            if not harness.skill_tree_destination_is_case_insensitive(target.parent):
+                self.skipTest("destination filesystem is case sensitive")
+            target.parent.rmdir()
+            before = harness.tree_digest(root)
+            args.apply = True
+            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                harness.HarnessError, "source skill entries collide"
+            ):
+                harness.sync_global(args)
+            self.assertFalse(target.parent.exists())
+            self.assertEqual(before, harness.tree_digest(root))
+
+    @unittest.skipUnless(os.name == "nt", "requires case-insensitive NTFS lookup")
+    def test_case_variant_hardlink_ambiguity_still_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, target = Path(tmp) / "source", Path(tmp) / "target"
+            source.mkdir()
+            target.mkdir()
+            (source / "foo").write_text("new", encoding="utf-8")
+            (target / "Foo").write_text("old", encoding="utf-8")
+            try:
+                os.link(target / "Foo", target / "other")
+            except OSError as exc:
+                self.skipTest(f"host cannot create hard links: {exc}")
+            before = harness.tree_digest(target)
+            with self.assertRaisesRegex(
+                harness.HarnessError, "ambiguous skill destination spelling"
+            ):
+                harness.canonicalize_skill_tree_case(source, target)
+            self.assertEqual(before, harness.tree_digest(target))
+
+    def test_failed_name_probe_refuses_without_live_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, target, args = self.collision_fixture(
+                root, ("one", "two"), "file", True
+            )
+            args.apply = True
+            before = harness.tree_digest(root)
+            with mock.patch.object(
+                harness.tempfile,
+                "mkdtemp",
+                side_effect=PermissionError("probe unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "cannot preflight skill source names"
+                ):
+                    harness.sync_global(args)
+            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_normalization_pair_follows_destination_filesystem(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, args = self.collision_fixture(
+                    root, ("\u00e9.txt", "e\u0301.txt"), "file", False
+                )
+                probe = target.parent / "\u00e9.txt"
+                probe.write_text("probe", encoding="utf-8")
+                equivalent = (target.parent / "e\u0301.txt").exists()
+                probe.unlink()
+                args.apply = apply
+                before = harness.tree_digest(root)
+                with redirect_stdout(io.StringIO()):
+                    if equivalent:
+                        with self.assertRaisesRegex(
+                            harness.HarnessError, "source skill entries collide"
+                        ):
+                            harness.sync_global(args)
+                        self.assertEqual(before, harness.tree_digest(root))
+                    else:
+                        self.assertEqual(0, harness.sync_global(args))
+                        if apply:
+                            self.assertEqual(
+                                harness.tree_digest(source), harness.tree_digest(target)
+                            )
+                        else:
+                            self.assertEqual(before, harness.tree_digest(root))
+
     def write_distinct_unicode_files(self, root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
         first = root / "Straße.txt"

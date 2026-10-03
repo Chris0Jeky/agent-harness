@@ -55,6 +55,31 @@ Git identity, email addresses, private hosts and repository names, and it
 refuses to write inside a Git work tree unless Git ignores the target. The
 output is private even after scrubbing: never commit it.
 
+The importer recognizes literal `gh repo` operands and known options, including
+`sync --source`, `create --template`, and fork organization/name values. Create's
+local `--source` directory and view's formatting `--template` retain their roles.
+SSH destinations, all literal `ssh-keyscan` hosts, SSH jump lists (`-J` and
+`-o ProxyJump`), `HostName`, and bind addresses (`-b`/`-o BindAddress`) are scrubbed;
+`-B` names an SSH interface, and ordinary option/remote-command arguments are preserved.
+SFTP's `-J`/`-o` and ssh-copy-id's `-o` share the host-valued option rules;
+SFTP's batchfile (`-b`), buffer size (`-B`) and port (`-P`) retain their meanings.
+Direct SSH ports use `-p`; literal host:port recognition is conservative scrubbing,
+while jump destinations support the host:port grammar.
+Container login recognizes literal single-label, IP and bracketed IPv6 registries
+with numeric ports, preserving public/loopback endpoints and username options.
+Mosh's declared literal option grammar preserves server/client paths, UDP port
+values, booleans and remote command text; literal bind IPs are scrubbed while
+`any`/`ssh` selectors remain. The `--ssh` parameter is preserved as a value,
+without recursively interpreting its inner command.
+Complete emails are scrubbed before generic long-token replacement.
+
+These are bounded command recognizers, not a shell parser. Quoted arguments and
+operators between literal commands are recognized; wrappers, aliases, variable
+expansion, substitutions, escaped operators outside quotes, malformed input,
+unknown option grammars, and email local parts beyond 128 characters have no
+comprehensive coverage. SSH forwarding and `ProxyCommand` grammars are outside
+this pass. Scrubbing does not make a corpus safe for public release.
+
 ## Kernel reference
 
 Replay v0 compares two policy-decision streams for a small, privacy-safe command corpus. It is a
