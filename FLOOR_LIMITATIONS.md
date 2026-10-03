@@ -7,16 +7,16 @@ canonical form (CI-asserted by the smoke suite). PR #71 merged as `21485bc`; its
 `tests/test_prefix_wrapper_crossproduct.py` now pins the named families in both directions and
 fails `UNEXPECTEDLY FIXED` if a documented bypass starts blocking. A new discovery gets one line
 here plus a closed issue, never a fix — unless it regresses the charter matrix as literally
-written. The walls remain branch protection and restricted toolsets (BLUEPRINT law 5); the
+written. The walls remain branch protection and restricted toolsets (BLUEPRINT P5); the
 floor is a tripwire, not a sandbox. Budget: this ledger caps at 120 lines; overflow rotates
-to `archive/floor-limitations-<year>.md` (laws 3/4).
+to `archive/floor-limitations-<year>.md` (BLUEPRINT P3/P4).
 
 ## Surfaces the floor never sees (it inspects only Bash argv)
 
 - **Non-shell secret writers** — the floor inspects only Bash argv, so secret-file mutation via structured Write/Edit/notebook/file-MCP payloads or a native-API writer inside an interpreter is not seen; shell-form secret writes remain blocked (#2). The native Claude PowerShell tool surface is the same boundary, tracked open as #88 because its remedy is adapter/matcher wiring, not a floor rule.
 - **Environment inherited from outside the inspected command** — in-line `GIT_CONFIG_*`/env forms are parsed, but an argv-only PreToolUse hook cannot see configuration or refspec overrides exported by a parent process or an earlier session (#6).
 - **Git ref/object-selection environment on pushes** — a scope declaration rather than a recorded bypass: variables such as `GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_REPLACE_REF_BASE` and `GIT_SHALLOW_FILE` can change what an allowed push reads or transmits without changing the resolved remote, and are outside the parser contract (#8).
-- **Detached-worktree state behind a plain removal** — whether the target of `git worktree remove <path>` holds a detached HEAD (whose commits die with the tree) is repository state, not argv; the graduated allow leans on law 7's `git switch -c` mandate as the guard, and the loss is measured and pinned by the fixture's detached leg rather than gated (#122).
+- **Detached-worktree state behind a plain removal** — whether the target of `git worktree remove <path>` holds a detached HEAD (whose commits die with the tree) is repository state, not argv; the graduated allow leans on global law 7's `git switch -c` mandate as the guard, and the loss is measured and pinned by the fixture's detached leg rather than gated (#122).
 - **Repository/user config that blinds the removal clean check** — `status.showUntrackedFiles=no` set in repo-local, user, or system configuration disables the untracked-file refusal that plain `worktree remove`'s allow leans on, invisibly to argv. A catch-all `core.excludesFile` blinds the identical check the same way. The argv-visible spellings are gated on the work-loss ladder (1.6.20): both keys, every `-c`/`--config-env` form, and **any dynamic `-c`/`--config-env` argument whatever key it names** — an unquoted value resplits after expansion, so an unwatched key proves nothing about what git actually runs. The ambient-config remainder is this line (#123). Scoped deliberately narrowly: under the feature freeze a limitation line is how this repo declines a fix, so one that over-states the limit ships a fixable gap as a documented non-fix.
 
 - **Object provenance behind an attributed sensitive-root push** — the issue-#48 narrowing lets a

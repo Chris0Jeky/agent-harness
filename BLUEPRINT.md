@@ -1,6 +1,6 @@
 # Agent Harness Blueprint
 
-Last Updated: 2026-07-26 · Applies to: every repo, every machine, every model tier
+Last Updated: 2026-10-03 · Applies to: every repo, every machine, every model tier
 Concrete schemas, skeletons, and literal file drafts live in [SPECS.md](./SPECS.md).
 
 **Thesis.** A repo's harness is defined by its **blast radius** — what can irreversibly break
@@ -19,62 +19,95 @@ half-worked. Nothing is speculative.
 
 ---
 
-## 0. The Twelve Laws (cross-cutting, all tiers)
+## 0. Design principles P1-P12 (cross-cutting, all tiers)
 
-1. **Enforcement ladder.** memory → CLAUDE.md → skill → hook → CI → structure (restricted
-   toolset, branch protection, sandbox). Every rule lives at exactly ONE layer — the cheapest
-   that actually enforces it. Prose is promoted to a hook only when violation is objectively
-   machine-detectable AND has recurred. (Formalizes Options `workflow_enforcement.md`.)
-2. **One home per policy.** Every policy has exactly one file; everything else links, never
-   restates. (Taskdeck's review policy lived in 7 files; #1220 took 14 review rounds partly
-   reconciling copies.)
-3. **Second-occurrence rule + pruning symmetry.** Nothing is built speculatively — structure
-   arrives with the second item (second correction → rule; third bulk-read → region map; second
-   repo needing a skill → hoist it global). Every growth trigger has a decay twin: session logs
-   expire in 14 days, memories uncited 90 days fold to one line, skills uninvoked a quarter get
-   archived, superseded strategies collapse to one SUPERSEDED line. Growth without decay
-   produced olb's 1,251-file memory swamp.
-4. **Budgets with rotation.** Every standing artifact has a hard line cap (table in SPECS §3).
-   Overflow ROTATES to `archive/` — never deleted, never accumulates in the routed path.
-   A mandate that cannot be literally obeyed (Taskdeck's ~80k-token required-reading chain)
-   teaches agents to ignore mandates — the most corrosive failure mode found in the estate.
-5. **Tripwires are not walls.** Regex deny hooks, stamp checks, and token-presence checks are
-   tripwires: cheap, worth keeping, never counted as safety. Walls are branch protection that
-   *requires named checks*, toolset-restricted subagents, and hermetic runtimes. (The old
-   prefix deny list missed `git push -f`; Taskdeck's branch protection "required nothing.")
-6. **The weaker the model, the harder the harness.** Spend the top model writing structure and
-   reviewing; run cheap models only inside mapped regions with skills, stop conditions, and
-   PR-only output. A weak model + tight region + stop-hook verification beats a strong model +
-   an 80k-token read mandate.
-7. **Capture is automatic; promotion must be scheduled.** Any ledger/memory/inbox without a
-   scheduled consumer degrades into noise (314/314 failure-ledger entries unclassified after
-   8 weeks; nightly lane red 5/5 days unnoticed). The Gardener (§4) is that consumer.
-8. **Authority is declared, not negotiated.** Push/merge autonomy is a written per-repo setting
-   in `.agent-harness/tier.json` — the same developer currently runs opposite git postures in different repos,
-   discoverable only by tripping hooks.
-9. **Tracked-issue-or-it-doesn't-exist.** Plans living only in prose lose to tracked issues
-   every time (Taskdeck's only archive plan sat in a gitignored file while agents worked the
-   tracker). Any doc-resident plan gets mirrored into the tracker or it will not happen.
-10. **Misleading authority is worse than nothing.** Dead repos get 3-line tombstones; stale
-    authoritative docs (metricalgo's 245-line AGENTS.md for a path that no longer exists) get
-    deleted, not maintained; superseded docs leave the routed path.
-11. **Every loop terminates.** Review is one review round plus one fix round, then ship or park.
-    Fix commits are earned only by confirmed CRITICAL/HIGH defects; every other finding becomes
-    a tracked issue or a one-line decline on the thread — never a silent drop, never a
-    fix-commit cascade. A red gate gets three genuinely different attempts, a disputed fact one
-    re-measure; then ship what is sound and park the rest. Evidence invalidation is scoped: a
-    head change re-proves what changed, never everything. (Issue #92 measured the unbounded
-    form: 90% of this repo's PR commits were post-review fixes, and fix rounds introduced
-    defects of their own.)
-12. **Mission first.** Harness, floor, gate, and doc work happens only when it IS the mission;
-    friction found mid-task becomes a one-line tracked issue, never a detour. No new gates whose
-    subject is other gates or doc consistency — grandfathered: the ones already built AND the
-    ones this blueprint itself prescribes (§3 stale-map stamps, the T3 docs-stamp/budget lane,
-    §7's vendor parity-diffs, SPECS §7's stop-hook states); the Gardener may propose retiring
-    any whose upkeep exceeds what it catches. Sessions are judged
-    by finished tasks: budget each task, park at ~2× budget, and close with a scoreboard
-    (finished / parked / rounds used) ahead of the evidence sections. (Issue #92 measured the
-    inverse: 9:1 ceremony-to-execution and zero product-capability PRs.)
+`P1` through `P12` name this blueprint's design principles, not another global law set.
+Global laws are canonical in claude-config; [SPECS §1](./SPECS.md#1-global-laws--pointer-not-a-mirror)
+identifies their source. Use `P<N>` or `global law <N>` explicitly in operational text.
+Historical records using `BLUEPRINT law N` retain their original numbering as `PN`;
+those records are not new operational instructions.
+
+### P1. Enforcement ladder
+
+memory → CLAUDE.md → skill → hook → CI → structure (restricted
+toolset, branch protection, sandbox). Every rule lives at exactly ONE layer — the cheapest
+that actually enforces it. Prose is promoted to a hook only when violation is objectively
+machine-detectable AND has recurred. (Formalizes Options `workflow_enforcement.md`.)
+
+### P2. One home per policy
+
+Every policy has exactly one file; everything else links, never
+restates. (Taskdeck's review policy lived in 7 files; #1220 took 14 review rounds partly
+reconciling copies.)
+
+### P3. Second-occurrence rule + pruning symmetry
+
+Nothing is built speculatively — structure
+arrives with the second item (second correction → rule; third bulk-read → region map; second
+repo needing a skill → hoist it global). Every growth trigger has a decay twin: session logs
+expire in 14 days, memories uncited 90 days fold to one line, skills uninvoked a quarter get
+archived, superseded strategies collapse to one SUPERSEDED line. Growth without decay
+produced olb's 1,251-file memory swamp.
+
+### P4. Budgets with rotation
+
+Every standing artifact has a hard line cap (table in SPECS §3).
+Overflow ROTATES to `archive/` — never deleted, never accumulates in the routed path.
+A mandate that cannot be literally obeyed (Taskdeck's ~80k-token required-reading chain)
+teaches agents to ignore mandates — the most corrosive failure mode found in the estate.
+
+### P5. Tripwires are not walls
+
+Regex deny hooks, stamp checks, and token-presence checks are
+tripwires: cheap, worth keeping, never counted as safety. Walls are branch protection that
+*requires named checks*, toolset-restricted subagents, and hermetic runtimes. (The old
+prefix deny list missed `git push -f`; Taskdeck's branch protection "required nothing.")
+
+### P6. The weaker the model, the harder the harness
+
+Spend the top model writing structure and
+reviewing; run cheap models only inside mapped regions with skills, stop conditions, and
+PR-only output. A weak model + tight region + stop-hook verification beats a strong model +
+an 80k-token read mandate.
+
+### P7. Capture is automatic; promotion must be scheduled
+
+Any ledger/memory/inbox without a
+scheduled consumer degrades into noise (314/314 failure-ledger entries unclassified after
+8 weeks; nightly lane red 5/5 days unnoticed). The Gardener (§4) is that consumer.
+
+### P8. Authority is declared, not negotiated
+
+Push/merge autonomy is a written per-repo setting
+in `.agent-harness/tier.json` — the same developer currently runs opposite git postures in different repos,
+discoverable only by tripping hooks.
+
+### P9. Tracked-issue-or-it-doesn't-exist
+
+Plans living only in prose lose to tracked issues
+every time (Taskdeck's only archive plan sat in a gitignored file while agents worked the
+tracker). Any doc-resident plan gets mirrored into the tracker or it will not happen.
+
+### P10. Misleading authority is worse than nothing
+
+Dead repos get 3-line tombstones; stale
+authoritative docs (metricalgo's 245-line AGENTS.md for a path that no longer exists) get
+deleted, not maintained; superseded docs leave the routed path.
+
+### P11. Every loop terminates
+
+Review and termination are defined by global laws 2 and 11,
+not a separate local round count. See [SPECS §1](./SPECS.md#1-global-laws--pointer-not-a-mirror)
+for the canonical source and `review-and-ship` for the operational procedure.
+
+### P12. Mission first
+
+Global law 12 defines mission scope; global law 11 defines termination.
+No new gates whose subject is other gates or doc consistency. The existing grandfathered
+set remains: already-built gates, §3 stale-map stamps, the T3 docs-stamp/budget lane,
+§7 vendor parity-diffs and SPECS §7 stop-hook states. The Gardener may propose retiring
+gates whose upkeep exceeds what they catch. Closeouts retain the finished / parked /
+rounds-used scoreboard described in §9; this is not a new review gate.
 
 ---
 
@@ -145,7 +178,7 @@ The lightest posture. Bypass comes only from user settings or a launch flag; the
 a host or the repo wires one. CLAUDE.md ≤40
 lines: what this is, how to run it, any hard data rule. No CI, no STATUS, no skills beyond the
 global process three, no repo review policy beyond global law 2, no read-first list. Start inline;
-a read-only review subagent is always allowed (law 2's independent review). **Promote to T2** on evidence of durable use: 3rd+ return session, something
+a read-only review subagent is always allowed (global law 2's independent review). **Promote to T2** on evidence of durable use: 3rd+ return session, something
 consuming its output, or the first "wish I had a test" moment.
 
 ### T2 — Daily driver (template: extract-api, the estate's cleanest instance)
@@ -157,7 +190,7 @@ consuming its output, or the first "wish I had a test" moment.
   are grandfathered — note the alias in ESTATE.md): human-only items with IDs, surfaced in
   every summary, checked off per global law 5 (direct evidence of completion; a human decision is
   never inferred).
-- `tasks/BACKLOG.md` session protocol (law 9 starts here).
+- `tasks/BACKLOG.md` session protocol (P9 starts here).
 - PostToolUseFailure → sanitized JSONL ledger, with a triage cadence (Gardener, §4).
 - 3–5 process skills ≤60 lines (onramp, safe-slice, verification-closeout, failure-capture).
   HARD RULE: no read-first ladders; never re-mandate auto-injected files.
@@ -187,7 +220,7 @@ Everything in T2, plus:
   bot's P0/P1 meets the bar exactly when it names a confirmed correctness, security, or
   data-loss defect. One fix round, verified against the fix diff (another fresh-context pass only
   when the fixes changed logic or the risk boundary; never a per-fix `@codex review` — global law
-  2f/2g) — then ship or park (law 11); never
+  2f/2g) — then ship or park (global law 11; P11); never
   pause mid-pipeline to ask whether to continue. PostToolUse nudge after `gh pr create` points
   at the skill (~20 tokens, exactly when relevant).
 - **Stop-hook verification** (first tier for it): narrowly detectable states only — PR opened
@@ -210,7 +243,7 @@ Everything in T3, plus:
   toolset-restricted no-Bash/no-Write reviewer agent — + green CI + the requested bot review
   triaged once by the severity bar (bots caught real bugs self-review missed 3+ recorded
   times) + never `--delete-branch` a stacked base. T4 raises how many independent eyes the
-  single review round gets, never how many rounds run — law 11's ceiling binds here too.
+  single review round gets, never how many rounds run — global law 11's ceiling binds here too.
   Sweep-then-push for large PRs: one multi-agent sweep, one push — never round-per-push cycles.
 - **Blocking diff-scoped gitleaks** in the required lane (pr-mode never reds on legacy).
 - **Advisory-first gate flips** (ADR-0035 pattern): every new gate lands `enforce:false` with an
@@ -233,10 +266,12 @@ release YAML and 6 weeks of red lanes post-pivot are the cautionary exhibit.)
 
 ---
 
-## 2. The Floor (the only thing that never varies)
+## 2. The floor: analyzer contract, posture and wiring
 
-One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with identical policy
-at every tier and explicit runtime adapters, protecting only the IRREVERSIBLE — wherever it is
+One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), with a shared analyzer
+and explicit runtime adapters. Effective rendering depends on posture, tier and overlays;
+wiring is declared separately. The invariant is the bounded analyzer contract, not an
+identical runtime refusal at every tier. The floor addresses the IRREVERSIBLE wherever it is
 wired. Claude wires the shared dispatcher at user scope on hosts that keep one (DESKTOP-IHKOOJS
 runs none by owner decision; a repository can declare `floor_wiring: none`); each active Codex repo owns one project adapter carrying an
 **audit-only** normalized dispatcher marker — a declaration the runtime never verifies, so a
@@ -263,7 +298,7 @@ Plain `worktree remove` allows at EVERY tier, `wave_mode` included (owner ruling
 issues #41/#117/#123). Git refuses it on a tree with tracked modifications or untracked
 files and a checked-out branch survives it — but its clean check ignores gitignored content,
 which removal then deletes, so **a `.env` living only in that worktree is gone**; and a
-**detached** worktree's commits are held only by its own HEAD and die with the removal (law
+**detached** worktree's commits are held only by its own HEAD and die with the removal (global law
 7's `git switch -c` mandate exists for exactly this). Allowed because git checks the part
 that matters, never because the plain form is harmless. What DOES stay on the work-loss
 ladder is every spelling that can carry `--force` or disable git's check without showing it
@@ -275,51 +310,36 @@ than the literal form it might be.
 agent's own descriptions and train `--body-file` workarounds. Secrets-in-content is CI
 gitleaks' job (diff-scoped); command safety is the argv parser's job.
 
-The floor is a defense-in-depth tripwire by law 5, not an exhaustive shell sandbox. Its bounded
+The floor is a defense-in-depth tripwire by P5, not an exhaustive shell sandbox. Its bounded
 parser and bypass matrix cover the explicitly tested command forms; the walls at T3+ remain
 branch protection and restricted toolsets. A change to the floor is T4-class work (top model +
 review) no matter which repo it runs in.
 
-**FEATURE-FROZEN (2026-07-26 — ratified in issue #92; decision record #96).** The floor is a
-tripwire at its useful maximum: 272 → ~9.5k lines as measured in issue #92 (11.3k by 1.6.12)
-bought a 12–14% false-positive rate on real agent commands with no recorded save of a real
-irreversible action, and seven versions of hardening shipped without ever executing anywhere.
-Only three classes of change may touch `dispatch.py`: **(a)** false-positive fixes that
-blocked real work, **(b)** the ratified #21 slice sequence, and **(c)** repairs to a SPECS §6
-charter regression as literally written (a listed must-block form newly allowed, or a listed
-must-allow form newly blocked) — the catastrophe matrix is always repaired. A newly
-discovered bypass FAMILY — a wrapper, interpreter, encoding, or shell shape the parser does
-not model — is recorded as one line in [FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md) and its
-issue closed, never fixed. No new floor version is DEPLOYED until the currently deployed one
-is re-trusted and canaried (HUMAN_TODO H-2) — a permitted fix still merges to `main` and
-bumps `FLOOR_VERSION`; what waits on H-2 is `sync-global --apply` and the consumer marker
-refresh. Shrinking the FP rate toward the ~0.1% it once measured is the only hardening
-direction left open.
+### Current posture and feature freeze
 
-The owner-authorized 2026-08-03 Developer Lens exact-route publication exception is one explicit,
-bounded exception to that freeze; it does not reopen general parser or bypass-family work. The
-feature freeze resumes immediately after that contract lands.
+The default below T4/`wave_mode` for a non-sensitive repository is `floor_posture: core`.
+Destructive deletes outside the project, secret-file mutation, downloaded program text run
+directly and privilege elevation remain double-checks (`FLOOR_ACK`); force-push, ref deletion,
+git-config execution, work-loss and launcher verdicts proceed. A `sensitive_data` repository
+never runs `core`: a declared `core` renders as `guide`. T4, `wave_mode` and the default
+sensitive posture retain walls; an eligible repository can declare `guide` or `wall`.
+SPECS §5.4 defines precedence and rendering, including guide's opacity handling. The analyzer
+and SPECS §6 charter matrix are unchanged. A repository declaring `floor_wiring: none` has
+no client-floor runtime claim.
 
-**Posture (owner decision 2026-09-02).** Re-measured on the owner's box before the change, the
-deployed floor's real blocks were still the #21 profile: the opacity class and force-push
-spellings, two months on. The owner ruled that below T4/`wave_mode` the floor is a guide, not a
-wall: pure opacity proceeds, and every other deny or ask becomes one deliberate double-check
-(`FLOOR_ACK`, SPECS §5.4). This lands the ratified #26/#62 slices in one seam and, by the owner's
-explicit direction, goes one step past #26's "never a charter deny" invariant: the irreversible
-core below T4 is protected by a forced re-read of the exact command, not by refusal. T4,
-`wave_mode` and (by default) `sensitive_data` keep the walls; any repo can declare
-`floor_posture: wall`. The freeze is otherwise unchanged.
+**FEATURE-FROZEN.** Only false-positive fixes that blocked real work, the ratified #21 slice
+sequence, and repairs to a SPECS §6 charter regression as literally written may change
+`dispatch.py`. A newly discovered bypass family is recorded in
+[FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md), not implemented. The owner-authorized
+Developer Lens exact-route publication contract is the separately ratified, bounded
+exception; it does not reopen general parser work. Permitted source fixes may merge and bump
+`FLOOR_VERSION`, but no new version is deployed until the currently deployed one is re-trusted
+and canaried. Current operator gates live in [HUMAN_TODO.md](./HUMAN_TODO.md); a source merge
+is not permission to run `sync-global --apply` or refresh consumer markers.
 
-**Core posture (owner decision 2026-09-27, issue #356).** Measured that day: no Claude session ran
-the floor, only six Codex roots did, and none of the floored repositories protected `main`
-server-side. The owner approved default-branch rulesets (`non_fast_forward`, `deletion`) on all
-of them and chose to shrink the client floor to LOCAL destruction, trading some security for
-throughput. Since 1.7.0 the default below T4/`wave_mode` for a non-sensitive repository is
-`floor_posture: core`: destructive deletes outside the project, secret-file mutation, downloaded
-program text run directly and privilege elevation stay double-checks (a `sensitive_data`
-repository never runs `core`: its declared `core` renders as `guide`); force-push, ref deletion, git config execution, work-loss and launcher verdicts
-proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any repo can declare
-`guide` or `wall` to get the old rendering back.
+The dated measurements and decisions behind these rules are preserved verbatim in
+[BOOK's historical appendix](./BOOK.md#historical-blueprint-records-preserved-2026-10-03).
+They are provenance, not a report of current installations or a second active plan.
 
 ---
 
@@ -493,11 +513,11 @@ from gone.
   items; the explicitly-requested exception to the global CLAUDE.md question-batching law),
   `model-effort-routing` (the
   effort→model→agent-count ladder plus the §3 fan-out caps that stop a reflexive subagent fleet),
-  and `review-and-ship` (the bounded review pipeline — law 11 in executable form; ships from
+  and `review-and-ship` (the bounded review pipeline — global laws 2 and 11 in executable form; ships from
   claude-config for both runtimes).
   That skill is the SINGLE home for named models and their effort bindings — §5 and SPECS §8 carry
   only the task-class→tier shape and point here; neither may restate the ladder. Global
-  CLAUDE.md (law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
+  CLAUDE.md (global law 5 + the Working-style section) and the T2 SessionStart nudge only point at these.
   Repo-tier skills come from the template layer here; domain skills grow per-repo by the
   second-occurrence rule.
 - **Plugins**: enable only what maps to a workflow verb actually used; where a plugin overlaps
@@ -524,7 +544,7 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
   a free independent review tier that caught real bugs self-review missed. Publish
   ready-for-review (a draft invites no bots; marking ready triggers the review) and triage what
   arrives once by the severity bar. Its clean outcome is the whole gate only under global law 2g;
-  it never licenses an unbounded comment loop (law 11).
+  it never licenses an unbounded comment loop (global law 11; P11).
 - **If a second runtime is real** (olb today): thin vendor shim only — routing README +
   runtime config + one dated `00_ACTIVE.md` pointer (edited on pivots; it propagated the
   archive pivot in one 54-line edit). Shared skill BODIES with 4-line vendor adapters, plus a
@@ -535,7 +555,7 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
   while CLAUDE.md says "only when asked" — same repo.)
 - **Global vendor mirror**: the universal laws Claude gets from `~/.claude/rules/laws.md` reach Codex
   through `~/.codex/AGENTS.md` (Codex's global personal-instructions file) — a faithful mirror of
-  the twelve laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
+  the twelve global laws, tier ladder, working style (incremental commits, no-coauthor, right-sized fan-out)
   and the floor note. It declares `rules/laws.md` canonical and is kept in sync by claude-config's
   `tests/check-law-parity.ps1`. This is WHY per-repo dual-runtime AGENTS.md files stay thin:
   the universal rules arrive globally for Codex exactly as they do for Claude, so nothing is
@@ -543,64 +563,19 @@ sessions in that repo (decision recorded in ESTATE.md per repo).
 
 ---
 
-## 8. Estate migration map
+## 8. Estate migration routing
 
-Order chosen by risk × leverage. The top tier does steps marked ★ (judgment); cheaper tiers
-execute the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
-create a parallel plan (law 9).
+The original July estate migration sequence is preserved in
+[BOOK's historical appendix](./BOOK.md#historical-blueprint-records-preserved-2026-10-03).
+It is a historical plan, not current instructions to mutate those repositories, and moving it
+here does not mark any step complete.
 
-1. ★ **Global layer** (one evening, highest leverage): write `~/.claude/CLAUDE.md` +
-   ESTATE.md + MACHINE.md; settings diet; argv-aware deny floor + dispatcher + test matrix;
-   global agents; `git init` ~/.claude config; delete global detritus (pr600-review/,
-   teams/session-*, blocklist test entries, daemon.lock, disabled marketplaces, the four
-   stale Apr-9 bootstrap-*.ps1 after salvaging as template source).
-2. **olb hotfixes FIRST despite the blueprint order** — highest-stakes / lowest-hygiene combo
-   (production money, deployed daily): convert absolute-path hooks to `$CLAUDE_PROJECT_DIR`
-   (they silently break worktree agents today); verify branch protection actually requires
-   named checks via `gh api`. Two hours, real risk retired.
-3. **Tombstones + REVIVAL.md files** (30 min): jekyt, repos, Taskdeck-gemini,
-   TaskdeckDemoExpansion, pr812-fixes, AgentForge(+Archive), all junk wrappers;
-   REVIVAL.md for platform-identity and metricalgo/staticprofit (replacing the stale-path
-   245-line AGENTS.md). Then cold-archive or delete the dead duplicates (several GB of
-   search noise).
-4. ★ **Certify extract-api as the T2 reference**: extract its scaffold (CLAUDE.md split,
-   4 skills, self-tested hooks, BACKLOG protocol) into `templates/tier2/` here; write its
-   tier.json. First Gardener cycle on its 2,324-line ledger.
-5. **hq-private → T1 + `sensitive_data`**: add tier line + privacy denies; rename to
-   HUMAN_TODO.md convention or record alias. Verify it has a private remote (irreplaceable
-   content). Nothing else — it already conforms.
-6. **Seed/bootstrapper CLI shipped (2026-07-13)** (SPECS §9): `harness.py seed`, `audit`,
-   `sync-global`, and `doctor`; the germ refuses overwrite. `tier-up` and estate-wide mutation
-   remain deferred until repeated use earns them.
-7. **Taskdeck → T3 diet, via its own tracked issues**: #1138 (STATUS → ≤150-line head +
-   rotation), #1275/ARCHIVE-07 (CI right-sizing: drop dual-OS matrix, path-filter, DELETE the
-   5/5-red nightly perf + 4/4-red mutation lanes under the red-lane law), #1276/ARCHIVE-08
-   (dead surface: ~1,000 lines of release/staging/SBOM YAML, ORCHESTRATION_STATE.md out of the
-   routed path, stale worktree dirs), #1269/ARCHIVE-01 (two-tier review gate = this
-   blueprint's T3 review pipeline). New small issues to seed: one-home policy collapse
-   (7 copies → 1), retire the .codex skill mirror (keep 00_ACTIVE.md + bot reviewers), strip
-   skill read-first ladders to region-map references, move bypassPermissions to
-   settings.local.json, remove/fence scripts/git/redistribute-commit-dates.ps1.
-   ★ Region maps: backend (Domain/Application/Infrastructure/Api), frontend
-   (views/stores/composables), automation/capture-review, CI+docs.
-8. **wealthlens-hq → T3**: tier.json codifying its relaxed-git authority (it is the written
-   spec for sub-T4 git freedom); Gardener on the 1,602-line ledger; red-lane law over its 11
-   workflows; ★ region maps for the 33.9k-file tree.
-9. ★ **olb → T4 formalization**: memory compaction (1,251-file .codex/memories + 111-file
-   memories/ + 12.6KB index → extract-api's 4-file endpoint is the target); encode its earned
-   rules (tagged-release pulls, forward-only migrations, UAI deploy sequencing, 2-review gate,
-   ratchets) into tier.json + CLAUDE.md; skill suite 21 → ~8; single-runtime decision for
-   Codex there (runtime with thin shim + parity CI, or bot-reviewer-only).
-10. **Memory graduation pass** across all 7 memory dirs: universal laws → global CLAUDE.md
-    (delete the duplicates same-commit), contradictions resolved (worktrees-broken vs -fixed),
-    session logs pruned, Options' 12.6KB index → one-liners.
-11. **Turn on the rhythm**: weekly Gardener on the 4 active repos only; weekly 15-minute
-    estate sitting; HUMAN_TODO aggregation into hq-private.
-12. ★ **Acceptance test for the migration**: hand a cheaper-tier model one mapped-region task
-    per active repo; fix whatever it stumbles on. Passing means the judgment soaked into the
-    structure — that is the whole point of §5's routing. There is no deadline to beat here: the
-    top tier is reserved by value, not rationed by availability, so re-run this whenever the
-    structure changes materially rather than once against a closing window.
+For current work, inspect the target repository's declared authority and live issue/PR state.
+Use the existing tracker rather than creating a parallel plan (P9). This repository's
+[ROADMAP.md](./ROADMAP.md) and [plans/ACTIVE.md](./plans/ACTIVE.md) carry current work routing;
+[HUMAN_TODO.md](./HUMAN_TODO.md) carries operator-only gates. Executable CLI behavior is in
+[README.md](./README.md) and SPECS §9. No estate-wide migration or runtime activation is
+implied by these pointers.
 
 ---
 
@@ -613,11 +588,11 @@ create a parallel plan (law 9).
 - **The harness generates its own workload.** An unbounded frontier — shell-bypass families,
   gates that check gates — consumes sessions without finishing any mission: measured
   2026-07-26, zero of this repo's 24 PRs added product capability and 81% of its open issues
-  were floor bypasses or floor false positives (issue #92). Law 12 quarantines meta-work, and
+  were floor bypasses or floor false positives (issue #92). Global law 12 and P12 quarantine meta-work, and
   the Gardener may propose retiring any gate whose upkeep exceeds what it catches.
 - **Evidence becomes the product.** Closeouts that demand evidence categories but no task count
   teach agents to optimize evidence instead of outcomes (the overnight doctrine measured 9:1
-  ceremony-to-execution by word count — issue #92). The law-12 scoreboard — finished / parked /
+  ceremony-to-execution by word count — issue #92). The P12 scoreboard — finished / parked /
   rounds used, ahead of the evidence sections — is the countermeasure; when rigor rises while
   throughput falls, the harness itself is the defect.
 - **The dispatcher is a single point of failure.** One parser bug—or a runtime's fail-open hook
