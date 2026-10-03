@@ -7338,7 +7338,13 @@ def canonicalize_skill_tree_case(source: Path, target: Path) -> None:
                 f"cannot resolve skill destination spelling: {desired}: {exc}"
             ) from exc
         if len(matches) != 1:
-            raise HarnessError(f"ambiguous skill destination spelling: {desired}")
+            names = ", ".join(sorted(entry.name for entry in matches)) or "none"
+            raise HarnessError(
+                f"ambiguous skill destination spelling: {desired} resolves to "
+                f"{len(matches)} destination entries ({names}); remove the extra "
+                "hard link or stale entry from the installed skill so exactly one "
+                "name remains, then run sync-global again"
+            )
         key = matches[0].name
         previous = source_by_target.get(key)
         if previous is not None and previous.name != source_child.name:

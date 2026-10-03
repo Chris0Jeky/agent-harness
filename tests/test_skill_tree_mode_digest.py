@@ -379,6 +379,36 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                     harness.sync_global(args)
                 self.assertEqual(before, harness.tree_digest(root))
 
+    def test_case_variant_hardlink_refusal_is_actionable_and_restores(self):
+        """L1: fail closed, name the entries, and leave the live skill intact."""
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, args = self.collision_fixture(root, (), "file", True)
+                (source / "foo").write_text("new", encoding="utf-8")
+                (target / "Foo").write_text("old", encoding="utf-8")
+                if not harness.skill_tree_destination_is_case_insensitive(target):
+                    self.skipTest("destination filesystem is case sensitive")
+                try:
+                    os.link(target / "Foo", target / "other")
+                except OSError as exc:
+                    self.skipTest(f"host cannot create hard links: {exc}")
+                args.apply = apply
+                before = harness.tree_digest(target)
+                with redirect_stdout(io.StringIO()):
+                    if not apply:
+                        self.assertEqual(0, harness.sync_global(args))
+                        self.assertEqual(before, harness.tree_digest(target))
+                        continue
+                    with self.assertRaises(harness.HarnessError) as caught:
+                        harness.sync_global(args)
+                message = str(caught.exception)
+                self.assertIn("ambiguous skill destination spelling", message)
+                self.assertIn("Foo, other", message)
+                self.assertIn("remove the extra hard link", message)
+                self.assertEqual(before, harness.tree_digest(target))
+                self.assertEqual("old", (target / "Foo").read_text("utf-8"))
+
     def test_failed_name_probe_refuses_without_live_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
