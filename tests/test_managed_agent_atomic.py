@@ -369,10 +369,10 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
 
     def test_new_destination_is_owner_only_not_parent_inherited(self):
         harness.write_managed_codex_file(self.target, b"new agent", 0o644)
-        self.assertEqual(self.dacl(self.target), f"D:P(A;;FA;;;{self.user})")
+        self.assertEqual(self.dacl(self.target), canonical(f"D:P(A;;FA;;;{self.user})"))
         state = self.parent / "state.json"
         harness.write_managed_codex_file(state, b"{}\n")
-        self.assertEqual(self.dacl(state), f"D:P(A;;FA;;;{self.user})")
+        self.assertEqual(self.dacl(state), canonical(f"D:P(A;;FA;;;{self.user})"))
 
     def test_moved_destination_keeps_its_own_inherited_entries(self):
         # Inherited entries from a narrower former parent must not be recomputed from
@@ -408,7 +408,9 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
 
     def test_new_destination_is_owned_by_the_token_user(self):
         harness.write_managed_codex_file(self.target, b"new agent", 0o644)
-        self.assertEqual(file_dacl_sddl(self.target, 0x1), f"O:{self.user}")
+        self.assertEqual(
+            file_dacl_sddl(self.target, 0x1), canonical(f"O:{self.user}", 0x1)
+        )
 
     def test_no_reader_can_open_the_staging_file_before_replacement(self):
         self.target.write_bytes(b"previous agent")
@@ -496,6 +498,43 @@ def current_user_sid() -> str:
         return ctypes.wstring_at(text.value)
     finally:
         kernel.LocalFree(text)
+
+
+def canonical(text: str, information: int = 0x4) -> str:
+    """Render SDDL the way Windows does, e.g. the built-in Administrator SID as LA."""
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
+    descriptor = ctypes.c_void_p()
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        rendered = ctypes.c_void_p()
+        if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, information, ctypes.byref(rendered), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(rendered.value)
+        finally:
+            kernel.LocalFree(rendered)
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 def open_for_read_error(path: Path) -> int:
