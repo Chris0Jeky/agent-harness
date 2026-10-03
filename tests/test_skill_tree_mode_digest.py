@@ -640,5 +640,243 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
             self.assertEqual(before, harness.tree_digest(target))
 
 
+class UnifiedSkillPreflightTests(unittest.TestCase):
+    def fixture(self, root, codex_names, claude_names, shared=True, present=False):
+        config = root / "config"
+        claude_home = root / "claude-home"
+        claude_home.mkdir()
+        skills_home = claude_home / "skills" if shared else root / "codex-skills"
+        args = SimpleNamespace(
+            config_root=str(config),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            only=[
+                *(f"skill:{name}" for name in codex_names),
+                *(f"claude-skill:{name}" for name in claude_names),
+            ],
+            apply=False,
+        )
+        entries = []
+        for family, names, source_parent, target_parent in (
+            ("codex", codex_names, config / "codex/skills", skills_home),
+            ("claude", claude_names, config / "skills", claude_home / "skills"),
+        ):
+            for name in names:
+                source, target = source_parent / name, target_parent / name
+                source.mkdir(parents=True)
+                (source / "SKILL.md").write_text(f"{family}:{name}", encoding="utf-8")
+                if present and not target.exists():
+                    shutil.copytree(source, target)
+                entries.append((source, target))
+        return args, entries
+
+    def assert_refuses_without_mutation(self, args, root):
+        before = harness.tree_digest(root)
+        with mock.patch.object(
+            harness, "reserve_backup_root", wraps=harness.reserve_backup_root
+        ) as reserve:
+            with mock.patch.object(
+                harness.shutil, "copytree", wraps=shutil.copytree
+            ) as copy:
+                with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                    harness.HarnessError, "selected skill roots collide"
+                ):
+                    harness.sync_global(args)
+                copy.assert_not_called()
+            reserve.assert_not_called()
+        self.assertEqual(before, harness.tree_digest(root))
+
+    def test_mixed_identical_roots_refuse_before_any_mutation(self):
+        for present in (False, True):
+            for apply in (False, True):
+                with self.subTest(
+                    present=present, apply=apply
+                ), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp).resolve()
+                    args, _ = self.fixture(
+                        root, ("sample",), ("sample",), present=present
+                    )
+                    args.apply = apply
+                    self.assert_refuses_without_mutation(args, root)
+
+    def test_mixed_case_and_unicode_roots_follow_native_lookup(self):
+        # Separate source families can represent both spellings even on an
+        # insensitive/normalizing source volume. This does not skip on APFS.
+        for names in (("Foo", "foo"), ("caf\u00e9", "cafe\u0301")):
+            for present in (False, True):
+                for apply in (False, True):
+                    with self.subTest(
+                        names=names, present=present, apply=apply
+                    ), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp).resolve()
+                        args, entries = self.fixture(
+                            root, names[:1], names[1:], present=present
+                        )
+                        parent = entries[0][1].parent
+                        parent.mkdir(exist_ok=True)
+                        # An independent native mkdir oracle observes lookup,
+                        # without asking the production preflight for a verdict.
+                        probe = parent / ".fixture-lookup"
+                        probe.mkdir()
+                        (probe / names[0]).mkdir()
+                        try:
+                            (probe / names[1]).mkdir()
+                        except FileExistsError:
+                            collides = True
+                        else:
+                            collides = False
+                        shutil.rmtree(probe)
+                        args.apply = apply
+                        if collides:
+                            self.assert_refuses_without_mutation(args, root)
+                        else:
+                            before = harness.tree_digest(root)
+                            with redirect_stdout(io.StringIO()):
+                                self.assertEqual(harness.sync_global(args), 0)
+                            if not apply:
+                                self.assertEqual(before, harness.tree_digest(root))
+                            else:
+                                for source, target in entries:
+                                    self.assertEqual(
+                                        harness.tree_digest(source),
+                                        harness.tree_digest(target),
+                                    )
+
+    def test_same_names_in_separate_destination_parents_remain_valid(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                args, entries = self.fixture(
+                    root, ("sample",), ("sample",), shared=False
+                )
+                args.apply = apply
+                before = harness.tree_digest(root)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(harness.sync_global(args), 0)
+                if not apply:
+                    self.assertEqual(before, harness.tree_digest(root))
+                else:
+                    for source, target in entries:
+                        self.assertEqual(
+                            harness.tree_digest(source), harness.tree_digest(target)
+                        )
+                    self.assertNotEqual(
+                        harness.tree_digest(entries[0][1]),
+                        harness.tree_digest(entries[1][1]),
+                    )
+
+    def test_existing_parent_case_aliases_are_grouped_by_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            parent = root / "parent"
+            parent.mkdir()
+            alias = root / "PARENT"
+            if not alias.exists():
+                self.skipTest("host lookup keeps these parent spellings distinct")
+            before = harness.tree_digest(root)
+            with self.assertRaisesRegex(
+                harness.HarnessError, "selected skill roots collide"
+            ):
+                harness.preflight_selected_skill_roots(
+                    [parent / "sample", alias / "sample"], None, [], "fixture"
+                )
+            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_distinct_sensitive_parents_do_not_merge_because_of_spelling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            SkillTreeFilesystemLookupTests.set_case_sensitive(self, root)
+            first, second = root / "Home", root / "home"
+            first.mkdir()
+            try:
+                second.mkdir()
+            except FileExistsError:
+                self.skipTest("host cannot represent distinct case-sensitive parents")
+            before = harness.tree_digest(root)
+            harness.preflight_selected_skill_roots(
+                [first / "sample", second / "sample"], None, [], "fixture"
+            )
+            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_only_changed_entries_are_probed_on_the_backup_parent(self):
+        names = ("alpha", "beta", "gamma")
+        for family in ("codex", "claude"):
+            for changed in ((), names[:1], names[:2]):
+                for apply in (False, True):
+                    with self.subTest(
+                        family=family, changed=changed, apply=apply
+                    ), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp).resolve()
+                        args, entries = self.fixture(
+                            root,
+                            names if family == "codex" else (),
+                            names if family == "claude" else (),
+                            present=True,
+                        )
+                        backup_parent = root / (
+                            "codex-home/backups"
+                            if family == "codex"
+                            else "claude-home/.harness-backups"
+                        )
+                        backup_parent.mkdir(parents=True)
+                        for source, _target in entries:
+                            if source.name in changed:
+                                (source / "SKILL.md").write_text(
+                                    "updated", encoding="utf-8"
+                                )
+                        real = harness.probe_distinct_skill_names
+                        observed = []
+
+                        def record(lookup, scratch, created, probed):
+                            if lookup == backup_parent:
+                                observed.append(list(probed))
+                            return real(lookup, scratch, created, probed)
+
+                        before = harness.tree_digest(root)
+                        args.apply = apply
+                        with mock.patch.object(
+                            harness, "probe_distinct_skill_names", record
+                        ), redirect_stdout(io.StringIO()):
+                            self.assertEqual(harness.sync_global(args), 0)
+                        self.assertEqual(
+                            observed, [list(changed)] if len(changed) > 1 else []
+                        )
+                        if not apply or not changed:
+                            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_unused_backup_lookup_failure_cannot_block_identical_skills(self):
+        for family in ("codex", "claude"):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                names = ("alpha", "beta")
+                args, _ = self.fixture(
+                    root,
+                    names if family == "codex" else (),
+                    names if family == "claude" else (),
+                    present=True,
+                )
+                backup_parent = root / (
+                    "codex-home/backups"
+                    if family == "codex"
+                    else "claude-home/.harness-backups"
+                )
+                backup_parent.mkdir(parents=True)
+                real = harness.probe_distinct_skill_names
+
+                def unavailable(lookup, scratch, created, probed):
+                    if lookup == backup_parent:
+                        raise OSError("fictional unused recovery lookup unavailable")
+                    return real(lookup, scratch, created, probed)
+
+                args.apply = True
+                before = harness.tree_digest(root)
+                with mock.patch.object(
+                    harness, "probe_distinct_skill_names", unavailable
+                ), redirect_stdout(io.StringIO()):
+                    self.assertEqual(harness.sync_global(args), 0)
+                self.assertEqual(before, harness.tree_digest(root))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -683,8 +683,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   `<codex-home>/backups/<timestamp>/skills/`, outside the recursively scanned `skills-home`; custom
   overlapping home/source layouts fail before writes, and legacy `skills-home/.harness-backups/`
   trees are neither migrated nor deleted.
-  Selected skill roots (`skill:` and `claude-skill:`) are probed together with name-only directories on
-  the destination parent, and on the backup parent for roots that need a recovery copy. Roots the
+  Selected skill roots (`skill:` and `claude-skill:`) are probed together across both families with
+  name-only directories on each shared destination parent before either family applies changes.
+  Recovery-name checks run only for changed existing Codex targets and changed Claude staging
+  targets (including new trees); identical trees never require a backup-name probe. Roots the
   destination's own lookup merges (for example `Foo` and `foo` on a case-insensitive volume) are
   refused before any live or backup write, dry run included. Qualifications, not guarantees: an
   installed skill holding a hard link to a case-variant entry stays an ambiguous-spelling refusal
