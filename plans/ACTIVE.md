@@ -5,7 +5,14 @@
 - #414 and #417 are merged: the handoff pack is an advisory authoring profile and the SQLite receipt lab is a single-owner reference, not native adoption.
 - The receipt suite now backs up one leased fictional row into two independent databases and demonstrates that copied epoch/fence values allow both owners to accept divergent local results. Receiver fencing and old-writer isolation still require native proof.
 - The handoff profile maps generic conformance cases to their native proof owners and separates cancellation request, admission stop, process acknowledgement and effects reconciliation. Native receipts remain with adopters; no runner, permission checker or gate is added.
-- #410 remains open for its remaining profile cases/acceptance; #416's source acceptance is qualified separately from native adoption. Human gates remain in `HUMAN_TODO.md`.
+- #410 and #416 are closed for demonstrated source acceptance; native adoption remains a separate evidence boundary. Human gates remain in `HUMAN_TODO.md`.
+
+## Privacy and source-collision continuation (2026-10-02)
+
+- #419's contextual GitHub repository-valued options and quoted command words are covered by fictional importer regressions. Local source directories, formatting templates and ordinary option values retain their contextual roles.
+- #401's reproduced SSH-family host options, every keyscan host and long-email ordering gaps are repaired. Existing single-label/IP/IPv6 registry coverage is reconciled with controls; persisted extraction/write/kernel fixtures exercise the combined behavior. Unknown shell grammar remains outside the recognizer and imported output stays private.
+- #375's absent/existing-target source-collision seam is covered by disposable native NTFS fixtures, including case-sensitive directory and Unicode-distinct controls. Hardlink ambiguity stays safely refused; normalization-collapsing and non-inherited POSIX directory lookup flags and fake mode bits remain separate qualification leads. This is pre-mutation refusal, not a claim of concurrent-writer exclusion.
+- The generic handoff schemas and declaration-only `bind_pack` boundary are unchanged. Native runtime, deployment/device and owner acceptance remain distinct; no private receipt or topology is published here.
 
 Snapshot: 2026-10-01 13:18 UTC, before quality integration. Observed `main` head `7c10099`
 (PR #409's merge). The 2026-09-02 snapshot and
