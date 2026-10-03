@@ -7737,6 +7737,13 @@ def windows_security_libraries() -> tuple[Any, Any]:
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_uint32),
     )
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
     kernel.GetCurrentProcess.restype = ctypes.c_void_p
     kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
     kernel.LocalFree.argtypes = (ctypes.c_void_p,)
@@ -7775,8 +7782,35 @@ def windows_file_dacl_descriptor(path: Path) -> bytes:
     return buffer.raw
 
 
+def windows_dacl_signature(descriptor: bytes) -> tuple[bool, bool, str]:
+    """Return (protected, NULL DACL, ordered ACE list) of a descriptor's DACL.
+
+    The auto-inherited marker is ignored: Windows sets it on propagation, not access.
+    """
+    advapi, kernel = windows_security_libraries()
+    buffer = ctypes.create_string_buffer(descriptor)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        buffer, 1, WINDOWS_DACL_SECURITY_INFORMATION, ctypes.byref(text), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+    match = re.fullmatch(r"D:((?:P|AI|AR|NO_ACCESS_CONTROL)*)(.*)", sddl, re.S)
+    if match is None:
+        raise OSError(f"unrecognised DACL descriptor: {sddl!r}")
+    flags = re.findall(r"P|AI|AR|NO_ACCESS_CONTROL", match.group(1))
+    return "P" in flags, "NO_ACCESS_CONTROL" in flags, match.group(2)
+
+
 def windows_owner_only_descriptor() -> bytes:
-    """Return a protected DACL granting full control only to the current token user."""
+    """Return a protected DACL granting full control only to the current token user.
+
+    The user is also named as owner, so an elevated token whose default owner is the
+    Administrators group does not hand implicit DACL control to that group.
+    """
     advapi, kernel = windows_security_libraries()
     token = ctypes.c_void_p()
     if not advapi.OpenProcessToken(
@@ -7801,7 +7835,8 @@ def windows_owner_only_descriptor() -> bytes:
     if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        sddl = f"D:P(A;;FA;;;{ctypes.wstring_at(sid_text.value)})"
+        user_sid = ctypes.wstring_at(sid_text.value)
+        sddl = f"O:{user_sid}D:P(A;;FA;;;{user_sid})"
     finally:
         kernel.LocalFree(sid_text)
     descriptor = ctypes.c_void_p()
@@ -7861,6 +7896,8 @@ def windows_create_staging_file(
                 )
             except OSError:
                 kernel.CloseHandle(handle)
+                if read_only:
+                    os.chmod(candidate, stat.S_IREAD | stat.S_IWRITE)
                 candidate.unlink(missing_ok=True)
                 raise
         error = ctypes.get_last_error()
@@ -7898,6 +7935,19 @@ def write_managed_codex_file(
             descriptor, temporary = windows_create_staging_file(
                 path.parent, ".harness-agent-", security, read_only
             )
+            # Prove the created DACL before any byte exists: refuse rather than publish
+            # if Windows merged parent entries or dropped the requested protection.
+            try:
+                staged = windows_dacl_signature(windows_file_dacl_descriptor(temporary))
+            except OSError:
+                os.close(descriptor)
+                raise
+            if staged != windows_dacl_signature(security):
+                os.close(descriptor)
+                raise HarnessError(
+                    f"staging file did not receive the destination's DACL; "
+                    f"refusing publication: {path}"
+                )
         else:
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=".harness-agent-", dir=path.parent

@@ -29,9 +29,14 @@ Permissions differ by platform, because a renamed file keeps its own access cont
 - **Windows (NTFS):** a mode contributes only the read-only attribute, so access comes from
   the DACL. The staging file is created with the existing destination's DACL, including
   its inheritance protection and explicit deny entries, or with a protected owner-only
-  DACL when the destination is new. It is never created with the parent's inherited
-  DACL, and it is opened without sharing until replacement, so no reader can be admitted
-  under broader access. The read-only attribute is set at creation. Measured on NTFS: a
+  DACL (and the token user as owner) when the destination is new. Before any byte is
+  written, the created DACL is read back and compared with the requested one; a host that
+  merged parent entries or dropped protection is refused, not published. The file is
+  opened without sharing until replacement, so no reader can be admitted under broader
+  access. The read-only attribute is set at creation. Only the DACL is carried over: the
+  replacement is owned by the writing token's default owner (an elevated token may make
+  that the Administrators group), and mandatory integrity labels and other SACL entries
+  of the old file are not copied. Measured on NTFS: a
   destination that another process holds open without delete sharing, or that is
   read-only, refuses replacement; the live bytes, attribute and DACL stay unchanged and
   the staging sibling is removed. A read-only source mode therefore publishes a read-only

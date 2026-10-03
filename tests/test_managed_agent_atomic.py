@@ -374,6 +374,42 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
         harness.write_managed_codex_file(state, b"{}\n")
         self.assertEqual(self.dacl(state), f"D:P(A;;FA;;;{self.user})")
 
+    def test_moved_destination_keeps_its_own_inherited_entries(self):
+        # Inherited entries from a narrower former parent must not be recomputed from
+        # the shared parent when the staging file is created.
+        narrow = self.parent.parent / "narrow"
+        narrow.mkdir()
+        set_dacl(narrow, f"D:(A;OICI;FA;;;{self.user})", True)
+        (narrow / "luna.toml").write_bytes(b"previous agent")
+        os.rename(narrow / "luna.toml", self.target)
+        before = self.dacl(self.target)
+        self.assertNotIn(";WD)", before)
+        harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(ace_body(self.dacl(self.target)), ace_body(before))
+        self.assertNotIn(";WD)", self.dacl(self.target))
+
+    def test_staging_dacl_mismatch_refuses_before_any_byte(self):
+        self.target.write_bytes(b"previous agent")
+        set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
+        before = self.dacl(self.target)
+        real = harness.windows_file_dacl_descriptor
+        broader = real(self.parent)
+
+        def merged(path):
+            # Simulate a host that merged the shared parent's entries at creation.
+            return broader if path.name.startswith(".harness-agent-") else real(path)
+
+        with mock.patch.object(harness, "windows_file_dacl_descriptor", merged):
+            with self.assertRaises(harness.HarnessError):
+                harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(self.target.read_bytes(), b"previous agent")
+        self.assertEqual(self.dacl(self.target), before)
+        self.assertEqual(self.staging(), [])
+
+    def test_new_destination_is_owned_by_the_token_user(self):
+        harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(file_dacl_sddl(self.target, 0x1), f"O:{self.user}")
+
     def test_no_reader_can_open_the_staging_file_before_replacement(self):
         self.target.write_bytes(b"previous agent")
         real_fsync = os.fsync
@@ -381,11 +417,8 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
 
         def probe(descriptor):
             for candidate in self.staging():
-                try:
-                    with open(candidate, "rb"):
-                        refused.append(False)
-                except PermissionError:
-                    refused.append(True)
+                # ERROR_SHARING_VIOLATION, not an ACL denial or success.
+                refused.append(open_for_read_error(candidate) == 32)
             return real_fsync(descriptor)
 
         with mock.patch.object(harness.os, "fsync", probe):
@@ -444,12 +477,16 @@ def current_user_sid() -> str:
         ctypes.POINTER(ctypes.c_void_p),
     )
     token = ctypes.c_void_p()
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
     if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
         raise ctypes.WinError(ctypes.get_last_error())
     user = ctypes.create_string_buffer(512)
     needed = ctypes.c_uint32(0)
-    if not advapi.GetTokenInformation(token, 1, user, 512, ctypes.byref(needed)):
-        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not advapi.GetTokenInformation(token, 1, user, 512, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
     text = ctypes.c_void_p()
     if not advapi.ConvertSidToStringSidW(
         ctypes.c_void_p.from_buffer(user).value, ctypes.byref(text)
@@ -461,7 +498,28 @@ def current_user_sid() -> str:
         kernel.LocalFree(text)
 
 
-def file_dacl_sddl(path: Path) -> str:
+def open_for_read_error(path: Path) -> int:
+    """Open with full sharing through CreateFileW and return the Win32 error (0 = opened)."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x80, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        return ctypes.get_last_error()
+    kernel.CloseHandle(handle)
+    return 0
+
+
+def file_dacl_sddl(path: Path, information: int = 0x4) -> str:
     """Read a file's DACL as SDDL independently of the helpers under test."""
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -475,11 +533,13 @@ def file_dacl_sddl(path: Path) -> str:
     )
     buffer = ctypes.create_string_buffer(4096)
     needed = ctypes.c_uint32(0)
-    if not advapi.GetFileSecurityW(str(path), 0x4, buffer, 4096, ctypes.byref(needed)):
+    if not advapi.GetFileSecurityW(
+        str(path), information, buffer, 4096, ctypes.byref(needed)
+    ):
         raise ctypes.WinError(ctypes.get_last_error())
     text = ctypes.c_void_p()
     if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-        buffer, 1, 0x4, ctypes.byref(text), None
+        buffer, 1, information, ctypes.byref(text), None
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
