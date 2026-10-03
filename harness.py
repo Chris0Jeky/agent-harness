@@ -5333,6 +5333,7 @@ def configured_push_remote(
     deadline: float | None,
     *,
     strict: bool = False,
+    fallback_remote: str = PUBLISHING_REMOTE,
 ) -> tuple[str, bool]:
     """(remote `git push` targets, whether that selection was measured).
 
@@ -5357,6 +5358,10 @@ def configured_push_remote(
     returns `False`, instead of falling back to `origin` and grading a
     repository whose real push remote was never read. The default keeps the
     historical behaviour for `sensitive_data_findings`.
+
+    A caller that has enumerated exactly one remote may supply `fallback_remote`
+    for Git's implicit single-remote default. It is used only after every
+    selection key was read as unset, never over an explicit name or failed probe.
     """
     unreadable = False
 
@@ -5394,7 +5399,7 @@ def configured_push_remote(
         configured_name = configured(key)
         if configured_name:
             return configured_name, True
-    return PUBLISHING_REMOTE, not exhausted()
+    return fallback_remote, not exhausted()
 
 
 def configured_remote_urls(
@@ -5886,8 +5891,12 @@ def default_branch_protection_findings(
     # `remote.pushDefault` and `branch.<name>.remote` select where a push goes
     # first (#370). A selection the budget never let git answer is unmeasured,
     # never a guess of `origin`.
+    remote_names = {name for name, _url, _direction in rows}
+    fallback_remote = (
+        next(iter(remote_names)) if len(remote_names) == 1 else PUBLISHING_REMOTE
+    )
     publishing_remote, selection_proven = configured_push_remote(
-        repo, command_runner, deadline, strict=True
+        repo, command_runner, deadline, strict=True, fallback_remote=fallback_remote
     )
     if not selection_proven:
         return [
@@ -5929,9 +5938,9 @@ def default_branch_protection_findings(
                     "goes, so its default-branch protection is unmeasured",
                 )
             ]
-    slugs = [github_repo_slug(url) for url in push_urls]
-    if not slugs or not all(slugs):
-        return []  # no such remote, or a push destination off GitHub: out of scope
+    # Git pushes to every pushurl. Scope each URL independently: an off-host
+    # destination cannot hide the GitHub members of the same publishing remote.
+    slugs = [slug for url in push_urls if (slug := github_repo_slug(url))]
     findings: list[dict] = []
     for slug in dict.fromkeys(slugs):
         findings.extend(

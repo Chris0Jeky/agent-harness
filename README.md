@@ -116,6 +116,9 @@ template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
 (`non_fast_forward` + `deletion` ruleset or classic equivalent) on the remote `git push` targets, when the effective floor
 posture is `core` or the repo declares `floor_wiring: none` — reported as `advisory` when
 missing or bypassable by the auditing token, never a failure (issues #356, #370).
+An implicit sole remote is measured even when it is not named `origin`; explicit push-remote
+configuration still wins. Mixed push URLs are scoped individually, so a non-GitHub destination
+does not hide the GitHub destinations. Unresolved URL-valued selections stay `UNPROVEN` (#438).
 A repo that vendors nothing says so rather than
 emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
 failure: it is the auditing machine's state, so making it a repo verdict would let the same

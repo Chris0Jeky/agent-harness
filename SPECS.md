@@ -677,6 +677,9 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   stale user-profile paths, and default-branch server-side history protection
   (`non_fast_forward` + `deletion` ruleset or classic equivalent) on the remote `git push` targets, reported as an advisory
   when the effective floor posture is `core` or `floor_wiring` is `none` (issues #356, #370).
+  Explicit push-remote configuration wins over the implicit sole-remote fallback; each GitHub
+  push URL is measured independently of non-GitHub neighbours. Unresolved URL-valued selections
+  remain `UNPROVEN` (#438).
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under
