@@ -5293,10 +5293,12 @@ def github_repo_slug(remote: str) -> str:
     about `22/owner` and a genuinely public origin degraded to UNPROVEN instead
     of raising the mismatch. `(?::\\d+)?` is optional and backtracks, so the
     portless `ssh://git@github.com:owner/repo` spelling still parses.
+    `ssh.github.com:443` is GitHub's SSH-over-HTTPS endpoint for the same
+    repositories, so it resolves to the same slug (#370).
     """
     patterns = (
         r"^(?:https?|git)://(?:[^/@]+@)?github\.com(?::\d+)?/([^/?#]+/[^/?#]+)",
-        r"^ssh://(?:[^@/]+@)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?(?:ssh\.)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
         r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
     )
     for pattern in patterns:
@@ -5806,14 +5808,19 @@ def default_branch_protection_findings(
     client-side interception either). Any other posture still intercepts, so
     there is nothing server-side to measure and the leg emits nothing.
 
-    The `origin` remote is resolved with the same helpers as
-    `sensitive_data_findings`; a non-GitHub or missing origin is out of scope
-    and also emits nothing. Otherwise `gh` probes, each host-pinned like
+    The remote measured is the one `git push` targets, resolved with the same
+    helpers as `sensitive_data_findings` (`configured_push_remote`:
+    `branch.<name>.pushRemote`, `remote.pushDefault`, `branch.<name>.remote`,
+    then `origin`) through its PUSH urls, so a `pushurl` is what counts; a
+    non-GitHub, missing or local (`.`) push destination is out of scope and
+    emits nothing. Otherwise `gh` probes, each host-pinned like
     `github_visibility`, read the default branch, its (paginated) branch rules
     with their ruleset ids, classic branch protection — only when the rulesets
     lack either rule; the union of both mechanisms must block both — and then
     whether the auditing token can bypass what blocks them: each backing
-    ruleset's `current_user_can_bypass`, and classic `enforce_admins`. Every
+    ruleset's `current_user_can_bypass`, and classic `enforce_admins`. A
+    bypassable ruleset still grades `ok` when classic protection alone blocks
+    both with `enforce_admins` true: a push must clear every gate. Every
     emitted status is `ok`, `advisory` (owner preference: a missing
     server-side rule never fails the audit) or `UNPROVEN`, never `MISMATCH`.
     An `--offline` run refuses the network probes through the runner and
@@ -5832,19 +5839,58 @@ def default_branch_protection_findings(
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                "the configured remotes could not be enumerated, so origin's "
-                "default-branch protection is unmeasured",
+                "the configured remotes could not be enumerated, so the "
+                "publishing remote's default-branch protection is unmeasured",
             )
         ]
+    # `origin` is only git's last fallback: `branch.<name>.pushRemote`,
+    # `remote.pushDefault` and `branch.<name>.remote` select where a push goes
+    # first (#370). A selection the budget never let git answer is unmeasured,
+    # never a guess of `origin`.
+    publishing_remote, selection_proven = configured_push_remote(
+        repo, command_runner, deadline
+    )
+    if not selection_proven:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                "the probe budget expired before git's push-remote configuration "
+                "could be read, so which remote publishes this repo is unmeasured",
+            )
+        ]
+    if publishing_remote == LOCAL_PUSH_REMOTE:
+        return []  # pushes stay in this repository: no server to protect
     # Only where pushes GO: a non-GitHub push URL with a GitHub fetch URL must
     # not be measured through the fetch repository (Codex P1 on #369).
-    push_urls = [
-        url for name, url, direction in rows if name == "origin" and direction == "push"
-    ]
+    push_urls = list(
+        dict.fromkeys(
+            url
+            for name, url, direction in rows
+            if name == publishing_remote and direction == "push"
+        )
+    )
     slugs = [github_repo_slug(url) for url in push_urls]
     if not slugs or not all(slugs):
-        return []  # no origin, or a push destination off GitHub: out of scope
-    slug = slugs[0]
+        return []  # no such remote, or a push destination off GitHub: out of scope
+    findings: list[dict] = []
+    for slug in dict.fromkeys(slugs):
+        findings.extend(
+            repository_branch_protection_findings(
+                repo, slug, command_runner=command_runner, deadline=deadline
+            )
+        )
+    return findings
+
+
+def repository_branch_protection_findings(
+    repo: Path,
+    slug: str,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict]:
+    """Probe one GitHub repository's default-branch history protection."""
     rest_path = github_rest_repo_path(slug)
     if not rest_path:
         return []
@@ -5911,65 +5957,80 @@ def default_branch_protection_findings(
     by_classic = {kind: False for kind in HISTORY_RULES}
     enforce_admins = ""
     protection_evidence = ""
-    if not all(by_ruleset.values()):
-        protection_argv = [
-            "gh",
-            "api",
-            "--hostname",
-            "github.com",
-            f"repos/{rest_path}/branches/{encoded_branch}/protection",
-            "--jq",
-            "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
-            '.enforce_admins.enabled]|map(tostring)|join(",")',
-        ]
+    protection_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/branches/{encoded_branch}/protection",
+        "--jq",
+        "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
+        '.enforce_admins.enabled]|map(tostring)|join(",")',
+    ]
+
+    def read_classic(blocked_by_rulesets: bool):
+        """Probe classic protection once.
+
+        Returns `("measured", (by_classic, enforce_admins, evidence))`,
+        `("absent", evidence)` for GitHub's own "Branch not protected", or
+        `("unproven", finding)`. An empty or null answer measured nothing
+        (#370): it is not evidence that force-push or deletion is allowed.
+        """
         resolved, output, failure = result_before_deadline(
             command_runner, protection_argv, repo, deadline
         )
         answer = output.strip()
         fields = [field.strip() for field in answer.split(",")]
+        lead = (
+            f"{slug} branch {branch}: rulesets lack non_fast_forward or "
+            f"deletion ({rules_text}) and classic protection is unmeasured"
+            if not blocked_by_rulesets
+            else f"{slug} branch {branch}: classic protection is unmeasured"
+        )
         if resolved and (
             len(fields) < 2
             or any(field not in ("true", "false") for field in fields[:2])
         ):
-            # An empty or null answer measured nothing (#370, item 5): it is
-            # not evidence that force-push or deletion is allowed.
             shown = redact_probe_text(answer[:40]) or "<no output>"
-            return [
-                reality_finding(
-                    BRANCH_PROTECTION_CHECK,
-                    REALITY_UNPROVEN,
-                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
-                    f"deletion ({rules_text}) and classic protection is "
-                    f"unmeasured — `{' '.join(protection_argv)}` answered "
-                    f"{shown!r}, which is not a pair of booleans",
-                )
-            ]
+            return "unproven", reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{lead} — `{' '.join(protection_argv)}` answered "
+                f"{shown!r}, which is not a pair of booleans",
+            )
         if resolved:
-            by_classic = {
-                "non_fast_forward": fields[0] == "false",
-                "deletion": fields[1] == "false",
-            }
-            enforce_admins = fields[2] if len(fields) > 2 else ""
-            protection_evidence = (
-                f"`{' '.join(protection_argv)}` -> {redact_probe_text(answer[:40])}"
+            return "measured", (
+                {
+                    "non_fast_forward": fields[0] == "false",
+                    "deletion": fields[1] == "false",
+                },
+                fields[2] if len(fields) > 2 else "",
+                f"`{' '.join(protection_argv)}` -> {redact_probe_text(answer[:40])}",
             )
-        elif "branch not protected" in failure.lower():
-            protection_evidence = (
-                f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
+        if "branch not protected" in failure.lower():
+            return (
+                "absent",
+                f"`{' '.join(protection_argv)}` answered 'Branch not protected'",
             )
+        # Only GitHub's own "Branch not protected" proves absence; a missing
+        # admin scope, a rate limit or an expired budget measured nothing
+        # (review of #369, M2).
+        return "unproven", reality_finding(
+            BRANCH_PROTECTION_CHECK,
+            REALITY_UNPROVEN,
+            f"{lead} — {probe_failure_note(protection_argv, failure)}",
+        )
+
+    classic: tuple[dict[str, bool], str, str] | None = None
+    if not all(by_ruleset.values()):
+        state, payload = read_classic(False)
+        if state == "unproven":
+            return [payload]
+        if state == "measured":
+            classic = payload
+            by_classic, enforce_admins, protection_evidence = classic
         else:
-            # Only GitHub's own "Branch not protected" proves absence; a missing
-            # admin scope, a rate limit or an expired budget measured nothing
-            # (review of #369, M2).
-            return [
-                reality_finding(
-                    BRANCH_PROTECTION_CHECK,
-                    REALITY_UNPROVEN,
-                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
-                    f"deletion ({rules_text}) and classic protection is unmeasured "
-                    f"— {probe_failure_note(protection_argv, failure)}",
-                )
-            ]
+            protection_evidence = payload
     unblocked = [
         HISTORY_RULE_LABELS[kind]
         for kind in HISTORY_RULES
@@ -6075,6 +6136,27 @@ def default_branch_protection_findings(
             )
         ]
     if bypassable:
+        # Classic protection and rulesets are independent gates: a push must
+        # clear both. So when classic protection ALONE blocks force-push and
+        # deletion with `enforce_admins` true, a bypassable ruleset (or a
+        # classic block that admins skip) does not open the branch (#370,
+        # Codex P2 on #377). Any other classic answer leaves the advisory.
+        if classic is None:
+            state, payload = read_classic(True)
+            if state == "measured":
+                classic = payload
+        if classic is not None and all(classic[0].values()) and classic[1] == "true":
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_OK,
+                    f"{slug} default branch {branch} blocks force-push and "
+                    "deletion server-side: classic branch protection blocks both "
+                    "with enforce_admins true, so the token-bypassable block "
+                    f"({'; '.join(bypassable)}) does not open the branch — "
+                    f"evidence: {rules_evidence}; {classic[2]}",
+                )
+            ]
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,

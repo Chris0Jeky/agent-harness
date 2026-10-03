@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import harness
 
@@ -250,7 +251,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
         runner, findings = self.run_protection(make_tier_data(), {})
         self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
         self.assertIn("unmeasured", findings[0]["detail"])
-        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(runner.gh_calls(), [list(DEFAULT_BRANCH_ARGV)])
 
     def test_unproven_when_rules_are_unanswered(self):
         _, findings = self.run_protection(
@@ -266,7 +267,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
         )
         self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
         self.assertIn("offline", findings[0]["detail"])
-        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(runner.gh_calls(), [list(DEFAULT_BRANCH_ARGV)])
 
     def test_skipped_unless_core_or_floorless(self):
         answered = {
@@ -537,51 +538,271 @@ class BranchProtectionFindingTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
         self.assertEqual(runner.calls, [])
 
-    def test_status_is_never_a_mismatch(self):
+    def test_each_probe_scenario_grades_to_its_exact_status(self):
+        # Replaces a test that only asserted "ok, advisory or UNPROVEN": it
+        # could not fail on a wrong grade. Each row pins the one status the
+        # evidence supports, and `MISMATCH` is excluded by equality.
+        default = {DEFAULT_BRANCH_ARGV: (True, "main")}
         scenarios = [
-            {},
-            {DEFAULT_BRANCH_ARGV: (True, "main")},
-            {DEFAULT_BRANCH_ARGV: (True, "")},
-            {DEFAULT_BRANCH_ARGV: (True, "null")},
+            ("nothing answers", {}, "UNPROVEN"),
+            ("empty branch", {DEFAULT_BRANCH_ARGV: (True, "")}, "UNPROVEN"),
+            ("null branch", {DEFAULT_BRANCH_ARGV: (True, "null")}, "UNPROVEN"),
+            ("rules unanswered", default, "UNPROVEN"),
+            (
+                "force-push open",
+                {
+                    **default,
+                    RULES_ARGV: (True, "deletion 7"),
+                    PROTECTION_ARGV: (True, "true,true,true"),
+                },
+                "advisory",
+            ),
+            (
+                "classic null",
+                {
+                    **default,
+                    RULES_ARGV: (True, "deletion 7"),
+                    PROTECTION_ARGV: (True, "null,null,null"),
+                },
+                "UNPROVEN",
+            ),
+            (
+                "ruleset bypassable",
+                {
+                    **default,
+                    RULES_ARGV: (True, BOTH_RULES),
+                    BYPASS_7: (True, "always"),
+                },
+                "advisory",
+            ),
+            (
+                "bypass unanswered",
+                {**default, RULES_ARGV: (True, BOTH_RULES)},
+                "UNPROVEN",
+            ),
+            (
+                "ruleset blocks both",
+                {
+                    **default,
+                    RULES_ARGV: (True, BOTH_RULES),
+                    BYPASS_7: (True, "never"),
+                },
+                "ok",
+            ),
+        ]
+        for label, responses, wanted in scenarios:
+            with self.subTest(label):
+                _, findings = self.run_protection(make_tier_data(), responses)
+                self.assertEqual([item["status"] for item in findings], [wanted])
+
+    def test_the_budget_expiring_between_probes_is_unproven_never_ok(self):
+        # Review of #377 (LOW): a budget live at one gh probe can expire before
+        # the next; every later probe must read as unmeasured.
+        for expiring in (DEFAULT_BRANCH_ARGV, RULES_ARGV):
+            with self.subTest(expires_after=expiring[-1]):
+                clock = {"now": 0.0}
+
+                class ExpiringRunner(ArgvRunner):
+                    def __call__(self, argv, cwd=None, **kwargs):
+                        result = super().__call__(argv, cwd, **kwargs)
+                        if tuple(argv) == expiring:
+                            clock["now"] = 1000.0
+                        return result
+
+                runner = ExpiringRunner(
+                    {
+                        REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                    }
+                )
+                with mock.patch.object(harness, "monotonic", lambda: clock["now"]):
+                    findings = harness.default_branch_protection_findings(
+                        Path("."),
+                        make_tier_data(),
+                        command_runner=runner,
+                        deadline=500.0,
+                    )
+                self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+                self.assertNotIn(list(BYPASS_7), runner.gh_calls())
+
+    # Push-remote resolution (#370): the remote git PUSHES to, not just `origin`.
+    def test_push_default_selects_the_remote_that_is_measured(self):
+        rows = (
+            "origin\thttps://git.example.invalid/acme/widgets.git (fetch)\n"
+            "origin\thttps://git.example.invalid/acme/widgets.git (push)\n"
+            "mirror\thttps://github.com/acme/widgets.git (fetch)\n"
+            "mirror\thttps://github.com/acme/widgets.git (push)"
+        )
+        for key in ("remote.pushDefault", "branch.work.pushRemote"):
+            with self.subTest(key=key):
+                runner, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        ("git", "rev-parse", "--abbrev-ref", "HEAD"): (True, "work\n"),
+                        ("git", "config", "--get", key): (True, "mirror\n"),
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                    },
+                    remote_rows=rows,
+                )
+                self.assertEqual([item["status"] for item in findings], ["ok"])
+                self.assertIn(list(RULES_ARGV), runner.gh_calls())
+
+    def test_push_default_away_from_github_origin_is_out_of_scope(self):
+        rows = (
+            "origin\thttps://github.com/acme/widgets.git (fetch)\n"
+            "origin\thttps://github.com/acme/widgets.git (push)\n"
+            "internal\thttps://git.example.invalid/acme/widgets.git (push)"
+        )
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {("git", "config", "--get", "remote.pushDefault"): (True, "internal\n")},
+            remote_rows=rows,
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_branch_push_remote_outranks_push_default(self):
+        rows = (
+            "origin\thttps://github.com/acme/widgets.git (push)\n"
+            "other\thttps://git.example.invalid/acme/widgets.git (push)"
+        )
+        runner, findings = self.run_protection(
+            make_tier_data(),
             {
-                DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "deletion 7"),
-                PROTECTION_ARGV: (True, "true,true,true"),
+                ("git", "rev-parse", "--abbrev-ref", "HEAD"): (True, "work"),
+                ("git", "config", "--get", "branch.work.pushRemote"): (True, "other"),
+                ("git", "config", "--get", "remote.pushDefault"): (True, "origin"),
             },
-            {
-                DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, "deletion 7"),
-                PROTECTION_ARGV: (True, "null,null,null"),
-            },
-            {
-                DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, BOTH_RULES),
-                BYPASS_7: (True, "always"),
-            },
-            {
-                DEFAULT_BRANCH_ARGV: (True, "main"),
-                RULES_ARGV: (True, BOTH_RULES),
-            },
+            remote_rows=rows,
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_the_dot_repository_pushes_nowhere_and_is_out_of_scope(self):
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {("git", "config", "--get", "remote.pushDefault"): (True, ".")},
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_a_pushurl_on_github_is_measured_when_the_fetch_url_is_not(self):
+        rows = (
+            "origin\thttps://git.example.invalid/acme/widgets.git (fetch)\n"
+            "origin\thttps://github.com/acme/widgets.git (push)"
+        )
+        _, findings = self.run_protection(
+            make_tier_data(),
             {
                 DEFAULT_BRANCH_ARGV: (True, "main"),
                 RULES_ARGV: (True, BOTH_RULES),
                 BYPASS_7: (True, "never"),
             },
-        ]
-        for responses in scenarios:
-            with self.subTest(responses=sorted(responses)):
-                _, findings = self.run_protection(make_tier_data(), responses)
-                # Non-vacuous: every scenario is in scope and must report.
-                self.assertGreaterEqual(len(findings), 1)
-                for item in findings:
-                    self.assertIn(
-                        item["status"],
-                        (
-                            harness.REALITY_OK,
-                            harness.REALITY_ADVISORY,
-                            harness.REALITY_UNPROVEN,
-                        ),
-                    )
+            remote_rows=rows,
+        )
+        self.assertEqual([item["status"] for item in findings], ["ok"])
+
+    def test_an_unreadable_push_remote_selection_is_unproven(self):
+        # A budget that expires while the selection is read must not fall back
+        # to guessing `origin`.
+        clock = {"now": 0.0}
+
+        class ExpiringRunner(ArgvRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                result = super().__call__(argv, cwd, **kwargs)
+                if tuple(argv) == REMOTE_ARGV:
+                    clock["now"] = 1000.0
+                return result
+
+        runner = ExpiringRunner({REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS)})
+        with mock.patch.object(harness, "monotonic", lambda: clock["now"]):
+            findings = harness.default_branch_protection_findings(
+                Path("."), make_tier_data(), command_runner=runner, deadline=500.0
+            )
+        self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_ssh_github_com_over_port_443_is_recognised(self):
+        for url in (
+            "ssh://git@ssh.github.com:443/acme/widgets.git",
+            "ssh://ssh.github.com:443/acme/widgets",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(harness.github_repo_slug(url), "acme/widgets")
+        rows = "origin\tssh://git@ssh.github.com:443/acme/widgets.git (push)"
+        _, findings = self.run_protection(
+            make_tier_data(),
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            },
+            remote_rows=rows,
+        )
+        self.assertEqual([item["status"] for item in findings], ["ok"])
+
+    def test_a_lookalike_host_is_not_github(self):
+        for url in (
+            "ssh://git@evilssh.github.com.example/acme/widgets.git",
+            "ssh://git@notssh.github.com:443/acme/widgets.git",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(harness.github_repo_slug(url), "")
+
+    # Classic protection can settle a bypassable ruleset (#370, Codex P2 on #377).
+    def test_bypassable_ruleset_is_ok_when_classic_blocks_both_for_admins(self):
+        runner, findings, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "always"),
+                PROTECTION_ARGV: (True, "false,false,true"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+        self.assertIn(list(PROTECTION_ARGV), runner.gh_calls())
+        self.assertIn("enforce_admins", findings[0]["detail"])
+
+    def test_bypassable_ruleset_stays_advisory_unless_classic_fully_blocks(self):
+        for label, classic in (
+            ("admins not enforced", (True, "false,false,false")),
+            ("force-push open", (True, "true,false,true")),
+            ("not protected", (False, "", "gh: Branch not protected (HTTP 404)")),
+            ("unreadable", (False, "", "gh: HTTP 403 forbidden")),
+            ("null", (True, "null,null,null")),
+        ):
+            with self.subTest(label):
+                _, _, statuses = self.statuses(
+                    {
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "exempt"),
+                        PROTECTION_ARGV: classic,
+                    }
+                )
+                self.assertEqual(statuses, ["advisory"])
+
+    def test_split_coverage_with_bypassable_ruleset_uses_the_classic_answer(self):
+        _, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, "deletion 7"),
+                PROTECTION_ARGV: (True, "false,false,true"),
+                BYPASS_7: (True, "always"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+
+    def test_unmeasured_ruleset_bypass_is_not_settled_by_classic(self):
+        _, _, statuses = self.statuses(
+            {
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "sometimes"),
+                PROTECTION_ARGV: (True, "false,false,true"),
+            }
+        )
+        self.assertEqual(statuses, ["UNPROVEN"])
 
     def test_reality_findings_wires_the_leg_in_order(self):
         with tempfile.TemporaryDirectory() as tmp:
