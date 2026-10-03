@@ -1,0 +1,36 @@
+name: Maintenance pinned source export
+on:
+  push:
+    branches: [prep/maintenance-20261003-r2]
+    paths: [.github/workflows/maintenance-source.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 12550f0097d05ef1ab23b49193374e697e2ec727
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact tracked source and reachable history without configuration
+        shell: python {0}
+        run: |
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'source-export'
+          out.mkdir()
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert head == '12550f0097d05ef1ab23b49193374e697e2ec727'
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          (out / 'manifest.json').write_text(json.dumps({'head': head, 'tree': tree}, indent=2) + '\n')
+          subprocess.run(['git', 'archive', '--format=zip', '-o', str(out / 'source.zip'), head], check=True)
+          subprocess.run(['git', 'bundle', 'create', str(out / 'source.bundle'), 'HEAD'], check=True)
+          print((out / 'manifest.json').read_text())
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-source-12550f0
+          path: ${{ runner.temp }}/source-export/
+          retention-days: 14
+          if-no-files-found: error
