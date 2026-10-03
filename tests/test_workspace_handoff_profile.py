@@ -31,12 +31,34 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertEqual(result["execution"], "not_run")
         self.assertEqual(result["authority"], "advisory")
         self.assertFalse(result["gate_eligible"])
-        self.assertEqual(result["journey_ids"], ["durable-capture", "stale-scope", "attempt-is-not-outcome"])
+        self.assertEqual(result["journey_ids"], ["durable-capture", "stale-scope", "attempt-is-not-outcome",
+                                                 "incomplete-observation", "cancellation-at-admission"])
 
     def test_revision_and_permission_negative_controls_are_independent(self) -> None:
         journey = self.load_example()["journeys"][1]
         self.assertEqual([step["id"] for step in journey["steps"]],
                          ["inspect", "stale", "revoked", "recover"])
+
+    def test_incomplete_observation_does_not_authorize_absence(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertIn("incomplete-observation", journeys)
+        journey = journeys["incomplete-observation"]
+        self.assertEqual([step["id"] for step in journey["steps"]],
+                         ["seed", "limited", "restart", "denied"])
+        for step in journey["steps"]:
+            self.assertIn("persisted_state", step["evidence_required"])
+            self.assertIn("network_summary", step["evidence_required"])
+
+    def test_admission_cancellation_and_lease_controls_are_independent(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertIn("cancellation-at-admission", journeys)
+        journey = journeys["cancellation-at-admission"]
+        self.assertEqual([step["id"] for step in journey["steps"]],
+                         ["cancel-before", "retired-lease", "expired-during-read", "cancel-after"])
+        self.assertEqual(journey["fixture_ref"], FIXTURE)
+        self.assertEqual(journey["budget"]["max_judge_calls"], 0)
+        self.assertEqual(journey["budget"]["max_retries"], 0)
+        self.assertEqual(self.bind(self.load_example())["execution"], "not_run")
 
     def test_expected_revision_must_match_even_for_a_fictional_example(self) -> None:
         with self.assertRaisesRegex(ContractError, "subject_mismatch"):
