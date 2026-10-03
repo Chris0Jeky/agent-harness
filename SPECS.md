@@ -16,6 +16,23 @@ Operational references must name the namespace; there is no default meaning for 
 Review and termination remain canonical in global laws 2 and 11; P11 points there rather
 than defining another review-round count.
 
+**Transition note (issue #429).** Operational citations were written before the P1-P12 / global-law
+split, so an unconverted bare `law N` must never be read as whichever namespace is convenient.
+Read it by where it lives:
+- **Pinned floor text** (`templates/hooks/dispatch.py`, the `templates/hooks/smoke_test.py` matrix
+  beside it, and any vendored copy whose bytes a test or a marker pins): a bare `law N` there means `global law N`
+  (in practice law 7, worktrees, whose `git switch -c` mandate the floor's comments cite). These
+  bytes change only through an authorized floor version and digest change, never for prose
+  consistency, so the bare spelling is a documented legacy form and not an invitation to
+  re-read it as `PN`.
+- **Historical records** (`HANDOFF.md`, `handoffs/`, dated `HUMAN_TODO.md` log entries, `ROADMAP.md`
+  deltas, `legacy/`): they keep their original wording. A bare `law N` there means the law as
+  numbered when it was written; `BLUEPRINT law N` means `PN`.
+- **Everything else** (active scripts, plans, docs, tests): qualify as `global law N` or `PN` when
+  touched. A bare number whose canonical source cannot be confirmed is left as written and is not
+  converted mechanically.
+New text never relies on a bare `law N`.
+
 `doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
 byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, source
 `rules/laws.md` against `~/.claude/rules/laws.md` (the law set Claude actually loads, #366), and

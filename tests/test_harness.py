@@ -9191,7 +9191,7 @@ allow_local_binding = true
 class TierResolutionTests(unittest.TestCase):
     """Co-located declarations bind to the STRICTEST union, not the first found.
 
-    Law 9 and `dispatch.load_tier` (SPECS §5) specify one resolution; audit read
+    Global law 9 and `dispatch.load_tier` (SPECS §5) specify one resolution; audit read
     `.agent-harness/tier.json` with FALLBACK to the legacy file, so a repo
     declaring T1 beside a surviving T4 + sensitive_data legacy file audited at a
     posture the dispatcher would never grant it (issue #99).
