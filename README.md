@@ -288,9 +288,11 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Producer source (2026-10-01): **1.7.3** restores the unscaled dispatcher-error deny when a
-later-fragment analyzer raises; the source adapter's audit marker matches those bytes. It is not
-deployed: installed 1.7.2, consumer markers and H-14 runtime trust/canaries remain unchanged.
+Producer source (2026-10-03): **1.7.4** stops trailing sentence punctuation from making a prose
+token path-shaped in the core hint (#365: `echo 'update credentials.'` no longer double-checks); the
+source adapter's audit marker matches those bytes. It is not deployed.
+**1.7.3** (2026-10-01) restored the unscaled dispatcher-error deny when a later-fragment analyzer
+raises. Neither is deployed: installed 1.7.2, consumer markers and H-14 runtime trust/canaries remain unchanged.
 
 Posture baseline (2026-09-28): **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
 false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core

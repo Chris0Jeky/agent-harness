@@ -70,7 +70,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.7.3 (2026-10-01)"
+FLOOR_VERSION = "1.7.4 (2026-10-03)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -13611,7 +13611,11 @@ def command_carries_core_hint(command: str) -> bool:
     if _CORE_DOWNLOAD_ASSIGNED.search(text) and _CORE_EVALUATOR.search(text):
         return True
     for token in text.split():
-        if _CORE_PATH_SHAPED.search(token) and (
+        # Trailing sentence punctuation is prose, not a path separator:
+        # `echo 'update credentials.'` is not path-shaped (1.7.4, issue #365).
+        # Both strips are single linear passes.
+        shape = token.strip("'\"`").rstrip(".,;:!?)'\"`")
+        if _CORE_PATH_SHAPED.search(shape) and (
             _CORE_SECRET_NAME.search(token) or _SECRET_PATH.search(token.strip("'\"`"))
         ):
             return True
