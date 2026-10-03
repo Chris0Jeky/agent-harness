@@ -7932,6 +7932,7 @@ def write_managed_codex_file(
                 else windows_owner_only_descriptor()
             )
             read_only = mode is not None and not mode & stat.S_IWRITE
+            requested = windows_dacl_signature(security)
             descriptor, temporary = windows_create_staging_file(
                 path.parent, ".harness-agent-", security, read_only
             )
@@ -7942,7 +7943,7 @@ def write_managed_codex_file(
             except OSError:
                 os.close(descriptor)
                 raise
-            if staged != windows_dacl_signature(security):
+            if staged != requested:
                 os.close(descriptor)
                 raise HarnessError(
                     f"staging file did not receive the destination's DACL; "
