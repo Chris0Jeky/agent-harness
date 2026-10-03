@@ -70,7 +70,7 @@ class ExhaustiveTests(unittest.TestCase):
             "uncounted_review": ("illegal_merge", "review rounds"),
             "changes_reopen": ("illegal_merge", "review rounds"),
             "conflict_keeps_review": ("illegal_merge", "reviewed"),
-            # #359: observer hardening and law 2g's semantic retarget
+            # #359: observer hardening and global law 2g's semantic retarget
             "semantic_retarget_keeps_review": ("illegal_merge", "reviewed"),
             "early_critical": ("illegal_merge", "review rounds"),
             "tick_before_push": ("illegal_merge", "aged"),
@@ -205,7 +205,7 @@ class LawScenarioTests(unittest.TestCase):
         self.assertFalse(enabled(run(HAPPY[:5]), "review_critical"))
 
     def test_a_critical_on_a_base_change_round_cannot_reopen(self):
-        """Law 2d reopens only for a CRITICAL introduced by the fixes (Codex, #361)."""
+        """Global law 2d reopens only for a CRITICAL introduced by the fixes (Codex, #361)."""
         state = run(
             HAPPY[:5] + ["review_pass", "ci_green", "retarget_semantic"]
             + ["proof_pass", "publish"]

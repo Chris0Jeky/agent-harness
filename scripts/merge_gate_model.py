@@ -12,7 +12,7 @@ instead of re-deriving the laws from prose.
   ready-for-review, proof and green CI for the exact (head, base) pair, a
   review of the current logic, the head aged three minutes, review rounds
   within the ceiling, and the merged SHA equal to the head;
-- review rounds never exceed two, plus the single reopen law 2d grants a new
+- review rounds never exceed two, plus the single reopen global law 2d grants a new
   CRITICAL introduced by fixes;
 - every counter stays within its bound;
 - no cycle through non-terminal states (only state-preserving no-ops repeat);
@@ -34,10 +34,10 @@ import sys
 from typing import NamedTuple
 
 MAX_ATTEMPTS = 3  # worker attempts before dead-letter
-MAX_FIXES = 3  # law 11: three genuinely different attempts at a red check
+MAX_FIXES = 3  # global law 11: three genuinely different attempts at a red check
 MAX_REFRESHES = 3  # base churn beyond this parks rather than looping
-MAX_REVIEW_ROUNDS = 2  # law 2d
-AGE_MINUTES = 3  # law 2f
+MAX_REVIEW_ROUNDS = 2  # global law 2d
+AGE_MINUTES = 3  # global law 2f
 
 AUTHORITIES = ("free", "gated", "human-only", "none")
 TERMINAL = frozenset({"Closed", "Parked", "DeadLetter"})
@@ -102,7 +102,7 @@ class State(NamedTuple):
     base: int = 0
     logic: int = 0
     pushed_head: int = -1
-    ready: bool = False  # published ready-for-review, never draft (law 2e)
+    ready: bool = False  # published ready-for-review, never draft (global law 2e)
     # table bookkeeping; the spec never trusts these (an event-driven observer re-derives
     # each, and the evidence identities below must agree with it)
     proven: bool = False
@@ -238,7 +238,7 @@ def step(s, event, mutants=frozenset()):
             if rounds < allowed:
                 return _enter_fixing(s, review_rounds=rounds, reopened=reopen)
             return s._replace(phase="Parked", review_rounds=rounds)
-        # law 2d: only a CRITICAL introduced by the fixes reopens, so it needs a round
+        # global law 2d: only a CRITICAL introduced by the fixes reopens, so it needs a round
         # behind it and a fix since that round's verdict
         introduced = s.review_rounds >= 1 and (fixed or "unfixed_critical" in mutants)
         if event == "review_critical" and (introduced or "early_critical" in mutants):
@@ -291,7 +291,7 @@ def _published_event(s, event, mutants):
         if s.refreshes >= MAX_REFRESHES:
             return s._replace(phase="Parked")
         if event == "retarget_semantic":
-            # Same head, new base that interacts with the change: law 2g owes a review.
+            # Same head, new base that interacts with the change: global law 2g owes a review.
             keep_review = "semantic_retarget_keeps_review" in mutants
             return s._replace(
                 phase="Proving",
@@ -311,7 +311,7 @@ def _published_event(s, event, mutants):
                 proven=s.proven and keep,
                 ci=s.ci if keep else "none",
             )
-        # A merge commit from the base is a new pushed head. Law 2g keeps the review
+        # A merge commit from the base is a new pushed head. Global law 2g keeps the review
         # unless the new base brings a conflict, semantic interaction or new logic.
         logic_changed = (
             event == "refresh_conflict" and "conflict_keeps_review" not in mutants
@@ -357,7 +357,7 @@ def observe(o, event):
     moved = head_moved or event in BASE_EVENTS
     return Observer(
         rounds=min(o.rounds + (event in REVIEW_VERDICTS), OBSERVED_ROUND_CAP),
-        # law 2d: only a CRITICAL introduced by fixes, i.e. after a first round, reopens
+        # global law 2d: only a CRITICAL introduced by fixes, i.e. after a first round, reopens
         criticals=min(
             o.criticals + (event == "review_critical" and o.rounds >= 1 and o.fixed), 2
         ),

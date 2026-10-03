@@ -4337,7 +4337,7 @@ def public_synthetic_publication_issues(value: Any) -> list[str]:
 def merge_tier_declarations(declarations: list[dict[str, Any]]) -> dict[str, Any]:
     """The one posture co-located declarations bind to: the strictest.
 
-    Law 9 and the dispatcher (`dispatch.load_tier`, SPECS §5) agree on the
+    Global law 9 and the dispatcher (`dispatch.load_tier`, SPECS §5) agree on the
     rules, and this mirrors them exactly rather than inventing a second
     semantics for the auditing tool:
 
