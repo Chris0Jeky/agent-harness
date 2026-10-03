@@ -51,7 +51,7 @@ intent → tools (ACI) → env feedback → verify (deterministic preferred)
 ## Oracle vs judge (compact)
 
 - **Oracle:** same inputs → same pass/fail without an LLM. Harbor requires Oracle≈1.0 and Nop≈0.0 before agent trials — use as a *design* pattern for flood samples, not as invented task-board membership.
-- **Judge:** LLM or bot opinion. Useful for triage; **never a required merge condition**, alone or combined with deterministic checks. Its approval, completion, availability or score must not become an indirect gate through an aggregate status.
+- **Judge:** LLM or bot opinion. Useful for triage; **never a required merge condition**, alone or combined with deterministic checks. Its approval or score must not become a required status check, directly or through an aggregate status. This does not remove the review step: the tier's bounded review pipeline (global law 2; BLUEPRINT "Bounded review pipeline") still requires one fresh-context review round before merge, and its findings are triaged by the severity bar rather than obeyed as a verdict.
 - Full contract: [MERGE_BOUNDARY](../evals/MERGE_BOUNDARY.md). Taxonomy: [TAXONOMY](../evals/TAXONOMY.md).
 
 ## Memory — session vs durable
