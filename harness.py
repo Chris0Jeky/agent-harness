@@ -7137,6 +7137,8 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
     reject_sync_path_aliases(target, "skill destination")
     probe_parent = target.parent
     while not probe_parent.exists():
+        if probe_parent.parent == probe_parent:
+            raise HarnessError(f"skill destination has no available ancestor: {target}")
         probe_parent = probe_parent.parent
     if not probe_parent.is_dir():
         raise HarnessError(
@@ -7159,6 +7161,10 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
                 if len(children) > 1:
                     lookup_directory = destination
                     while not lookup_directory.is_dir():
+                        if lookup_directory.parent == lookup_directory:
+                            raise HarnessError(
+                                f"skill destination has no available lookup directory: {destination}"
+                            )
                         lookup_directory = lookup_directory.parent
                     if lookup_directory.stat().st_dev != scratch.stat().st_dev:
                         raise HarnessError(
@@ -7463,9 +7469,17 @@ def restore_skill_tree_from_backup(backup: Path, target: Path) -> str:
     return f"live skill restored; backup retained at {backup}"
 
 
+def sync_input_path(value: str | Path, label: str) -> Path:
+    """Refuse parent traversal before normalization can hide an alias (#273)."""
+    path = Path(value)
+    if ".." in path.parts:
+        raise HarnessError(f"unsafe {label} parent traversal: {path}")
+    return Path(os.path.abspath(path))
+
+
 def reject_sync_path_aliases(path: Path, label: str) -> None:
     """Reject an alias at a selected path or any existing ancestor."""
-    logical = Path(os.path.abspath(path))
+    logical = sync_input_path(path, label)
     for candidate in (logical, *logical.parents):
         if path_is_alias(candidate):
             raise HarnessError(f"unsafe {label} path alias: {candidate}")
@@ -9501,11 +9515,12 @@ def write_atomic_json(path: Path, payload: Mapping[str, Any], label: str) -> Non
 
 def sync_bundle_roots(args: argparse.Namespace) -> dict[str, Path]:
     """Resolve only the two logical destination roots the manifest may name."""
-    claude_input = Path(os.path.abspath(args.claude_home or Path.home() / ".claude"))
-    user_bin_input = Path(
-        os.path.abspath(
-            getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin"
-        )
+    claude_input = sync_input_path(
+        args.claude_home or Path.home() / ".claude", "bundle Claude home"
+    )
+    user_bin_input = sync_input_path(
+        getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin",
+        "bundle user bin home",
     )
     reject_sync_path_aliases(claude_input, "bundle Claude home")
     reject_sync_path_aliases(user_bin_input, "bundle user bin home")
@@ -9999,11 +10014,11 @@ def rollback_sync_bundle(
 
 def sync_global_bundle(args: argparse.Namespace, bundle_name: str) -> int:
     """Run the isolated manifest bundle lane or its receipt rollback."""
-    config_root_input = Path(os.path.abspath(args.config_root))
+    config_root_input = sync_input_path(args.config_root, "sync config root")
     roots = sync_bundle_roots(args)
     rollback_receipt = getattr(args, "rollback_receipt", None)
     if rollback_receipt:
-        receipt_path = Path(os.path.abspath(rollback_receipt))
+        receipt_path = sync_input_path(rollback_receipt, "bundle rollback receipt")
         components = load_bundle_rollback_receipt(receipt_path, roots, bundle_name)
         rollback_sync_bundle(receipt_path, components, bool(args.apply))
         return 0
@@ -10084,7 +10099,7 @@ def sync_global(args: argparse.Namespace) -> int:
         return sync_global_bundle(args, next(iter(selected_bundles)))
     if rollback_receipt:
         raise HarnessError("--rollback-receipt requires --only bundle:muse-runtime")
-    config_root_input = Path(os.path.abspath(args.config_root))
+    config_root_input = sync_input_path(args.config_root, "sync config root")
     if selected_claude_skills:
         reject_sync_path_aliases(config_root_input, "Claude skill config root")
     config_root = config_root_input.resolve()
@@ -10092,22 +10107,26 @@ def sync_global(args: argparse.Namespace) -> int:
     harness_root = Path(__file__).resolve().parent
     codex_selection = default_sync or sync_agents or bool(selected_skills)
     codex_home = (
-        Path(
-            args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        sync_input_path(
+            args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"),
+            "Codex home",
         ).resolve()
         if codex_selection
         else None
     )
-    claude_home_input = Path(
-        os.path.abspath(args.claude_home or Path.home() / ".claude")
+    claude_home_input = (
+        sync_input_path(args.claude_home or Path.home() / ".claude", "Claude home")
+        if default_sync or selected_claude_skills
+        else None
     )
     if selected_claude_skills:
+        assert claude_home_input is not None
         reject_sync_path_aliases(claude_home_input, "Claude home")
-    claude_home = (
-        claude_home_input.resolve() if default_sync or selected_claude_skills else None
-    )
+    claude_home = claude_home_input.resolve() if claude_home_input is not None else None
     skills_home = (
-        Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+        sync_input_path(
+            args.skills_home or Path.home() / ".agents" / "skills", "skills home"
+        ).resolve()
         if default_sync or selected_skills
         else None
     )
@@ -10781,6 +10800,18 @@ def doctor(args: argparse.Namespace) -> int:
                 if requested_path in logical_root.resolve().parents
                 else requested_path
             )
+            checks.append(
+                (
+                    "Codex modeled session cwd",
+                    True,
+                    f"{layer_walk_path.resolve()}"
+                    + (
+                        f" (downward-selected product; requested {requested_path})"
+                        if layer_walk_path != requested_path
+                        else ""
+                    ),
+                )
+            )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
                 for layer in codex_project_layer_dirs(
@@ -10814,6 +10845,8 @@ def doctor(args: argparse.Namespace) -> int:
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
 
+            # Rule 2 models a session started at layer_walk_path, not the
+            # undeclared directory supplied to --repo (SPECS section 2.1).
             # Codex runs a hook command from the SESSION cwd, not from the
             # directory that owns the hook source. Wherever those differ — a
             # `--repo <subdir>` audit, or a linked worktree sourcing hooks from
@@ -10821,7 +10854,7 @@ def doctor(args: argparse.Namespace) -> int:
             # somewhere other than the hook source root, so it cannot be
             # certified.
             def wrapper_is_cwd_relative_here(hooks: Path) -> bool:
-                return hooks.parent.parent.resolve() != requested_path
+                return hooks.parent.parent.resolve() != layer_walk_path.resolve()
 
             repo_hook_sources = [
                 (hooks, text, "json") for hooks, text in json_hook_documents
@@ -10972,7 +11005,7 @@ def doctor(args: argparse.Namespace) -> int:
                 activation_detail = str(exc)
             wrapper_detail = (
                 "session cwd "
-                f"{requested_path} is not the hook source root, so "
+                f"{layer_walk_path.resolve()} is not the hook source root, so "
                 f"{'; '.join(unresolvable_wrapper_sources)}"
                 " that Codex would resolve under the session cwd instead; "
                 if unresolvable_wrapper_sources
