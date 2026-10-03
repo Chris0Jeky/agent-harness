@@ -1,0 +1,34 @@
+name: Export exact source for maintenance recovery
+on:
+  push:
+    branches: [maintenance/source-recovery-1003]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive only tracked source at explicit revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source-recovery
+          for sha in eb881070808eabd7122baed9238999de67c05719 17d7f6ba40eb7b203c75fb0ebfde567e627f9c9c 0c3f800378dd98f21294e61f86bdb5078e15c022 3e19338423042cbe0e9c0226e1d157e3d33042f0; do
+            git cat-file -e "$sha^{commit}"
+            git archive --format=zip --output="source-recovery/$sha.zip" "$sha"
+            printf '%s %s\n' "$sha" "$(git rev-parse "$sha^{tree}")" >> source-recovery/source-trees.txt
+          done
+          cd source-recovery
+          sha256sum *.zip > SHA256SUMS
+          cat source-trees.txt SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-source-recovery
+          path: source-recovery/
+          retention-days: 7
+          if-no-files-found: error
