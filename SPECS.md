@@ -1,6 +1,6 @@
 # Harness Specs
 
-Last Updated: 2026-07-26 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
+Last Updated: 2026-10-03 · Concrete schemas and drafts referenced from [BLUEPRINT.md](./BLUEPRINT.md).
 
 ## §1 Global laws — pointer, not a mirror
 
@@ -8,9 +8,13 @@ The global law set lives in the claude-config repository, and it is the only cop
 `rules/laws.md`, deployed as `~/.claude/rules/laws.md`; Codex reads the same contract as
 `codex/AGENTS.md`, and claude-config's `tests/check-law-parity.ps1` keeps those two in step. This
 section used to hold a dated verbatim mirror (ratified 2026-07-26, issue #92). The mirror drifted
-from laws 2f/2g, and the drift misled a review (issue #358), so law 8 pruned it. A "global law N"
-or "CLAUDE.md law N" pointer means law N of that file; a bare "law N" in BLUEPRINT.md means
-BLUEPRINT §0's own twelve laws, which are numbered differently.
+from global laws 2f/2g, and the drift misled a review (issue #358), so global law 8 pruned it.
+A `global law N` or `CLAUDE.md law N` pointer means law N of that canonical file.
+BLUEPRINT §0 uses the separate design-principle namespace `P1` through `P12`.
+Operational references must name the namespace; there is no default meaning for a bare
+`law N`. Historical `BLUEPRINT law N` citations mean the correspondingly numbered `PN`.
+Review and termination remain canonical in global laws 2 and 11; P11 points there rather
+than defining another review-round count.
 
 `doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
 byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, source
@@ -80,7 +84,7 @@ This repository's own deltas from the global merge rules:
   dispatcher also reads legacy `.claude/tier.json` files so existing estates can migrate
   without a flag day.
 - Two co-located declarations bind to the STRICTEST union, never to the first one found
-  (law 9; `dispatch.load_tier`; `harness.merge_tier_declarations`): highest `tier` wins,
+  (global law 9; `dispatch.load_tier`; `harness.merge_tier_declarations`): highest `tier` wins,
   tightening flags and the strictest `authority` dial are unioned, and the one relaxation
   (`relaxed_work_loss_guards`) applies only when EVERY declaration sets it. The publication
   relaxation likewise applies only when EVERY declaration contains the exact same valid object.
@@ -522,7 +526,7 @@ force spellings of a worktree removal, which ride the identical ladder because a
 spelling must never score better than the literal form it might be: a runtime-computed
 action word (`git worktree $ACT …`, issue #117 — `[worktree-action-opaque]`), a dynamic
 option or separator-free operand token in a removal (`-$X`, bare `$A` —
-`[worktree-remove-opaque]`; law 7's `$WT_PROJECT_DIR/<name>` compounds keep the plain
+`[worktree-remove-opaque]`; global law 7's `$WT_PROJECT_DIR/<name>` compounds keep the plain
 score — braced and quoted spellings included, but NOT the Windows `$VAR\<name>` one, whose
 backslash a POSIX lexer eats, costing the token the separator that pins it out of option
 space, so it lands on the ask/deny rung instead: issue #128), and argv-visible config that
@@ -538,7 +542,7 @@ consider gitignored content: it reports a worktree holding `.env`, `local.db`, `
 and `node_modules/` as clean, and removal then deletes all of it. The branch guarantee is
 scoped to a worktree that has one: a clean **detached** worktree passes git's pre-removal
 check and its commits — held only by that worktree's HEAD — leave `git log --all` with the
-removal, which is why law 7 mandates `git switch -c` before committing (issue #122; the
+removal, which is why global law 7 mandates `git switch -c` before committing (issue #122; the
 floor cannot see detached-ness in argv). All measured on git 2.45.1 and pinned by
 `ignored_worktree_removal_is_destructive` in `smoke_test.py`, including the
 `status.showUntrackedFiles=no` blinding of the untracked-file refusal.
@@ -599,7 +603,7 @@ Fire ONLY on narrowly detectable states; never on research-only sessions:
 Stated override: the user saying `SKIP-CHECKS: <reason>` — logged to the failure ledger.
 False positives train hook-disabling; when in doubt, don't fire.
 
-**No new stop-hooks.** The states above are the grandfathered set (BLUEPRINT law 12 — the
+**No new stop-hooks.** The states above are the grandfathered set (BLUEPRINT P12 — the
 meta-gate cap, issue #92 P5): a stop-hook is a gate, and a new gate about process compliance
 arrives only as a ratified mission, never as a session detour. A proposed addition must
 displace one of the states above or start life as a tracked issue.
@@ -808,7 +812,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 2. Draft from the §4 anatomy template; must include the anti-trigger section and at least one
    verbatim guard phrase; ≤60 lines.
 3. Validate: frontmatter parses, caps hold, no read-first ladder, no restatement of a policy
-   that has a home (law 2).
+   that has a home (BLUEPRINT P2).
 4. Output: branch + PR (part of the Gardener PR or standalone). Agents NEVER self-install
    skills; the human merge is the trust gate.
 5. Decay twin: skills with zero invocations in a quarter are archived by the same pipeline.
@@ -835,7 +839,7 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
   names models and their effort bindings (claude-config's `rules/laws.md` also names models in
   its working style; the skill stays authoritative for model names where the two disagree, and
   claude-config stays authoritative for law text); §8 above and BLUEPRINT §5 carry the task-class→tier shape
-  and point here. Global CLAUDE.md (law 5 + Working style) and the T2 SessionStart nudge only point
+  and point here. Global CLAUDE.md (global law 5 + Working style) and the T2 SessionStart nudge only point
   at them.
 - 4 `bootstrap-*.ps1` (2,664 lines, Apr 9, drifted): salvage text into `templates/`, then delete.
 - Plugins: keep pr-review-toolkit/code-review/feature-dev ONLY where a repo hasn't chosen its
@@ -847,10 +851,10 @@ Template layout: `templates/tier1..tier4/` overlays + `templates/hooks/` + `temp
 
 BLUEPRINT §1's T3 "bounded review pipeline" slot is filled by the `review-and-ship` skill,
 shipped from claude-config for both runtimes. Reference, don't restate: the skill file is the
-single home for the step-by-step, and global law 2 (claude-config `rules/laws.md`) plus BLUEPRINT law 11 are the
-law it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
+single home for the step-by-step, and global law 2 (claude-config `rules/laws.md`) plus BLUEPRINT P11 are the
+contract it executes — one review round, one severity-bar triage (confirmed CRITICAL/HIGH fix
 commits only; the rest tracked or declined on the thread), one fix round verified against the
 fix diff (a fresh-context pass is owed only when the fixes changed logic or the risk boundary,
-law 2g; a manual `@codex review` is never a per-fix step, law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
+global law 2g; a manual `@codex review` is never a per-fix step, global law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
 high-risk work; T4 two adversarial reviews), never how many rounds run.

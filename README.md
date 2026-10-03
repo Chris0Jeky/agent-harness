@@ -13,7 +13,7 @@ share one repository while keeping their contracts explicit.
 | `plans/ACTIVE.md` | At most two active, executable workstreams |
 | `docs/BENCHMARKS.md` | Measured baselines and their reproducibility limits |
 | [Agent-loop observability v0](docs/observability/AGENT_LOOP_SPANS.md) | Proposed advisory span/event contract; no runtime exporter or merge gate |
-| `BLUEPRINT.md` | The law: tier ladder (T0 tombstone → T4 live wire), the twelve laws, regions, the Gardener loop, model/effort routing, estate migration map |
+| `BLUEPRINT.md` | The policy: tier ladder (T0 tombstone → T4 live wire), design principles P1-P12, regions, the Gardener loop, model/effort routing, current migration pointers |
 | `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
 | `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
 | `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
