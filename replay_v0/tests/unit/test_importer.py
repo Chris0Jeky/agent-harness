@@ -49,6 +49,70 @@ class ScrubberTests(unittest.TestCase):
             with self.subTest(prefix=secret[:4]):
                 self.assertNotIn(secret, self.scrubber.scrub(f"use {secret} now"))
 
+    def test_stripe_secret_and_restricted_keys_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        prefixes = [
+            "s" + "k_" + "live" + "_",
+            "s" + "k_" + "test" + "_",
+            "r" + "k_" + "live" + "_",
+            "r" + "k_" + "test" + "_",
+        ]
+        bodies = ["A" * 30, "A1b2" * 5, "Ab3_" * 5, "Ab3-" * 5]
+        for prefix in prefixes:
+            for body in bodies:
+                with self.subTest(prefix=prefix, body=body):
+                    token = prefix + body
+                    self.assertEqual(
+                        scrubber.scrub("deploy " + token), "deploy <token>"
+                    )
+
+    def test_slack_tokens_old_and_new_forms_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        prefixes = [
+            "xa" + "pp-",
+            "xo" + "xe-",
+            "xo" + "xo-",
+            "xo" + "xa-",
+            "xo" + "xb-",
+            "xo" + "xp-",
+            "xo" + "xr-",
+            "xo" + "xs-",
+        ]
+        bodies = ["A" * 30, "A1b2" * 5, "AbC-123-XyZ-4567"]
+        for prefix in prefixes:
+            for body in bodies:
+                with self.subTest(prefix=prefix, body=body):
+                    token = prefix + body
+                    self.assertEqual(
+                        scrubber.scrub("deploy " + token), "deploy <token>"
+                    )
+
+    def test_openai_preserved_and_safe_controls_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        openai = "s" + "k-" + "q" * 30
+        self.assertEqual(scrubber.scrub("deploy " + openai), "deploy <token>")
+        for prefix in ["p" + "k_" + "live" + "_", "p" + "k_" + "test" + "_"]:
+            with self.subTest(prefix=prefix):
+                command = "deploy " + prefix + "A" * 30
+                self.assertEqual(scrubber.scrub(command), command)
+        short_tokens = [
+            "s" + "k_" + "live" + "_" + "ABC123",
+            "r" + "k_" + "test" + "_" + "abc",
+            "xo" + "xe-" + "abc",
+            "xa" + "pp-" + "abc",
+        ]
+        for token in short_tokens:
+            with self.subTest(token=token):
+                command = "deploy " + token
+                self.assertEqual(scrubber.scrub(command), command)
+        ordinary = [
+            "deploy " + "s" + "k_" + "live" + " status",
+            "deploy " + "xo" + "xe" + " check",
+        ]
+        for command in ordinary:
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
     def test_assignments_and_headers_are_redacted(self) -> None:
         text = self.scrubber.scrub(
             'API_TOKEN=abc123 curl -H "Authorization: Bearer abcdefghij" x'
@@ -79,6 +143,143 @@ class ScrubberTests(unittest.TestCase):
         )
         for secret in ("hunter2hunter2", "abc123def", "S3cretPw"):
             self.assertNotIn(secret, text)
+
+    def test_gh_repo_positional_selectors_are_scrubbed(self) -> None:
+        scrubber = Scrubber([])
+        for subcommand in (
+            "archive",
+            "clone",
+            "create",
+            "new",
+            "delete",
+            "edit",
+            "fork",
+            "set-default",
+            "sync",
+            "unarchive",
+            "view",
+        ):
+            for selector in (
+                "acme-private/secret-proj",
+                "'acme-private/secret-proj'",
+                '"acme-private/secret-proj"',
+            ):
+                with self.subTest(subcommand=subcommand, selector=selector):
+                    quote = selector[0] if selector[0] in "\"'" else ""
+                    self.assertEqual(
+                        scrubber.scrub(f"gh repo {subcommand} {selector}"),
+                        f"gh repo {subcommand} {quote}<owner>/<repo>{quote}",
+                    )
+
+    def test_gh_repo_options_and_later_arguments_keep_their_roles(self) -> None:
+        scrubber = Scrubber([])
+        cases = (
+            (
+                "gh repo view --branch feature/topic acme-private/secret-proj --web",
+                "gh repo view --branch feature/topic <owner>/<repo> --web",
+            ),
+            (
+                "gh repo view -bfeature/topic --json name --jq '.name' acme-private/secret-proj",
+                "gh repo view -bfeature/topic --json name --jq '.name' <owner>/<repo>",
+            ),
+            (
+                'gh repo view --template "a/b; c/d" acme-private/secret-proj',
+                'gh repo view --template "a/b; c/d" <owner>/<repo>',
+            ),
+            (
+                "gh repo clone -u source/remote acme-private/secret-proj workspace/checkout -- --reference cache/repo",
+                "gh repo clone -u source/remote <owner>/<repo> workspace/checkout -- --reference cache/repo",
+            ),
+            (
+                "gh repo create --source src/project --private acme-private/secret-proj",
+                "gh repo create --source src/project --private <owner>/<repo>",
+            ),
+            (
+                "gh repo edit --description 'group/project' --enable-issues=false acme-private/secret-proj",
+                "gh repo edit --description 'group/project' --enable-issues=false <owner>/<repo>",
+            ),
+            (
+                "gh repo sync --branch=feature/topic acme-private/secret-proj",
+                "gh repo sync --branch=feature/topic <owner>/<repo>",
+            ),
+            (
+                "gh repo view -- acme-private/secret-proj",
+                "gh repo view -- <owner>/<repo>",
+            ),
+            (
+                "gh repo clone secret-proj workspace/checkout -- --reference cache/repo",
+                "gh repo clone <repo> workspace/checkout -- --reference cache/repo",
+            ),
+            ("gh repo create --private secret-proj", "gh repo create --private <repo>"),
+            (
+                '"C:/fictional tools/gh.exe" repo view acme-private/secret-proj',
+                '"C:/fictional tools/gh.exe" repo view <owner>/<repo>',
+            ),
+            (
+                "echo done && gh repo view acme-private/secret-proj; gh repo clone acme-private/secret-proj workspace/checkout",
+                "echo done && gh repo view <owner>/<repo>; gh repo clone <owner>/<repo> workspace/checkout",
+            ),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
+
+    def test_gh_repo_nonselectors_are_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "echo acme-private/secret-proj",
+            "gh repo list group/project",
+            "gh repo rename group/project",
+            "gh repo gitignore view group/project",
+            "gh repo view --branch feature/topic",
+            "gh repo view --template 'group/project'",
+            "gh repo fork -- --reference cache/repo",
+            "gh repo create --source src/project --private",
+            "gh repo set-default origin",
+            "gh repo unknown group/project",
+            "gh repo view --future-option group/project",
+            'echo "gh repo view acme-private/secret-proj"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_gh_repo_short_clusters_preserve_option_values(self) -> None:
+        scrubber = Scrubber([])
+        for option in ("-wbfeature/topic", "-wb feature/topic"):
+            with self.subTest(option=option):
+                self.assertEqual(
+                    scrubber.scrub(f"gh repo view {option} acme-private/secret-proj"),
+                    f"gh repo view {option} <owner>/<repo>",
+                )
+        for command in (
+            "gh repo view -wbfeature/topic",
+            "gh repo view -wb feature/topic",
+            "gh repo view -wtgroup/project",
+            "gh repo view -wt 'group/project'",
+            "gh repo view -wx group/project acme-private/secret-proj",
+            "gh repo view -wxbfeature/topic acme-private/secret-proj",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_gh_repo_urls_keep_existing_host_rules(self) -> None:
+        scrubber = Scrubber([])
+        for command, expected in (
+            (
+                "gh repo view https://github.com/acme-private/secret-proj",
+                "gh repo view https://github.com/<owner>/<repo>",
+            ),
+            (
+                "gh repo clone https://code.private.corp/acme-private/secret-proj workspace/checkout",
+                "gh repo clone https://<host>/<path> workspace/checkout",
+            ),
+            (
+                "gh repo view --template https://example.com/a/b",
+                "gh repo view --template https://example.com/a/b",
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), expected)
 
     def test_a_home_name_with_a_space_is_fully_removed(self) -> None:
         scrubber = Scrubber(["Jane Doe", "Jane", "Doe"])
@@ -212,6 +413,200 @@ class ScrubberTests(unittest.TestCase):
             self.scrubber.scrub("docker login -u bot"), "docker login -u bot"
         )
 
+    def test_login_private_ipv4_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login 10.0.0.5", "docker login <registry>", "10.0.0.5"),
+            (
+                "docker login 10.0.0.5:5000",
+                "docker login <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "podman login 192.168.1.10",
+                "podman login <registry>",
+                "192.168.1.10",
+            ),
+            (
+                "podman login 192.168.1.10:5000",
+                "podman login <registry>",
+                "192.168.1.10",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
+    def test_login_single_label_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login myregistry", "docker login <registry>"),
+            ("docker login myregistry:5000", "docker login <registry>"),
+            ("podman login myregistry", "podman login <registry>"),
+            ("podman login myregistry:5000", "podman login <registry>"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn("myregistry", text)
+
+    def test_login_bracket_ipv6_endpoints_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            ("docker login [fd00::1]", "docker login <registry>"),
+            ("docker login [fd00::1]:5000", "docker login <registry>"),
+            ("podman login [fd00::1]", "podman login <registry>"),
+            ("podman login [fd00::1]:5000", "podman login <registry>"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn("fd00", text)
+
+    def test_login_quoted_registries_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            (
+                'docker login "10.0.0.5:5000"',
+                'docker login "<registry>"',
+                "10.0.0.5",
+            ),
+            (
+                "docker login 'myregistry:5000'",
+                "docker login '<registry>'",
+                "myregistry",
+            ),
+            (
+                'podman login "[fd00::1]:5000"',
+                'podman login "<registry>"',
+                "fd00",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
+    def test_login_public_and_loopback_endpoints_are_preserved(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "docker login example.com",
+            "docker login example.com:5000",
+            "docker login localhost",
+            "docker login localhost:5000",
+            "docker login 127.0.0.1",
+            "docker login 127.0.0.1:5000",
+            "docker login [::1]",
+            "docker login [::1]:5000",
+            "podman login localhost:5000",
+            "podman login example.com:5000",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_login_missing_endpoint_and_flags_are_unchanged(self) -> None:
+        scrubber = Scrubber([])
+        for command in (
+            "docker login",
+            "docker login -u bot",
+            "docker login --password-stdin",
+            'docker login -u "my user"',
+            "docker login --username 'my user'",
+            "podman login",
+            "podman login --password-stdin",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(scrubber.scrub(command), command)
+
+    def test_login_option_values_do_not_become_endpoints(self) -> None:
+        scrubber = Scrubber([])
+        cases = [
+            (
+                "docker login -u bot 10.0.0.5:5000",
+                "docker login -u bot <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "docker login --username bot myregistry:5000",
+                "docker login --username bot <registry>",
+                "myregistry",
+            ),
+            (
+                'docker login -u "my user" 10.0.0.5:5000',
+                'docker login -u "my user" <registry>',
+                "10.0.0.5",
+            ),
+            (
+                "docker login --password-stdin myregistry:5000",
+                "docker login --password-stdin <registry>",
+                "myregistry",
+            ),
+            (
+                "docker login --username=bot myregistry:5000",
+                "docker login --username=bot <registry>",
+                "myregistry",
+            ),
+            (
+                "podman login -u bot myregistry",
+                "podman login -u bot <registry>",
+                "myregistry",
+            ),
+            (
+                "docker  login   10.0.0.5:5000",
+                "docker  login   <registry>",
+                "10.0.0.5",
+            ),
+            (
+                "docker login 10.0.0.5:5000; echo done",
+                "docker login <registry>; echo done",
+                "10.0.0.5",
+            ),
+        ]
+        for command, expected, private in cases:
+            with self.subTest(command=command):
+                text = scrubber.scrub(command)
+                self.assertEqual(text, expected)
+                self.assertNotIn(private, text)
+
+    def test_login_escaped_username_quotes_preserve_endpoint_redaction(self) -> None:
+        scrubber = Scrubber([])
+        usernames = (r'"build\"bot"', r"build\"bot", r"'build\bot'", r'"build\\"')
+        for tool in ("docker", "podman"):
+            for username in usernames:
+                with self.subTest(tool=tool, username=username):
+                    command = f"{tool} login -u {username} private.corp:5000"
+                    self.assertEqual(
+                        scrubber.scrub(command),
+                        f"{tool} login -u {username} <registry>",
+                    )
+
+    def test_login_password_values_are_redacted(self) -> None:
+        scrubber = Scrubber([])
+        for tool in ("docker", "podman"):
+            for option, expected in (
+                ("-p private.password", "-p <redacted>"),
+                ('-p "private password"', '-p "<redacted>"'),
+                ("-p 'private password'", "-p '<redacted>'"),
+                ("-pprivate.password", "-p<redacted>"),
+                ("-p=private.password", "-p=<redacted>"),
+                ("--password private.password", "--password <redacted>"),
+                ("--password=private.password", "--password=<redacted>"),
+            ):
+                with self.subTest(tool=tool, option=option):
+                    self.assertEqual(
+                        scrubber.scrub(f"{tool} login {option} private.corp:5000"),
+                        f"{tool} login {expected} <registry>",
+                    )
+            self.assertEqual(
+                scrubber.scrub(f"{tool} login --password-stdin example.com"),
+                f"{tool} login --password-stdin example.com",
+            )
+
     def test_long_dotted_runs_scrub_in_linear_time(self) -> None:
         # #397: unbounded leading classes made this 8.5 s for 40,000 characters.
         for text in ("echo " + "x." * 20000, "echo " + "a-" * 20000 + "@"):
@@ -314,6 +709,22 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(found, ["ls -la", "make"])
         self.assertEqual(stats["codex-unparsed-calls"], 2)
 
+    def test_login_password_does_not_reach_private_corpus_events(self) -> None:
+        commands = [
+            (
+                f"{tool} login -p private.password private.corp:5000",
+                "2026-01-01T00:00:00Z",
+                None,
+            )
+            for tool in ("docker", "podman")
+        ]
+        events, _, _ = build_private_corpus([("claude", iter(commands))], Scrubber([]))
+        self.assertEqual(len(events), 2)
+        for event in events:
+            self.assertNotIn("private.password", event["command"])
+            self.assertNotIn("private.corp", event["command"])
+            self.assertIn("-p <redacted>", event["command"])
+
     def test_corpus_is_scrubbed_deduplicated_and_loadable(self) -> None:
         commands = [
             ("ls /home/someone", "2026-01-01T00:00:00Z", None),
@@ -331,6 +742,35 @@ class ExtractionTests(unittest.TestCase):
         loaded = kernel._load_charter_corpus(str(output))
         self.assertEqual(loaded.event_count, 2)
         self.assertEqual(loaded.events[0]["source"], "historical-redacted")
+
+    def test_gh_repo_selectors_do_not_reach_imported_corpus(self) -> None:
+        _write_jsonl(
+            self.root / "codex" / "fictional.jsonl",
+            [
+                {
+                    "payload": {
+                        "type": "function_call",
+                        "name": "shell_command",
+                        "arguments": json.dumps({"command": command}),
+                    }
+                }
+                for command in (
+                    "gh repo view acme-private/secret-proj --web",
+                    "gh repo clone acme-private/secret-proj workspace/checkout",
+                )
+            ],
+        )
+        events, cases, _ = build_private_corpus(
+            [("codex", codex_commands(self.root / "codex", Counter()))], Scrubber([])
+        )
+        output = self.root / "gh-corpus"
+        write_corpus(output, events, cases)
+        loaded = kernel._load_charter_corpus(str(output))
+        self.assertEqual(loaded.event_count, 2)
+        for event in loaded.events:
+            self.assertIn("<owner>/<repo>", event["command"])
+            self.assertNotIn("acme-private", event["command"])
+            self.assertNotIn("secret-proj", event["command"])
 
 
 @unittest.skipUnless(HAS_GIT, "git is not installed")

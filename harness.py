@@ -20,6 +20,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.parse
 import uuid
@@ -962,11 +963,11 @@ def parse_worktree_lease_timestamp(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
 def render_worktree_lease_timestamp(value: datetime) -> str:
@@ -7073,6 +7074,126 @@ def skill_tree_destination_is_case_insensitive(directory: Path) -> bool:
             pass
 
 
+def skill_directory_case_sensitive(
+    directory: Path, enabled: bool | None = None
+) -> bool:
+    """Read NTFS lookup flags, or apply them only to an empty disposable probe."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.GetFileInformationByHandleEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    kernel.SetFileInformationByHandle.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    access = 0x80 if enabled is None else 0x100  # read/write attributes
+    handle = kernel.CreateFileW(str(directory), access, 7, None, 3, 0x02000000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise HarnessError(
+            f"cannot inspect skill destination lookup flags: {directory}"
+        )
+    try:
+        flags = ctypes.c_uint32(0 if enabled is None else int(enabled))
+        operation = (
+            kernel.GetFileInformationByHandleEx
+            if enabled is None
+            else kernel.SetFileInformationByHandle
+        )
+        if not operation(handle, 23, ctypes.byref(flags), ctypes.sizeof(flags)):
+            error = ctypes.get_last_error()
+            raise HarnessError(
+                f"cannot establish skill destination lookup flags: {directory}: {error}"
+            )
+        return bool(flags.value & 1)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def preflight_skill_source_names(source: Path, target: Path) -> None:
+    """Check source spellings on the destination filesystem before live writes.
+
+    Empty name-only probes stay outside the live tree and are removed even on
+    refusal. Actual filesystem lookup, rather than Unicode casefold, decides
+    whether two source names collide. Windows per-directory sensitivity is read
+    from the existing destination or its nearest surviving directory ancestor.
+    """
+    tree_digest(target)
+    reject_sync_path_aliases(target, "skill destination")
+    probe_parent = target.parent
+    while not probe_parent.exists():
+        probe_parent = probe_parent.parent
+    if not probe_parent.is_dir():
+        raise HarnessError(
+            f"skill destination parent is not a directory: {probe_parent}"
+        )
+    tree_digest(source)  # Validate ordinary entries before probing their names.
+    created: list[Path] = []
+    try:
+        try:
+            scratch = Path(
+                tempfile.mkdtemp(prefix=".harness-name-probe-", dir=probe_parent)
+            )
+            created.append(scratch)
+            pending = [(source, target)]
+            while pending:
+                source_directory, destination = pending.pop()
+                children = sorted(
+                    source_directory.iterdir(), key=lambda path: path.name
+                )
+                if len(children) > 1:
+                    lookup_directory = destination
+                    while not lookup_directory.is_dir():
+                        lookup_directory = lookup_directory.parent
+                    if lookup_directory.stat().st_dev != scratch.stat().st_dev:
+                        raise HarnessError(
+                            f"cannot probe skill lookup across filesystems: {destination}"
+                        )
+                    probe = scratch / uuid.uuid4().hex
+                    probe.mkdir()
+                    created.append(probe)
+                    if os.name == "nt":
+                        sensitive = skill_directory_case_sensitive(lookup_directory)
+                        if skill_directory_case_sensitive(probe) != sensitive:
+                            skill_directory_case_sensitive(probe, sensitive)
+                    for child in children:
+                        try:
+                            (probe / child.name).mkdir()
+                            created.append(probe / child.name)
+                        except FileExistsError as exc:
+                            raise HarnessError(
+                                f"source skill entries collide on this destination: "
+                                f"{source_directory}: {child.name}; {destination}"
+                            ) from exc
+                for child in children:
+                    if child.is_dir():
+                        pending.append((child, destination / child.name))
+        finally:
+            # Every probe is empty: never recursively delete a skill root, even
+            # when the caller cannot remove its live Windows directory.
+            for path in reversed(created):
+                path.rmdir()
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot preflight skill source names: {source}; {target}: {exc}"
+        ) from exc
+
+
 def rename_skill_tree_entry_to_canonical_name(current: Path, desired: Path) -> None:
     if current.name == desired.name:
         return
@@ -7236,6 +7357,7 @@ def make_skill_tree_directories_writable(root: Path) -> None:
 
 def copy_skill_tree_over(source: Path, target: Path) -> None:
     """Copy a skill over its live root, then prune stale entries in place."""
+    preflight_skill_source_names(source, target)
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, target)
@@ -10042,9 +10164,12 @@ def sync_global(args: argparse.Namespace) -> int:
             for name in sorted(selected_skills)
         ]
     )
-    skill_states = [
-        (source, target, same_tree(source, target)) for source, target in skill_actions
-    ]
+    skill_states = []
+    for source, target in skill_actions:
+        equal = same_tree(source, target)
+        if not equal:
+            preflight_skill_source_names(source, target)
+        skill_states.append((source, target, equal))
     assert claude_home is not None or not selected_claude_skills
     claude_skill_actions = [
         (config_root / "skills" / name, claude_home / "skills" / name)

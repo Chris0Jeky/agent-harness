@@ -177,6 +177,13 @@ overlaps the configured `skills-home`, or a selected source tree, is refused bef
 `<skills-home>/.harness-backups/` copies are left untouched; inspecting or moving those existing
 copies is a separate recovery operation.
 
+Changed managed Codex skill trees preflight source names with disposable, empty probes on the
+destination filesystem before live copies or backups. Dry-run removes those sibling probes and
+leaves the destination unchanged. Native NTFS fixtures cover absent/existing targets and preserve
+per-directory case sensitivity and Unicode-distinct names. Unavailable lookup flags or a different
+probe volume refuse safely. Non-inherited POSIX directory lookup flags and normalization-collapsing
+filesystems still need their own platform qualification; final digest/recovery checks remain in place.
+
 `--only claude-skill:<name>` is a separate, opt-in lane from
 `<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. Every selected source and
 destination is validated before a write. Selectors are basenames; aliases, reparse points,
@@ -281,7 +288,11 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Current state (2026-09-28): canonical source is **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
+Producer source (2026-10-01): **1.7.3** restores the unscaled dispatcher-error deny when a
+later-fragment analyzer raises; the source adapter's audit marker matches those bytes. It is not
+deployed: installed 1.7.2, consumer markers and H-14 runtime trust/canaries remain unchanged.
+
+Posture baseline (2026-09-28): **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
 false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core
 hint reads commands rather than PR-body or heredoc prose), the **core posture** (SPECS §5.4,
 owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a

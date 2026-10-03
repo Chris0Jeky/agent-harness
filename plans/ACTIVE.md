@@ -1,7 +1,48 @@
 # Active workstreams
 
-Snapshot: 2026-09-29, evening. `main` head `2f704c2` (PR #396's merge). The 2026-09-02 snapshot and
+## Workspace reference qualification (2026-10-02)
+
+- #414 and #417 are merged: the handoff pack is an advisory authoring profile and the SQLite receipt lab is a single-owner reference, not native adoption.
+- The receipt suite now backs up one leased fictional row into two independent databases and demonstrates that copied epoch/fence values allow both owners to accept divergent local results. Receiver fencing and old-writer isolation still require native proof.
+- The handoff profile maps generic conformance cases to their native proof owners and separates cancellation request, admission stop, process acknowledgement and effects reconciliation. Native receipts remain with adopters; no runner, permission checker or gate is added.
+- #410 and #416 are closed for demonstrated source acceptance; native adoption remains a separate evidence boundary. Human gates remain in `HUMAN_TODO.md`.
+
+## Privacy and source-collision continuation (2026-10-02)
+
+- #419's contextual GitHub repository-valued options and quoted command words are covered by fictional importer regressions. Local source directories, formatting templates and ordinary option values retain their contextual roles.
+- #401's reproduced SSH-family host options, every keyscan host and long-email ordering gaps are repaired. Existing single-label/IP/IPv6 registry coverage is reconciled with controls; persisted extraction/write/kernel fixtures exercise the combined behavior. Unknown shell grammar remains outside the recognizer and imported output stays private.
+- #375's absent/existing-target source-collision seam is covered by disposable native NTFS fixtures, including case-sensitive directory and Unicode-distinct controls. Hardlink ambiguity stays safely refused; normalization-collapsing and non-inherited POSIX directory lookup flags and fake mode bits remain separate qualification leads. This is pre-mutation refusal, not a claim of concurrent-writer exclusion.
+- The generic handoff schemas and declaration-only `bind_pack` boundary are unchanged. Native runtime, deployment/device and owner acceptance remain distinct; no private receipt or topology is published here.
+
+Snapshot: 2026-10-01 13:18 UTC, before quality integration. Observed `main` head `7c10099`
+(PR #409's merge). The 2026-09-02 snapshot and
 everything older now live in `docs/archive/status-2026-09.md`; git history holds the rest.
+
+## Quality pass (2026-10-01)
+
+Eight Muse review lenses completed with two file-only worker candidates, at two-worker capacity
+and a 2048 MB memory floor. The coordinator reproduced accepted defects and ran each candidate's
+required checks; the supervisor is stopped with no in-flight jobs. Raw reports and logs remain
+outside Git. No estate process, installed floor or consumer marker was changed.
+
+- **#408 merged:** out-of-range UTC normalization in worktree leases now follows the malformed
+  lease/keep path rather than raising; real Git fixtures prove plan/apply preserve the tree.
+- **#409 merged:** re-recording stages all artifacts and recovers prior outputs after a later
+  write failure, while preserving a later writer and retaining recovery bytes when necessary.
+- **#412, reviewed source PR:** private Docker/Podman login endpoints and additional credential forms are
+  scrubbed. Independent review caught an escaped-quote regression, fixed before publication.
+- **#413, reviewed source PR:** malformed receipt/coordinator JSON is isolated by the outcome ledger, including
+  nesting, duplicate keys and non-finite/overflow floats.
+- **Integration branch:** includes the reviewed #412/#413 commits and floor 1.7.3, which restores
+  the existing unscaled dispatcher-error deny for errors
+  in later-fragment checks. Its separator semantics remain pinned by #267/#268 controls. The
+  pathological quoted-brace availability edge is tracked in #365; #411 tracks positional
+  `gh repo` selector scrubbing. Neither is a claim that scrubbed corpora are public-safe.
+
+Floor 1.7.2 remains deployed. The 1.7.3 producer source may merge under the gate, but deployment,
+consumer marker refresh and live trust/canaries still wait on H-14. Recording recovery does not
+claim process-crash atomicity or exclusion of concurrent writers. Public replay extraction/release
+is a separate step; H-19 remains open.
 
 ## Owner decisions in force (2026-09-29)
 
@@ -61,11 +102,14 @@ hardening), #398 (secret-path coverage table, #244), #399 (CLAUDE.md lint list) 
 (`seed` gitignores `/.claude/worktrees/`, #236), then #403 (CI: Verify lints
 first with a 30-minute budget, #402) and, last, #396 (importer scrub leaks).
 
-## Open pull requests
+## PR checkpoint (2026-10-01, before integration)
 
 | PR | State |
 |---|---|
 | #332 | older parked lane from another session; not touched here |
+| #406 | another session's draft architecture synthesis; not touched here |
+| #412 | reviewed quality privacy source; commits included in the integration branch |
+| #413 | reviewed quality ledger source; commits included in the integration branch |
 
 ## Open follow-ups
 

@@ -25,6 +25,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -84,13 +85,42 @@ class LedgerError(Exception):
 # -- reading ---------------------------------------------------------------
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value):
+    raise ValueError("non-finite JSON number")
+
+
+def _finite_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 def _read_json(path):
     """Return (value, sha256) for a bounded JSON file; raise ValueError on anything else."""
     with open(path, "rb") as handle:
         raw = handle.read(MAX_FILE_BYTES + 1)
     if len(raw) > MAX_FILE_BYTES:
         raise ValueError("file exceeds the size bound")
-    return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+            parse_float=_finite_float,
+        )
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds the decoder limit") from exc
+    return value, hashlib.sha256(raw).hexdigest()
 
 
 def _wave_key(name):

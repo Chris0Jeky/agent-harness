@@ -7,6 +7,8 @@ Sister (do not merge tracks): [#281](https://github.com/Chris0Jeky/agent-harness
 
 This note synthesizes best-of-breed harness patterns onto Chris’s estate.
 It does **not** invent runners, collectors, CI jobs, or LLM merge gates.
+The mappings below are proposed or inherited contracts, not receipts of native
+implementation. Research-source acceptance and native qualification remain separate.
 
 ## Hard rule
 
@@ -49,7 +51,7 @@ intent → tools (ACI) → env feedback → verify (deterministic preferred)
 ## Oracle vs judge (compact)
 
 - **Oracle:** same inputs → same pass/fail without an LLM. Harbor requires Oracle≈1.0 and Nop≈0.0 before agent trials — use as a *design* pattern for flood samples, not as invented Taskdeck membership.
-- **Judge:** LLM or bot opinion. Useful for triage; **never** sole branch-protection requirement.
+- **Judge:** LLM or bot opinion. Useful for triage; **never a required merge condition**, alone or combined with deterministic checks. Its approval, completion, availability or score must not become an indirect gate through an aggregate status.
 - Full contract: [MERGE_BOUNDARY](../evals/MERGE_BOUNDARY.md). Taxonomy: [TAXONOMY](../evals/TAXONOMY.md).
 
 ## Memory — session vs durable
