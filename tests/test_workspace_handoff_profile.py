@@ -34,7 +34,7 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertFalse(result["gate_eligible"])
         self.assertEqual(result["journey_ids"], ["durable-capture", "stale-scope", "attempt-is-not-outcome",
                                                  "incomplete-observation", "cancellation-at-admission", "evidence-ladder",
-                                                 "observation-states", "catch-up-contract", "fix-round-discipline"])
+                                                 "catch-up-contract", "fix-round-discipline"])
 
     def test_revision_and_permission_negative_controls_are_independent(self) -> None:
         journey = self.load_example()["journeys"][1]
@@ -46,7 +46,7 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertIn("incomplete-observation", journeys)
         journey = journeys["incomplete-observation"]
         self.assertEqual([step["id"] for step in journey["steps"]],
-                         ["seed", "limited", "restart", "denied"])
+                         ["seed", "limited", "unavailable", "restart", "denied"])
         for step in journey["steps"]:
             self.assertIn("persisted_state", step["evidence_required"])
             self.assertIn("network_summary", step["evidence_required"])
@@ -100,15 +100,19 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
                      "lower rung never implies a higher one"):
             self.assertIn(rung, profile)
 
-    def test_observation_states_are_four_distinct_states(self) -> None:
-        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
-        self.assertEqual([step["id"] for step in journeys["observation-states"]["steps"]],
-                         ["complete", "partial", "unavailable", "denied"])
-        text = self.journey_text("observation-states")
-        for claim in ("never authorizes inferred deletion or inferred delivery",
-                      "unknown, never pass", "distinct state from unavailable and from partial"):
+    def test_observation_states_are_folded_into_incomplete_observation(self) -> None:
+        ids = [j["id"] for j in self.load_example()["journeys"]]
+        self.assertNotIn("observation-states", ids)
+        text = self.journey_text("incomplete-observation")
+        for claim in ("unknown, never pass and never an empty collection",
+                      "distinct state from unavailable and from partial",
+                      "no outcome receipt, deletion, delivery claim or authority change",
+                      "hides private cached content"):
             self.assertIn(claim, text)
-        self.assertIn("complete, partial, unavailable and denied are four distinct states", self.profile_text())
+        profile = self.profile_text()
+        self.assertIn("complete, partial, unavailable and denied are four distinct states", profile)
+        self.assertIn("a partial read never authorises inferred deletion or inferred delivery", profile)
+        self.assertEqual(profile.count("four distinct states"), 1)
 
     def test_catch_up_contract_pins_ordering_overlap_and_deferral(self) -> None:
         journeys = {j["id"]: j for j in self.load_example()["journeys"]}

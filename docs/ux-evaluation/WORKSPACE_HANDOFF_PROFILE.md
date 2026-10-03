@@ -31,10 +31,13 @@ A product implementation must add genuine crash-boundary, duplicate-delivery, ou
 
 ### Completeness and admission boundaries
 
-A bounded response is not automatically a complete snapshot. The incomplete-observation journey
-requires a preserved complete checkpoint through a partial read and restart, then an independent
-access-denial control that cannot be undone by an older reply. An omitted item is not evidence
-that a reminder was delivered, a task was deleted or access was revoked. Consume authoritative
+A bounded response is not automatically a complete snapshot. Complete, partial, unavailable and
+denied are four distinct states: a partial read never authorises inferred deletion or inferred
+delivery, unavailable stays unknown (never PASS, never an empty collection) and denied hides private
+cached content. The incomplete-observation journey requires a preserved complete checkpoint through
+a partial read, an unavailable source and restart, then an independent access-denial control that
+cannot be undone by an older reply. An omitted item is not evidence that a reminder was delivered,
+a task was deleted or access was revoked. Consume authoritative
 outcome receipts where the distinction matters; do not turn a collection cap into an effect.
 
 The admission journey records a precise launch-admission boundary. Persisted cancellation before
@@ -43,13 +46,11 @@ retire the lease during the last permission read and expire a disclosure grant w
 is pending. These controls must leave newer ownership intact and must not manufacture process
 acknowledgement or effect reconciliation. A scheduler lock does not fence an external writer.
 
-### Evidence ladder, observation states, catch-up and fix rounds
+### Evidence ladder, catch-up and fix rounds
 
-Four further journeys are advisory and `not_run`; they make no execution claim.
+Three further journeys are advisory and `not_run`; they make no execution claim.
 
 **Evidence ladder** (`evidence-ladder`): source, unit, integrated, native runtime, installed, device, owner accepted. Each rung is its own receipt. Every rung records the subject revision, exact source revision, fixture revision or hash, UTC time and environment, proof kind, command and cwd, pass/fail/skip counts, unavailable observations and advisory or operational authority. The installed rung adds an installed artifact identity distinct from the source revision. The device rung adds device and platform identity. The owner-accepted rung is an owner-supplied record, never inferred by an agent or implied by a lower rung. A lower rung never implies a higher one, and a higher rung never transfers to a different candidate revision; re-observe each rung against the new revision.
-
-**Observation states** (`observation-states`): complete, partial, unavailable and denied are four distinct states. A partial read never authorises inferred deletion or inferred delivery. Unavailable stays unknown, never PASS and never an empty collection. Denied is neither unavailable nor partial and hides private cached content.
 
 **Catch-up contracts** (`catch-up-contract`): look up outcomes for known IDs directly and read unseen ones from a commit-ordered feed. Apply a first-run floor and report items before it as not examined. Each pass re-reads an inclusive overlap and continues exclusively past it. A page never splits one timestamp group, and a resume position never lands inside one. A deferred item is never skipped by a resume position, and a failed read never advances it.
 

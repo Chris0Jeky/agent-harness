@@ -261,6 +261,19 @@
           ]
         },
         {
+          "id": "unavailable",
+          "action": "Make the source unreachable so no read completes, without truncating or denying anything.",
+          "assertions": [
+            "The state is unknown, never PASS and never an empty collection; it is distinct from partial and from denied.",
+            "No outcome receipt, deletion, delivery claim or authority change is created from the failure."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
           "id": "restart",
           "action": "Restart the consumer and resume with a complete current collection and authoritative outcome receipts.",
           "assertions": [
@@ -278,6 +291,7 @@
           "action": "Independently deny current access without truncating the collection, then release an older authorized response.",
           "assertions": [
             "Denied access hides private cached content rather than treating the failure as ordinary stale availability.",
+            "Denied is a distinct state from unavailable and from partial; it is not reported as either.",
             "The older response cannot repopulate the cache or visible private projection after the newer denial."
           ],
           "evidence_required": [
@@ -457,81 +471,6 @@
           "assertions": [
             "No rung transfers to the new candidate revision; each must be re-observed against it.",
             "The earlier receipts stay inspectable as history for the earlier revision."
-          ],
-          "evidence_required": [
-            "action_log",
-            "network_summary",
-            "persisted_state"
-          ]
-        }
-      ],
-      "rubric_dimensions": [
-        "effectiveness",
-        "usability",
-        "simplicity",
-        "clarity",
-        "feel"
-      ],
-      "budget": {
-        "max_actions": 40,
-        "max_seconds": 600,
-        "max_judge_calls": 0,
-        "max_retries": 0
-      }
-    },
-    {
-      "id": "observation-states",
-      "goal": "Complete, partial, unavailable and denied observations are four distinct states with different consequences.",
-      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
-      "preconditions": [
-        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
-        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
-        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
-      ],
-      "steps": [
-        {
-          "id": "complete",
-          "action": "Read a complete authorized collection and record its explicit coverage.",
-          "assertions": [
-            "Only a complete observation may support a comparison against an earlier complete observation."
-          ],
-          "evidence_required": [
-            "action_log",
-            "network_summary",
-            "persisted_state"
-          ]
-        },
-        {
-          "id": "partial",
-          "action": "Return a partial read that omits a previously observed item and any item that depended on it.",
-          "assertions": [
-            "A partial read never authorizes inferred deletion or inferred delivery.",
-            "The last complete observation is preserved and the partial coverage is reported."
-          ],
-          "evidence_required": [
-            "action_log",
-            "network_summary",
-            "persisted_state"
-          ]
-        },
-        {
-          "id": "unavailable",
-          "action": "Make the source unreachable so no read completes.",
-          "assertions": [
-            "The state is unknown, never PASS and never an empty collection.",
-            "No receipt, deletion, delivery claim or authority change is created from the failure."
-          ],
-          "evidence_required": [
-            "action_log",
-            "network_summary",
-            "persisted_state"
-          ]
-        },
-        {
-          "id": "denied",
-          "action": "Deny access while the source is reachable.",
-          "assertions": [
-            "Denied is a distinct state from unavailable and from partial; private cached content is hidden, not served as stale."
           ],
           "evidence_required": [
             "action_log",
