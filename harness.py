@@ -7125,6 +7125,98 @@ def skill_directory_case_sensitive(
         kernel.CloseHandle(handle)
 
 
+def probe_distinct_skill_names(
+    lookup_directory: Path, scratch: Path, created: list[Path], names: list[str]
+) -> str | None:
+    """Return the first name the destination's lookup rules merge with another.
+
+    Names are created as empty directories in a disposable probe inside
+    ``scratch`` (same filesystem as ``lookup_directory``). On Windows the probe
+    takes the lookup directory's per-directory case sensitivity. Every probe is
+    appended to ``created`` so the caller removes it even on refusal.
+    """
+    if lookup_directory.stat().st_dev != scratch.stat().st_dev:
+        raise HarnessError(
+            f"cannot probe skill lookup across filesystems: {lookup_directory}"
+        )
+    probe = scratch / uuid.uuid4().hex
+    probe.mkdir()
+    created.append(probe)
+    if os.name == "nt":
+        sensitive = skill_directory_case_sensitive(lookup_directory)
+        if skill_directory_case_sensitive(probe) != sensitive:
+            skill_directory_case_sensitive(probe, sensitive)
+    for name in names:
+        try:
+            (probe / name).mkdir()
+            created.append(probe / name)
+        except FileExistsError:
+            return name
+    return None
+
+
+def nearest_available_skill_directory(path: Path, label: str) -> Path:
+    """Return ``path`` or its nearest existing ancestor, refusing a dead root."""
+    candidate = path
+    while not candidate.exists():
+        if candidate.parent == candidate:
+            raise HarnessError(f"{label} has no available ancestor: {path}")
+        candidate = candidate.parent
+    if not candidate.is_dir():
+        raise HarnessError(f"{label} parent is not a directory: {candidate}")
+    return candidate
+
+
+def preflight_selected_skill_roots(
+    targets: list[Path],
+    backup_parent: Path | None,
+    backup_targets: list[Path],
+    label: str,
+) -> None:
+    """Refuse selected skill roots that one directory would merge.
+
+    Foo and foo from a case-sensitive source parent (or two Unicode spellings)
+    can name one entry on a case-insensitive or normalizing directory. Each
+    destination parent, and the backup parent that holds same-named recovery
+    copies of ``backup_targets``, is probed with name-only directories before
+    any live or backup write, whether the destination is absent or populated.
+    """
+    by_parent: dict[Path, list[str]] = {}
+    for target in targets:
+        reject_sync_path_aliases(target, label)
+        by_parent.setdefault(target.parent, []).append(target.name)
+    checks = [
+        (parent, sorted(names)) for parent, names in by_parent.items() if len(names) > 1
+    ]
+    if backup_parent is not None and len(backup_targets) > 1:
+        checks.append((backup_parent, sorted(target.name for target in backup_targets)))
+    for parent, names in checks:
+        lookup_directory = nearest_available_skill_directory(parent, label)
+        created: list[Path] = []
+        try:
+            try:
+                scratch = Path(
+                    tempfile.mkdtemp(
+                        prefix=".harness-name-probe-", dir=lookup_directory
+                    )
+                )
+                created.append(scratch)
+                if probe_distinct_skill_names(
+                    lookup_directory, scratch, created, names
+                ):
+                    raise HarnessError(
+                        f"selected skill roots collide on this destination: "
+                        f"{parent}: {', '.join(names)}"
+                    )
+            finally:
+                for path in reversed(created):
+                    path.rmdir()
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot preflight selected skill roots: {parent}: {exc}"
+            ) from exc
+
+
 def preflight_skill_source_names(source: Path, target: Path) -> None:
     """Check source spellings on the destination filesystem before live writes.
 
@@ -7135,15 +7227,9 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
     """
     tree_digest(target)
     reject_sync_path_aliases(target, "skill destination")
-    probe_parent = target.parent
-    while not probe_parent.exists():
-        if probe_parent.parent == probe_parent:
-            raise HarnessError(f"skill destination has no available ancestor: {target}")
-        probe_parent = probe_parent.parent
-    if not probe_parent.is_dir():
-        raise HarnessError(
-            f"skill destination parent is not a directory: {probe_parent}"
-        )
+    probe_parent = nearest_available_skill_directory(
+        target.parent, "skill destination"
+    )
     tree_digest(source)  # Validate ordinary entries before probing their names.
     created: list[Path] = []
     try:
@@ -7166,26 +7252,17 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
                                 f"skill destination has no available lookup directory: {destination}"
                             )
                         lookup_directory = lookup_directory.parent
-                    if lookup_directory.stat().st_dev != scratch.stat().st_dev:
+                    collided = probe_distinct_skill_names(
+                        lookup_directory,
+                        scratch,
+                        created,
+                        [child.name for child in children],
+                    )
+                    if collided is not None:
                         raise HarnessError(
-                            f"cannot probe skill lookup across filesystems: {destination}"
+                            f"source skill entries collide on this destination: "
+                            f"{source_directory}: {collided}; {destination}"
                         )
-                    probe = scratch / uuid.uuid4().hex
-                    probe.mkdir()
-                    created.append(probe)
-                    if os.name == "nt":
-                        sensitive = skill_directory_case_sensitive(lookup_directory)
-                        if skill_directory_case_sensitive(probe) != sensitive:
-                            skill_directory_case_sensitive(probe, sensitive)
-                    for child in children:
-                        try:
-                            (probe / child.name).mkdir()
-                            created.append(probe / child.name)
-                        except FileExistsError as exc:
-                            raise HarnessError(
-                                f"source skill entries collide on this destination: "
-                                f"{source_directory}: {child.name}; {destination}"
-                            ) from exc
                 for child in children:
                     if child.is_dir():
                         pending.append((child, destination / child.name))
@@ -10255,6 +10332,12 @@ def sync_global(args: argparse.Namespace) -> int:
             for name in sorted(selected_skills)
         ]
     )
+    preflight_selected_skill_roots(
+        [target for _source, target in skill_actions],
+        codex_home / "backups" if codex_home is not None else None,
+        [target for _source, target in skill_actions if target.exists()],
+        "Codex skill destination",
+    )
     skill_states = []
     for source, target in skill_actions:
         equal = same_tree(source, target)
@@ -10267,16 +10350,13 @@ def sync_global(args: argparse.Namespace) -> int:
         for name in sorted(selected_claude_skills)
     ]
     claude_skill_states: list[tuple[Path, Path, str, str | None, bool]] = []
-    claude_target_keys: dict[str, str] = {}
+    preflight_selected_skill_roots(
+        [target for _source, target in claude_skill_actions],
+        claude_home / ".harness-backups" if claude_home is not None else None,
+        [target for _source, target in claude_skill_actions],
+        "Claude skill destination",
+    )
     for source, target in claude_skill_actions:
-        target_key = worktree_path_key(target.resolve(strict=False))
-        conflicting_name = claude_target_keys.get(target_key)
-        if conflicting_name is not None:
-            raise HarnessError(
-                "Claude skill selectors collide at the destination: "
-                f"{conflicting_name} and {source.name}"
-            )
-        claude_target_keys[target_key] = source.name
         source_digest, target_digest, equal = preflight_claude_skill(source, target)
         claude_skill_states.append(
             (source, target, source_digest, target_digest, equal)
@@ -10511,7 +10591,7 @@ def sync_global(args: argparse.Namespace) -> int:
             raise HarnessError(
                 f"Codex skill sync failed for {target}: {exc}; {rollback}"
             ) from exc
-    staged_claude_skills: dict[Path, Path] = {}
+    staged_claude_skills: dict[str, Path] = {}
     if needs_claude_skill_stage:
         assert claude_skill_backup is not None
         staging_root = claude_skill_backup / ".staged-skills"
@@ -10525,7 +10605,7 @@ def sync_global(args: argparse.Namespace) -> int:
                 raise HarnessError(
                     f"Claude skill source changed while staging; refusing replacement: {source}"
                 )
-            staged_claude_skills[target] = stage
+            staged_claude_skills[str(target)] = stage
 
         # Staging is outside live discovery. Revalidate every selected source and
         # target before the first live directory is moved.
@@ -10547,7 +10627,7 @@ def sync_global(args: argparse.Namespace) -> int:
         if equal:
             continue
         assert claude_skill_backup is not None
-        stage = staged_claude_skills[target]
+        stage = staged_claude_skills[str(target)]
         backup: Path | None = None
         if target_digest is not None:
             backup = claude_skill_backup / "skills" / target.name

@@ -286,6 +286,99 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                 harness.canonicalize_skill_tree_case(source, target)
             self.assertEqual(before, harness.tree_digest(target))
 
+    def selection_fixture(self, root, selector, present, names=("Foo", "foo")):
+        """Two selected skill roots whose names differ only by case."""
+        source_parent = root / "config" / (
+            "skills" if selector == "claude-skill" else "codex/skills"
+        )
+        source_parent.mkdir(parents=True)
+        self.set_case_sensitive(source_parent)
+        for name in names:
+            skill = source_parent / name
+            try:
+                skill.mkdir()
+            except FileExistsError:
+                self.skipTest("source filesystem cannot represent distinct roots")
+            (skill / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+        home = root / (
+            "claude-home/skills" if selector == "claude-skill" else "skills-home"
+        )
+        home.mkdir(parents=True)
+        if present:
+            (home / names[0]).mkdir()
+            (home / names[0] / "SKILL.md").write_text("old skill", encoding="utf-8")
+        args = SimpleNamespace(
+            config_root=str(root / "config"),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(root / "claude-home"),
+            skills_home=str(home),
+            only=[f"{selector}:{name}" for name in names],
+            apply=False,
+        )
+        return home, args
+
+    def test_selected_root_name_collision_refuses_before_mutation(self):
+        for selector in ("skill", "claude-skill"):
+            for apply in (False, True):
+                for present in (False, True):
+                    with self.subTest(
+                        selector=selector, apply=apply, present=present
+                    ), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        home, args = self.selection_fixture(root, selector, present)
+                        if not harness.skill_tree_destination_is_case_insensitive(home):
+                            self.skipTest("destination filesystem is case sensitive")
+                        args.apply = apply
+                        before = harness.tree_digest(root)
+                        with mock.patch.object(
+                            harness.shutil, "copytree", wraps=shutil.copytree
+                        ) as copy, redirect_stdout(io.StringIO()):
+                            with self.assertRaisesRegex(
+                                harness.HarnessError, "selected skill roots collide"
+                            ):
+                                harness.sync_global(args)
+                            copy.assert_not_called()
+                        self.assertEqual(before, harness.tree_digest(root))
+                        self.assertFalse((root / "codex-home").exists())
+                        self.assertFalse((root / "claude-home" / ".harness-backups").exists())
+
+    def test_selected_roots_on_case_sensitive_destination_both_install(self):
+        for selector in ("skill", "claude-skill"):
+            with self.subTest(selector=selector), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                home, args = self.selection_fixture(root, selector, False)
+                self.set_case_sensitive(home)
+                if harness.skill_tree_destination_is_case_insensitive(home):
+                    self.skipTest("destination filesystem is case insensitive")
+                if selector == "claude-skill":
+                    # Claude stages every replacement under its backup parent.
+                    backups = root / "claude-home" / ".harness-backups"
+                    backups.mkdir()
+                    self.set_case_sensitive(backups)
+                args.apply = True
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, harness.sync_global(args))
+                self.assertEqual("# Foo\n", (home / "Foo" / "SKILL.md").read_text("utf-8"))
+                self.assertEqual("# foo\n", (home / "foo" / "SKILL.md").read_text("utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "needs a case-sensitive NTFS destination")
+    def test_selected_roots_colliding_in_the_backup_parent_refuse_first(self):
+        for selector in ("skill", "claude-skill"):
+            with self.subTest(selector=selector), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                home, args = self.selection_fixture(root, selector, False)
+                self.set_case_sensitive(home)
+                for name in ("Foo", "foo"):
+                    (home / name).mkdir()
+                    (home / name / "SKILL.md").write_text("old", encoding="utf-8")
+                args.apply = True
+                before = harness.tree_digest(root)
+                with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                    harness.HarnessError, "selected skill roots collide"
+                ):
+                    harness.sync_global(args)
+                self.assertEqual(before, harness.tree_digest(root))
+
     def test_failed_name_probe_refuses_without_live_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
