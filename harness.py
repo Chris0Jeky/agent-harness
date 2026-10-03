@@ -7227,9 +7227,7 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
     """
     tree_digest(target)
     reject_sync_path_aliases(target, "skill destination")
-    probe_parent = nearest_available_skill_directory(
-        target.parent, "skill destination"
-    )
+    probe_parent = nearest_available_skill_directory(target.parent, "skill destination")
     tree_digest(source)  # Validate ordinary entries before probing their names.
     created: list[Path] = []
     try:

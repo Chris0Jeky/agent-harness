@@ -288,8 +288,10 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
 
     def selection_fixture(self, root, selector, present, names=("Foo", "foo")):
         """Two selected skill roots whose names differ only by case."""
-        source_parent = root / "config" / (
-            "skills" if selector == "claude-skill" else "codex/skills"
+        source_parent = (
+            root
+            / "config"
+            / ("skills" if selector == "claude-skill" else "codex/skills")
         )
         source_parent.mkdir(parents=True)
         self.set_case_sensitive(source_parent)
@@ -340,7 +342,9 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                             copy.assert_not_called()
                         self.assertEqual(before, harness.tree_digest(root))
                         self.assertFalse((root / "codex-home").exists())
-                        self.assertFalse((root / "claude-home" / ".harness-backups").exists())
+                        self.assertFalse(
+                            (root / "claude-home" / ".harness-backups").exists()
+                        )
 
     def test_selected_roots_on_case_sensitive_destination_both_install(self):
         for selector in ("skill", "claude-skill"):
@@ -358,8 +362,12 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                 args.apply = True
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(0, harness.sync_global(args))
-                self.assertEqual("# Foo\n", (home / "Foo" / "SKILL.md").read_text("utf-8"))
-                self.assertEqual("# foo\n", (home / "foo" / "SKILL.md").read_text("utf-8"))
+                self.assertEqual(
+                    "# Foo\n", (home / "Foo" / "SKILL.md").read_text("utf-8")
+                )
+                self.assertEqual(
+                    "# foo\n", (home / "foo" / "SKILL.md").read_text("utf-8")
+                )
 
     @unittest.skipUnless(os.name == "nt", "needs a case-sensitive NTFS destination")
     def test_selected_roots_colliding_in_the_backup_parent_refuse_first(self):
@@ -408,6 +416,41 @@ class SkillTreeFilesystemLookupTests(unittest.TestCase):
                 self.assertIn("remove the extra hard link", message)
                 self.assertEqual(before, harness.tree_digest(target))
                 self.assertEqual("old", (target / "Foo").read_text("utf-8"))
+
+    def test_case_sensitive_destination_subdirectory_keeps_nested_case_pair(self):
+        """L3: per-directory NTFS sensitivity applies below the skill root."""
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, args = self.collision_fixture(root, (), "file", True)
+                nested = source / "scripts"
+                nested.mkdir()
+                self.set_case_sensitive(nested)
+                for name in ("Foo", "foo"):
+                    try:
+                        (nested / name).write_text(name, encoding="utf-8")
+                    except OSError:
+                        self.skipTest(
+                            "source filesystem cannot represent distinct names"
+                        )
+                if len(list(nested.iterdir())) != 2:
+                    self.skipTest("source filesystem cannot represent distinct names")
+                scripts = target / "scripts"
+                scripts.mkdir()
+                self.set_case_sensitive(scripts)
+                if harness.skill_tree_destination_is_case_insensitive(scripts):
+                    self.skipTest("destination subdirectory is case insensitive")
+                args.apply = apply
+                before = harness.tree_digest(root)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, harness.sync_global(args))
+                if not apply:
+                    self.assertEqual(before, harness.tree_digest(root))
+                    continue
+                self.assertEqual(
+                    harness.tree_digest(source), harness.tree_digest(target)
+                )
+                self.assertFalse((scripts / "Foo").samefile(scripts / "foo"))
 
     def test_failed_name_probe_refuses_without_live_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
