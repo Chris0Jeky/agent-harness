@@ -113,7 +113,7 @@ a declared `sensitive_data` overlay against each remote's actual host visibility
 `dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
 template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
 `human_todo` against a file that exists, and default-branch server-side history protection
-(`non_fast_forward` + `deletion` ruleset or classic equivalent) when the effective floor
+(`non_fast_forward` + `deletion` ruleset or classic equivalent) on the remote `git push` targets, when the effective floor
 posture is `core` or the repo declares `floor_wiring: none` — reported as `advisory` when
 missing or bypassable by the auditing token, never a failure (issues #356, #370).
 A repo that vendors nothing says so rather than
