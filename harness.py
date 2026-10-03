@@ -9756,9 +9756,14 @@ def apply_sync_bundle(
                 try:
                     target.rename(quarantine)
                 except OSError as exc:
+                    previous = (
+                        str(backup)
+                        if backup is not None
+                        else "none (previously absent)"
+                    )
                     raise HarnessError(
-                        f"{problem}; the unverified bytes are still live because they "
-                        f"could not be quarantined: {exc}"
+                        f"{problem}; could not quarantine the target: {exc}; "
+                        f"current live state is unverified; previous target backup: {previous}"
                     ) from exc
                 problem += f"; unverified bytes retained at {quarantine}"
                 if backup is not None:
