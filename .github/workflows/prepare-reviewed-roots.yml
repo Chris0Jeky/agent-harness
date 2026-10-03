@@ -1,0 +1,28 @@
+name: Prepare reviewed root repair blobs
+on:
+  push:
+    branches: [maintenance/prepare-root-repair-1003]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'Chris0Jeky/agent-harness'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Install repository-pinned development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Apply hash-bound recipe, format and test
+        run: python .maintenance/prepare_roots.py build
+      - name: Store only verified file blobs, never refs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .maintenance/prepare_roots.py publish
