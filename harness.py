@@ -5308,8 +5308,31 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+# What `bounded_command_result` / `result_before_deadline` say when a probe never
+# produced an exit status: a timeout, a spawn failure, an unreadable pipe, an
+# expired aggregate budget. Anything else with failure text is a real non-zero
+# exit; none at all is `git config --get` reporting an unset key (exit 1).
+PROBE_NEVER_ANSWERED_MARKERS = (
+    "did not answer within",
+    "could not be started",
+    "could not be read",
+    "budget expired",
+    "no executable of that name",
+    "empty probe command",
+    "cannot be spawned safely",
+)
+
+
+def probe_never_answered(failure: str) -> bool:
+    return any(marker in failure for marker in PROBE_NEVER_ANSWERED_MARKERS)
+
+
 def configured_push_remote(
-    repo: Path, command_runner: Any, deadline: float | None
+    repo: Path,
+    command_runner: Any,
+    deadline: float | None,
+    *,
+    strict: bool = False,
 ) -> tuple[str, bool]:
     """(remote `git push` targets, whether that selection was measured).
 
@@ -5326,23 +5349,39 @@ def configured_push_remote(
     returns `False` for the second element rather than guessing `origin`: the
     caller reports the whole check UNPROVEN instead of downgrading a public
     push endpoint to an advisory it never measured.
+
+    `strict` (the default-branch protection leg, #370) also refuses to read a
+    FAILED probe as an unset key: `git config --get` exits 1 with no output
+    for a key that is absent, so any other failure (a timeout, a spawn error,
+    a non-zero exit with a message) leaves the selection unmeasured and
+    returns `False`, instead of falling back to `origin` and grading a
+    repository whose real push remote was never read. The default keeps the
+    historical behaviour for `sensitive_data_findings`.
     """
+    unreadable = False
 
     def exhausted() -> bool:
-        return deadline is not None and deadline - monotonic() <= 0
+        return (deadline is not None and deadline - monotonic() <= 0) or unreadable
 
     def configured(key: str) -> str:
-        resolved, value = output_before_deadline(
+        nonlocal unreadable
+        resolved, value, failure = result_before_deadline(
             command_runner, ["git", "config", "--get", key], repo, deadline
         )
+        if strict and not resolved and failure.strip():
+            unreadable = True
         return value.strip() if resolved else ""
 
     if exhausted():
         return PUBLISHING_REMOTE, False
-    resolved, branch = output_before_deadline(
+    resolved, branch, failure = result_before_deadline(
         command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
     )
     branch = branch.strip() if resolved else ""
+    if strict and not resolved and probe_never_answered(failure):
+        # An unborn or detached HEAD fails with a message and has no branch
+        # keys to read; a probe that never answered proves nothing.
+        return PUBLISHING_REMOTE, False
     candidates = []
     if branch and branch != "HEAD":
         candidates.append(f"branch.{branch}.pushRemote")
@@ -5848,15 +5887,16 @@ def default_branch_protection_findings(
     # first (#370). A selection the budget never let git answer is unmeasured,
     # never a guess of `origin`.
     publishing_remote, selection_proven = configured_push_remote(
-        repo, command_runner, deadline
+        repo, command_runner, deadline, strict=True
     )
     if not selection_proven:
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                "the probe budget expired before git's push-remote configuration "
-                "could be read, so which remote publishes this repo is unmeasured",
+                "git's push-remote configuration could not be read in full (a probe "
+                "timed out, failed to start, or the budget expired), so which "
+                "remote publishes this repo is unmeasured",
             )
         ]
     if publishing_remote == LOCAL_PUSH_REMOTE:
@@ -5870,6 +5910,26 @@ def default_branch_protection_findings(
             if name == publishing_remote and direction == "push"
         )
     )
+    if not push_urls and not any(name == publishing_remote for name, _u, _d in rows):
+        # `pushRemote`/`pushDefault` may hold a repository URL instead of a
+        # remote name (git-config); that value is the push destination (#370,
+        # review of #437). With nothing selected explicitly, a missing `origin`
+        # stays out of scope as before.
+        if publishing_remote != PUBLISHING_REMOTE:
+            slug = github_repo_slug(publishing_remote)
+            if slug:
+                push_urls = [publishing_remote]
+            else:
+                return [
+                    reality_finding(
+                        BRANCH_PROTECTION_CHECK,
+                        REALITY_UNPROVEN,
+                        "git is configured to push to "
+                        f"{redact_remote_url(publishing_remote)!r}, which is not a "
+                        "configured remote and not a github.com URL, so its "
+                        "default-branch protection is unmeasured",
+                    )
+                ]
     slugs = [github_repo_slug(url) for url in push_urls]
     if not slugs or not all(slugs):
         return []  # no such remote, or a push destination off GitHub: out of scope
@@ -6143,6 +6203,10 @@ def repository_branch_protection_findings(
         # Codex P2 on #377). Any other classic answer leaves the advisory.
         if classic is None:
             state, payload = read_classic(True)
+            if state == "unproven":
+                # The classic answer never arrived, so "the token can bypass
+                # the combined protection" is not established (review of #437).
+                return [payload]
             if state == "measured":
                 classic = payload
         if classic is not None and all(classic[0].values()) and classic[1] == "true":

@@ -76,6 +76,7 @@ def bypass_argv(ruleset_id):
 RULES_ARGV = rules_argv()
 PROTECTION_ARGV = protection_argv()
 BYPASS_7 = bypass_argv(7)
+NOT_PROTECTED = (False, "", "gh: Branch not protected (HTTP 404)")
 BOTH_RULES = "non_fast_forward 7\ndeletion 7\n"
 
 
@@ -386,7 +387,11 @@ class BranchProtectionFindingTests(unittest.TestCase):
         for answer, wanted in rows:
             with self.subTest(answer=answer):
                 _, findings, statuses = self.statuses(
-                    {RULES_ARGV: (True, BOTH_RULES), BYPASS_7: (True, answer)}
+                    {
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, answer),
+                        PROTECTION_ARGV: NOT_PROTECTED,
+                    }
                 )
                 self.assertEqual(statuses, [wanted])
                 if wanted == "advisory":
@@ -412,6 +417,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
                 RULES_ARGV: (True, "non_fast_forward 7\ndeletion 9\n"),
                 BYPASS_7: (True, "never"),
                 bypass_argv(9): (True, "always"),
+                PROTECTION_ARGV: NOT_PROTECTED,
             }
         )
         self.assertEqual(statuses, ["advisory"])
@@ -572,6 +578,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
                     **default,
                     RULES_ARGV: (True, BOTH_RULES),
                     BYPASS_7: (True, "always"),
+                    PROTECTION_ARGV: NOT_PROTECTED,
                 },
                 "advisory",
             ),
@@ -771,8 +778,6 @@ class BranchProtectionFindingTests(unittest.TestCase):
             ("admins not enforced", (True, "false,false,false")),
             ("force-push open", (True, "true,false,true")),
             ("not protected", (False, "", "gh: Branch not protected (HTTP 404)")),
-            ("unreadable", (False, "", "gh: HTTP 403 forbidden")),
-            ("null", (True, "null,null,null")),
         ):
             with self.subTest(label):
                 _, _, statuses = self.statuses(
@@ -783,6 +788,111 @@ class BranchProtectionFindingTests(unittest.TestCase):
                     }
                 )
                 self.assertEqual(statuses, ["advisory"])
+
+    def test_classic_fallback_expired_is_unproven(self):
+        # Sol on #437: a classic answer that never arrived (expired budget,
+        # 403, null) could have settled the bypassable ruleset, so the leg
+        # cannot claim the token bypasses the combined protection.
+        for label, classic in (
+            (
+                "expired",
+                (False, "", "the probe budget expired before this command ran"),
+            ),
+            ("forbidden", (False, "", "gh: HTTP 403 forbidden")),
+            ("null", (True, "null,null,null")),
+            ("empty", (True, "")),
+        ):
+            with self.subTest(label):
+                _, findings, statuses = self.statuses(
+                    {
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "exempt"),
+                        PROTECTION_ARGV: classic,
+                    }
+                )
+                self.assertEqual(statuses, ["UNPROVEN"])
+                self.assertNotIn("can bypass the block", findings[0]["detail"])
+
+    def test_push_selection_timeout_is_unproven(self):
+        # Sol on #437 (HIGH): a selection probe that failed while the aggregate
+        # budget was live is not proof the key is unset; falling back to
+        # `origin` reported ok for a repo whose real push remote is unprotected.
+        rows = (
+            "origin\thttps://github.com/acme/widgets.git (push)\n"
+            "mirror\thttps://github.com/acme/other.git (push)"
+        )
+        branch = ("git", "rev-parse", "--abbrev-ref", "HEAD")
+        failures = (
+            "git did not answer within 3.0s",
+            "git could not be started: boom",
+            "fatal: unable to read config file",
+        )
+        for key in ("branch.work.pushRemote", "remote.pushDefault"):
+            for failure in failures:
+                with self.subTest(key=key, failure=failure):
+                    runner, findings = self.run_protection(
+                        make_tier_data(),
+                        {
+                            branch: (True, "work"),
+                            ("git", "config", "--get", key): (False, "", failure),
+                            DEFAULT_BRANCH_ARGV: (True, "main"),
+                            RULES_ARGV: (True, BOTH_RULES),
+                            BYPASS_7: (True, "never"),
+                        },
+                        remote_rows=rows,
+                    )
+                    self.assertEqual(
+                        [item["status"] for item in findings], ["UNPROVEN"]
+                    )
+                    self.assertEqual(runner.gh_calls(), [])
+        with self.subTest("branch lookup timed out"):
+            runner, findings = self.run_protection(
+                make_tier_data(),
+                {
+                    branch: (False, "", "git did not answer within 3.0s"),
+                    DEFAULT_BRANCH_ARGV: (True, "main"),
+                    RULES_ARGV: (True, BOTH_RULES),
+                    BYPASS_7: (True, "never"),
+                },
+                remote_rows=rows,
+            )
+            self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+            self.assertEqual(runner.gh_calls(), [])
+
+    def test_a_proven_absent_selection_key_falls_through_to_origin(self):
+        # `git config --get` exits 1 with no output for an unset key: proof of
+        # absence, not a failure.
+        _, _, statuses = self.statuses(
+            {
+                ("git", "rev-parse", "--abbrev-ref", "HEAD"): (
+                    False,
+                    "",
+                    "fatal: ambiguous argument 'HEAD'",
+                ),
+                ("git", "config", "--get", "remote.pushDefault"): (False, "", ""),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+
+    def test_a_url_valued_push_remote_is_measured_or_unproven_never_skipped(self):
+        # Sol on #437: git allows a URL in branch.<b>.pushRemote.
+        key = ("git", "config", "--get", "remote.pushDefault")
+        github = "https://github.com/acme/widgets.git"
+        _, _, statuses = self.statuses(
+            {
+                key: (True, github),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        self.assertEqual(statuses, ["ok"])
+        for value in ("https://git.example.invalid/acme/widgets.git", "../sibling"):
+            with self.subTest(value=value):
+                runner, findings, statuses = self.statuses({key: (True, value)})
+                self.assertEqual(statuses, ["UNPROVEN"])
+                self.assertEqual(runner.gh_calls(), [])
 
     def test_split_coverage_with_bypassable_ruleset_uses_the_classic_answer(self):
         _, _, statuses = self.statuses(
