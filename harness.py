@@ -7181,6 +7181,8 @@ def preflight_selected_skill_roots(
     copies of ``backup_targets``, is probed with name-only directories before
     any live or backup write, whether the destination is absent or populated.
     """
+    if len(targets) < 2:
+        return
     by_parent: dict[Path, list[str]] = {}
     for target in targets:
         reject_sync_path_aliases(target, label)
