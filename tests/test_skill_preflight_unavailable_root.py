@@ -6,10 +6,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "harness_preflight_root", ROOT / "harness.py"
-)
+spec = importlib.util.spec_from_file_location("harness_preflight_root", ROOT / "harness.py")
 harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
 
@@ -25,7 +24,7 @@ class UnavailableSkillRootTests(unittest.TestCase):
 
     def test_missing_probe_root_refuses_without_repeating_the_root(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source, target = self.fixture(root)
             before = harness.tree_digest(root)
             missing = set(target.parents)
@@ -49,7 +48,7 @@ class UnavailableSkillRootTests(unittest.TestCase):
 
     def test_lost_lookup_root_refuses_and_removes_disposable_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source, target = self.fixture(root)
             before = harness.tree_digest(root)
             missing = {target, *target.parents}
@@ -69,9 +68,7 @@ class UnavailableSkillRootTests(unittest.TestCase):
                 if lost and path in missing:
                     if path.parent == path:
                         root_reads += 1
-                        self.assertLessEqual(
-                            root_reads, 1, "unbounded lookup traversal"
-                        )
+                        self.assertLessEqual(root_reads, 1, "unbounded lookup traversal")
                     return False
                 return actual_is_dir(path, *args, **kwargs)
 
@@ -86,7 +83,7 @@ class UnavailableSkillRootTests(unittest.TestCase):
 
     def test_ordinary_missing_parent_still_uses_an_available_ancestor(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             source, target = self.fixture(root)
             before = harness.tree_digest(root)
             harness.preflight_skill_source_names(source, target)

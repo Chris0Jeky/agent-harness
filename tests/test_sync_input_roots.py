@@ -44,7 +44,10 @@ class SyncInputRootTests(unittest.TestCase):
         cleanup = self.fixture.make_directory_alias(physical, alias)
         self.addCleanup(cleanup)
         args.claude_home = str(alias / ".." / home.name)
-        self.assertNotEqual(Path(args.claude_home).resolve(), home)
+        self.assertTrue(alias.samefile(physical))
+        # Parent normalization differs across platforms; raw refusal must not.
+        if os.name != "nt":
+            self.assertNotEqual(Path(args.claude_home).resolve(), home)
         for apply in (False, True):
             with self.subTest(apply=apply):
                 args.apply = apply
