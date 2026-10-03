@@ -1,0 +1,34 @@
+name: Prepare reviewed law-reference follow-up
+on:
+  push:
+    branches: [maintenance/prepare-law-refs-429-1003]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Apply reviewed patch and prove semantic preservation
+        run: python .maintenance/prepare_law_refs.py build
+      - name: Store verified blobs only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .maintenance/prepare_law_refs.py publish
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: law-reference-reviewed-candidate
+          path: .maintenance-output/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
