@@ -25,16 +25,19 @@ python -m unittest discover -s tests -p test_workspace_handoff_profile.py -v
 
 ## Required journey evidence
 
-The five authored journeys cover durable capture after a lost response, stale/revoked scope, the separation between attempt results and human completion, incomplete observations and cancellation at admission. The attempt journey includes an identical progress replay and an independently stale, out-of-order report before cancellation, reflecting a native monotonic-report contract while remaining an unexecuted generic case. Retain ordered actions, requests, actual committed state and receipts. Capture UI evidence separately where the user-facing distinction matters. Record unavailable observations as BLOCKED or NOT RUN, not as an expected successful result.
+The first five authored journeys cover durable capture after a lost response, stale/revoked scope, the separation between attempt results and human completion, incomplete observations and cancellation at admission. The attempt journey includes an identical progress replay and an independently stale, out-of-order report before cancellation, reflecting a native monotonic-report contract while remaining an unexecuted generic case. Retain ordered actions, requests, actual committed state and receipts. Capture UI evidence separately where the user-facing distinction matters. Record unavailable observations as BLOCKED or NOT RUN, not as an expected successful result.
 
 A product implementation must add genuine crash-boundary, duplicate-delivery, out-of-order event, permission revocation and cancellation controls. Isolate revision and permission failures: first test a stale revision with valid scope, then revoked scope with the current revision. Otherwise one working gate can conceal another broken gate. Include a worker that exits successfully without satisfying acceptance criteria. Complete the journey only through the application's current authorized transition. Test fixtures must not borrow personal databases, cloud credentials or real messages.
 
 ### Completeness and admission boundaries
 
-A bounded response is not automatically a complete snapshot. The incomplete-observation journey
-requires a preserved complete checkpoint through a partial read and restart, then an independent
-access-denial control that cannot be undone by an older reply. An omitted item is not evidence
-that a reminder was delivered, a task was deleted or access was revoked. Consume authoritative
+A bounded response is not automatically a complete snapshot. Complete, partial, unavailable and
+denied are four distinct states: a partial read never authorises inferred deletion or inferred
+delivery, unavailable stays unknown (never PASS, never an empty collection) and denied hides private
+cached content. The incomplete-observation journey requires a preserved complete checkpoint through
+a partial read, an unavailable source and restart, then an independent access-denial control that
+cannot be undone by an older reply. An omitted item is not evidence that a reminder was delivered,
+a task was deleted or access was revoked. Consume authoritative
 outcome receipts where the distinction matters; do not turn a collection cap into an effect.
 
 The admission journey records a precise launch-admission boundary. Persisted cancellation before
@@ -42,6 +45,16 @@ that boundary must prevent launch; cancellation after it is an in-flight request
 retire the lease during the last permission read and expire a disclosure grant while that read
 is pending. These controls must leave newer ownership intact and must not manufacture process
 acknowledgement or effect reconciliation. A scheduler lock does not fence an external writer.
+
+### Evidence ladder, catch-up and fix rounds
+
+Three further journeys are advisory and `not_run`; they make no execution claim.
+
+**Evidence ladder** (`evidence-ladder`): source, unit, integrated, native runtime, installed, device, owner accepted. Each rung is its own receipt. Every rung records the subject revision, exact source revision, fixture revision or hash, UTC time and environment, proof kind, command and cwd, pass/fail/skip counts, unavailable observations and advisory or operational authority. The installed rung adds an installed artifact identity distinct from the source revision. The device rung adds device and platform identity. The owner-accepted rung is an owner-supplied record, never inferred by an agent or implied by a lower rung. A lower rung never implies a higher one, and a higher rung never transfers to a different candidate revision; re-observe each rung against the new revision.
+
+**Catch-up contracts** (`catch-up-contract`): look up outcomes for known IDs directly and read unseen ones from a commit-ordered feed. Apply a first-run floor and report items before it as not examined. Each pass re-reads an inclusive overlap and continues exclusively past it. A page never splits one timestamp group, and a resume position never lands inside one. A deferred item is never skipped by a resume position, and a failed read never advances it.
+
+**Fix-round discipline** (`fix-round-discipline`): run one scoped verification after every fix round. Past fix rounds repeatedly introduced new high-severity defects: an expiry that dropped recoverable rows, a cursor that advanced on a failed read, a resume position that skipped deferred rows. Verify the fix diff and its neighbouring seams against the exact fix revision; a verification of an earlier revision does not cover it.
 
 These are authored acceptance requirements. Passing the profile's declaration tests does not
 prove that any product implements them, and no additional simulator or scheduler is introduced.
@@ -63,7 +76,7 @@ This table assigns conformance questions to generic roles. It records no native 
 
 Cancellation requested does not establish that admission stopped. Admission stopped does not establish process acknowledgement, and process acknowledgement does not establish reconciled effects. Record each observation separately, including `blocked` or `not_run` where appropriate. Repeating the receipt lab's cancelled-work/late-success case is reference coverage, not native adoption evidence.
 
-For each native receipt record the subject/input revision, exact source and fixture revision, environment, proof kind, command, outcome and unavailable observations. Existing binding validates declarations only; it never invokes a runner, checks permissions or decides merge eligibility. Do not add fixture/identity fields to the strict schema merely to turn a pending proof request into an apparent executed observation.
+Each native receipt records the evidence-ladder fields of its rung (see Evidence ladder above). Existing binding validates declarations only; it never invokes a runner, checks permissions or decides merge eligibility. Do not add fixture/identity fields to the strict schema merely to turn a pending proof request into an apparent executed observation.
 
 ## Qualification boundary
 
