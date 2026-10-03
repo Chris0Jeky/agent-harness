@@ -7137,6 +7137,8 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
     reject_sync_path_aliases(target, "skill destination")
     probe_parent = target.parent
     while not probe_parent.exists():
+        if probe_parent.parent == probe_parent:
+            raise HarnessError(f"skill destination has no available ancestor: {target}")
         probe_parent = probe_parent.parent
     if not probe_parent.is_dir():
         raise HarnessError(
@@ -7159,6 +7161,10 @@ def preflight_skill_source_names(source: Path, target: Path) -> None:
                 if len(children) > 1:
                     lookup_directory = destination
                     while not lookup_directory.is_dir():
+                        if lookup_directory.parent == lookup_directory:
+                            raise HarnessError(
+                                f"skill destination has no available lookup directory: {destination}"
+                            )
                         lookup_directory = lookup_directory.parent
                     if lookup_directory.stat().st_dev != scratch.stat().st_dev:
                         raise HarnessError(
@@ -7463,9 +7469,17 @@ def restore_skill_tree_from_backup(backup: Path, target: Path) -> str:
     return f"live skill restored; backup retained at {backup}"
 
 
+def sync_input_path(value: str | Path, label: str) -> Path:
+    """Refuse parent traversal before normalization can hide an alias (#273)."""
+    path = Path(value)
+    if ".." in path.parts:
+        raise HarnessError(f"unsafe {label} parent traversal: {path}")
+    return Path(os.path.abspath(path))
+
+
 def reject_sync_path_aliases(path: Path, label: str) -> None:
     """Reject an alias at a selected path or any existing ancestor."""
-    logical = Path(os.path.abspath(path))
+    logical = sync_input_path(path, label)
     for candidate in (logical, *logical.parents):
         if path_is_alias(candidate):
             raise HarnessError(f"unsafe {label} path alias: {candidate}")
@@ -7593,7 +7607,7 @@ def managed_codex_agent_destination_path(agents_home: Path, name: str) -> Path:
         matches = [
             entry
             for entry in agents_home.iterdir()
-            if managed_codex_agent_destination_key(entry.name) == destination_key
+            if entry.name.casefold() == destination_key
         ]
     except OSError as exc:
         raise HarnessError(
@@ -7642,8 +7656,21 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
         return {}
     if not state_path.is_file():
         raise HarnessError(f"invalid managed Codex agents state path: {state_path}")
+
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise HarnessError(
+                    "invalid managed Codex agents state: duplicate JSON key"
+                )
+            result[key] = value
+        return result
+
     try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            state_path.read_text(encoding="utf-8"), object_pairs_hook=unique_pairs
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise HarnessError(
             f"cannot read managed Codex agents state {state_path}: {exc}"
@@ -7656,14 +7683,67 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
     ):
         raise HarnessError(f"invalid managed Codex agents state: {state_path}")
     agents: dict[str, str] = {}
+    identities: set[str] = set()
     for name, digest in payload["agents"].items():
         name = managed_codex_agent_name(name)
+        identity = managed_codex_agent_destination_key(name)
+        if identity in identities:
+            raise HarnessError(
+                "invalid managed Codex agents state: colliding agent names"
+            )
+        identities.add(identity)
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise HarnessError(
                 f"invalid managed Codex agents state: invalid digest for {name}"
             )
         agents[name] = digest
     return agents
+
+
+def write_managed_codex_file(
+    path: Path, content: bytes, mode: int | None = None
+) -> None:
+    """Replace one file through an exclusive, flushed sibling; never follow a hardlink.
+
+    This is a single-file publication, not a multi-file transaction or a concurrent-writer lock.
+    A failed rename leaves the previous destination in place; callers retain recovery backups.
+    """
+    temporary: Path | None = None
+    try:
+        reject_sync_path_aliases(path.parent, "managed Codex file parent")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        reject_sync_path_aliases(path, "managed Codex file")
+        if path.exists() and not path.is_file():
+            raise HarnessError(f"managed Codex target is not an ordinary file: {path}")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".harness-agent-", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mode is not None:
+            temporary.chmod(mode)
+        os.replace(temporary, path)
+        temporary = None
+        if path_is_alias(path) or not path.is_file() or path.read_bytes() != content:
+            raise HarnessError(
+                f"managed Codex target changed during publication: {path}"
+            )
+    except OSError as exc:
+        raise HarnessError(f"cannot publish managed Codex file {path}: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                # Only the reserved sibling is cleaned up; no live target is chmodded.
+                if not path_is_alias(temporary) and temporary.is_file():
+                    temporary.chmod(stat.S_IREAD | stat.S_IWRITE)
+                    temporary.unlink()
+                else:
+                    raise
 
 
 def write_managed_codex_agents_state(
@@ -7674,8 +7754,9 @@ def write_managed_codex_agents_state(
         "schema_version": MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION,
         "agents": dict(sorted(agents.items())),
     }
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_managed_codex_file(
+        state_path, (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    )
 
 
 def reserve_backup_root(parent: Path, stem: str) -> Path:
@@ -9501,11 +9582,12 @@ def write_atomic_json(path: Path, payload: Mapping[str, Any], label: str) -> Non
 
 def sync_bundle_roots(args: argparse.Namespace) -> dict[str, Path]:
     """Resolve only the two logical destination roots the manifest may name."""
-    claude_input = Path(os.path.abspath(args.claude_home or Path.home() / ".claude"))
-    user_bin_input = Path(
-        os.path.abspath(
-            getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin"
-        )
+    claude_input = sync_input_path(
+        args.claude_home or Path.home() / ".claude", "bundle Claude home"
+    )
+    user_bin_input = sync_input_path(
+        getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin",
+        "bundle user bin home",
     )
     reject_sync_path_aliases(claude_input, "bundle Claude home")
     reject_sync_path_aliases(user_bin_input, "bundle user bin home")
@@ -9741,9 +9823,14 @@ def apply_sync_bundle(
                 try:
                     target.rename(quarantine)
                 except OSError as exc:
+                    previous = (
+                        str(backup)
+                        if backup is not None
+                        else "none (previously absent)"
+                    )
                     raise HarnessError(
-                        f"{problem}; the unverified bytes are still live because they "
-                        f"could not be quarantined: {exc}"
+                        f"{problem}; could not quarantine the target: {exc}; "
+                        f"current live state is unverified; previous target backup: {previous}"
                     ) from exc
                 problem += f"; unverified bytes retained at {quarantine}"
                 if backup is not None:
@@ -9999,11 +10086,11 @@ def rollback_sync_bundle(
 
 def sync_global_bundle(args: argparse.Namespace, bundle_name: str) -> int:
     """Run the isolated manifest bundle lane or its receipt rollback."""
-    config_root_input = Path(os.path.abspath(args.config_root))
+    config_root_input = sync_input_path(args.config_root, "sync config root")
     roots = sync_bundle_roots(args)
     rollback_receipt = getattr(args, "rollback_receipt", None)
     if rollback_receipt:
-        receipt_path = Path(os.path.abspath(rollback_receipt))
+        receipt_path = sync_input_path(rollback_receipt, "bundle rollback receipt")
         components = load_bundle_rollback_receipt(receipt_path, roots, bundle_name)
         rollback_sync_bundle(receipt_path, components, bool(args.apply))
         return 0
@@ -10084,7 +10171,7 @@ def sync_global(args: argparse.Namespace) -> int:
         return sync_global_bundle(args, next(iter(selected_bundles)))
     if rollback_receipt:
         raise HarnessError("--rollback-receipt requires --only bundle:muse-runtime")
-    config_root_input = Path(os.path.abspath(args.config_root))
+    config_root_input = sync_input_path(args.config_root, "sync config root")
     if selected_claude_skills:
         reject_sync_path_aliases(config_root_input, "Claude skill config root")
     config_root = config_root_input.resolve()
@@ -10092,22 +10179,26 @@ def sync_global(args: argparse.Namespace) -> int:
     harness_root = Path(__file__).resolve().parent
     codex_selection = default_sync or sync_agents or bool(selected_skills)
     codex_home = (
-        Path(
-            args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        sync_input_path(
+            args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"),
+            "Codex home",
         ).resolve()
         if codex_selection
         else None
     )
-    claude_home_input = Path(
-        os.path.abspath(args.claude_home or Path.home() / ".claude")
+    claude_home_input = (
+        sync_input_path(args.claude_home or Path.home() / ".claude", "Claude home")
+        if default_sync or selected_claude_skills
+        else None
     )
     if selected_claude_skills:
+        assert claude_home_input is not None
         reject_sync_path_aliases(claude_home_input, "Claude home")
-    claude_home = (
-        claude_home_input.resolve() if default_sync or selected_claude_skills else None
-    )
+    claude_home = claude_home_input.resolve() if claude_home_input is not None else None
     skills_home = (
-        Path(args.skills_home or Path.home() / ".agents" / "skills").resolve()
+        sync_input_path(
+            args.skills_home or Path.home() / ".agents" / "skills", "skills home"
+        ).resolve()
         if default_sync or selected_skills
         else None
     )
@@ -10218,6 +10309,7 @@ def sync_global(args: argparse.Namespace) -> int:
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
     source_agent_keys: dict[str, str] = {}
+    agent_snapshots: dict[str, tuple[bytes, int]] = {}
     agent_selection = default_sync or sync_agents
     agent_source_exists = agent_selection and (
         agent_source.exists() or path_is_alias(agent_source)
@@ -10272,12 +10364,23 @@ def sync_global(args: argparse.Namespace) -> int:
                     "Codex agent destination must be an ordinary file: "
                     f"{existing_target}"
                 )
-            equal = same_file(source, existing_target)
+            try:
+                source_bytes = source.read_bytes()
+                source_mode = stat.S_IMODE(source.stat().st_mode)
+                equal = (
+                    existing_target.is_file()
+                    and existing_target.read_bytes() == source_bytes
+                )
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot snapshot managed Codex agent {source}: {exc}"
+                ) from exc
+            agent_snapshots[name] = (source_bytes, source_mode)
             canonical_name_needed = existing_target.name != name
             agent_states.append(
                 (name, source, target, existing_target, equal, canonical_name_needed)
             )
-            next_agent_state[name] = sha256_file(source)
+            next_agent_state[name] = hashlib.sha256(source_bytes).hexdigest()
         for name, digest in current_agent_state.items():
             if managed_codex_agent_destination_key(name) in source_agent_keys:
                 continue
@@ -10520,8 +10623,12 @@ def sync_global(args: argparse.Namespace) -> int:
                 shutil.copy2(existing_target, backup)
                 print(f"agent backup {backup} (before replacing {existing_target})")
             if not equal:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, existing_target)
+                try:
+                    write_managed_codex_file(existing_target, *agent_snapshots[_name])
+                except HarnessError as exc:
+                    raise HarnessError(
+                        f"{exc}; recovery backups: {backup_root}"
+                    ) from exc
             if canonical_name_needed:
                 rename_codex_agent_to_canonical_name(existing_target, target)
         for _name, target, status in stale_agent_states:
@@ -10547,6 +10654,21 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copy2(target, backup)
             print(f"agent backup {backup} (before removing {target})")
             target.unlink()
+        # Do not publish ownership for stale or unverified active bytes, including no-ops.
+        for name, _source, target, _existing, _equal, _rename in agent_states:
+            try:
+                verified = (
+                    not path_is_alias(target)
+                    and target.is_file()
+                    and sha256_file(target) == next_agent_state[name]
+                )
+            except OSError:
+                verified = False
+            if not verified:
+                raise HarnessError(
+                    f"managed Codex agent changed before ownership publication: {target}; "
+                    f"recovery backups: {backup_root}"
+                )
         if current_agent_state != next_agent_state:
             if agent_state_path.exists():
                 backup = backup_root / "managed-codex-agents-state.json"
@@ -10781,6 +10903,18 @@ def doctor(args: argparse.Namespace) -> int:
                 if requested_path in logical_root.resolve().parents
                 else requested_path
             )
+            checks.append(
+                (
+                    "Codex modeled session cwd",
+                    True,
+                    f"{layer_walk_path.resolve()}"
+                    + (
+                        f" (downward-selected product; requested {requested_path})"
+                        if layer_walk_path != requested_path
+                        else ""
+                    ),
+                )
+            )
             project_config_paths = [
                 layer / ".codex" / "config.toml"
                 for layer in codex_project_layer_dirs(
@@ -10814,6 +10948,8 @@ def doctor(args: argparse.Namespace) -> int:
                 if (document := inline_hooks_document(hooks.with_name("config.toml")))
             ]
 
+            # Rule 2 models a session started at layer_walk_path, not the
+            # undeclared directory supplied to --repo (SPECS section 2.1).
             # Codex runs a hook command from the SESSION cwd, not from the
             # directory that owns the hook source. Wherever those differ — a
             # `--repo <subdir>` audit, or a linked worktree sourcing hooks from
@@ -10821,7 +10957,7 @@ def doctor(args: argparse.Namespace) -> int:
             # somewhere other than the hook source root, so it cannot be
             # certified.
             def wrapper_is_cwd_relative_here(hooks: Path) -> bool:
-                return hooks.parent.parent.resolve() != requested_path
+                return hooks.parent.parent.resolve() != layer_walk_path.resolve()
 
             repo_hook_sources = [
                 (hooks, text, "json") for hooks, text in json_hook_documents
@@ -10972,7 +11108,7 @@ def doctor(args: argparse.Namespace) -> int:
                 activation_detail = str(exc)
             wrapper_detail = (
                 "session cwd "
-                f"{requested_path} is not the hook source root, so "
+                f"{layer_walk_path.resolve()} is not the hook source root, so "
                 f"{'; '.join(unresolvable_wrapper_sources)}"
                 " that Codex would resolve under the session cwd instead; "
                 if unresolvable_wrapper_sources

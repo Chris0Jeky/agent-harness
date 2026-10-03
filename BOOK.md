@@ -330,3 +330,148 @@ itself, which is where it was always supposed to be.
 10. Misleading authority is worse than nothing. Tombstone the dead; demote with pride.
 
 *— written inside the window, so it outlasts it.*
+
+
+---
+
+## Historical blueprint records (preserved 2026-10-03)
+
+The following blocks are copied verbatim from BLUEPRINT at main commit
+`4bef9337a4d03dba329c07d007c650f628e0785a` during the #389 structure cleanup.
+They preserve dated rationale and the original migration proposal. Their statements about
+installed state, issue state, future work and timing are historical, not fresh verification.
+Their imperative wording is quoted source material, not authorization to execute it now.
+For current rules use [BLUEPRINT](./BLUEPRINT.md), the canonical global laws identified in
+[SPECS §1](./SPECS.md#1-global-laws--pointer-not-a-mirror), and the current tracker/operator gates.
+Old BLUEPRINT-law numbers map to the P1-P12 design-principle namespace; global-law numbering
+is unchanged. No migration step is accepted or completed by this move.
+
+### Original review and mission rationale
+
+```text
+11. **Every loop terminates.** Review is one review round plus one fix round, then ship or park.
+    Fix commits are earned only by confirmed CRITICAL/HIGH defects; every other finding becomes
+    a tracked issue or a one-line decline on the thread — never a silent drop, never a
+    fix-commit cascade. A red gate gets three genuinely different attempts, a disputed fact one
+    re-measure; then ship what is sound and park the rest. Evidence invalidation is scoped: a
+    head change re-proves what changed, never everything. (Issue #92 measured the unbounded
+    form: 90% of this repo's PR commits were post-review fixes, and fix rounds introduced
+    defects of their own.)
+12. **Mission first.** Harness, floor, gate, and doc work happens only when it IS the mission;
+    friction found mid-task becomes a one-line tracked issue, never a detour. No new gates whose
+    subject is other gates or doc consistency — grandfathered: the ones already built AND the
+    ones this blueprint itself prescribes (§3 stale-map stamps, the T3 docs-stamp/budget lane,
+    §7's vendor parity-diffs, SPECS §7's stop-hook states); the Gardener may propose retiring
+    any whose upkeep exceeds what it catches. Sessions are judged
+    by finished tasks: budget each task, park at ~2× budget, and close with a scoreboard
+    (finished / parked / rounds used) ahead of the evidence sections. (Issue #92 measured the
+    inverse: 9:1 ceremony-to-execution and zero product-capability PRs.)
+```
+
+### Dated floor decisions and measurements
+
+```text
+**FEATURE-FROZEN (2026-07-26 — ratified in issue #92; decision record #96).** The floor is a
+tripwire at its useful maximum: 272 → ~9.5k lines as measured in issue #92 (11.3k by 1.6.12)
+bought a 12–14% false-positive rate on real agent commands with no recorded save of a real
+irreversible action, and seven versions of hardening shipped without ever executing anywhere.
+Only three classes of change may touch `dispatch.py`: **(a)** false-positive fixes that
+blocked real work, **(b)** the ratified #21 slice sequence, and **(c)** repairs to a SPECS §6
+charter regression as literally written (a listed must-block form newly allowed, or a listed
+must-allow form newly blocked) — the catastrophe matrix is always repaired. A newly
+discovered bypass FAMILY — a wrapper, interpreter, encoding, or shell shape the parser does
+not model — is recorded as one line in [FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md) and its
+issue closed, never fixed. No new floor version is DEPLOYED until the currently deployed one
+is re-trusted and canaried (HUMAN_TODO H-2) — a permitted fix still merges to `main` and
+bumps `FLOOR_VERSION`; what waits on H-2 is `sync-global --apply` and the consumer marker
+refresh. Shrinking the FP rate toward the ~0.1% it once measured is the only hardening
+direction left open.
+
+The owner-authorized 2026-08-03 Developer Lens exact-route publication exception is one explicit,
+bounded exception to that freeze; it does not reopen general parser or bypass-family work. The
+feature freeze resumes immediately after that contract lands.
+
+**Posture (owner decision 2026-09-02).** Re-measured on the owner's box before the change, the
+deployed floor's real blocks were still the #21 profile: the opacity class and force-push
+spellings, two months on. The owner ruled that below T4/`wave_mode` the floor is a guide, not a
+wall: pure opacity proceeds, and every other deny or ask becomes one deliberate double-check
+(`FLOOR_ACK`, SPECS §5.4). This lands the ratified #26/#62 slices in one seam and, by the owner's
+explicit direction, goes one step past #26's "never a charter deny" invariant: the irreversible
+core below T4 is protected by a forced re-read of the exact command, not by refusal. T4,
+`wave_mode` and (by default) `sensitive_data` keep the walls; any repo can declare
+`floor_posture: wall`. The freeze is otherwise unchanged.
+
+**Core posture (owner decision 2026-09-27, issue #356).** Measured that day: no Claude session ran
+the floor, only six Codex roots did, and none of the floored repositories protected `main`
+server-side. The owner approved default-branch rulesets (`non_fast_forward`, `deletion`) on all
+of them and chose to shrink the client floor to LOCAL destruction, trading some security for
+throughput. Since 1.7.0 the default below T4/`wave_mode` for a non-sensitive repository is
+`floor_posture: core`: destructive deletes outside the project, secret-file mutation, downloaded
+program text run directly and privilege elevation stay double-checks (a `sensitive_data`
+repository never runs `core`: its declared `core` renders as `guide`); force-push, ref deletion, git config execution, work-loss and launcher verdicts
+proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any repo can declare
+`guide` or `wall` to get the old rendering back.
+```
+
+### Original estate migration proposal
+
+```text
+## 8. Estate migration map
+
+Order chosen by risk × leverage. The top tier does steps marked ★ (judgment); cheaper tiers
+execute the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
+create a parallel plan (law 9).
+
+1. ★ **Global layer** (one evening, highest leverage): write `~/.claude/CLAUDE.md` +
+   ESTATE.md + MACHINE.md; settings diet; argv-aware deny floor + dispatcher + test matrix;
+   global agents; `git init` ~/.claude config; delete global detritus (pr600-review/,
+   teams/session-*, blocklist test entries, daemon.lock, disabled marketplaces, the four
+   stale Apr-9 bootstrap-*.ps1 after salvaging as template source).
+2. **olb hotfixes FIRST despite the blueprint order** — highest-stakes / lowest-hygiene combo
+   (production money, deployed daily): convert absolute-path hooks to `$CLAUDE_PROJECT_DIR`
+   (they silently break worktree agents today); verify branch protection actually requires
+   named checks via `gh api`. Two hours, real risk retired.
+3. **Tombstones + REVIVAL.md files** (30 min): jekyt, repos, Taskdeck-gemini,
+   TaskdeckDemoExpansion, pr812-fixes, AgentForge(+Archive), all junk wrappers;
+   REVIVAL.md for platform-identity and metricalgo/staticprofit (replacing the stale-path
+   245-line AGENTS.md). Then cold-archive or delete the dead duplicates (several GB of
+   search noise).
+4. ★ **Certify extract-api as the T2 reference**: extract its scaffold (CLAUDE.md split,
+   4 skills, self-tested hooks, BACKLOG protocol) into `templates/tier2/` here; write its
+   tier.json. First Gardener cycle on its 2,324-line ledger.
+5. **hq-private → T1 + `sensitive_data`**: add tier line + privacy denies; rename to
+   HUMAN_TODO.md convention or record alias. Verify it has a private remote (irreplaceable
+   content). Nothing else — it already conforms.
+6. **Seed/bootstrapper CLI shipped (2026-07-13)** (SPECS §9): `harness.py seed`, `audit`,
+   `sync-global`, and `doctor`; the germ refuses overwrite. `tier-up` and estate-wide mutation
+   remain deferred until repeated use earns them.
+7. **Taskdeck → T3 diet, via its own tracked issues**: #1138 (STATUS → ≤150-line head +
+   rotation), #1275/ARCHIVE-07 (CI right-sizing: drop dual-OS matrix, path-filter, DELETE the
+   5/5-red nightly perf + 4/4-red mutation lanes under the red-lane law), #1276/ARCHIVE-08
+   (dead surface: ~1,000 lines of release/staging/SBOM YAML, ORCHESTRATION_STATE.md out of the
+   routed path, stale worktree dirs), #1269/ARCHIVE-01 (two-tier review gate = this
+   blueprint's T3 review pipeline). New small issues to seed: one-home policy collapse
+   (7 copies → 1), retire the .codex skill mirror (keep 00_ACTIVE.md + bot reviewers), strip
+   skill read-first ladders to region-map references, move bypassPermissions to
+   settings.local.json, remove/fence scripts/git/redistribute-commit-dates.ps1.
+   ★ Region maps: backend (Domain/Application/Infrastructure/Api), frontend
+   (views/stores/composables), automation/capture-review, CI+docs.
+8. **wealthlens-hq → T3**: tier.json codifying its relaxed-git authority (it is the written
+   spec for sub-T4 git freedom); Gardener on the 1,602-line ledger; red-lane law over its 11
+   workflows; ★ region maps for the 33.9k-file tree.
+9. ★ **olb → T4 formalization**: memory compaction (1,251-file .codex/memories + 111-file
+   memories/ + 12.6KB index → extract-api's 4-file endpoint is the target); encode its earned
+   rules (tagged-release pulls, forward-only migrations, UAI deploy sequencing, 2-review gate,
+   ratchets) into tier.json + CLAUDE.md; skill suite 21 → ~8; single-runtime decision for
+   Codex there (runtime with thin shim + parity CI, or bot-reviewer-only).
+10. **Memory graduation pass** across all 7 memory dirs: universal laws → global CLAUDE.md
+    (delete the duplicates same-commit), contradictions resolved (worktrees-broken vs -fixed),
+    session logs pruned, Options' 12.6KB index → one-liners.
+11. **Turn on the rhythm**: weekly Gardener on the 4 active repos only; weekly 15-minute
+    estate sitting; HUMAN_TODO aggregation into hq-private.
+12. ★ **Acceptance test for the migration**: hand a cheaper-tier model one mapped-region task
+    per active repo; fix whatever it stumbles on. Passing means the judgment soaked into the
+    structure — that is the whole point of §5's routing. There is no deadline to beat here: the
+    top tier is reserved by value, not rationed by availability, so re-run this whenever the
+    structure changes materially rather than once against a closing window.
+```

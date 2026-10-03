@@ -3708,22 +3708,20 @@ allow_local_binding = true
         current.write_text("model = 'updated'\n", encoding="utf-8")
         stale.unlink()
         stale_target = target_agents / "stale.toml"
-        original_copy2 = harness.shutil.copy2
+        original_replace = harness.os.replace
 
         def mutate_stale_target(
             source: Path, target: Path, *args: object, **kwargs: object
-        ) -> str:
+        ) -> None:
+            result = original_replace(source, target, *args, **kwargs)
             if (
-                Path(source).samefile(current)
-                and Path(target).parent.samefile(target_agents)
+                Path(target).parent.samefile(target_agents)
                 and Path(target).name == "current.toml"
             ):
                 stale_target.write_text("model = 'edited locally'\n", encoding="utf-8")
-            return original_copy2(source, target, *args, **kwargs)
+            return result
 
-        with mock.patch.object(
-            harness.shutil, "copy2", side_effect=mutate_stale_target
-        ):
+        with mock.patch.object(harness.os, "replace", side_effect=mutate_stale_target):
             self.assertEqual(harness.sync_global(args), 0)
 
         self.assertEqual(

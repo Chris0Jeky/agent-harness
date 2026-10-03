@@ -1,6 +1,6 @@
 # Migration Prompt — re-work a repo's harness to the blueprint
 
-Last Updated: 2026-07-26 · Paste the block below into a top-tier session — the model per the
+Last Updated: 2026-10-03 · Paste the block below into a top-tier session — the model per the
 `model-effort-routing` skill, which is the only place that names one — opened in the
 target repo. Then paste the matching per-repo appendix from the bottom of this file.
 
@@ -14,7 +14,7 @@ top routed model: do the judgment work yourself (tier reasoning, region maps, la
 anything irreversible); delegate only mechanical sweeps.
 
 RESOURCES (read in this order, nothing else up front; discover paths, do not assume a user profile):
-1. <agent-harness-root>/BLUEPRINT.md   — the tier ladder and twelve laws
+1. <agent-harness-root>/BLUEPRINT.md   — the tier ladder and design principles P1-P12
 2. <agent-harness-root>/SPECS.md       — schemas, budgets, hook wiring, skeletons
 3. <config-root>/ESTATE.md             — this repo's assigned tier + flags, when current for this machine
 4. The per-repo appendix pasted below this prompt     — priorities and cautions for THIS repo
@@ -58,7 +58,7 @@ DO, IN ORDER:
    no defaultMode (a committed one outranks the user's; bypass comes only from user settings or a
    launch flag — global laws, "Claude Code runtime facts"). Verify
    worktree/clone behavior: every protocol-mandated first command must be allowlisted.
-4. DIET (apply BLUEPRINT laws 2/3/4): one home per policy (collapse restatements to links);
+4. DIET (apply BLUEPRINT principles P2/P3/P4): one home per policy (collapse restatements to links);
    strip skill read-first ladders (skills may point only at the seam map + the "now"-doc head,
    never at >200-line docs, never at auto-injected files); budgets pass per SPECS §3 with
    ROTATE-to-archive, never trim-to-pass; superseded docs leave the routed path; delete or
@@ -96,7 +96,7 @@ PRODUCTION. Real money. Deployed daily. Propose-first for everything beyond step
   checks: `gh api repos/{owner}/{repo}/branches/main/protection` — the estate has had
   configured-but-empty protection before.
 - tier.json: tier 4, authority push=gated merge=gated. Keep its earned rules and write them in:
-  2-review merge gate (bounded per BLUEPRINT law 11 — one review round + one fix round),
+  2-review merge gate (bounded per global laws 2 and 11; BLUEPRINT P11 points to that contract),
   tagged-release pulls, forward-only migrations, UAI deploy
   sequencing, coverage/tsc ratchets.
 - Memory compaction is the big win: .codex/memories ≈ 1,251 files + memories/ ≈ 111 files +
