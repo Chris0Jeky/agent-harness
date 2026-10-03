@@ -76,7 +76,7 @@ This table assigns conformance questions to generic roles. It records no native 
 
 Cancellation requested does not establish that admission stopped. Admission stopped does not establish process acknowledgement, and process acknowledgement does not establish reconciled effects. Record each observation separately, including `blocked` or `not_run` where appropriate. Repeating the receipt lab's cancelled-work/late-success case is reference coverage, not native adoption evidence.
 
-For each native receipt record the subject/input revision, exact source and fixture revision, environment, proof kind, command, outcome and unavailable observations. Existing binding validates declarations only; it never invokes a runner, checks permissions or decides merge eligibility. Do not add fixture/identity fields to the strict schema merely to turn a pending proof request into an apparent executed observation.
+Each native receipt records the evidence-ladder fields of its rung (see Evidence ladder above). Existing binding validates declarations only; it never invokes a runner, checks permissions or decides merge eligibility. Do not add fixture/identity fields to the strict schema merely to turn a pending proof request into an apparent executed observation.
 
 ## Qualification boundary
 
