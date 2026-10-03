@@ -47,3 +47,37 @@ Raw files stay local. A successful byte check is not redaction, licensing, human
 ## Verification
 
 Fifteen cases first failed because the verifier was absent. Sixteen final evidence tests plus twelve scenario tests pass locally; the extra case separates hardlink testing from symlink privileges. Native CLI cases cover exit 0/2/3 and error redaction. Filesystem tests create actual symlinks/hardlinks when supported. Exact-head Windows/Linux full-suite CI is separate from this local subset. No LLM is called by these tests or promoted into CI.
+
+
+## Whole-pack coverage for one run
+
+`python -m ux_evaluation verify-run` adds a read-only rollup without changing either existing
+scenario or observation schemas. Supply `--pack`, `--manifest` (a JSON array of observation
+manifests), `--run-root`, `--expected-run-id`, `--expected-repository`, `--expected-revision`
+and the existing repeatable `--fixture-ref` allowlist. No path is guessed or fixture executed.
+
+The `ux-run-evidence-check/0` output lists missing journeys in the pack's declared order, counts
+their planned assertions as `not_run`, retains every per-journey report, and aggregates assertion
+counts. One complete journey does not qualify a multi-journey pack. An empty observation array
+is a valid incomplete inventory. A complete evidence inventory may contain recorded assertion
+failures and still exits 0: this is **coverage**, never a product-pass or merge verdict. Invalid
+input exits 2; valid incomplete/blocked coverage exits 3. Authority remains advisory and
+`gate_eligible=false` unconditionally.
+
+Every observation must match the caller's run id, subject and pack digest. Journey duplicates and
+mixed controller, controller-version or environment declarations are refused. Fixtures may differ
+only as allowed by the pack. All observations and their metadata are checked before any artifact
+payload is opened. The combined manifest JSON keeps the existing 256 KiB/depth/node limits and
+has at most the pack's 20 journeys. Individual limits remain 128 artifacts and 32 MiB per artifact;
+the **whole run** is capped at 128 MiB of distinct-path bytes, not 128 MiB per journey.
+
+Artifact ids are journey-local. A shared path is checked/read/counted once only when its exact
+path, kind, hash, size and capture time agree; case aliases and conflicting identities refuse the
+run. Identical bytes cannot be relabelled as different evidence kinds across journeys. Input
+manifest order does not change output order, and caller inputs are not mutated. Files remain
+subject to the existing static-alias, bounded-handle and integrity controls.
+
+These checks cannot attest who collected the files, whether recorded assertions are true, or
+whether a real browser, product, worker or device was exercised. A self-consistent synthetic
+bundle is still synthetic. The extra 13 test methods in `tests/test_ux_evidence.py` exercise the
+real verifier and CLI over disposable files; they do not execute the authored handoff journeys.
