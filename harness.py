@@ -10397,6 +10397,8 @@ def load_bundle_rollback_receipt(
         destination_relative = sync_bundle_relative_path(
             destination.get("path"), "receipt destination"
         )
+        if PurePosixPath(destination_relative).parts[0] == ".harness-backups":
+            raise HarnessError("receipt destination overlaps recovery storage")
         target = roots[root_name].joinpath(*PurePosixPath(destination_relative).parts)
         reject_sync_path_aliases(target, "receipt destination")
         installed_digest = raw.get("installed_digest")
