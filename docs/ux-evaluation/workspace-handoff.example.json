@@ -224,6 +224,159 @@
         "max_judge_calls": 0,
         "max_retries": 0
       }
+    },
+    {
+      "id": "incomplete-observation",
+      "goal": "Missing from an incomplete read is not evidence of deletion, delivery or revoked authority.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "seed",
+          "action": "Read a complete authorized synthetic collection and persist its exact coverage and source identity.",
+          "assertions": [
+            "The fixture records which collection was complete; successful HTTP alone does not establish completeness."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "limited",
+          "action": "Return a capped or partial collection that omits a previously observed item.",
+          "assertions": [
+            "The projection reports limited coverage and preserves the last complete observation without inferring removal.",
+            "No outcome receipt, notification claim, destructive action or authority change is created from the omission."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "restart",
+          "action": "Restart the consumer and resume with a complete current collection and authoritative outcome receipts.",
+          "assertions": [
+            "The last complete checkpoint survives; recovery compares only complete observations of the same scoped source.",
+            "Delivery and cancellation remain distinct producer outcomes; absence alone cannot decide between them."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "denied",
+          "action": "Independently deny current access without truncating the collection, then release an older authorized response.",
+          "assertions": [
+            "Denied access hides private cached content rather than treating the failure as ordinary stale availability.",
+            "The older response cannot repopulate the cache or visible private projection after the newer denial."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "cancellation-at-admission",
+      "goal": "Cancellation, lease retirement and time expiry are rechecked at the actual admission boundary.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "cancel-before",
+          "action": "Reserve one synthetic attempt, block its final authority read, persist cancellation, then release the still-valid authority response.",
+          "assertions": [
+            "Cancellation observed before the documented launch-admission boundary prevents all launcher invocations.",
+            "The unstarted reservation is released without claiming process acknowledgement or reconciled effects."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "retired-lease",
+          "action": "In an independent uncancelled attempt, retire its lease while its final authority read is blocked; release that response.",
+          "assertions": [
+            "The retired owner cannot enter the launcher or alter a newer reservation.",
+            "The original attempt identity and retirement evidence remain inspectable."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "expired-during-read",
+          "action": "Keep revisions and scope valid while the final authority read consumes the remaining disclosure-grant lifetime.",
+          "assertions": [
+            "The execution clock is sampled after the read; an expired grant prevents disclosure and launch.",
+            "A fresh authorized control is separate from the expiry control; no implicit grant extension occurs."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "cancel-after",
+          "action": "Admit another authorized attempt through the documented boundary, then request cancellation before its delayed launch acknowledgement.",
+          "assertions": [
+            "The receipt describes in-flight cancellation, not a guaranteed zero-launch result.",
+            "Process acknowledgement and effect reconciliation require separate receiver observations; missing evidence remains unknown."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
     }
   ]
 }
