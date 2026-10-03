@@ -47,7 +47,7 @@ is a separate step; H-19 remains open.
 ## Owner decisions in force (2026-09-29)
 
 - **Merge autonomy.** Agents may merge any PR once its requirements are met: green proving checks
-  at the exact head, law 2's review gate, the three-minute aging floor, merge commits only. The
+  at the exact head, global law 2's review gate, the three-minute aging floor, merge commits only. The
   2026-09-28 "nobody merges" rule for the replay and merge-gate briefs is withdrawn.
 - **AH-10 unlocked for the replay tool.** The owner approved a clean public repository, the name
   `charter-replay`, Apache-2.0, publication and the demo GIF (REPLAY_TOOL_PRODUCT RP-004/RP-005,

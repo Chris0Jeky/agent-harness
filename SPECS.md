@@ -16,6 +16,23 @@ Operational references must name the namespace; there is no default meaning for 
 Review and termination remain canonical in global laws 2 and 11; P11 points there rather
 than defining another review-round count.
 
+**Transition note (issue #429).** Operational citations were written before the P1-P12 / global-law
+split, so an unconverted bare `law N` must never be read as whichever namespace is convenient.
+Read it by where it lives:
+- **Pinned floor text** (`templates/hooks/dispatch.py`, the `templates/hooks/smoke_test.py` matrix
+  beside it, and any vendored copy whose bytes a test or a marker pins): a bare `law N` there means `global law N`
+  (in practice law 7, worktrees, whose `git switch -c` mandate the floor's comments cite). These
+  bytes change only through an authorized floor version and digest change, never for prose
+  consistency, so the bare spelling is a documented legacy form and not an invitation to
+  re-read it as `PN`.
+- **Historical records** (`HANDOFF.md`, `handoffs/`, dated `HUMAN_TODO.md` log entries, `ROADMAP.md`
+  deltas, `legacy/`): they keep their original wording. A bare `law N` there means the law as
+  numbered when it was written; `BLUEPRINT law N` means `PN`.
+- **Everything else** (active scripts, plans, docs, tests): qualify as `global law N` or `PN` when
+  touched. A bare number whose canonical source cannot be confirmed is left as written and is not
+  converted mechanically.
+New text never relies on a bare `law N`.
+
 `doctor --config-root <claude-config>` compares each canonical guidance file with its deployed copy
 byte for byte, as separate checks: source `CLAUDE.md` against `~/.claude/CLAUDE.md`, source
 `rules/laws.md` against `~/.claude/rules/laws.md` (the law set Claude actually loads, #366), and
@@ -666,6 +683,14 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   `<codex-home>/backups/<timestamp>/skills/`, outside the recursively scanned `skills-home`; custom
   overlapping home/source layouts fail before writes, and legacy `skills-home/.harness-backups/`
   trees are neither migrated nor deleted.
+  Selected skill roots (`skill:` and `claude-skill:`) are probed together with name-only directories on
+  the destination parent, and on the backup parent for roots that need a recovery copy. Roots the
+  destination's own lookup merges (for example `Foo` and `foo` on a case-insensitive volume) are
+  refused before any live or backup write, dry run included. Qualifications, not guarantees: an
+  installed skill holding a hard link to a case-variant entry stays an ambiguous-spelling refusal
+  (the message names the entries; remove the extra link or stale entry and re-run), and a destination
+  that fakes mode bits (exFAT/FAT on POSIX) fails the post-copy digest check, which compares
+  executable bits, rather than being treated as installed.
 - `harness.py sync-global --config-root <claude-config> --only claude-skill:<name>
   [--only claude-skill:<name> ...] [--apply]` — previews or installs only the named Claude-native
   skill trees from `<config-root>/skills/` to `<claude-home>/skills/`. It preflights every selected
