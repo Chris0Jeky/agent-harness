@@ -1,0 +1,131 @@
+name: Prepare PR 436 SDDL fixture repair
+
+on:
+  push:
+    branches: [prep/436-sddl-identity-1003]
+    paths: [.github/preparation/repair436.py, .github/workflows/prepare436.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: python {0}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Prepare only the pinned test file
+        run: |
+          import json, os, pathlib, subprocess, sys
+          source = pathlib.Path.cwd()
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436'
+          evidence.mkdir()
+          base = '58569535fbcd6554515b79d3b7985d44f86494f0'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), base], check=True)
+          subprocess.run([sys.executable, str(source / '.github/preparation/repair436.py')], cwd=candidate, check=True)
+          subprocess.run(['git', '-c', 'core.autocrlf=false', 'add', '--', 'tests/test_managed_agent_atomic.py'], cwd=candidate, check=True)
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=candidate, text=True).splitlines()
+          assert paths == ['tests/test_managed_agent_atomic.py'], paths
+          subprocess.run(['git', 'diff', '--cached', '--check'], cwd=candidate, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
+          blob = subprocess.check_output(['git', 'rev-parse', ':tests/test_managed_agent_atomic.py'], cwd=candidate, text=True).strip()
+          production = subprocess.check_output(['git', 'rev-parse', ':harness.py'], cwd=candidate, text=True).strip()
+          manifest = {'base': base, 'candidate_tree': tree, 'candidate_test_blob': blob, 'unchanged_harness_blob': production, 'preparation_commit': os.environ['GITHUB_SHA'], 'host': sys.platform}
+          (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          (evidence / 'fixture.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary'], cwd=candidate))
+          subprocess.run(['git', 'archive', '--format=zip', '-o', str(evidence / 'candidate-source.zip'), tree], cwd=candidate, check=True)
+          (evidence / 'test_managed_agent_atomic.py').write_bytes((candidate / 'tests/test_managed_agent_atomic.py').read_bytes())
+      - name: Preserve prepared source and patch
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sddl436-prepared-source
+          path: ${{ runner.temp }}/evidence436/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Install pinned development tools
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', 'requirements-dev.txt'], cwd=root, check=True)
+      - name: Check modified-file style and compilation
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          path = 'tests/test_managed_agent_atomic.py'
+          for command in (['-m', 'ruff', 'check', path], ['-m', 'black', '--check', '--diff', path], ['-m', 'py_compile', path]):
+              subprocess.run([sys.executable, *command], cwd=root, check=True)
+      - name: Run focused native and portable publication regressions
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436/focused.log'
+          with log.open('w', encoding='utf-8') as stream:
+              result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_managed_agent_atomic.py', '-v'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          print(log.read_text(encoding='utf-8')[-6000:])
+          raise SystemExit(result.returncode)
+      - name: Run full root unit suite
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436/root-units.log'
+          with log.open('w', encoding='utf-8') as stream:
+              result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          print(log.read_text(encoding='utf-8')[-8000:])
+          raise SystemExit(result.returncode)
+      - name: Run full replay suite
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436/replay.log'
+          with log.open('w', encoding='utf-8') as stream:
+              result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          print(log.read_text(encoding='utf-8')[-2000:])
+          raise SystemExit(result.returncode)
+      - name: Run complete deny-floor smoke matrix
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436/smoke.log'
+          with log.open('w', encoding='utf-8') as stream:
+              result = subprocess.run([sys.executable, 'templates/hooks/smoke_test.py'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          print(log.read_text(encoding='utf-8')[-2000:])
+          raise SystemExit(result.returncode)
+      - name: Record Doctor observation without claiming installed-runtime qualification
+        if: always()
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate436'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence436'
+          if not (root / 'harness.py').exists():
+              raise SystemExit('candidate unavailable; no Doctor observation')
+          log = evidence / 'doctor.log'
+          with log.open('w', encoding='utf-8') as stream:
+              result = subprocess.run([sys.executable, 'harness.py', 'doctor'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          (evidence / 'doctor-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'installed_runtime_qualified': False}) + '\n')
+          print('Doctor observational exit:', result.returncode)
+          print(log.read_text(encoding='utf-8')[-3000:])
+      - name: Preserve complete logs and bound source manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sddl436-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/evidence436/
+          retention-days: 14
+          if-no-files-found: error
