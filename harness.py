@@ -7607,7 +7607,7 @@ def managed_codex_agent_destination_path(agents_home: Path, name: str) -> Path:
         matches = [
             entry
             for entry in agents_home.iterdir()
-            if managed_codex_agent_destination_key(entry.name) == destination_key
+            if entry.name.casefold() == destination_key
         ]
     except OSError as exc:
         raise HarnessError(
@@ -7656,8 +7656,21 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
         return {}
     if not state_path.is_file():
         raise HarnessError(f"invalid managed Codex agents state path: {state_path}")
+
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise HarnessError(
+                    "invalid managed Codex agents state: duplicate JSON key"
+                )
+            result[key] = value
+        return result
+
     try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            state_path.read_text(encoding="utf-8"), object_pairs_hook=unique_pairs
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise HarnessError(
             f"cannot read managed Codex agents state {state_path}: {exc}"
@@ -7670,14 +7683,67 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
     ):
         raise HarnessError(f"invalid managed Codex agents state: {state_path}")
     agents: dict[str, str] = {}
+    identities: set[str] = set()
     for name, digest in payload["agents"].items():
         name = managed_codex_agent_name(name)
+        identity = managed_codex_agent_destination_key(name)
+        if identity in identities:
+            raise HarnessError(
+                "invalid managed Codex agents state: colliding agent names"
+            )
+        identities.add(identity)
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise HarnessError(
                 f"invalid managed Codex agents state: invalid digest for {name}"
             )
         agents[name] = digest
     return agents
+
+
+def write_managed_codex_file(
+    path: Path, content: bytes, mode: int | None = None
+) -> None:
+    """Replace one file through an exclusive, flushed sibling; never follow a hardlink.
+
+    This is a single-file publication, not a multi-file transaction or a concurrent-writer lock.
+    A failed rename leaves the previous destination in place; callers retain recovery backups.
+    """
+    temporary: Path | None = None
+    try:
+        reject_sync_path_aliases(path.parent, "managed Codex file parent")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        reject_sync_path_aliases(path, "managed Codex file")
+        if path.exists() and not path.is_file():
+            raise HarnessError(f"managed Codex target is not an ordinary file: {path}")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".harness-agent-", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mode is not None:
+            temporary.chmod(mode)
+        os.replace(temporary, path)
+        temporary = None
+        if path_is_alias(path) or not path.is_file() or path.read_bytes() != content:
+            raise HarnessError(
+                f"managed Codex target changed during publication: {path}"
+            )
+    except OSError as exc:
+        raise HarnessError(f"cannot publish managed Codex file {path}: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                # Only the reserved sibling is cleaned up; no live target is chmodded.
+                if not path_is_alias(temporary) and temporary.is_file():
+                    temporary.chmod(stat.S_IREAD | stat.S_IWRITE)
+                    temporary.unlink()
+                else:
+                    raise
 
 
 def write_managed_codex_agents_state(
@@ -7688,8 +7754,9 @@ def write_managed_codex_agents_state(
         "schema_version": MANAGED_CODEX_AGENTS_STATE_SCHEMA_VERSION,
         "agents": dict(sorted(agents.items())),
     }
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_managed_codex_file(
+        state_path, (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    )
 
 
 def reserve_backup_root(parent: Path, stem: str) -> Path:
@@ -10242,6 +10309,7 @@ def sync_global(args: argparse.Namespace) -> int:
     current_agent_state: dict[str, str] = {}
     next_agent_state: dict[str, str] = {}
     source_agent_keys: dict[str, str] = {}
+    agent_snapshots: dict[str, tuple[bytes, int]] = {}
     agent_selection = default_sync or sync_agents
     agent_source_exists = agent_selection and (
         agent_source.exists() or path_is_alias(agent_source)
@@ -10296,12 +10364,23 @@ def sync_global(args: argparse.Namespace) -> int:
                     "Codex agent destination must be an ordinary file: "
                     f"{existing_target}"
                 )
-            equal = same_file(source, existing_target)
+            try:
+                source_bytes = source.read_bytes()
+                source_mode = stat.S_IMODE(source.stat().st_mode)
+                equal = (
+                    existing_target.is_file()
+                    and existing_target.read_bytes() == source_bytes
+                )
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot snapshot managed Codex agent {source}: {exc}"
+                ) from exc
+            agent_snapshots[name] = (source_bytes, source_mode)
             canonical_name_needed = existing_target.name != name
             agent_states.append(
                 (name, source, target, existing_target, equal, canonical_name_needed)
             )
-            next_agent_state[name] = sha256_file(source)
+            next_agent_state[name] = hashlib.sha256(source_bytes).hexdigest()
         for name, digest in current_agent_state.items():
             if managed_codex_agent_destination_key(name) in source_agent_keys:
                 continue
@@ -10544,8 +10623,12 @@ def sync_global(args: argparse.Namespace) -> int:
                 shutil.copy2(existing_target, backup)
                 print(f"agent backup {backup} (before replacing {existing_target})")
             if not equal:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, existing_target)
+                try:
+                    write_managed_codex_file(existing_target, *agent_snapshots[_name])
+                except HarnessError as exc:
+                    raise HarnessError(
+                        f"{exc}; recovery backups: {backup_root}"
+                    ) from exc
             if canonical_name_needed:
                 rename_codex_agent_to_canonical_name(existing_target, target)
         for _name, target, status in stale_agent_states:
@@ -10571,6 +10654,21 @@ def sync_global(args: argparse.Namespace) -> int:
             shutil.copy2(target, backup)
             print(f"agent backup {backup} (before removing {target})")
             target.unlink()
+        # Do not publish ownership for stale or unverified active bytes, including no-ops.
+        for name, _source, target, _existing, _equal, _rename in agent_states:
+            try:
+                verified = (
+                    not path_is_alias(target)
+                    and target.is_file()
+                    and sha256_file(target) == next_agent_state[name]
+                )
+            except OSError:
+                verified = False
+            if not verified:
+                raise HarnessError(
+                    f"managed Codex agent changed before ownership publication: {target}; "
+                    f"recovery backups: {backup_root}"
+                )
         if current_agent_state != next_agent_state:
             if agent_state_path.exists():
                 backup = backup_root / "managed-codex-agents-state.json"
