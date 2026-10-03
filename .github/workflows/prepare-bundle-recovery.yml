@@ -1,0 +1,128 @@
+name: Prepare bundle preflight and recovery repair
+on:
+  push:
+    branches: [prep/bundle-recovery-1004]
+    paths: [.github/preparation/bundle-recovery.part0, .github/preparation/bundle-recovery.part1, .github/preparation/bundle-recovery.part2, .github/preparation/bundle-recovery.part3, .github/workflows/prepare-bundle-recovery.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: python {0}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Apply hash-bound patch to the exact reviewed base
+        run: |
+          import hashlib, os, pathlib, subprocess, zlib
+          source = pathlib.Path.cwd()
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          evidence.mkdir()
+          patch = zlib.decompress(b''.join((source / f'.github/preparation/bundle-recovery.part{i}').read_bytes() for i in range(4)))
+          assert hashlib.sha256(patch).hexdigest() == '0e0946bc96e198a4330044b5e379e72997a11b2103a3403a1079a3966748a7b5'
+          (evidence / 'input.patch').write_bytes(patch)
+          base = '3102fc6797b06078a6189765c25c0e2f40f5ad68'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(root), base], check=True)
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root, text=True).strip() == '1788ab3ebba41e54a743d99fd35f2f3e6de0def7'
+          subprocess.run(['git', 'apply', '--index', str(evidence / 'input.patch')], cwd=root, check=True)
+      - name: Install pinned tools and format only changed Python
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          paths = ['harness.py', 'tests/test_bundle_preflight_recovery.py']
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', 'requirements-dev.txt'], cwd=root, check=True)
+          for command in (['-m', 'black', *paths], ['-m', 'ruff', 'check', *paths], ['-m', 'black', '--check', *paths], ['-m', 'py_compile', *paths]):
+              subprocess.run([sys.executable, *command], cwd=root, check=True)
+      - name: Demonstrate regression failures against the unchanged base
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          target = root / 'harness.py'
+          candidate = target.read_bytes()
+          try:
+              target.write_bytes(subprocess.check_output(['git', 'show', 'HEAD:harness.py'], cwd=root))
+              result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_preflight_recovery.py', '-v'], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              (evidence / 'red.log').write_bytes(result.stdout)
+              (evidence / 'red-exit.json').write_text(json.dumps({'exit_code': result.returncode}) + '\n')
+              assert result.returncode == 1 and b'FAILED (failures=' in result.stdout, result.stdout[-2000:]
+              print(result.stdout[-1800:].decode('utf-8', errors='backslashreplace'))
+          finally:
+              target.write_bytes(candidate)
+      - name: Verify candidate and preserve exact outcomes
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          commands = {
+              'focused': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_preflight_recovery.py', '-v'],
+              'root-units': ['-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+              'replay': ['-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'],
+              'smoke': ['templates/hooks/smoke_test.py'],
+          }
+          for name, args in commands.items():
+              log = evidence / (name + '.log')
+              with log.open('wb') as stream:
+                  result = subprocess.run([sys.executable, *args], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+              (evidence / (name + '-exit.json')).write_text(json.dumps({'exit_code': result.returncode, 'command': args}) + '\n')
+              print(name, 'exit', result.returncode, flush=True)
+              print(log.read_bytes()[-2000:].decode('utf-8', errors='backslashreplace'), flush=True)
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+      - name: Observe Doctor without changing hosted globals
+        if: always()
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          if not (root / 'harness.py').exists():
+              raise SystemExit('candidate unavailable')
+          with (evidence / 'doctor.log').open('wb') as stream:
+              result = subprocess.run([sys.executable, 'harness.py', 'doctor'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          (evidence / 'doctor-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'installed_runtime_qualified': False}) + '\n')
+          print('Doctor observational exit:', result.returncode)
+      - name: Export verified immutable blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle-recovery'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          for name in ('focused', 'root-units', 'replay', 'smoke'):
+              assert json.loads((evidence / (name + '-exit.json')).read_text())['exit_code'] == 0
+          paths = ['.github/workflows/ci.yml', 'SPECS.md', 'harness.py', 'tests/test_bundle_preflight_recovery.py']
+          subprocess.run(['git', 'add', '--', *paths], cwd=root, check=True)
+          assert subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=root, text=True).splitlines() == paths
+          subprocess.run(['git', 'diff', '--cached', '--check'], cwd=root, check=True)
+          manifest = {'base': '3102fc6797b06078a6189765c25c0e2f40f5ad68', 'preparation_commit': os.environ['GITHUB_SHA'], 'candidate_tree': subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip(), 'files': {}}
+          for path in paths:
+              data = (root / path).read_bytes()
+              expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              request = urllib.request.Request('https://api.github.com/repos/Chris0Jeky/agent-harness/git/blobs', data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  returned = json.load(response)
+              assert returned['sha'] == expected
+              manifest['files'][path] = expected
+          (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (evidence / 'final.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary'], cwd=root))
+          subprocess.run(['git', 'archive', '--format=zip', '-o', str(evidence / 'source.zip'), manifest['candidate_tree']], cwd=root, check=True)
+          print(json.dumps(manifest, indent=2))
+      - name: Retain source and complete evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bundle-recovery-verification
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
+          retention-days: 14
