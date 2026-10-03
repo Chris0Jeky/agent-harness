@@ -57,6 +57,7 @@ jobs:
           tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
+          tests/test_managed_agent_atomic.py
           tests/test_skill_preflight_unavailable_root.py
           tests/test_replay_decoder_contract.py
           tests/test_replay_input_decoding.py
@@ -93,6 +94,7 @@ jobs:
           tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
+          tests/test_managed_agent_atomic.py
           tests/test_skill_preflight_unavailable_root.py
           tests/test_replay_decoder_contract.py
           tests/test_replay_input_decoding.py
@@ -129,6 +131,7 @@ jobs:
           tests/test_audit_branch_protection.py
           tests/test_command_prefixes.py
           tests/test_replay_corpus.py tests/test_skill_tree_mode_digest.py
+          tests/test_managed_agent_atomic.py
           tests/test_skill_preflight_unavailable_root.py
           tests/test_replay_decoder_contract.py
           tests/test_replay_input_decoding.py

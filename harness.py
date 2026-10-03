@@ -7783,11 +7783,219 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
     return agents
 
 
+WINDOWS_DACL_SECURITY_INFORMATION = 0x4
+
+
+def windows_security_libraries() -> tuple[Any, Any]:
+    """Load advapi32/kernel32 with the signatures the staging helpers use (Windows only)."""
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.GetFileSecurityW.restype = ctypes.c_int
+    advapi.OpenProcessToken.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetTokenInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.ConvertSidToStringSidW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.restype = ctypes.c_void_p
+    kernel.CreateFileW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    return advapi, kernel
+
+
+def windows_file_dacl_descriptor(path: Path) -> bytes:
+    """Return an existing file's self-relative DACL descriptor, protection flag included."""
+    advapi, _kernel = windows_security_libraries()
+    needed = ctypes.c_uint32(0)
+    advapi.GetFileSecurityW(
+        str(path), WINDOWS_DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(needed)
+    )
+    if needed.value == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not advapi.GetFileSecurityW(
+        str(path),
+        WINDOWS_DACL_SECURITY_INFORMATION,
+        buffer,
+        needed.value,
+        ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return buffer.raw
+
+
+def windows_dacl_signature(descriptor: bytes) -> tuple[bool, bool, str]:
+    """Return (protected, NULL DACL, ordered ACE list) of a descriptor's DACL.
+
+    The auto-inherited marker is ignored: Windows sets it on propagation, not access.
+    """
+    advapi, kernel = windows_security_libraries()
+    buffer = ctypes.create_string_buffer(descriptor)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        buffer, 1, WINDOWS_DACL_SECURITY_INFORMATION, ctypes.byref(text), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+    match = re.fullmatch(r"D:((?:P|AI|AR|NO_ACCESS_CONTROL)*)(.*)", sddl, re.S)
+    if match is None:
+        raise OSError(f"unrecognised DACL descriptor: {sddl!r}")
+    flags = re.findall(r"P|AI|AR|NO_ACCESS_CONTROL", match.group(1))
+    return "P" in flags, "NO_ACCESS_CONTROL" in flags, match.group(2)
+
+
+def windows_owner_only_descriptor() -> bytes:
+    """Return a protected DACL granting full control only to the current token user.
+
+    The user is also named as owner, so an elevated token whose default owner is the
+    Administrators group does not hand implicit DACL control to that group.
+    """
+    advapi, kernel = windows_security_libraries()
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)  # TOKEN_QUERY
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = ctypes.c_uint32(0)
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        user = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, 1, user, needed.value, ctypes.byref(needed)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
+    # TOKEN_USER begins with SID_AND_ATTRIBUTES, whose first member is the SID pointer.
+    sid = ctypes.c_void_p.from_buffer(user).value
+    sid_text = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        user_sid = ctypes.wstring_at(sid_text.value)
+        sddl = f"O:{user_sid}D:P(A;;FA;;;{user_sid})"
+    finally:
+        kernel.LocalFree(sid_text)
+    descriptor = ctypes.c_void_p()
+    size = ctypes.c_uint32(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(descriptor.value, size.value)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+class WindowsSecurityAttributes(ctypes.Structure):
+    _fields_ = (
+        ("nLength", ctypes.c_uint32),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.c_int),
+    )
+
+
+def windows_create_staging_file(
+    parent: Path, prefix: str, descriptor: bytes, read_only: bool
+) -> tuple[int, Path]:
+    """Create a new unshared sibling whose DACL and read-only bit exist before any byte.
+
+    No other handle can open the file while the returned descriptor is open, so no reader
+    can be admitted under a broader DACL than the one the destination will keep.
+    """
+    import msvcrt
+
+    _advapi, kernel = windows_security_libraries()
+    security = ctypes.create_string_buffer(descriptor)
+    attributes = WindowsSecurityAttributes(
+        ctypes.sizeof(WindowsSecurityAttributes),
+        ctypes.cast(security, ctypes.c_void_p),
+        0,
+    )
+    flags = 0x01 if read_only else 0x80  # FILE_ATTRIBUTE_READONLY / NORMAL
+    for _attempt in range(100):
+        candidate = parent / f"{prefix}{uuid.uuid4().hex}"
+        handle = kernel.CreateFileW(
+            str(candidate),
+            0x40000000,  # GENERIC_WRITE
+            0,  # no sharing until replacement
+            ctypes.byref(attributes),
+            1,  # CREATE_NEW
+            flags,
+            None,
+        )
+        if handle not in (None, ctypes.c_void_p(-1).value):
+            try:
+                return (
+                    msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY),
+                    candidate,
+                )
+            except OSError:
+                kernel.CloseHandle(handle)
+                if read_only:
+                    os.chmod(candidate, stat.S_IREAD | stat.S_IWRITE)
+                candidate.unlink(missing_ok=True)
+                raise
+        error = ctypes.get_last_error()
+        if error not in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+            raise ctypes.WinError(error)
+    raise FileExistsError(f"cannot reserve a staging sibling in {parent}")
+
+
 def write_managed_codex_file(
     path: Path, content: bytes, mode: int | None = None
 ) -> None:
     """Replace one file through an exclusive, flushed sibling; never follow a hardlink.
 
+    The final mode (POSIX) or the destination's DACL and read-only bit (Windows) are applied
+    to the staging file before its single fsync, so the flushed file already carries them.
     This is a single-file publication, not a multi-file transaction or a concurrent-writer lock.
     A failed rename leaves the previous destination in place; callers retain recovery backups.
     """
@@ -7798,16 +8006,43 @@ def write_managed_codex_file(
         reject_sync_path_aliases(path, "managed Codex file")
         if path.exists() and not path.is_file():
             raise HarnessError(f"managed Codex target is not an ordinary file: {path}")
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".harness-agent-", dir=path.parent
-        )
-        temporary = Path(temporary_name)
+        if os.name == "nt":
+            # A renamed sibling keeps its own DACL, so it must be the destination's: an
+            # inherited parent DACL could broaden a deliberately restricted file (#431).
+            security = (
+                windows_file_dacl_descriptor(path)
+                if path.exists()
+                else windows_owner_only_descriptor()
+            )
+            read_only = mode is not None and not mode & stat.S_IWRITE
+            requested = windows_dacl_signature(security)
+            descriptor, temporary = windows_create_staging_file(
+                path.parent, ".harness-agent-", security, read_only
+            )
+            # Prove the created DACL before any byte exists: refuse rather than publish
+            # if Windows merged parent entries or dropped the requested protection.
+            try:
+                staged = windows_dacl_signature(windows_file_dacl_descriptor(temporary))
+            except OSError:
+                os.close(descriptor)
+                raise
+            if staged != requested:
+                os.close(descriptor)
+                raise HarnessError(
+                    f"staging file did not receive the destination's DACL; "
+                    f"refusing publication: {path}"
+                )
+        else:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".harness-agent-", dir=path.parent
+            )
+            temporary = Path(temporary_name)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()
+            if mode is not None and os.name != "nt":
+                os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        if mode is not None:
-            temporary.chmod(mode)
         os.replace(temporary, path)
         temporary = None
         if path_is_alias(path) or not path.is_file() or path.read_bytes() != content:
