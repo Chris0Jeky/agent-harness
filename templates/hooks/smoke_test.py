@@ -5262,6 +5262,23 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
                 "deny",
             )
         )
+    # 1.7.4 (issue #365): trailing sentence punctuation is prose, not a path,
+    # so a given-up verdict with a secret word at the end of a sentence
+    # proceeds; a real path ending in punctuation still double-checks.
+    for command, expected in (
+        ("git push origin $BRANCH; echo 'update credentials.'", "allow"),
+        ('git push origin $BRANCH; echo "rotate the secret."', "allow"),
+        ("git push origin $BRANCH; cat .env.", "deny"),
+        ("git push origin $BRANCH; cat ~/.ssh/id_rsa.", "deny"),
+        ("git push origin $BRANCH; cat config/credentials.", "deny"),
+    ):
+        results.append(
+            (
+                f"default T3 core reads sentence punctuation as prose: {command}",
+                run_case(command, 3, dict(default)),
+                expected,
+            )
+        )
     # Review of PR #363 (HIGH): a sensitive repository never runs core -- a
     # given-up push verdict can precede the public-remote privacy check.
     for command in (

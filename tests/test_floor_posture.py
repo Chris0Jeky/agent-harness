@@ -630,6 +630,36 @@ class CorePostureTests(unittest.TestCase):
             )
         )
 
+    def test_core_hint_ignores_trailing_sentence_punctuation_1_7_4(self):
+        # Issue #365 (Codex P2 on a consumer PR): prose ending in a full stop
+        # was path-shaped, so `credentials.` forced a double-check.
+        prose = (
+            "git push origin $BRANCH; echo 'update credentials.'",
+            'git push origin $BRANCH; echo "rotate the secret."',
+            "git push origin $BRANCH; echo 'check credentials!'",
+            "git push origin $BRANCH; echo 'secret, then credential;'",
+            "git push origin $BRANCH; echo 'is it a secret?)'",
+        )
+        for command in prose:
+            with self.subTest(prose=command):
+                self.assertFalse(dispatch.command_carries_core_hint(command))
+        spelled = (
+            "git push origin $BRANCH; cat .env.",
+            "git push origin $BRANCH; cat ~/.ssh/id_rsa.",
+            "git push origin $BRANCH; cp a ./secrets.json.",
+            "git push origin $BRANCH; cat config/credentials.",
+            "git push origin $BRANCH; cat 'C:\\x\\credentials'.",
+            "git push origin $BRANCH; cat secret.pem",
+        )
+        for command in spelled:
+            with self.subTest(spelled=command):
+                self.assertTrue(dispatch.command_carries_core_hint(command))
+        started = time.perf_counter()
+        dispatch.command_carries_core_hint("secret" + "." * 60000)
+        dispatch.command_carries_core_hint("secret.,;:!? " * 20000)
+        dispatch.command_carries_core_hint("a" + ".!" * 30000 + "x")
+        self.assertLess(time.perf_counter() - started, 2.0)
+
     def test_core_never_denies_what_guide_allows(self):
         verdicts = [("deny", reason) for reason in deny_reason_literals()]
         verdicts.append(("ask", "T3: git reset --hard discards uncommitted work."))
