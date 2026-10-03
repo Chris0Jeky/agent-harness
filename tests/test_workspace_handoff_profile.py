@@ -83,16 +83,23 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
 
     def test_evidence_ladder_names_every_rung_and_receipt_field(self) -> None:
         journeys = {j["id"]: j for j in self.load_example()["journeys"]}
-        self.assertEqual([step["id"] for step in journeys["evidence-ladder"]["steps"]],
-                         ["source-unit", "integrated-runtime", "installed", "device",
-                          "owner-accepted", "revision-change"])
+        steps = {step["id"]: step for step in journeys["evidence-ladder"]["steps"]}
+        self.assertEqual(list(steps), ["source", "unit", "integrated", "native-runtime", "installed",
+                                       "device", "owner-accepted", "revision-change"])
+        common = ("subject revision", "exact source revision", "fixture revision or hash", "utc time",
+                  "environment", "proof kind", "unavailable observations",
+                  "advisory or operational authority")
+        executed = ("command and cwd", "pass/fail/skip counts")
+        extras = {"installed": ("installed artifact identity",), "device": ("device and platform identity",),
+                  "owner-accepted": ("owner-supplied record",)}
+        for rung in ("source", "unit", "integrated", "native-runtime", "installed", "device", "owner-accepted"):
+            action = steps[rung]["action"].lower()
+            required = common + (executed if rung != "owner-accepted" else ()) + extras.get(rung, ())
+            for field in required:
+                self.assertIn(field, action, f"{rung} rung omits {field}")
         text = self.journey_text("evidence-ladder")
-        for field in ("subject revision", "exact source revision", "fixture revision or hash", "utc",
-                      "environment", "proof kind", "command and cwd", "pass/fail/skip counts",
-                      "unavailable observations", "advisory or operational authority",
-                      "installed artifact identity", "device and platform identity",
-                      "owner-supplied record", "does not imply", "no rung transfers"):
-            self.assertIn(field, text)
+        for claim in ("does not imply", "no rung transfers"):
+            self.assertIn(claim, text)
         profile = self.profile_text()
         for rung in ("source, unit, integrated, native runtime, installed, device, owner accepted",
                      "installed artifact identity distinct from the source revision",

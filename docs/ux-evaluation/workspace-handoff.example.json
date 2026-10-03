@@ -403,11 +403,11 @@
       ],
       "steps": [
         {
-          "id": "source-unit",
-          "action": "Declare a source and a unit rung receipt for one fictional candidate: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, command and cwd, pass/fail/skip counts, unavailable observations and advisory or operational authority.",
+          "id": "source",
+          "action": "Declare the source rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
           "assertions": [
             "Every named field is present or explicitly recorded as unavailable; an omitted field is not a pass.",
-            "A unit rung does not imply an integrated, runtime, installed, device or owner-accepted rung."
+            "A source rung does not imply a unit, integrated, runtime, installed, device or owner-accepted rung."
           ],
           "evidence_required": [
             "action_log",
@@ -416,10 +416,35 @@
           ]
         },
         {
-          "id": "integrated-runtime",
-          "action": "Declare an integrated rung and a native runtime rung as separate receipts, each with its own command, cwd, environment and counts.",
+          "id": "unit",
+          "action": "Declare the unit rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
           "assertions": [
-            "A skipped or unavailable observation stays unknown and is never counted as a pass.",
+            "A unit rung does not imply an integrated, runtime, installed, device or owner-accepted rung.",
+            "A skipped or unavailable observation stays unknown and is never counted as a pass."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "integrated",
+          "action": "Declare the integrated rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
+          "assertions": [
+            "The integrated receipt is separate from the unit receipt and carries its own fields.",
+            "A skipped or unavailable observation stays unknown and is never counted as a pass."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "native-runtime",
+          "action": "Declare the native runtime rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Name the runtime that actually ran.",
+          "assertions": [
             "The runtime receipt names the runtime that actually ran, not the one the integrated rung assumed."
           ],
           "evidence_required": [
@@ -430,7 +455,7 @@
         },
         {
           "id": "installed",
-          "action": "Declare an installed rung that records the installed artifact identity as a field distinct from the source revision.",
+          "action": "Declare the installed rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Also record the installed artifact identity as a field distinct from the source revision.",
           "assertions": [
             "A source-revision match alone never stands in for the identity of the installed artifact."
           ],
@@ -442,7 +467,7 @@
         },
         {
           "id": "device",
-          "action": "Declare a device rung that records the device and platform identity beside the installed artifact identity.",
+          "action": "Declare the device rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Also record the device and platform identity beside the installed artifact identity.",
           "assertions": [
             "A rung observed on one device or platform makes no claim about another."
           ],
@@ -454,7 +479,7 @@
         },
         {
           "id": "owner-accepted",
-          "action": "Declare the owner-accepted rung as a slot that only an owner-supplied record can fill.",
+          "action": "Declare the owner-accepted rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. This rung is a slot that only an owner-supplied record can fill; command and counts do not apply.",
           "assertions": [
             "No agent, model or lower rung can fill or infer the owner record; absent means open.",
             "Every rung stays advisory and not run in this pack; no execution claim is made."
