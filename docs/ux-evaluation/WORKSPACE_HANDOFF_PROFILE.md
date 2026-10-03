@@ -25,9 +25,26 @@ python -m unittest discover -s tests -p test_workspace_handoff_profile.py -v
 
 ## Required journey evidence
 
-The three authored journeys cover durable capture after a lost response, stale/revoked scope and the separation between attempt results and human completion. The attempt journey includes an identical progress replay and an independently stale, out-of-order report before cancellation, reflecting a native monotonic-report contract while remaining an unexecuted generic case. Retain ordered actions, requests, actual committed state and receipts. Capture UI evidence separately where the user-facing distinction matters. Record unavailable observations as BLOCKED or NOT RUN, not as an expected successful result.
+The five authored journeys cover durable capture after a lost response, stale/revoked scope, the separation between attempt results and human completion, incomplete observations and cancellation at admission. The attempt journey includes an identical progress replay and an independently stale, out-of-order report before cancellation, reflecting a native monotonic-report contract while remaining an unexecuted generic case. Retain ordered actions, requests, actual committed state and receipts. Capture UI evidence separately where the user-facing distinction matters. Record unavailable observations as BLOCKED or NOT RUN, not as an expected successful result.
 
 A product implementation must add genuine crash-boundary, duplicate-delivery, out-of-order event, permission revocation and cancellation controls. Isolate revision and permission failures: first test a stale revision with valid scope, then revoked scope with the current revision. Otherwise one working gate can conceal another broken gate. Include a worker that exits successfully without satisfying acceptance criteria. Complete the journey only through the application's current authorized transition. Test fixtures must not borrow personal databases, cloud credentials or real messages.
+
+### Completeness and admission boundaries
+
+A bounded response is not automatically a complete snapshot. The incomplete-observation journey
+requires a preserved complete checkpoint through a partial read and restart, then an independent
+access-denial control that cannot be undone by an older reply. An omitted item is not evidence
+that a reminder was delivered, a task was deleted or access was revoked. Consume authoritative
+outcome receipts where the distinction matters; do not turn a collection cap into an effect.
+
+The admission journey records a precise launch-admission boundary. Persisted cancellation before
+that boundary must prevent launch; cancellation after it is an in-flight request. Independently
+retire the lease during the last permission read and expire a disclosure grant while that read
+is pending. These controls must leave newer ownership intact and must not manufacture process
+acknowledgement or effect reconciliation. A scheduler lock does not fence an external writer.
+
+These are authored acceptance requirements. Passing the profile's declaration tests does not
+prove that any product implements them, and no additional simulator or scheduler is introduced.
 
 ## Fictional adoption profile
 
@@ -38,6 +55,8 @@ This table assigns conformance questions to generic roles. It records no native 
 | Lost capture response, duplicate key and changed-payload conflict | Work application | One persisted capture and its authoritative receipt through the actual client; independent scope/revision controls |
 | Lost admission response and duplicate enqueue | Admission runtime and receiver | Stable intent/attempt mapping, actual admission receipt and one admitted job after reconciliation |
 | Duplicate or out-of-order progress | Attempt/report owners | Identical-sequence replay, stale report handling without state regression and durable recovery after restart |
+| Incomplete collection and restart | Projection and source owners | Explicit coverage, preserved complete checkpoint, no inferred effects and a separate denied-access/late-response control |
+| Cancellation before launch admission | Admission runtime | Cancellation and lease retirement during the final authority read prevent launch; elapsed read time can expire the grant |
 | Cancellation and late success | Runtime, receiver and effect owner | Separately observed request, admission stop, process acknowledgement and reconciled effects; unavailable observations stay unknown |
 | Successful worker without accepted human outcome | Work application | Attempt result/evidence recorded while human work remains open; completion uses a separate authorized transition |
 | Restored owners with copied epoch/fence | Effect receiver | Receiver-enforced fencing or explicit old-writer isolation; the receipt lab's two-owner counterexample proves neither |
