@@ -21,10 +21,10 @@ jobs:
       - name: Read bounded failure diagnostics
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python .maintenance/prepare_docs.py diagnostics
+        run: python .maintenance/run_docs.py diagnostics
       - name: Construct exact reviewed documentation bytes
-        run: python .maintenance/prepare_docs.py build
+        run: python .maintenance/run_docs.py build
       - name: Store only verified file blobs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python .maintenance/prepare_docs.py publish
+        run: python .maintenance/run_docs.py publish
