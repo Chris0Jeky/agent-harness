@@ -1,0 +1,30 @@
+name: Prepare reviewed documentation blobs
+on:
+  push:
+    branches: [maintenance/prepare-doc-389-1003]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Read bounded failure diagnostics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .maintenance/prepare_docs.py diagnostics
+      - name: Construct exact reviewed documentation bytes
+        run: python .maintenance/prepare_docs.py build
+      - name: Store only verified file blobs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .maintenance/prepare_docs.py publish
