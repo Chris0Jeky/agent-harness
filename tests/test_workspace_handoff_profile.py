@@ -10,6 +10,7 @@ from ux_evaluation.common import ContractError
 from ux_evaluation.scenarios import bind_pack
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "docs" / "ux-evaluation" / "workspace-handoff.example.json"
+PROFILE = EXAMPLE.with_name("WORKSPACE_HANDOFF_PROFILE.md")
 REPOSITORY = "example/workspace"
 REVISION = "1" * 40  # Deliberately synthetic, not a checkout or attestation.
 FIXTURE = "authoring-only: isolated workspace handoff simulator (not implemented)"
@@ -32,7 +33,8 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertEqual(result["authority"], "advisory")
         self.assertFalse(result["gate_eligible"])
         self.assertEqual(result["journey_ids"], ["durable-capture", "stale-scope", "attempt-is-not-outcome",
-                                                 "incomplete-observation", "cancellation-at-admission"])
+                                                 "incomplete-observation", "cancellation-at-admission", "evidence-ladder",
+                                                 "observation-states", "catch-up-contract", "fix-round-discipline"])
 
     def test_revision_and_permission_negative_controls_are_independent(self) -> None:
         journey = self.load_example()["journeys"][1]
@@ -59,6 +61,78 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertEqual(journey["budget"]["max_judge_calls"], 0)
         self.assertEqual(journey["budget"]["max_retries"], 0)
         self.assertEqual(self.bind(self.load_example())["execution"], "not_run")
+
+    def journey_text(self, journey_id: str) -> str:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertIn(journey_id, journeys)
+        return json.dumps(journeys[journey_id], ensure_ascii=False).lower()
+
+    def profile_text(self) -> str:
+        self.assertTrue(PROFILE.is_file(), "The workspace handoff profile is missing")
+        return " ".join(PROFILE.read_text(encoding="utf-8").lower().split())
+
+    def test_advisory_journeys_stay_unexecuted_and_within_budget(self) -> None:
+        pack = self.load_example()
+        for journey in pack["journeys"][5:]:
+            self.assertEqual(journey["fixture_ref"], FIXTURE)
+            self.assertEqual(journey["budget"]["max_judge_calls"], 0)
+            self.assertEqual(journey["budget"]["max_retries"], 0)
+        self.assertEqual(self.bind(pack)["execution"], "not_run")
+        self.assertIn("advisory and `not_run`; they make no execution claim", " ".join(
+            PROFILE.read_text(encoding="utf-8").split()))
+
+    def test_evidence_ladder_names_every_rung_and_receipt_field(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertEqual([step["id"] for step in journeys["evidence-ladder"]["steps"]],
+                         ["source-unit", "integrated-runtime", "installed", "device",
+                          "owner-accepted", "revision-change"])
+        text = self.journey_text("evidence-ladder")
+        for field in ("subject revision", "exact source revision", "fixture revision or hash", "utc",
+                      "environment", "proof kind", "command and cwd", "pass/fail/skip counts",
+                      "unavailable observations", "advisory or operational authority",
+                      "installed artifact identity", "device and platform identity",
+                      "owner-supplied record", "does not imply", "no rung transfers"):
+            self.assertIn(field, text)
+        profile = self.profile_text()
+        for rung in ("source, unit, integrated, native runtime, installed, device, owner accepted",
+                     "installed artifact identity distinct from the source revision",
+                     "never inferred", "never transfers to a different candidate revision",
+                     "lower rung never implies a higher one"):
+            self.assertIn(rung, profile)
+
+    def test_observation_states_are_four_distinct_states(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertEqual([step["id"] for step in journeys["observation-states"]["steps"]],
+                         ["complete", "partial", "unavailable", "denied"])
+        text = self.journey_text("observation-states")
+        for claim in ("never authorizes inferred deletion or inferred delivery",
+                      "unknown, never pass", "distinct state from unavailable and from partial"):
+            self.assertIn(claim, text)
+        self.assertIn("complete, partial, unavailable and denied are four distinct states", self.profile_text())
+
+    def test_catch_up_contract_pins_ordering_overlap_and_deferral(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertEqual([step["id"] for step in journeys["catch-up-contract"]["steps"]],
+                         ["outcome-lookup", "first-run", "overlap-continuation",
+                          "timestamp-group", "deferred"])
+        text = self.journey_text("catch-up-contract")
+        for claim in ("first-run floor", "inclusive overlap", "exclusive", "never splits one timestamp group",
+                      "never skipped by a resume position", "failed read does not advance"):
+            self.assertIn(claim, text)
+        profile = self.profile_text()
+        for claim in ("commit-ordered feed", "inclusive overlap", "never splits one timestamp group",
+                      "never skipped by a resume position"):
+            self.assertIn(claim, profile)
+
+    def test_fix_round_requires_one_scoped_verification(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        self.assertEqual([step["id"] for step in journeys["fix-round-discipline"]["steps"]],
+                         ["fix-round", "scoped-verification", "outcome"])
+        text = self.journey_text("fix-round-discipline")
+        for claim in ("scoped to the fix diff", "expiry does not drop rows", "cursor does not advance on a failed read",
+                      "resume position does not skip deferred rows", "exact fix revision"):
+            self.assertIn(claim, text)
+        self.assertIn("one scoped verification after every fix round", self.profile_text())
 
     def test_expected_revision_must_match_even_for_a_fictional_example(self) -> None:
         with self.assertRaisesRegex(ContractError, "subject_mismatch"):
