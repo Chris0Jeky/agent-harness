@@ -1,0 +1,124 @@
+name: Prepare rollback storage repair 278
+on:
+  push:
+    branches: [prep/bundle-rollback-storage-278]
+    paths: [.github/preparation/test_bundle_rollback_storage.py, .github/workflows/prepare-bundle-278.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: python {0}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Prepare pinned candidate and demonstrate failing-first controls
+        run: |
+          import hashlib, json, os, pathlib, shutil, subprocess, sys
+          source = pathlib.Path.cwd()
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle278'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence278'
+          evidence.mkdir()
+          base = '4b95295c993bab0f10fbfdc2a97ad45ff4421fef'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(root), base], check=True)
+          original = subprocess.check_output(['git', 'rev-parse', 'HEAD:harness.py'], cwd=root, text=True).strip()
+          assert original == 'e9ab09de04b146f4ba2d8b3c9e83f5358745019d', original
+          test = 'tests/test_bundle_rollback_storage.py'
+          shutil.copyfile(source / '.github/preparation/test_bundle_rollback_storage.py', root / test)
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', 'requirements-dev.txt'], cwd=root, check=True)
+          subprocess.run([sys.executable, '-m', 'black', test], cwd=root, check=True)
+          result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_rollback_storage.py', '-v'], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          (evidence / 'failing-first.log').write_bytes(result.stdout)
+          assert result.returncode == 1 and b'FAILED (failures=32)' in result.stdout, result.stdout[-2000:]
+          path = root / 'harness.py'
+          text = path.read_text(encoding='utf-8')
+          old = '        destination_relative = sync_bundle_relative_path(\n            destination.get("path"), "receipt destination"\n        )\n        target = roots[root_name].joinpath(*PurePosixPath(destination_relative).parts)\n'
+          new = old.replace('        target =', '        if PurePosixPath(destination_relative).parts[0] == ".harness-backups":\n            raise HarnessError("receipt destination overlaps recovery storage")\n        target =')
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+          for command in (['-m', 'ruff', 'check', 'harness.py', test], ['-m', 'black', '--check', '--diff', 'harness.py', test], ['-m', 'py_compile', 'harness.py', test]):
+              subprocess.run([sys.executable, *command], cwd=root, check=True)
+          subprocess.run(['git', 'add', '--', 'harness.py', test], cwd=root, check=True)
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=root, text=True).splitlines()
+          assert paths == ['harness.py', test], paths
+          subprocess.run(['git', 'diff', '--cached', '--check'], cwd=root, check=True)
+          manifest = {'base': base, 'base_harness_blob': original, 'preparation_commit': os.environ['GITHUB_SHA'], 'candidate_tree': subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip(), 'files': {p: subprocess.check_output(['git', 'rev-parse', ':' + p], cwd=root, text=True).strip() for p in paths}}
+          (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          (evidence / 'repair.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary'], cwd=root))
+          subprocess.run(['git', 'archive', '--format=zip', '-o', str(evidence / 'source.zip'), manifest['candidate_tree']], cwd=root, check=True)
+          print(json.dumps(manifest, indent=2))
+      - name: Run full verification and record each exit before rendering logs
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle278'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence278'
+          commands = {
+              'focused': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_rollback_storage.py', '-v'],
+              'root-units': ['-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+              'replay': ['-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'],
+              'smoke': ['templates/hooks/smoke_test.py'],
+          }
+          for name, args in commands.items():
+              log = evidence / (name + '.log')
+              with log.open('wb') as stream:
+                  result = subprocess.run([sys.executable, *args], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+              (evidence / (name + '-exit.json')).write_text(json.dumps({'exit_code': result.returncode, 'command': args}) + '\n', encoding='utf-8')
+              print(name, 'exit', result.returncode)
+              print(log.read_bytes()[-1500:].decode('utf-8', errors='backslashreplace'), flush=True)
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+      - name: Observe Doctor without certifying hosted globals
+        if: always()
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle278'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence278'
+          if not (root / 'harness.py').exists():
+              raise SystemExit('no prepared source')
+          log = evidence / 'doctor.log'
+          with log.open('wb') as stream:
+              result = subprocess.run([sys.executable, 'harness.py', 'doctor'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          (evidence / 'doctor-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'installed_runtime_qualified': False}) + '\n', encoding='utf-8')
+          print('Doctor observational exit:', result.returncode)
+          print(log.read_bytes()[-1500:].decode('utf-8', errors='backslashreplace'))
+      - name: Export only verified immutable blobs, never refs or pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64, hashlib, json, os, pathlib, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bundle278'
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence278'
+          manifest = json.loads((evidence / 'manifest.json').read_text())
+          for name in ('focused', 'root-units', 'replay', 'smoke'):
+              assert json.loads((evidence / (name + '-exit.json')).read_text())['exit_code'] == 0
+          assert set(manifest['files']) == {'harness.py', 'tests/test_bundle_rollback_storage.py'}
+          exported = {}
+          for path, expected in manifest['files'].items():
+              data = (root / path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == expected
+              request = urllib.request.Request('https://api.github.com/repos/Chris0Jeky/agent-harness/git/blobs', data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              assert result['sha'] == expected
+              exported[path] = result['sha']
+          (evidence / 'exported-blobs.json').write_text(json.dumps(exported, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(exported, indent=2))
+      - name: Retain logs, source, and exact file identities
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bundle278-preparation-evidence
+          path: ${{ runner.temp }}/evidence278/
+          if-no-files-found: error
+          retention-days: 14
