@@ -45,7 +45,7 @@ intent → tools (ACI) → env feedback → verify (deterministic preferred)
 | Host prove / Verify smoke | delegate-runtime prove · harness Verify | Deterministic when required |
 | Review under flood | [REVIEW_UNDER_FLOOD](../evals/REVIEW_UNDER_FLOOD.md) · #301 | Advisory bots; severity bar |
 | Merge authority | the merge gate (configuration repository) · branch protection | Model-free checks only |
-| UX observe→judge | #281 | Advisory → issues; Playwright Plane B may gate later |
+| UX observe→judge | #281 | Advisory → issues; only a repo-owned deterministic Playwright check (Plane B) could gate later, never a judge verdict |
 | Spans / cost / tool ids | [AGENT_LOOP_SPANS](../observability/AGENT_LOOP_SPANS.md) · #320 | Advisory only |
 
 ## Oracle vs judge (compact)
