@@ -2,10 +2,10 @@
 
 Status: proposed documentation, 2026-10-01.
 Parent: [#299](https://github.com/Chris0Jeky/agent-harness/issues/299).
-Research pack: `/workspace/handoffs/perfect-agentic-assistant-2026-10-01/`.
+Research pack: private handoff notes (not published).
 Sister (do not merge tracks): [#281](https://github.com/Chris0Jeky/agent-harness/issues/281) product UX observe→judge.
 
-This note synthesizes best-of-breed harness patterns onto Chris’s estate.
+This note synthesizes best-of-breed harness patterns onto the owner’s estate.
 It does **not** invent runners, collectors, CI jobs, or LLM merge gates.
 The mappings below are proposed or inherited contracts, not receipts of native
 implementation. Research-source acceptance and native qualification remain separate.
@@ -14,7 +14,7 @@ implementation. Research-source acceptance and native qualification remain separ
 
 | May receive automated merge authority | Stays advisory forever |
 | --- | --- |
-| Applicable, repo-owned **deterministic oracles** (see [MERGE_BOUNDARY](../evals/MERGE_BOUNDARY.md)) | LLM judgment, review-bot scores/approvals, telemetry health, vendor catch-rates, [agent-hq coverage](https://github.com/Chris0Jeky/agent-hq/issues/10) (`gate_eligible: false`) |
+| Applicable, repo-owned **deterministic oracles** (see [MERGE_BOUNDARY](../evals/MERGE_BOUNDARY.md)) | LLM judgment, review-bot scores/approvals, telemetry health, vendor catch-rates, control-plane coverage evidence (`gate_eligible: false`) |
 
 **Reject:** LGTM theater · flaky LLM-as-merge-CI · auto-merge on vendor scores.
 
@@ -36,21 +36,21 @@ Primary pattern sources (access 2026-10-01): Anthropic [Building Effective Agent
 ```
 intent → tools (ACI) → env feedback → verify (deterministic preferred)
        → retry ≤ budget → stop | escalate human/estop
-       → publish + proof → EstateGate (model-free) merge
+       → publish + proof → the merge gate (model-free) merge
 ```
 
 | Loop step | Estate owner | Gate? |
 | --- | --- | --- |
 | Tool use / scrub / deny floor | agent-harness templates + scrubber | Policy floor, not product correctness |
-| Host prove / Verify smoke | Muse prove · harness Verify | Deterministic when required |
+| Host prove / Verify smoke | delegate-runtime prove · harness Verify | Deterministic when required |
 | Review under flood | [REVIEW_UNDER_FLOOD](../evals/REVIEW_UNDER_FLOOD.md) · #301 | Advisory bots; severity bar |
-| Merge authority | EstateGate (`claude-config`) · branch protection | Model-free checks only |
+| Merge authority | the merge gate (configuration repository) · branch protection | Model-free checks only |
 | UX observe→judge | #281 | Advisory → issues; Playwright Plane B may gate later |
 | Spans / cost / tool ids | [AGENT_LOOP_SPANS](../observability/AGENT_LOOP_SPANS.md) · #320 | Advisory only |
 
 ## Oracle vs judge (compact)
 
-- **Oracle:** same inputs → same pass/fail without an LLM. Harbor requires Oracle≈1.0 and Nop≈0.0 before agent trials — use as a *design* pattern for flood samples, not as invented Taskdeck membership.
+- **Oracle:** same inputs → same pass/fail without an LLM. Harbor requires Oracle≈1.0 and Nop≈0.0 before agent trials — use as a *design* pattern for flood samples, not as invented task-board membership.
 - **Judge:** LLM or bot opinion. Useful for triage; **never a required merge condition**, alone or combined with deterministic checks. Its approval, completion, availability or score must not become an indirect gate through an aggregate status.
 - Full contract: [MERGE_BOUNDARY](../evals/MERGE_BOUNDARY.md). Taxonomy: [TAXONOMY](../evals/TAXONOMY.md).
 
@@ -61,7 +61,7 @@ intent → tools (ACI) → env feedback → verify (deterministic preferred)
 | Campaign/decision inbox answers | Raw user prompts / assistant text |
 | Outcome ledger fingerprints + matured outcomes | Tool I/O bodies / raw API JSON |
 | CLAUDE.md / skills / conventions | Unredacted MCP payloads |
-| Estop / tier / EstateGate exceptions (human-owned) | Hobby SaaS transcript dumps |
+| Estop / tier / merge-gate exceptions (human-owned) | Hobby SaaS transcript dumps |
 
 Session resume (JSONL) is continuity, not learning. Cross-session learning lands in ledger/journal/decisions after provenance rules.
 
@@ -74,7 +74,7 @@ Session resume (JSONL) is continuity, not learning. Cross-session learning lands
 
 ## Human gates / draft-first
 
-Irreversible sends, secrets, billing, Apps, and merge exceptions stay human-owned (draft → inbox card → explicit approve). Hermes and console Pilot controls do **not** merge or deploy. EstateGate human-exceptions list starts empty.
+Irreversible sends, secrets, billing, Apps, and merge exceptions stay human-owned (draft → inbox card → explicit approve). Assistant-gateway and console pilot controls do **not** merge or deploy. The merge-gate human-exceptions list starts empty.
 
 ## Observability posture
 
@@ -91,6 +91,4 @@ OTel-shaped spans for `invoke_agent` → `chat`/`llm_request` → `execute_tool`
 ## Related
 
 - Additives table: [ARCHITECTURE_ADDITIVES](./ARCHITECTURE_ADDITIVES.md)
-- Pack: `/workspace/handoffs/perfect-agentic-assistant-2026-10-01/`
-- Muse swarm: `/workspace/handoffs/muse-swarm-max-session-2026-09-30/`
-- Prior eval/obs: `/workspace/handoffs/agent-eval-obs-2026-09-30/`
+- Research pack, delegate-runtime swarm notes, and prior eval/observability notes: private handoff material, not published.
