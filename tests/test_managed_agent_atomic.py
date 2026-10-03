@@ -255,6 +255,37 @@ class ManagedAgentAtomicTests(unittest.TestCase):
                 os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
         self.assertEqual(list(self.targets.glob(".harness-agent-*")), [])
 
+    def test_alias_target_or_parent_is_refused_before_any_write(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "luna.toml").write_bytes(b"outside bytes")
+        try:
+            os.symlink(outside / "luna.toml", self.target)
+            os.symlink(outside, self.home / "linked", target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"host cannot create a symlink: {exc}")
+        for path in (self.target, self.home / "linked" / "luna.toml"):
+            with self.subTest(path=path):
+                with self.assertRaises(harness.HarnessError):
+                    harness.write_managed_codex_file(path, b"new agent", 0o644)
+        self.assertEqual((outside / "luna.toml").read_bytes(), b"outside bytes")
+        self.assertEqual(list(outside.iterdir()), [outside / "luna.toml"])
+        self.assertEqual(list(self.targets.glob(".harness-agent-*")), [])
+
+    def test_ownership_record_bytes_are_canonical(self):
+        harness.write_managed_codex_agents_state(
+            self.state, {"zeta.toml": "b" * 64, "luna.toml": "a" * 64}
+        )
+        self.assertEqual(
+            self.state.read_bytes(),
+            (
+                '{\n  "schema_version": 1,\n  "agents": {\n'
+                f'    "luna.toml": "{"a" * 64}",\n'
+                f'    "zeta.toml": "{"b" * 64}"\n'
+                "  }\n}\n"
+            ).encode("utf-8"),
+        )
+
     def test_ownership_failure_after_agent_replacement_then_retry(self):
         self.target.write_bytes(b"previous agent")
         previous_digest = hashlib.sha256(b"previous agent").hexdigest()
