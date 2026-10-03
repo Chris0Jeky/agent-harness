@@ -274,6 +274,16 @@ _CONTAINER_IMAGE = re.compile(r"^([^/]+)/(.+)$")
 
 
 def _command_head(segment: str) -> str:
+    # Recognize a quoted literal executable only for the SSH-family scanner,
+    # which already preserves quoted option words. Do not interpret expansions.
+    first = _GH_REPO_PARTS.match(segment.lstrip())
+    if first is not None:
+        quote, body, _ = _split_quote(first.group(0))
+        if quote and "$" not in body and "`" not in body:
+            head = body.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            head = head.removesuffix(".exe")
+            if head in _SSH_DESTINATION_COMMANDS:
+                return head
     match = re.match(r"\s*(\S+)", segment)
     if match is None:
         return ""
@@ -621,6 +631,25 @@ def _redact_ssh_destination(chunk: str) -> str:
     return f"{quote}{(user + '@' if sep else '')}{replacement}{port}{tail}"
 
 
+def _redact_sftp_destination(chunk: str) -> str:
+    """SFTP's colon suffix is a remote path, not an SSH port (#420)."""
+    quote, body, tail = _split_quote(chunk)
+    match = re.fullmatch(
+        r"((?:[A-Za-z0-9_.-]{1,128}@)?(?:\[[^]\s]+\]|[A-Za-z0-9_.-]+)):(.*)",
+        body,
+    )
+    if match is None:
+        return _redact_ssh_destination(chunk)
+    endpoint, path = match.groups()
+    # Do not turn an ordinary drive path into a private remote endpoint.
+    if len(endpoint) == 1 and path.startswith(("/", "\\")):
+        return chunk
+    redacted = _redact_ssh_destination(endpoint)
+    if redacted == endpoint:
+        return chunk  # Public/loopback endpoints and unsupported bracket forms.
+    return f"{quote}{redacted}:<path>{tail}"
+
+
 def _redact_ssh_option(value: str, flag: str) -> str:
     quote, body, tail = _split_quote(value)
     if flag == "--bind-server":
@@ -753,7 +782,10 @@ def _scrub_ssh_segment(segment: str) -> str:
                 + tail
             )
         else:
-            parts[index] = _redact_ssh_destination(parts[index])
+            redact = (
+                _redact_sftp_destination if head == "sftp" else _redact_ssh_destination
+            )
+            parts[index] = redact(parts[index])
             break  # Remote command arguments are not local SSH destinations.
     return "".join(parts)
 
@@ -864,15 +896,13 @@ class Scrubber:
             text = pattern.sub("<redacted>", text)
         text = _scrub_gh_repo(text)
         text = _scrub_bare_hosts(text)
-        for pattern, replacement in _TOKEN_PATTERNS[:-2]:
-            text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
         text = _GITHUB_REPO.sub(r"\1<owner>/<repo>", text)
         text = _SCP_REMOTE.sub(self._scp, text)
-        # Preserve structured URL/scp matching, but replace complete emails
-        # before generic long-token rules can erase only their local part.
+        # Preserve structured URL/scp matching, then replace complete emails
+        # before any credential rule can erase only their local part (#420).
         text = _EMAIL.sub("<email>", text)
-        for pattern, replacement in _TOKEN_PATTERNS[-2:]:
+        for pattern, replacement in _TOKEN_PATTERNS:
             text = pattern.sub(replacement, text)
         text = _REPOS_API.sub(r"\1<owner>/<repo>", text)
         text = _REPO_FLAG.sub(r"\1<owner>/<repo>", text)
