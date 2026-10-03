@@ -251,5 +251,147 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn(str(self.root), done.stderr)
 
 
+class EvidenceRunTests(unittest.TestCase):
+    """Aggregates actual frozen fixture bytes; never claims that a product journey ran."""
+    def setUp(self):
+        EvidenceTests.setUp(self)
+        other = copy.deepcopy(self.pack["journeys"][0])
+        other["id"] = "second-journey"
+        self.pack["journeys"].append(other)
+        self.manifest["pack_sha256"] = digest(self.pack)
+        self.other = copy.deepcopy(self.manifest)
+        self.other["journey_id"] = other["id"]
+
+    def verify_run(self, manifests=None, **overrides):
+        method = getattr(self.api, "verify_run", None)
+        self.assertTrue(callable(method), "Whole-pack evidence verification is not implemented")
+        args = dict(pack=self.pack, manifests=[self.manifest, self.other] if manifests is None else manifests,
+                    run_root=self.root, expected_repository=REPOSITORY, expected_revision=REVISION,
+                    expected_run_id="synthetic-run", allowed_fixtures=[FIXTURE])
+        args.update(overrides)
+        return method(**args)
+
+    def test_one_complete_journey_is_not_a_complete_pack(self):
+        result = self.verify_run([self.manifest])
+        self.assertFalse(result["coverage_complete"])
+        self.assertEqual(result["missing_journeys"], ["second-journey"])
+        self.assertEqual(result["assertion_counts"]["not_run"], 1)
+        self.assertEqual(result["observed_journeys"], 1)
+        self.assertFalse(result["gate_eligible"])
+
+    def test_complete_evidence_of_failure_is_not_a_product_pass(self):
+        self.other["steps"][0]["outcomes"][0]["status"] = "fail"
+        result = self.verify_run()
+        self.assertTrue(result["coverage_complete"])
+        self.assertEqual(result["assertion_counts"]["fail"], 1)
+        self.assertEqual(result["assertion_counts"]["pass"], 1)
+        self.assertEqual(result["authority"], "advisory")
+        self.assertNotIn("verdict", result)
+        self.assertNotIn("passed", result)
+
+    def test_no_observations_reports_every_missing_journey(self):
+        result = self.verify_run([])
+        self.assertFalse(result["coverage_complete"])
+        self.assertEqual(result["missing_journeys"], ["keep-draft", "second-journey"])
+        self.assertEqual(result["assertion_counts"]["not_run"], 2)
+        self.assertEqual(result["artifact_bytes"], 0)
+
+    def test_duplicates_and_mixed_run_ids_fail_before_payload_reads(self):
+        for manifests in ([self.manifest, self.manifest],
+                          [self.manifest, {**self.other, "run_id": "another-run"}]):
+            with self.subTest(manifests=manifests), patch.object(self.api, "read_regular") as reader:
+                with self.assertRaises(ContractError):
+                    self.verify_run(manifests)
+                reader.assert_not_called()
+        with self.assertRaises(ContractError):
+            self.verify_run(expected_run_id="wrong-run")
+
+    def test_mixed_environment_or_controller_cannot_be_one_run(self):
+        for key in ("controller", "controller_version", "environment"):
+            changed = copy.deepcopy(self.other)
+            changed["observer"][key] = "different"
+            with self.subTest(key=key), patch.object(self.api, "read_regular") as reader:
+                with self.assertRaises(ContractError):
+                    self.verify_run([self.manifest, changed])
+                reader.assert_not_called()
+
+    def test_shared_artifacts_are_verified_and_counted_once(self):
+        with patch.object(self.api, "read_regular", wraps=self.api.read_regular) as reader:
+            result = self.verify_run()
+            self.assertEqual(reader.call_count, 2)
+        self.assertEqual(result["artifact_count"], 2)
+        self.assertEqual(result["artifact_bytes"], sum(map(len, self.files.values())))
+
+    def test_later_invalid_metadata_prevents_all_payload_reads(self):
+        self.other["steps"][0]["id"] = "wrong-step"
+        with patch.object(self.api, "read_regular") as reader:
+            with self.assertRaises(ContractError):
+                self.verify_run()
+            reader.assert_not_called()
+
+    def test_conflicting_shared_paths_are_rejected(self):
+        for change in ({"sha256": "f" * 64}, {"path": "ACTIONS.TXT"},
+                       {"captured_at": "2026-09-24T00:00:00Z"}):
+            changed = copy.deepcopy(self.other)
+            changed["artifacts"][0].update(change)
+            with self.subTest(change=change), patch.object(self.api, "read_regular") as reader:
+                with self.assertRaises(ContractError):
+                    self.verify_run([self.manifest, changed])
+                reader.assert_not_called()
+
+    def test_global_unique_bytes_limit_precedes_payload_reads(self):
+        for artifact in self.other["artifacts"]:
+            raw = (self.root / artifact["path"]).read_bytes() + b"!"
+            artifact["path"] = "second-" + artifact["path"]
+            artifact["size_bytes"] = len(raw)
+            artifact["sha256"] = hashlib.sha256(raw).hexdigest()
+            (self.root / artifact["path"]).write_bytes(raw)
+        with patch.object(self.api, "MAX_TOTAL_BYTES", 50), patch.object(self.api, "read_regular") as reader:
+            with self.assertRaisesRegex(ContractError, "artifact_total_size"):
+                self.verify_run()
+            reader.assert_not_called()
+
+    def test_same_bytes_cannot_be_relabelled_across_journeys(self):
+        self.other["artifacts"][0]["kind"], self.other["artifacts"][1]["kind"] = (
+            self.other["artifacts"][1]["kind"], self.other["artifacts"][0]["kind"])
+        with self.assertRaises(ContractError):
+            self.verify_run()
+
+    def test_partial_observation_remains_partial_at_run_level(self):
+        self.other["status"] = "blocked_environment"
+        self.other["steps"][0]["outcomes"][0]["status"] = "blocked"
+        result = self.verify_run()
+        self.assertFalse(result["coverage_complete"])
+        self.assertEqual(result["assertion_counts"]["blocked"], 1)
+        self.assertEqual(result["missing_journeys"], [])
+
+    def test_input_order_does_not_change_report_or_inputs(self):
+        before = copy.deepcopy([self.manifest, self.other])
+        expected = self.verify_run()
+        self.assertEqual(expected, self.verify_run([self.other, self.manifest]))
+        self.assertEqual([self.manifest, self.other], before)
+
+    def test_run_cli_reports_incomplete_and_keeps_errors_content_free(self):
+        pack_path, manifests_path = self.root / "pack.json", self.root / "observations.json"
+        pack_path.write_text(json.dumps(self.pack), encoding="utf-8")
+        manifests_path.write_text(json.dumps([self.manifest]), encoding="utf-8")
+        args = [sys.executable, "-m", "ux_evaluation", "verify-run", "--pack", str(pack_path),
+                "--manifest", str(manifests_path), "--run-root", str(self.root),
+                "--expected-run-id", "synthetic-run", "--expected-repository", REPOSITORY,
+                "--expected-revision", REVISION, "--fixture-ref", FIXTURE]
+        result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["missing_journeys"], ["second-journey"])
+        manifests_path.write_text(json.dumps([self.manifest, self.other]), encoding="utf-8")
+        result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.root / "actions.txt").write_bytes(b"PRIVATE_BROKEN_ARTIFACT")
+        result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("PRIVATE_BROKEN_ARTIFACT", result.stderr)
+        self.assertNotIn(str(self.root), result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

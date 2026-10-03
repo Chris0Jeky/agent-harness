@@ -75,9 +75,9 @@ def timestamp(value: Any) -> None:
         raise ContractError("capture_time") from exc
 
 
-def verify_observation(*, pack: Any, manifest: Any, run_root: Path,
+def _prepare_observation(*, pack: Any, manifest: Any,
                        expected_repository: str, expected_revision: str,
-                       allowed_fixtures: list[str]) -> dict[str, Any]:
+                       allowed_fixtures: list[str]) -> tuple[dict[str, Any], dict[str, Any]]:
     binding = bind_pack(pack, expected_repository=expected_repository,
                         expected_revision=expected_revision, allowed_fixtures=allowed_fixtures)
     canonical(manifest)
@@ -158,18 +158,11 @@ def verify_observation(*, pack: Any, manifest: Any, run_root: Path,
                 and manifest["status"] == "complete")
     require(manifest["status"] != "complete" or complete, "incomplete_evidence")
 
-    # Validate the complete metadata inventory before opening any artifact payload.
-    root = safe_root(run_root)
-    resolved = {key: safe_file(root, item["path"]) for key, item in by_id.items()}
-    for key, artifact in by_id.items():
-        raw = read_regular(resolved[key], artifact["size_bytes"])
-        require(len(raw) == artifact["size_bytes"]
-                and hashlib.sha256(raw).hexdigest() == artifact["sha256"], "artifact_integrity")
     normalized = copy.deepcopy(manifest)
     normalized["artifacts"].sort(key=lambda a: a["id"])
     for step in normalized["steps"]:
         step["artifact_ids"].sort()
-    return {
+    report = {
         "schema": "ux-evidence-check/0", "authority": "advisory", "gate_eligible": False,
         "subject": binding["subject"], "pack_sha256": binding["pack_sha256"],
         "observation_sha256": digest(normalized), "run_id": manifest["run_id"],
@@ -177,4 +170,83 @@ def verify_observation(*, pack: Any, manifest: Any, run_root: Path,
         "recorded_status": manifest["status"], "assertion_counts": counts,
         "missing_evidence": missing, "artifact_count": len(artifacts), "artifact_bytes": total_bytes,
         "assurance": "Bytes and declared coverage only; no collector attestation, outcome re-derivation or UX verdict.",
+    }
+    return report, by_id
+
+
+def _verify_artifacts(run_root: Path, artifacts: list[dict[str, Any]]) -> None:
+    # The caller preflights ALL metadata (including later journeys) before payload I/O.
+    root = safe_root(run_root)
+    resolved = [(safe_file(root, item["path"]), item) for item in artifacts]
+    for path, artifact in resolved:
+        raw = read_regular(path, artifact["size_bytes"])
+        require(len(raw) == artifact["size_bytes"]
+                and hashlib.sha256(raw).hexdigest() == artifact["sha256"], "artifact_integrity")
+
+
+def verify_observation(*, pack: Any, manifest: Any, run_root: Path,
+                       expected_repository: str, expected_revision: str,
+                       allowed_fixtures: list[str]) -> dict[str, Any]:
+    report, artifacts = _prepare_observation(pack=pack, manifest=manifest,
+        expected_repository=expected_repository, expected_revision=expected_revision,
+        allowed_fixtures=allowed_fixtures)
+    _verify_artifacts(run_root, list(artifacts.values()))
+    return report
+
+
+def verify_run(*, pack: Any, manifests: Any, run_root: Path, expected_run_id: str,
+               expected_repository: str, expected_revision: str,
+               allowed_fixtures: list[str]) -> dict[str, Any]:
+    """Whole-pack declared coverage for ONE run; not a collector attestation or acceptance verdict.
+
+    Missing journeys remain not_run. A shared artifact is read/counts once only if its full
+    identity agrees. Input JSON, individual artifacts and total unique bytes retain existing caps.
+    """
+    binding = bind_pack(pack, expected_repository=expected_repository,
+                        expected_revision=expected_revision, allowed_fixtures=allowed_fixtures)
+    identifier(expected_run_id)
+    canonical(manifests)
+    array(manifests, 0, len(binding["journey_ids"]))
+    reports, inventory, hash_kinds = {}, {}, {}
+    observer_identity = None
+    for manifest in manifests:
+        report, artifacts = _prepare_observation(pack=pack, manifest=manifest,
+            expected_repository=expected_repository, expected_revision=expected_revision,
+            allowed_fixtures=allowed_fixtures)
+        require(report["run_id"] == expected_run_id, "run_mismatch")
+        require(report["journey_id"] not in reports, "duplicate_journey")
+        identity = tuple(manifest["observer"][key]
+                         for key in ("controller", "controller_version", "environment"))
+        if observer_identity is None:
+            observer_identity = identity
+        require(identity == observer_identity, "observer_mismatch")
+        reports[report["journey_id"]] = report
+        for artifact in artifacts.values():
+            # IDs are journey-local, but a shared path is one frozen file, not two captures.
+            signature = {k: v for k, v in artifact.items() if k != "id"}
+            key = artifact["path"].casefold()
+            require(key not in inventory or inventory[key] == signature, "artifact_path_conflict")
+            inventory[key] = signature
+            sha = artifact["sha256"]
+            require(sha not in hash_kinds or hash_kinds[sha] == artifact["kind"], "artifact_kind_conflict")
+            hash_kinds[sha] = artifact["kind"]
+    total = sum(item["size_bytes"] for item in inventory.values())
+    require(total <= MAX_TOTAL_BYTES, "artifact_total_size")
+    _verify_artifacts(run_root, [inventory[key] for key in sorted(inventory)])
+    missing = [j for j in binding["journey_ids"] if j not in reports]
+    counts = dict.fromkeys(OUTCOMES, 0)
+    for report in reports.values():
+        for key in OUTCOMES:
+            counts[key] += report["assertion_counts"][key]
+    counts["not_run"] += sum(len(step["assertions"]) for journey in pack["journeys"]
+                             if journey["id"] in missing for step in journey["steps"])
+    return {
+        "schema": "ux-run-evidence-check/0", "authority": "advisory", "gate_eligible": False,
+        "subject": binding["subject"], "pack_sha256": binding["pack_sha256"],
+        "run_id": expected_run_id, "expected_journeys": len(binding["journey_ids"]),
+        "observed_journeys": len(reports), "missing_journeys": missing,
+        "coverage_complete": not missing and all(r["coverage_complete"] for r in reports.values()),
+        "assertion_counts": counts, "artifact_count": len(inventory), "artifact_bytes": total,
+        "journeys": [reports[j] for j in binding["journey_ids"] if j in reports],
+        "assurance": "Bytes and declared whole-pack coverage only; no collector attestation or product verdict.",
     }
