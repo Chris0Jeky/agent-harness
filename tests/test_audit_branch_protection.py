@@ -876,19 +876,28 @@ class BranchProtectionFindingTests(unittest.TestCase):
         )
         self.assertEqual(statuses, ["ok"])
 
-    def test_a_url_valued_push_remote_is_measured_or_unproven_never_skipped(self):
-        # Sol on #437: git allows a URL in branch.<b>.pushRemote.
-        key = ("git", "config", "--get", "remote.pushDefault")
-        github = "https://github.com/acme/widgets.git"
+    def test_failed_selection_stdout_is_unproven(self):
+        # Sol on #437 (fix round): a failed probe that still printed a value
+        # never proved the key absent, so it must not fall through to origin.
         _, _, statuses = self.statuses(
             {
-                key: (True, github),
+                ("git", "config", "--get", "remote.pushDefault"): (False, "mirror"),
                 RULES_ARGV: (True, BOTH_RULES),
                 BYPASS_7: (True, "never"),
             }
         )
-        self.assertEqual(statuses, ["ok"])
-        for value in ("https://git.example.invalid/acme/widgets.git", "../sibling"):
+        self.assertEqual(statuses, ["UNPROVEN"])
+
+    def test_a_url_valued_push_remote_is_unproven_never_skipped(self):
+        # Sol on #437: git allows a URL in branch.<b>.pushRemote, and rewrites it
+        # through url.<base>.insteadOf before pushing, so even a github.com URL
+        # is not proven to be the destination.
+        key = ("git", "config", "--get", "remote.pushDefault")
+        for value in (
+            "https://github.com/acme/widgets.git",
+            "https://git.example.invalid/acme/widgets.git",
+            "../sibling",
+        ):
             with self.subTest(value=value):
                 runner, findings, statuses = self.statuses({key: (True, value)})
                 self.assertEqual(statuses, ["UNPROVEN"])

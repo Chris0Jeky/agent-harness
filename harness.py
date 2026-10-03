@@ -5353,7 +5353,7 @@ def configured_push_remote(
     `strict` (the default-branch protection leg, #370) also refuses to read a
     FAILED probe as an unset key: `git config --get` exits 1 with no output
     for a key that is absent, so any other failure (a timeout, a spawn error,
-    a non-zero exit with a message) leaves the selection unmeasured and
+    a non-zero exit with a message or with output) leaves the selection unmeasured and
     returns `False`, instead of falling back to `origin` and grading a
     repository whose real push remote was never read. The default keeps the
     historical behaviour for `sensitive_data_findings`.
@@ -5368,7 +5368,7 @@ def configured_push_remote(
         resolved, value, failure = result_before_deadline(
             command_runner, ["git", "config", "--get", key], repo, deadline
         )
-        if strict and not resolved and failure.strip():
+        if strict and not resolved and (failure.strip() or value.strip()):
             unreadable = True
         return value.strip() if resolved else ""
 
@@ -5912,24 +5912,23 @@ def default_branch_protection_findings(
     )
     if not push_urls and not any(name == publishing_remote for name, _u, _d in rows):
         # `pushRemote`/`pushDefault` may hold a repository URL instead of a
-        # remote name (git-config); that value is the push destination (#370,
-        # review of #437). With nothing selected explicitly, a missing `origin`
-        # stays out of scope as before.
+        # remote name (git-config). Git rewrites such a URL through
+        # `url.<base>.insteadOf`/`pushInsteadOf` before pushing, so the raw value
+        # is not proven to be the destination: report it unmeasured rather than
+        # grade a repository the push may never reach (#370, review of #437).
+        # With nothing selected explicitly, a missing `origin` stays out of
+        # scope as before.
         if publishing_remote != PUBLISHING_REMOTE:
-            slug = github_repo_slug(publishing_remote)
-            if slug:
-                push_urls = [publishing_remote]
-            else:
-                return [
-                    reality_finding(
-                        BRANCH_PROTECTION_CHECK,
-                        REALITY_UNPROVEN,
-                        "git is configured to push to "
-                        f"{redact_remote_url(publishing_remote)!r}, which is not a "
-                        "configured remote and not a github.com URL, so its "
-                        "default-branch protection is unmeasured",
-                    )
-                ]
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_UNPROVEN,
+                    "git is configured to push to "
+                    f"{redact_remote_url(publishing_remote)!r}, which is not a "
+                    "configured remote; URL rewrites may change where that push "
+                    "goes, so its default-branch protection is unmeasured",
+                )
+            ]
     slugs = [github_repo_slug(url) for url in push_urls]
     if not slugs or not all(slugs):
         return []  # no such remote, or a push destination off GitHub: out of scope
