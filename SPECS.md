@@ -679,7 +679,8 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   when the effective floor posture is `core` or `floor_wiring` is `none` (issues #356, #370).
   Explicit push-remote configuration wins over the implicit sole-remote fallback; each GitHub
   push URL is measured independently of non-GitHub neighbours. Unresolved URL-valued selections
-  remain `UNPROVEN` (#438).
+  remain `UNPROVEN` (#438). Fallback counts include URL-less remotes, and a successfully read
+  empty selector is explicit invalid configuration rather than an unset key.
 - `harness.py sync-global --config-root <claude-config> [--apply]` — previews or installs global
   Codex guidance, managed skills, and shared Claude-home floor bytes with timestamped backups;
   removes only the obsolete managed global Codex matcher. New Codex skill backups are stored under

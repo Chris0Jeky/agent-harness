@@ -5373,7 +5373,12 @@ def configured_push_remote(
         resolved, value, failure = result_before_deadline(
             command_runner, ["git", "config", "--get", key], repo, deadline
         )
-        if strict and not resolved and (failure.strip() or value.strip()):
+        if strict and (
+            (not resolved and (failure.strip() or value.strip()))
+            or (resolved and not value.strip())
+        ):
+            # A successfully read empty selector is explicit configuration,
+            # not proof that the key is absent. Git does not use a fallback.
             unreadable = True
         return value.strip() if resolved else ""
 
@@ -5891,20 +5896,32 @@ def default_branch_protection_findings(
     # `remote.pushDefault` and `branch.<name>.remote` select where a push goes
     # first (#370). A selection the budget never let git answer is unmeasured,
     # never a guess of `origin`.
-    remote_names = {name for name, _url, _direction in rows}
-    fallback_remote = (
-        next(iter(remote_names)) if len(remote_names) == 1 else PUBLISHING_REMOTE
-    )
     publishing_remote, selection_proven = configured_push_remote(
-        repo, command_runner, deadline, strict=True, fallback_remote=fallback_remote
+        repo, command_runner, deadline, strict=True, fallback_remote=""
     )
+    if selection_proven and not publishing_remote:
+        # Verbose URL rows omit URL-less remotes, which still count toward
+        # Git's sole-remote fallback. Enumerate names only when fallback is
+        # needed; an explicit selector has already supplied its destination.
+        names_resolved, names_output = output_before_deadline(
+            command_runner, ["git", "remote"], repo, deadline
+        )
+        names = {line.strip() for line in names_output.splitlines() if line.strip()}
+        if not names_resolved or any(
+            name not in names for name, _url, _direction in rows
+        ):
+            selection_proven = False
+        else:
+            publishing_remote = (
+                next(iter(names)) if len(names) == 1 else PUBLISHING_REMOTE
+            )
     if not selection_proven:
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                "git's push-remote configuration could not be read in full (a probe "
-                "timed out, failed to start, or the budget expired), so which "
+                "git's push-remote selection is unproven (configuration was empty, "
+                "a probe failed, enumeration was inconsistent, or the budget expired), so which "
                 "remote publishes this repo is unmeasured",
             )
         ]
@@ -10406,6 +10423,8 @@ def load_bundle_rollback_receipt(
         destination_relative = sync_bundle_relative_path(
             destination.get("path"), "receipt destination"
         )
+        if PurePosixPath(destination_relative).parts[0] == ".harness-backups":
+            raise HarnessError("receipt destination overlaps recovery storage")
         target = roots[root_name].joinpath(*PurePosixPath(destination_relative).parts)
         reject_sync_path_aliases(target, "receipt destination")
         installed_digest = raw.get("installed_digest")

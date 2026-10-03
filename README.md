@@ -118,7 +118,8 @@ posture is `core` or the repo declares `floor_wiring: none` — reported as `adv
 missing or bypassable by the auditing token, never a failure (issues #356, #370).
 An implicit sole remote is measured even when it is not named `origin`; explicit push-remote
 configuration still wins. Mixed push URLs are scoped individually, so a non-GitHub destination
-does not hide the GitHub destinations. Unresolved URL-valued selections stay `UNPROVEN` (#438).
+does not hide the GitHub destinations. Fallback counts include URL-less remote names. Explicitly
+empty selectors and unresolved URL-valued selections stay `UNPROVEN` (#438).
 A repo that vendors nothing says so rather than
 emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
 failure: it is the auditing machine's state, so making it a repo verdict would let the same
