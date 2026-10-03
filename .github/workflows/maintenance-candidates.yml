@@ -1,0 +1,158 @@
+name: Maintenance candidate verification
+on:
+  push:
+    branches: [prep/maintenance-20261003-r2]
+    paths:
+      - .github/preparation/wave2-candidates.json
+      - .github/preparation/wave2-payload-fixes.json
+      - .github/workflows/maintenance-candidates.yml
+permissions:
+  contents: write
+jobs:
+  verify:
+    name: Prepare ${{ matrix.candidate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: [audit438, skills439, bundle441]
+    env:
+      CANDIDATE: ${{ matrix.candidate }}
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: python {0}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Validate and apply only the hash-bound candidate
+        run: |
+          import base64, gzip, hashlib, json, os, pathlib, shutil, subprocess, sys
+          source = pathlib.Path.cwd()
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          out.mkdir()
+          request = source / '.github/preparation/wave2-candidates.json'
+          shutil.copyfile(request, out / 'input-request.json')
+          data = json.loads(request.read_text())
+          assert data['base'] == '12550f0097d05ef1ab23b49193374e697e2ec727'
+          name = os.environ['CANDIDATE']
+          item = data['candidates'][name]
+          expected_paths = {
+              'audit438': ['README.md', 'SPECS.md', 'harness.py', 'tests/test_audit_branch_protection.py'],
+              'skills439': ['SPECS.md', 'harness.py', 'tests/test_skill_tree_mode_digest.py'],
+              'bundle441': ['.github/workflows/ci.yml', 'harness.py', 'tests/test_bundle_rollback_storage.py'],
+          }
+          assert item['paths'] == expected_paths[name]
+          encoded = item['gzip_base64']
+          fixes = source / '.github/preparation/wave2-payload-fixes.json'
+          if fixes.exists():
+              for old, new in json.loads(fixes.read_text()).get(name, []):
+                  assert encoded.count(old) == 1
+                  encoded = encoded.replace(old, new, 1)
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == item['patch_sha256']
+          (out / 'submitted.patch').write_bytes(patch)
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(root), data['base']], check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, cwd=root, check=True)
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=root, text=True).splitlines()
+          assert sorted(paths) == sorted(item['paths']), paths
+          original = subprocess.check_output(['git', 'show', 'HEAD:harness.py'], cwd=root)
+          candidate = (root / 'harness.py').read_bytes()
+          try:
+              (root / 'harness.py').write_bytes(original)
+              red = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', item['test'], '-v'], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              (out / 'baseline-regressions.log').write_bytes(red.stdout)
+              assert red.returncode == 1 and b'FAILED (' in red.stdout, red.stdout[-3000:]
+          finally:
+              (root / 'harness.py').write_bytes(candidate)
+          (out / 'candidate-request.json').write_text(json.dumps(item, indent=2) + '\n')
+      - name: Format and verify changed-file style
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate'
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          item = json.loads((out / 'candidate-request.json').read_text())
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', 'requirements-dev.txt'], cwd=root, check=True)
+          python_paths = [path for path in item['paths'] if path.endswith('.py')]
+          for command in (['-m', 'black', *python_paths], ['-m', 'black', '--check', '--diff', *python_paths], ['-m', 'ruff', 'check', *python_paths], ['-m', 'py_compile', *python_paths]):
+              subprocess.run([sys.executable, *command], cwd=root, check=True)
+          subprocess.run(['git', 'add', '--', *item['paths']], cwd=root, check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], cwd=root, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip()
+          files = {p: subprocess.check_output(['git', 'rev-parse', ':' + p], cwd=root, text=True).strip() for p in item['paths']}
+          manifest = {'base': '12550f0097d05ef1ab23b49193374e697e2ec727', 'candidate': os.environ['CANDIDATE'], 'tree': tree, 'files': files, 'preparation_commit': os.environ['GITHUB_SHA']}
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (out / 'formatted.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary'], cwd=root))
+          subprocess.run(['git', 'archive', '--format=zip', '-o', str(out / 'candidate-source.zip'), tree], cwd=root, check=True)
+          print(json.dumps(manifest, indent=2))
+      - name: Run focused and full verification
+        run: |
+          import json, os, pathlib, subprocess, sys, time
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate'
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          item = json.loads((out / 'candidate-request.json').read_text())
+          commands = {
+              'focused': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', item['test'], '-v'],
+              'root-units': ['-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+              'replay': ['-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'],
+              'smoke': ['templates/hooks/smoke_test.py'],
+          }
+          for name, args in commands.items():
+              log = out / (name + '.log')
+              start = time.time()
+              with log.open('wb') as stream:
+                  result = subprocess.run([sys.executable, *args], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+              (out / (name + '-exit.json')).write_text(json.dumps({'exit_code': result.returncode, 'command': args, 'seconds': time.time() - start}) + '\n')
+              print(name, 'exit', result.returncode, flush=True)
+              print(log.read_bytes()[-2000:].decode('utf-8', errors='backslashreplace'), flush=True)
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+      - name: Record Doctor separately from installed qualification
+        if: always()
+        run: |
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate'
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          if not (root / 'harness.py').exists():
+              raise SystemExit('candidate unavailable, no Doctor observation')
+          with (out / 'doctor.log').open('wb') as stream:
+              result = subprocess.run([sys.executable, 'harness.py', 'doctor'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
+          (out / 'doctor-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'installed_runtime_qualified': False}) + '\n')
+          print('Doctor observation:', result.returncode)
+      - name: Export only verified immutable Git blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64, hashlib, json, os, pathlib, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate'
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence'
+          manifest = json.loads((out / 'manifest.json').read_text())
+          for name in ('focused', 'root-units', 'replay', 'smoke'):
+              assert json.loads((out / (name + '-exit.json')).read_text())['exit_code'] == 0
+          exported = {}
+          for path, expected in manifest['files'].items():
+              content = (root / path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              assert actual == expected
+              req = urllib.request.Request('https://api.github.com/repos/Chris0Jeky/agent-harness/git/blobs', data=json.dumps({'content': base64.b64encode(content).decode(), 'encoding': 'base64'}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  answer = json.load(response)
+              assert answer['sha'] == expected
+              exported[path] = expected
+          (out / 'exported-blobs.json').write_text(json.dumps(exported, indent=2) + '\n')
+          print(json.dumps(exported, indent=2))
+      - name: Preserve reproducible source and raw evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wave2-${{ matrix.candidate }}-verification
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: error
