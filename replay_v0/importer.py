@@ -235,6 +235,32 @@ _SSH_VALUE_FLAGS = frozenset(
         "-w",
     }
 )
+# Upstream scripts/mosh.pl GetOptions: these values are not SSH flags.
+_MOSH_VALUE_FLAGS = frozenset(
+    {
+        "--client",
+        "--server",
+        "--predict",
+        "--family",
+        "--port",
+        "--ssh",
+        "--bind-server",
+        "--experimental-remote-ip",
+        "-p",
+    }
+)
+_MOSH_BOOL_FLAGS = frozenset(
+    {
+        "--predict-overwrite",
+        "--ssh-pty",
+        "--no-ssh-pty",
+        "--init",
+        "--no-init",
+        "--local",
+        "--help",
+        "--version",
+    }
+)
 _SINGLE_LABEL_HOST = re.compile(r"[A-Za-z0-9_-]+")
 _SCP_COMMANDS = frozenset({"scp", "rsync"})
 _CONTAINER_COMMANDS = frozenset({"docker", "podman"})
@@ -267,58 +293,83 @@ def _scrub_gh_repo_segment(parts: list[str]) -> str:
         return "".join(parts)
     head = _split_quote(parts[positions[0]])[1]
     head = head.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
-    if head != "gh" or parts[positions[1]] != "repo":
+    if head != "gh" or _split_quote(parts[positions[1]])[1] != "repo":
         return "".join(parts)
-    command = parts[positions[2]]
+    command = _split_quote(parts[positions[2]])[1]
     if command == "new":
         command = "create"
     if command not in _GH_REPO_VALUE_FLAGS:
         return "".join(parts)
     values = set(_GH_REPO_VALUE_FLAGS[command].split())
     booleans = set(_GH_REPO_BOOL_FLAGS[command].split()) | {"--help"}
-    skip_value = False
+    private_values = {
+        "sync": {"--source": "repo", "-s": "repo"},
+        "create": {"--template": "repo", "-p": "repo"},
+        "fork": {"--org": "owner", "--fork-name": "name"},
+    }.get(command, {})
+
+    def redact_value(value: str, kind: str | None) -> str:
+        quote, body, tail = _split_quote(value)
+        if kind == "repo" and _GH_REPO_SELECTOR.fullmatch(body):
+            return f"{quote}<owner>/<repo>{tail}"
+        if kind in {"repo", "name", "owner"} and _GH_REPO_NAME.fullmatch(body):
+            return f"{quote}<{('owner' if kind == 'owner' else 'repo')}>{tail}"
+        return value
+
+    pending: str | None = None
     options = True
+    operand_seen = False
     for position in positions[3:]:
         quote, body, tail = _split_quote(parts[position])
-        if skip_value:
-            skip_value = False
+        if pending is not None:
+            parts[position] = redact_value(parts[position], private_values.get(pending))
+            pending = None
             continue
         if options and body == "--":
-            # These commands forward the remainder to git, not to gh.
             if command in {"clone", "fork"}:
-                break
+                break  # Remaining flags belong to git.
             options = False
             continue
         if options and body.startswith("-"):
-            flag, equals, _ = body.partition("=")
+            flag, equals, value = body.partition("=")
             if flag in values:
-                skip_value = not equals
+                if equals:
+                    parts[position] = (
+                        f"{quote}{flag}={redact_value(value, private_values.get(flag))}{tail}"
+                    )
+                else:
+                    pending = flag
             elif flag in booleans:
                 continue
             elif not body.startswith("--") and len(body) > 2:
-                # Boolean shorthands may precede a value shorthand: `-wbfoo`
-                # or `-wb foo`. The first value flag consumes the remainder.
-                known_cluster = True
                 for offset, shorthand in enumerate(body[1:], start=1):
                     short_flag = "-" + shorthand
                     if short_flag in values:
-                        skip_value = offset == len(body) - 1
+                        if offset == len(body) - 1:
+                            pending = short_flag
+                        else:
+                            prefix = body[: offset + 1]
+                            value = body[offset + 1 :]
+                            # pflag accepts both -pVALUE and -p=VALUE.
+                            marker = "=" if value.startswith("=") else ""
+                            value = value.removeprefix("=")
+                            parts[position] = (
+                                f"{quote}{prefix}{marker}{redact_value(value, private_values.get(short_flag))}{tail}"
+                            )
                         break
                     if short_flag not in booleans:
-                        known_cluster = False
-                        break
-                if not known_cluster:
-                    break
+                        return "".join(parts)
             else:
                 break
             continue
-        if _GH_REPO_SELECTOR.fullmatch(body):
-            parts[position] = f"{quote}<owner>/<repo>{tail}"
-        elif command in {"clone", "create"} and _GH_REPO_NAME.fullmatch(body):
-            # Only these commands document omission of the authenticated owner.
-            parts[position] = f"{quote}<repo>{tail}"
-        # Exactly one selector. Clone's next operand is its local directory.
-        break
+        if not operand_seen:
+            if _GH_REPO_SELECTOR.fullmatch(body):
+                parts[position] = f"{quote}<owner>/<repo>{tail}"
+            elif command in {"clone", "create"} and _GH_REPO_NAME.fullmatch(body):
+                parts[position] = f"{quote}<repo>{tail}"
+            operand_seen = True
+        # Keep scanning known gh flags after the first operand. Local directory
+        # operands and formatting values retain their distinct roles.
     return "".join(parts)
 
 
@@ -515,6 +566,11 @@ def _scrub_login_segment(segment: str) -> str:
         if effective.startswith("-"):
             if effective in _LOGIN_VALUE_FLAGS:
                 value_flag = effective
+            elif effective.startswith("--password="):
+                value_quote, _, value_tail = _split_quote(effective.partition("=")[2])
+                parts[pos] = (
+                    f"{quote}--password={value_quote}<redacted>{value_tail}{tail}"
+                )
             elif effective.startswith("-p") and not effective.startswith("--"):
                 prefix = "-p=" if effective.startswith("-p=") else "-p"
                 parts[pos] = f"{quote}{prefix}<redacted>{tail}"
@@ -524,52 +580,181 @@ def _scrub_login_segment(segment: str) -> str:
 
 
 def _redact_ssh_destination(chunk: str) -> str:
-    if "://" in chunk:
-        return chunk
-    quote, body, _ = _split_quote(chunk)
-    if not body or body[0] == "-" or "/" in body or "=" in body:
-        return chunk
-    if body.startswith("<") and body.endswith(">"):
+    quote, body, tail = _split_quote(chunk)
+    if not body or body[0] == "-" or "/" in body or "=" in body or "://" in body:
         return chunk
     user, sep, host = body.rpartition("@")
-    if sep:
-        if not host or "/" in user or ":" in user:
-            return chunk
-    else:
+    if not sep:
         host = body
-    lowered = host.lower()
-    if lowered in _PUBLIC_HOSTS or lowered == "localhost" or host == "127.0.0.1":
+    elif not host or "/" in user or ":" in user:
         return chunk
-    if _IPV4_LITERAL.fullmatch(host):
-        if host == "127.0.0.1":
+    port = ""
+    bracketed = host.startswith("[")
+    if bracketed:
+        match = re.fullmatch(r"\[([^]\s]+)\](:[0-9]+)?", host)
+        if match is None:
             return chunk
-        host = "<ip>"
-    elif _DOTTED_HOST.fullmatch(host):
-        if lowered in _PUBLIC_HOSTS:
+        host, port = match.group(1), match.group(2) or ""
+    elif host.count(":") == 1:
+        host, separator, number = host.partition(":")
+        if not number.isdigit():
             return chunk
-        host = "<host>"
-    elif _SINGLE_LABEL_HOST.fullmatch(host):
-        host = "<host>"
+        port = separator + number
+    if host.lower() in _PUBLIC_HOSTS or host.startswith("<"):
+        return chunk
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.is_loopback:
+            return chunk
+        replacement = "<ip>"
+    elif bracketed:
+        return chunk
+    elif _DOTTED_HOST.fullmatch(host) or _SINGLE_LABEL_HOST.fullmatch(host):
+        replacement = "<host>"
     else:
         return chunk
-    return f"{quote}{(user + '@' if sep else '')}{host}{quote}"
+    if bracketed:
+        replacement = f"[{replacement}]"
+    return f"{quote}{(user + '@' if sep else '')}{replacement}{port}{tail}"
+
+
+def _redact_ssh_option(value: str, flag: str) -> str:
+    quote, body, tail = _split_quote(value)
+    if flag == "--bind-server":
+        # mosh accepts "any"/"ssh" selectors as well as literal bind IPs.
+        try:
+            ipaddress.ip_address(body)
+        except ValueError:
+            return value
+        return _redact_ssh_destination(value)
+    if flag == "-J":
+        if body.lower() == "none":
+            return value
+        return (
+            quote
+            + ",".join(_redact_ssh_destination(host) for host in body.split(","))
+            + tail
+        )
+    if flag == "-b":
+        return _redact_ssh_destination(value)
+    if flag == "-o":
+        match = re.fullmatch(r"(?i)(ProxyJump|HostName|BindAddress)([=\s]+)(.+)", body)
+        if match:
+            option, separator, argument = match.groups()
+            kind = "-J" if option.lower() == "proxyjump" else "-b"
+            return (
+                f"{quote}{option}{separator}{_redact_ssh_option(argument, kind)}{tail}"
+            )
+    return value
 
 
 def _scrub_ssh_segment(segment: str) -> str:
-    parts = re.split(r"(\s+)", segment)
-    positions = [i for i, part in enumerate(parts) if i % 2 == 0 and part]
-    pos = 1
-    while pos < len(positions):
-        index = positions[pos]
-        token = parts[index]
-        if token.startswith("-"):
-            if token in _SSH_VALUE_FLAGS and pos + 1 < len(positions):
-                pos += 2
-            else:
-                pos += 1
+    parts = _split_login_parts(segment)
+    positions = [i for i, part in enumerate(parts) if part and not part.isspace()]
+    if not positions:
+        return segment
+    head = (
+        _split_quote(parts[positions[0]])[1]
+        .replace("\\", "/")
+        .rsplit("/", 1)[-1]
+        .lower()
+        .removesuffix(".exe")
+    )
+    keyscan = head == "ssh-keyscan"
+    if keyscan:
+        values = {"-f", "-O", "-p", "-T", "-t"}
+        booleans = set("46cDHv")
+    elif head == "mosh":
+        values = _MOSH_VALUE_FLAGS
+        booleans = set("ano46")
+    elif head == "sftp":
+        values = {
+            "-B",
+            "-b",
+            "-c",
+            "-D",
+            "-F",
+            "-i",
+            "-J",
+            "-l",
+            "-o",
+            "-P",
+            "-R",
+            "-S",
+            "-s",
+            "-X",
+        }
+        booleans = set("46AaCfNpqrv")
+    elif head == "ssh-copy-id":
+        values = {"-i", "-o", "-p", "-F", "-t"}
+        booleans = set("fnsxh?")
+    else:
+        values = _SSH_VALUE_FLAGS | {"-P"}
+        booleans = set("46AaCfGgKkMNnqsTtVvXxYy")
+    private_flags = (
+        {"--bind-server"}
+        if head == "mosh"
+        else (
+            {"-J", "-o", "-b"}
+            if head == "ssh"
+            else (
+                {"-J", "-o"}
+                if head == "sftp"
+                else {"-o"} if head == "ssh-copy-id" else set()
+            )
+        )
+    )
+    options = True
+    pending: str | None = None
+    for index in positions[1:]:
+        quote, token, tail = _split_quote(parts[index])
+        if pending is not None:
+            if pending in private_flags:
+                parts[index] = _redact_ssh_option(parts[index], pending)
+            pending = None
             continue
-        parts[index] = _redact_ssh_destination(token)
-        break
+        if options and token == "--":
+            options = False
+            continue
+        if options and token.startswith("-"):
+            if token.startswith("--"):
+                flag, equals, value = token.partition("=")
+                if head == "mosh" and flag in values:
+                    if not equals:
+                        pending = flag
+                    elif flag in private_flags:
+                        parts[index] = (
+                            f"{quote}{flag}={_redact_ssh_option(value, flag)}{tail}"
+                        )
+                    continue
+                if head == "mosh" and token in _MOSH_BOOL_FLAGS:
+                    continue
+                break  # Unknown option grammar is outside the bounded recognizer.
+            for offset, letter in enumerate(token[1:], start=1):
+                flag = "-" + letter
+                if flag in values:
+                    if offset == len(token) - 1:
+                        pending = flag
+                    elif flag in private_flags:
+                        parts[index] = (
+                            f"{quote}{token[:offset + 1]}{_redact_ssh_option(token[offset + 1:], flag)}{tail}"
+                        )
+                    break
+                if letter not in booleans:
+                    return "".join(parts)
+            continue
+        if keyscan:
+            parts[index] = (
+                quote
+                + ",".join(_redact_ssh_destination(host) for host in token.split(","))
+                + tail
+            )
+        else:
+            parts[index] = _redact_ssh_destination(parts[index])
+            break  # Remote command arguments are not local SSH destinations.
     return "".join(parts)
 
 
@@ -587,7 +772,13 @@ def _redact_after_command(segment: str, skip: int, func: Callable[[str], str]) -
 
 
 def _scrub_bare_hosts(text: str) -> str:
-    segments = re.split(r"([;&|\n]+)", text)
+    segments = [""]
+    for match in _GH_REPO_PARTS.finditer(text):
+        part = match.group(0)
+        if part[0] in ";&|\n":
+            segments.extend((part, ""))
+        else:
+            segments[-1] += part
     for index in range(0, len(segments), 2):
         segment = segments[index]
         head = _command_head(segment)
@@ -672,16 +863,20 @@ class Scrubber:
         for pattern in self._spaced_term_patterns:
             text = pattern.sub("<redacted>", text)
         text = _scrub_gh_repo(text)
-        for pattern, replacement in _TOKEN_PATTERNS:
+        text = _scrub_bare_hosts(text)
+        for pattern, replacement in _TOKEN_PATTERNS[:-2]:
             text = pattern.sub(replacement, text)
         text = _URL_USERINFO.sub(r"\1", text)
         text = _GITHUB_REPO.sub(r"\1<owner>/<repo>", text)
         text = _SCP_REMOTE.sub(self._scp, text)
+        # Preserve structured URL/scp matching, but replace complete emails
+        # before generic long-token rules can erase only their local part.
         text = _EMAIL.sub("<email>", text)
+        for pattern, replacement in _TOKEN_PATTERNS[-2:]:
+            text = pattern.sub(replacement, text)
         text = _REPOS_API.sub(r"\1<owner>/<repo>", text)
         text = _REPO_FLAG.sub(r"\1<owner>/<repo>", text)
         text = _URL_HOST.sub(self._host, text)
-        text = _scrub_bare_hosts(text)
         for pattern in _HOME_PATHS:
             text = pattern.sub(r"\1<user>", text)
         for pattern in self._term_patterns:
@@ -697,7 +892,10 @@ class Scrubber:
 
     @staticmethod
     def _scp(match: re.Match[str]) -> str:
-        if match.group(1).lower() in _PUBLIC_HOSTS:
+        if match.group(1).lower() in _PUBLIC_HOSTS or (
+            match.group(1).lower() == "sha256"
+            and re.fullmatch(r"[0-9a-fA-F]{32,}", match.group(2))
+        ):
             return match.group(0)
         return "<host>:<path>"
 
