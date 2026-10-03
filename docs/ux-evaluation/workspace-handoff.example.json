@@ -261,6 +261,19 @@
           ]
         },
         {
+          "id": "unavailable",
+          "action": "Make the source unreachable so no read completes, without truncating or denying anything.",
+          "assertions": [
+            "The state is unknown, never PASS and never an empty collection; it is distinct from partial and from denied.",
+            "No outcome receipt, deletion, delivery claim or authority change is created from the failure."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
           "id": "restart",
           "action": "Restart the consumer and resume with a complete current collection and authoritative outcome receipts.",
           "assertions": [
@@ -278,6 +291,7 @@
           "action": "Independently deny current access without truncating the collection, then release an older authorized response.",
           "assertions": [
             "Denied access hides private cached content rather than treating the failure as ordinary stale availability.",
+            "Denied is a distinct state from unavailable and from partial; it is not reported as either.",
             "The older response cannot repopulate the cache or visible private projection after the newer denial."
           ],
           "evidence_required": [
@@ -356,6 +370,284 @@
           "assertions": [
             "The receipt describes in-flight cancellation, not a guaranteed zero-launch result.",
             "Process acknowledgement and effect reconciliation require separate receiver observations; missing evidence remains unknown."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "evidence-ladder",
+      "goal": "Each evidence rung is claimed only for the exact candidate it observed; no rung implies a higher one.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "source",
+          "action": "Declare the source rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
+          "assertions": [
+            "Every named field is present or explicitly recorded as unavailable; an omitted field is not a pass.",
+            "A source rung does not imply a unit, integrated, runtime, installed, device or owner-accepted rung."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "unit",
+          "action": "Declare the unit rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
+          "assertions": [
+            "A unit rung does not imply an integrated, runtime, installed, device or owner-accepted rung.",
+            "A skipped or unavailable observation stays unknown and is never counted as a pass."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "integrated",
+          "action": "Declare the integrated rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts.",
+          "assertions": [
+            "The integrated receipt is separate from the unit receipt and carries its own fields.",
+            "A skipped or unavailable observation stays unknown and is never counted as a pass."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "native-runtime",
+          "action": "Declare the native runtime rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Name the runtime that actually ran.",
+          "assertions": [
+            "The runtime receipt names the runtime that actually ran, not the one the integrated rung assumed."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "installed",
+          "action": "Declare the installed rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Also record the installed artifact identity as a field distinct from the source revision.",
+          "assertions": [
+            "A source-revision match alone never stands in for the identity of the installed artifact."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "device",
+          "action": "Declare the device rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. Also record command and cwd, and pass/fail/skip counts. Also record the device and platform identity beside the installed artifact identity.",
+          "assertions": [
+            "A rung observed on one device or platform makes no claim about another."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "owner-accepted",
+          "action": "Declare the owner-accepted rung receipt for one fictional candidate with the common fields: subject revision, exact source revision, fixture revision or hash, UTC time, environment, proof kind, unavailable observations and advisory or operational authority. This rung is a slot that only an owner-supplied record can fill; command and counts do not apply.",
+          "assertions": [
+            "No agent, model or lower rung can fill or infer the owner record; absent means open.",
+            "Every rung stays advisory and not run in this pack; no execution claim is made."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "revision-change",
+          "action": "Change the candidate revision after the higher rungs were declared, then re-read every rung.",
+          "assertions": [
+            "No rung transfers to the new candidate revision; each must be re-observed against it.",
+            "The earlier receipts stay inspectable as history for the earlier revision."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "catch-up-contract",
+      "goal": "A consumer catches up through outcome lookup for known IDs plus a commit-ordered feed for unseen ones, without skipping or splitting.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "outcome-lookup",
+          "action": "Look up the outcome of every already-known ID directly, independent of the feed.",
+          "assertions": [
+            "A known ID missing from the feed is resolved by lookup, never by inference from absence."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "first-run",
+          "action": "Start a consumer with no saved position and apply the first-run floor.",
+          "assertions": [
+            "The floor bounds the first read in commit order; items before it are reported as not examined, not as absent."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "overlap-continuation",
+          "action": "Run two passes where each pass re-reads an inclusive overlap with the previous pass and continues exclusively beyond it.",
+          "assertions": [
+            "The inclusive overlap re-delivers boundary items so an item committed late is not lost.",
+            "Continuation past the overlap is exclusive; no item is processed twice as new."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "timestamp-group",
+          "action": "Serve a page boundary that falls inside a group of items sharing one timestamp.",
+          "assertions": [
+            "A page never splits one timestamp group; the whole group moves to one page.",
+            "A resume position never lands inside a group."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "deferred",
+          "action": "Defer an item, advance the resume position past it, then resume.",
+          "assertions": [
+            "A deferred item is never skipped by a resume position; it remains pending until resolved.",
+            "A failed read does not advance the position."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 40,
+        "max_seconds": 600,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "fix-round-discipline",
+      "goal": "Every fix round ends with one scoped verification of the fix; a fix is not assumed safe because the original finding is closed.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use only synthetic records and explicit local credentials. Record exact candidate, configuration, initial persistence counts and operation identifiers.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "fix-round",
+          "action": "Apply one fix round for a reviewed finding in a fictional expiry, cursor and resume-position component.",
+          "assertions": [
+            "The round records which findings it addresses and which seam it changed."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "scoped-verification",
+          "action": "Run one verification scoped to the fix diff, covering the changed seam and its neighbours.",
+          "assertions": [
+            "Expiry does not drop rows that are still recoverable.",
+            "A cursor does not advance on a failed read.",
+            "A resume position does not skip deferred rows.",
+            "These three are examples of defects past fix rounds introduced; the list is illustrative, not complete."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "outcome",
+          "action": "Record the verification as a receipt tied to the exact fix revision and report skipped checks.",
+          "assertions": [
+            "A verification of an earlier revision does not cover the fix; an unrun check is reported as not run."
           ],
           "evidence_required": [
             "action_log",

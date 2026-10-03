@@ -5293,10 +5293,12 @@ def github_repo_slug(remote: str) -> str:
     about `22/owner` and a genuinely public origin degraded to UNPROVEN instead
     of raising the mismatch. `(?::\\d+)?` is optional and backtracks, so the
     portless `ssh://git@github.com:owner/repo` spelling still parses.
+    `ssh.github.com:443` is GitHub's SSH-over-HTTPS endpoint for the same
+    repositories, so it resolves to the same slug (#370).
     """
     patterns = (
         r"^(?:https?|git)://(?:[^/@]+@)?github\.com(?::\d+)?/([^/?#]+/[^/?#]+)",
-        r"^ssh://(?:[^@/]+@)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
+        r"^ssh://(?:[^@/]+@)?(?:ssh\.)?github\.com(?::\d+)?[:/]([^/?#]+/[^/?#]+)",
         r"^(?:[^@/]+@)?github\.com:([^/?#]+/[^/?#]+)",
     )
     for pattern in patterns:
@@ -5306,8 +5308,31 @@ def github_repo_slug(remote: str) -> str:
     return ""
 
 
+# What `bounded_command_result` / `result_before_deadline` say when a probe never
+# produced an exit status: a timeout, a spawn failure, an unreadable pipe, an
+# expired aggregate budget. Anything else with failure text is a real non-zero
+# exit; none at all is `git config --get` reporting an unset key (exit 1).
+PROBE_NEVER_ANSWERED_MARKERS = (
+    "did not answer within",
+    "could not be started",
+    "could not be read",
+    "budget expired",
+    "no executable of that name",
+    "empty probe command",
+    "cannot be spawned safely",
+)
+
+
+def probe_never_answered(failure: str) -> bool:
+    return any(marker in failure for marker in PROBE_NEVER_ANSWERED_MARKERS)
+
+
 def configured_push_remote(
-    repo: Path, command_runner: Any, deadline: float | None
+    repo: Path,
+    command_runner: Any,
+    deadline: float | None,
+    *,
+    strict: bool = False,
 ) -> tuple[str, bool]:
     """(remote `git push` targets, whether that selection was measured).
 
@@ -5324,23 +5349,39 @@ def configured_push_remote(
     returns `False` for the second element rather than guessing `origin`: the
     caller reports the whole check UNPROVEN instead of downgrading a public
     push endpoint to an advisory it never measured.
+
+    `strict` (the default-branch protection leg, #370) also refuses to read a
+    FAILED probe as an unset key: `git config --get` exits 1 with no output
+    for a key that is absent, so any other failure (a timeout, a spawn error,
+    a non-zero exit with a message or with output) leaves the selection unmeasured and
+    returns `False`, instead of falling back to `origin` and grading a
+    repository whose real push remote was never read. The default keeps the
+    historical behaviour for `sensitive_data_findings`.
     """
+    unreadable = False
 
     def exhausted() -> bool:
-        return deadline is not None and deadline - monotonic() <= 0
+        return (deadline is not None and deadline - monotonic() <= 0) or unreadable
 
     def configured(key: str) -> str:
-        resolved, value = output_before_deadline(
+        nonlocal unreadable
+        resolved, value, failure = result_before_deadline(
             command_runner, ["git", "config", "--get", key], repo, deadline
         )
+        if strict and not resolved and (failure.strip() or value.strip()):
+            unreadable = True
         return value.strip() if resolved else ""
 
     if exhausted():
         return PUBLISHING_REMOTE, False
-    resolved, branch = output_before_deadline(
+    resolved, branch, failure = result_before_deadline(
         command_runner, ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo, deadline
     )
     branch = branch.strip() if resolved else ""
+    if strict and not resolved and probe_never_answered(failure):
+        # An unborn or detached HEAD fails with a message and has no branch
+        # keys to read; a probe that never answered proves nothing.
+        return PUBLISHING_REMOTE, False
     candidates = []
     if branch and branch != "HEAD":
         candidates.append(f"branch.{branch}.pushRemote")
@@ -5806,14 +5847,19 @@ def default_branch_protection_findings(
     client-side interception either). Any other posture still intercepts, so
     there is nothing server-side to measure and the leg emits nothing.
 
-    The `origin` remote is resolved with the same helpers as
-    `sensitive_data_findings`; a non-GitHub or missing origin is out of scope
-    and also emits nothing. Otherwise `gh` probes, each host-pinned like
+    The remote measured is the one `git push` targets, resolved with the same
+    helpers as `sensitive_data_findings` (`configured_push_remote`:
+    `branch.<name>.pushRemote`, `remote.pushDefault`, `branch.<name>.remote`,
+    then `origin`) through its PUSH urls, so a `pushurl` is what counts; a
+    non-GitHub, missing or local (`.`) push destination is out of scope and
+    emits nothing. Otherwise `gh` probes, each host-pinned like
     `github_visibility`, read the default branch, its (paginated) branch rules
     with their ruleset ids, classic branch protection — only when the rulesets
     lack either rule; the union of both mechanisms must block both — and then
     whether the auditing token can bypass what blocks them: each backing
-    ruleset's `current_user_can_bypass`, and classic `enforce_admins`. Every
+    ruleset's `current_user_can_bypass`, and classic `enforce_admins`. A
+    bypassable ruleset still grades `ok` when classic protection alone blocks
+    both with `enforce_admins` true: a push must clear every gate. Every
     emitted status is `ok`, `advisory` (owner preference: a missing
     server-side rule never fails the audit) or `UNPROVEN`, never `MISMATCH`.
     An `--offline` run refuses the network probes through the runner and
@@ -5832,19 +5878,78 @@ def default_branch_protection_findings(
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                "the configured remotes could not be enumerated, so origin's "
-                "default-branch protection is unmeasured",
+                "the configured remotes could not be enumerated, so the "
+                "publishing remote's default-branch protection is unmeasured",
             )
         ]
+    # `origin` is only git's last fallback: `branch.<name>.pushRemote`,
+    # `remote.pushDefault` and `branch.<name>.remote` select where a push goes
+    # first (#370). A selection the budget never let git answer is unmeasured,
+    # never a guess of `origin`.
+    publishing_remote, selection_proven = configured_push_remote(
+        repo, command_runner, deadline, strict=True
+    )
+    if not selection_proven:
+        return [
+            reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                "git's push-remote configuration could not be read in full (a probe "
+                "timed out, failed to start, or the budget expired), so which "
+                "remote publishes this repo is unmeasured",
+            )
+        ]
+    if publishing_remote == LOCAL_PUSH_REMOTE:
+        return []  # pushes stay in this repository: no server to protect
     # Only where pushes GO: a non-GitHub push URL with a GitHub fetch URL must
     # not be measured through the fetch repository (Codex P1 on #369).
-    push_urls = [
-        url for name, url, direction in rows if name == "origin" and direction == "push"
-    ]
+    push_urls = list(
+        dict.fromkeys(
+            url
+            for name, url, direction in rows
+            if name == publishing_remote and direction == "push"
+        )
+    )
+    if not push_urls and not any(name == publishing_remote for name, _u, _d in rows):
+        # `pushRemote`/`pushDefault` may hold a repository URL instead of a
+        # remote name (git-config). Git rewrites such a URL through
+        # `url.<base>.insteadOf`/`pushInsteadOf` before pushing, so the raw value
+        # is not proven to be the destination: report it unmeasured rather than
+        # grade a repository the push may never reach (#370, review of #437).
+        # With nothing selected explicitly, a missing `origin` stays out of
+        # scope as before.
+        if publishing_remote != PUBLISHING_REMOTE:
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_UNPROVEN,
+                    "git is configured to push to "
+                    f"{redact_remote_url(publishing_remote)!r}, which is not a "
+                    "configured remote; URL rewrites may change where that push "
+                    "goes, so its default-branch protection is unmeasured",
+                )
+            ]
     slugs = [github_repo_slug(url) for url in push_urls]
     if not slugs or not all(slugs):
-        return []  # no origin, or a push destination off GitHub: out of scope
-    slug = slugs[0]
+        return []  # no such remote, or a push destination off GitHub: out of scope
+    findings: list[dict] = []
+    for slug in dict.fromkeys(slugs):
+        findings.extend(
+            repository_branch_protection_findings(
+                repo, slug, command_runner=command_runner, deadline=deadline
+            )
+        )
+    return findings
+
+
+def repository_branch_protection_findings(
+    repo: Path,
+    slug: str,
+    *,
+    command_runner: Any,
+    deadline: float | None,
+) -> list[dict]:
+    """Probe one GitHub repository's default-branch history protection."""
     rest_path = github_rest_repo_path(slug)
     if not rest_path:
         return []
@@ -5911,65 +6016,80 @@ def default_branch_protection_findings(
     by_classic = {kind: False for kind in HISTORY_RULES}
     enforce_admins = ""
     protection_evidence = ""
-    if not all(by_ruleset.values()):
-        protection_argv = [
-            "gh",
-            "api",
-            "--hostname",
-            "github.com",
-            f"repos/{rest_path}/branches/{encoded_branch}/protection",
-            "--jq",
-            "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
-            '.enforce_admins.enabled]|map(tostring)|join(",")',
-        ]
+    protection_argv = [
+        "gh",
+        "api",
+        "--hostname",
+        "github.com",
+        f"repos/{rest_path}/branches/{encoded_branch}/protection",
+        "--jq",
+        "[.allow_force_pushes.enabled, .allow_deletions.enabled, "
+        '.enforce_admins.enabled]|map(tostring)|join(",")',
+    ]
+
+    def read_classic(blocked_by_rulesets: bool):
+        """Probe classic protection once.
+
+        Returns `("measured", (by_classic, enforce_admins, evidence))`,
+        `("absent", evidence)` for GitHub's own "Branch not protected", or
+        `("unproven", finding)`. An empty or null answer measured nothing
+        (#370): it is not evidence that force-push or deletion is allowed.
+        """
         resolved, output, failure = result_before_deadline(
             command_runner, protection_argv, repo, deadline
         )
         answer = output.strip()
         fields = [field.strip() for field in answer.split(",")]
+        lead = (
+            f"{slug} branch {branch}: rulesets lack non_fast_forward or "
+            f"deletion ({rules_text}) and classic protection is unmeasured"
+            if not blocked_by_rulesets
+            else f"{slug} branch {branch}: classic protection is unmeasured"
+        )
         if resolved and (
             len(fields) < 2
             or any(field not in ("true", "false") for field in fields[:2])
         ):
-            # An empty or null answer measured nothing (#370, item 5): it is
-            # not evidence that force-push or deletion is allowed.
             shown = redact_probe_text(answer[:40]) or "<no output>"
-            return [
-                reality_finding(
-                    BRANCH_PROTECTION_CHECK,
-                    REALITY_UNPROVEN,
-                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
-                    f"deletion ({rules_text}) and classic protection is "
-                    f"unmeasured — `{' '.join(protection_argv)}` answered "
-                    f"{shown!r}, which is not a pair of booleans",
-                )
-            ]
+            return "unproven", reality_finding(
+                BRANCH_PROTECTION_CHECK,
+                REALITY_UNPROVEN,
+                f"{lead} — `{' '.join(protection_argv)}` answered "
+                f"{shown!r}, which is not a pair of booleans",
+            )
         if resolved:
-            by_classic = {
-                "non_fast_forward": fields[0] == "false",
-                "deletion": fields[1] == "false",
-            }
-            enforce_admins = fields[2] if len(fields) > 2 else ""
-            protection_evidence = (
-                f"`{' '.join(protection_argv)}` -> {redact_probe_text(answer[:40])}"
+            return "measured", (
+                {
+                    "non_fast_forward": fields[0] == "false",
+                    "deletion": fields[1] == "false",
+                },
+                fields[2] if len(fields) > 2 else "",
+                f"`{' '.join(protection_argv)}` -> {redact_probe_text(answer[:40])}",
             )
-        elif "branch not protected" in failure.lower():
-            protection_evidence = (
-                f"`{' '.join(protection_argv)}` answered 'Branch not protected'"
+        if "branch not protected" in failure.lower():
+            return (
+                "absent",
+                f"`{' '.join(protection_argv)}` answered 'Branch not protected'",
             )
+        # Only GitHub's own "Branch not protected" proves absence; a missing
+        # admin scope, a rate limit or an expired budget measured nothing
+        # (review of #369, M2).
+        return "unproven", reality_finding(
+            BRANCH_PROTECTION_CHECK,
+            REALITY_UNPROVEN,
+            f"{lead} — {probe_failure_note(protection_argv, failure)}",
+        )
+
+    classic: tuple[dict[str, bool], str, str] | None = None
+    if not all(by_ruleset.values()):
+        state, payload = read_classic(False)
+        if state == "unproven":
+            return [payload]
+        if state == "measured":
+            classic = payload
+            by_classic, enforce_admins, protection_evidence = classic
         else:
-            # Only GitHub's own "Branch not protected" proves absence; a missing
-            # admin scope, a rate limit or an expired budget measured nothing
-            # (review of #369, M2).
-            return [
-                reality_finding(
-                    BRANCH_PROTECTION_CHECK,
-                    REALITY_UNPROVEN,
-                    f"{slug} branch {branch}: rulesets lack non_fast_forward or "
-                    f"deletion ({rules_text}) and classic protection is unmeasured "
-                    f"— {probe_failure_note(protection_argv, failure)}",
-                )
-            ]
+            protection_evidence = payload
     unblocked = [
         HISTORY_RULE_LABELS[kind]
         for kind in HISTORY_RULES
@@ -6075,6 +6195,31 @@ def default_branch_protection_findings(
             )
         ]
     if bypassable:
+        # Classic protection and rulesets are independent gates: a push must
+        # clear both. So when classic protection ALONE blocks force-push and
+        # deletion with `enforce_admins` true, a bypassable ruleset (or a
+        # classic block that admins skip) does not open the branch (#370,
+        # Codex P2 on #377). Any other classic answer leaves the advisory.
+        if classic is None:
+            state, payload = read_classic(True)
+            if state == "unproven":
+                # The classic answer never arrived, so "the token can bypass
+                # the combined protection" is not established (review of #437).
+                return [payload]
+            if state == "measured":
+                classic = payload
+        if classic is not None and all(classic[0].values()) and classic[1] == "true":
+            return [
+                reality_finding(
+                    BRANCH_PROTECTION_CHECK,
+                    REALITY_OK,
+                    f"{slug} default branch {branch} blocks force-push and "
+                    "deletion server-side: classic branch protection blocks both "
+                    "with enforce_admins true, so the token-bypassable block "
+                    f"({'; '.join(bypassable)}) does not open the branch — "
+                    f"evidence: {rules_evidence}; {classic[2]}",
+                )
+            ]
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
@@ -7783,11 +7928,219 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
     return agents
 
 
+WINDOWS_DACL_SECURITY_INFORMATION = 0x4
+
+
+def windows_security_libraries() -> tuple[Any, Any]:
+    """Load advapi32/kernel32 with the signatures the staging helpers use (Windows only)."""
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.GetFileSecurityW.restype = ctypes.c_int
+    advapi.OpenProcessToken.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetTokenInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.ConvertSidToStringSidW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.restype = ctypes.c_void_p
+    kernel.CreateFileW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    return advapi, kernel
+
+
+def windows_file_dacl_descriptor(path: Path) -> bytes:
+    """Return an existing file's self-relative DACL descriptor, protection flag included."""
+    advapi, _kernel = windows_security_libraries()
+    needed = ctypes.c_uint32(0)
+    advapi.GetFileSecurityW(
+        str(path), WINDOWS_DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(needed)
+    )
+    if needed.value == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not advapi.GetFileSecurityW(
+        str(path),
+        WINDOWS_DACL_SECURITY_INFORMATION,
+        buffer,
+        needed.value,
+        ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return buffer.raw
+
+
+def windows_dacl_signature(descriptor: bytes) -> tuple[bool, bool, str]:
+    """Return (protected, NULL DACL, ordered ACE list) of a descriptor's DACL.
+
+    The auto-inherited marker is ignored: Windows sets it on propagation, not access.
+    """
+    advapi, kernel = windows_security_libraries()
+    buffer = ctypes.create_string_buffer(descriptor)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        buffer, 1, WINDOWS_DACL_SECURITY_INFORMATION, ctypes.byref(text), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+    match = re.fullmatch(r"D:((?:P|AI|AR|NO_ACCESS_CONTROL)*)(.*)", sddl, re.S)
+    if match is None:
+        raise OSError(f"unrecognised DACL descriptor: {sddl!r}")
+    flags = re.findall(r"P|AI|AR|NO_ACCESS_CONTROL", match.group(1))
+    return "P" in flags, "NO_ACCESS_CONTROL" in flags, match.group(2)
+
+
+def windows_owner_only_descriptor() -> bytes:
+    """Return a protected DACL granting full control only to the current token user.
+
+    The user is also named as owner, so an elevated token whose default owner is the
+    Administrators group does not hand implicit DACL control to that group.
+    """
+    advapi, kernel = windows_security_libraries()
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)  # TOKEN_QUERY
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = ctypes.c_uint32(0)
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        user = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, 1, user, needed.value, ctypes.byref(needed)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
+    # TOKEN_USER begins with SID_AND_ATTRIBUTES, whose first member is the SID pointer.
+    sid = ctypes.c_void_p.from_buffer(user).value
+    sid_text = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        user_sid = ctypes.wstring_at(sid_text.value)
+        sddl = f"O:{user_sid}D:P(A;;FA;;;{user_sid})"
+    finally:
+        kernel.LocalFree(sid_text)
+    descriptor = ctypes.c_void_p()
+    size = ctypes.c_uint32(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(descriptor.value, size.value)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+class WindowsSecurityAttributes(ctypes.Structure):
+    _fields_ = (
+        ("nLength", ctypes.c_uint32),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.c_int),
+    )
+
+
+def windows_create_staging_file(
+    parent: Path, prefix: str, descriptor: bytes, read_only: bool
+) -> tuple[int, Path]:
+    """Create a new unshared sibling whose DACL and read-only bit exist before any byte.
+
+    No other handle can open the file while the returned descriptor is open, so no reader
+    can be admitted under a broader DACL than the one the destination will keep.
+    """
+    import msvcrt
+
+    _advapi, kernel = windows_security_libraries()
+    security = ctypes.create_string_buffer(descriptor)
+    attributes = WindowsSecurityAttributes(
+        ctypes.sizeof(WindowsSecurityAttributes),
+        ctypes.cast(security, ctypes.c_void_p),
+        0,
+    )
+    flags = 0x01 if read_only else 0x80  # FILE_ATTRIBUTE_READONLY / NORMAL
+    for _attempt in range(100):
+        candidate = parent / f"{prefix}{uuid.uuid4().hex}"
+        handle = kernel.CreateFileW(
+            str(candidate),
+            0x40000000,  # GENERIC_WRITE
+            0,  # no sharing until replacement
+            ctypes.byref(attributes),
+            1,  # CREATE_NEW
+            flags,
+            None,
+        )
+        if handle not in (None, ctypes.c_void_p(-1).value):
+            try:
+                return (
+                    msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY),
+                    candidate,
+                )
+            except OSError:
+                kernel.CloseHandle(handle)
+                if read_only:
+                    os.chmod(candidate, stat.S_IREAD | stat.S_IWRITE)
+                candidate.unlink(missing_ok=True)
+                raise
+        error = ctypes.get_last_error()
+        if error not in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+            raise ctypes.WinError(error)
+    raise FileExistsError(f"cannot reserve a staging sibling in {parent}")
+
+
 def write_managed_codex_file(
     path: Path, content: bytes, mode: int | None = None
 ) -> None:
     """Replace one file through an exclusive, flushed sibling; never follow a hardlink.
 
+    The final mode (POSIX) or the destination's DACL and read-only bit (Windows) are applied
+    to the staging file before its single fsync, so the flushed file already carries them.
     This is a single-file publication, not a multi-file transaction or a concurrent-writer lock.
     A failed rename leaves the previous destination in place; callers retain recovery backups.
     """
@@ -7798,16 +8151,43 @@ def write_managed_codex_file(
         reject_sync_path_aliases(path, "managed Codex file")
         if path.exists() and not path.is_file():
             raise HarnessError(f"managed Codex target is not an ordinary file: {path}")
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".harness-agent-", dir=path.parent
-        )
-        temporary = Path(temporary_name)
+        if os.name == "nt":
+            # A renamed sibling keeps its own DACL, so it must be the destination's: an
+            # inherited parent DACL could broaden a deliberately restricted file (#431).
+            security = (
+                windows_file_dacl_descriptor(path)
+                if path.exists()
+                else windows_owner_only_descriptor()
+            )
+            read_only = mode is not None and not mode & stat.S_IWRITE
+            requested = windows_dacl_signature(security)
+            descriptor, temporary = windows_create_staging_file(
+                path.parent, ".harness-agent-", security, read_only
+            )
+            # Prove the created DACL before any byte exists: refuse rather than publish
+            # if Windows merged parent entries or dropped the requested protection.
+            try:
+                staged = windows_dacl_signature(windows_file_dacl_descriptor(temporary))
+            except OSError:
+                os.close(descriptor)
+                raise
+            if staged != requested:
+                os.close(descriptor)
+                raise HarnessError(
+                    f"staging file did not receive the destination's DACL; "
+                    f"refusing publication: {path}"
+                )
+        else:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".harness-agent-", dir=path.parent
+            )
+            temporary = Path(temporary_name)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()
+            if mode is not None and os.name != "nt":
+                os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        if mode is not None:
-            temporary.chmod(mode)
         os.replace(temporary, path)
         temporary = None
         if path_is_alias(path) or not path.is_file() or path.read_bytes() != content:
