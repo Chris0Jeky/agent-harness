@@ -420,7 +420,7 @@ proceed (SPECS §5.4). The analyzer and the §6 matrix are unchanged, and any re
 
 Order chosen by risk × leverage. The top tier does steps marked ★ (judgment); cheaper tiers
 execute the rest inside that structure. Taskdeck steps map onto EXISTING tracked issues — do not
-create a parallel plan (law 9).
+create a parallel plan (P9).
 
 1. ★ **Global layer** (one evening, highest leverage): write `~/.claude/CLAUDE.md` +
    ESTATE.md + MACHINE.md; settings diet; argv-aware deny floor + dispatcher + test matrix;

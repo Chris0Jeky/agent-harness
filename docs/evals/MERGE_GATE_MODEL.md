@@ -26,7 +26,7 @@ edges at this commit, in about two seconds.
    - the head aged three minutes;
    - review rounds within the ceiling;
    - the merged SHA equal to the head.
-2. **Review ceiling.** Rounds never exceed two, plus the single reopen that law 2d grants a new
+2. **Review ceiling.** Rounds never exceed two, plus the single reopen that global law 2d grants a new
    CRITICAL introduced by fixes.
 3. **Bounded counters.** Worker attempts are at most 3, fixes at most 3, base refreshes at most
    3, and review rounds as above. Counters are checked on every successor before terminal
@@ -42,7 +42,7 @@ edges at this commit, in about two seconds.
 review round, or an age that survives a push, would otherwise look lawful. The observer is a
 small automaton driven only by the accepted event stream:
 - review verdicts are counted, and a CRITICAL counts toward the reopen only when it is
-  "introduced by the fixes" (law 2d): after a first round, and with a fix since that round's
+  "introduced by the fixes" (global law 2d): after a first round, and with a fix since that round's
   verdict. A CRITICAL on a round that reviewed only a base change cannot reopen; the table
   refuses it too, so such a round can only pass or park;
 - aging restarts when a head-changing event fires and again when that head is published, so a
@@ -80,14 +80,14 @@ property the exhaustive search relies on.
 Writing the laws as a machine surfaced cases the prose leaves implicit:
 
 - **Unreviewable logic parks.** Suppose round 1 requests changes, round 2 passes, and CI then
-  goes red. A fix that changes logic would need a third review, which law 2d forbids, so
+  goes red. A fix that changes logic would need a third review, which global law 2d forbids, so
   publishing it parks the PR. A *mechanical* fix keeps the review and can still ship. The first
   run of the checker found this path as a ceiling violation.
 - **Retarget versus refresh.** A retarget moves the base under the same head. It needs fresh
   proof and CI, but it keeps the review and the aging clock (paused while the new base is
   re-proved, which only delays a lawful merge). A merge-commit refresh is a new
-  pushed head, so its aging restarts (law 2f). It keeps the review *unless* the new base brings
-  a conflict, semantic interaction or new logic: law 2g's exception is the `refresh_conflict`
+  pushed head, so its aging restarts (global law 2f). It keeps the review *unless* the new base brings
+  a conflict, semantic interaction or new logic: global law 2g's exception is the `refresh_conflict`
   event. Such a refresh after the last round parks. A retarget whose new base interacts
   semantically with the change (`retarget_semantic`) likewise owes a fresh review, while the
   head, and so its aging clock, stays.
@@ -95,7 +95,7 @@ Writing the laws as a machine surfaced cases the prose leaves implicit:
   unbounded cycle. The model parks after three refreshes. The laws name no such bound; the
   control plane should adopt one or name its own.
 - **"A third review round is structurally impossible"** (a #432 qualification canary) is
-  true except for law 2d's one CRITICAL reopen. The model follows the law: the third round
+  true except for global law 2d's one CRITICAL reopen. The model follows the law: the third round
   exists only through that reopen, and a second reopen parks.
 - **Non-free authority never merges autonomously.** `gated`, `human-only` and `none` reach
   `OwnerBlocked` with every proof in hand, so the owner's decision is the only exit.
@@ -169,7 +169,7 @@ stateDiagram-v2
 - It models decisions, not effects. GitHub, CI and review are events. Whether a review was
   genuinely independent, or a fix genuinely "mechanical", is an input the implementation must
   establish.
-- One PR at a time. Stacked-PR ordering (law 4), post-merge late-comment reconciliation (law 2h)
+- One PR at a time. Stacked-PR ordering (global law 4), post-merge late-comment reconciliation (global law 2h)
   and cross-PR interference are not modelled.
 - The bounds are the laws' where the laws name one. The refresh bound and the dead-letter
   attempt count are this model's proposals.
