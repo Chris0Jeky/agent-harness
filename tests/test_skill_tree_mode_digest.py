@@ -878,5 +878,178 @@ class UnifiedSkillPreflightTests(unittest.TestCase):
                 self.assertEqual(before, harness.tree_digest(root))
 
 
+class SkillDestinationOverlapTests(unittest.TestCase):
+    """Cross-family destination overlap and absent-parent aliases (#444)."""
+
+    def build(self, root, codex_name, claude_name, skills_home, claude_home):
+        config = root / "config"
+        for family, source in (
+            ("codex", config / "codex/skills" / codex_name),
+            ("claude", config / "skills" / claude_name),
+        ):
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text(family, encoding="utf-8")
+        return SimpleNamespace(
+            config_root=str(config),
+            codex_home=str(root / "codex-home"),
+            claude_home=str(claude_home),
+            skills_home=str(skills_home),
+            only=[f"skill:{codex_name}", f"claude-skill:{claude_name}"],
+            apply=False,
+        )
+
+    def assert_refuses(self, args, root, pattern):
+        before = harness.tree_digest(root)
+        with mock.patch.object(
+            harness, "reserve_backup_root", wraps=harness.reserve_backup_root
+        ) as reserve, mock.patch.object(
+            harness.shutil, "copytree", wraps=shutil.copytree
+        ) as copy:
+            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                harness.HarnessError, pattern
+            ):
+                harness.sync_global(args)
+            copy.assert_not_called()
+            reserve.assert_not_called()
+        self.assertEqual(before, harness.tree_digest(root))
+
+    def nested_case(self, root, order, state):
+        """Return args for one nested layout; the inner target sits in the outer."""
+        config = root / "config"
+        if order == "codex-in-claude":
+            claude_home = root / "claude-home"
+            claude_home.mkdir()
+            outer = claude_home / "skills" / "outer"
+            args = self.build(root, "inner", "outer", outer / "skills", claude_home)
+            inner = outer / "skills" / "inner"
+            outer_source = config / "skills/outer"
+            inner_source = config / "codex/skills/inner"
+        else:
+            skills_home = root / "codex-skills"
+            outer = skills_home / "outer"
+            claude_home = outer / "claude-home"
+            skills_home.mkdir()
+            args = self.build(root, "outer", "inner", skills_home, claude_home)
+            inner = claude_home / "skills" / "inner"
+            outer_source = config / "codex/skills/outer"
+            inner_source = config / "skills/inner"
+        if state >= 1:
+            shutil.copytree(outer_source, outer)
+        if state >= 2:
+            shutil.copytree(inner_source, inner)
+        return args
+
+    def test_nested_cross_family_destinations_refuse_before_mutation(self):
+        for order in ("codex-in-claude", "claude-in-codex"):
+            for state in (0, 1, 2):
+                for apply in (False, True):
+                    with self.subTest(
+                        order=order, state=state, apply=apply
+                    ), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp).resolve()
+                        args = self.nested_case(root, order, state)
+                        args.apply = apply
+                        self.assert_refuses(
+                            args, root, "selected skill destinations overlap"
+                        )
+
+    def test_sibling_and_distinct_targets_are_not_overlap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "a").mkdir()
+            before = harness.tree_digest(root)
+            harness.preflight_skill_destination_overlap(
+                [root / "a" / "x", root / "a" / "y"],
+                [root / "a" / "xy", root / "b" / "x", root / "ax"],
+            )
+            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_mixed_absent_case_alias_parents_refuse_before_mutation(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                claude_home = root / "claude-home"
+                claude_home.mkdir()
+                args = self.build(
+                    root, "sample", "sample", claude_home / "Skills", claude_home
+                )
+                # Independent native mkdir oracle, not the production probe.
+                probe = claude_home / ".fixture-lookup"
+                probe.mkdir()
+                (probe / "skills").mkdir()
+                try:
+                    (probe / "Skills").mkdir()
+                except FileExistsError:
+                    collides = True
+                else:
+                    collides = False
+                shutil.rmtree(probe)
+                args.apply = apply
+                if collides:
+                    self.assert_refuses(args, root, "selected skill roots collide")
+                else:
+                    before = harness.tree_digest(root)
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(harness.sync_global(args), 0)
+                    if apply:
+                        self.assertTrue((claude_home / "Skills/sample").is_dir())
+                        self.assertTrue((claude_home / "skills/sample").is_dir())
+                    else:
+                        self.assertEqual(before, harness.tree_digest(root))
+
+    def test_absent_deep_parent_chains_group_by_native_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "home").mkdir()
+            probe = root / "home" / ".fixture-lookup"
+            probe.mkdir()
+            (probe / "a").mkdir()
+            try:
+                (probe / "A").mkdir()
+            except FileExistsError:
+                collides = True
+            else:
+                collides = False
+            shutil.rmtree(probe)
+            before = harness.tree_digest(root)
+            targets = [root / "home/a/b/sample", root / "home/A/b/sample"]
+            if collides:
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "selected skill roots collide"
+                ):
+                    harness.preflight_selected_skill_roots(targets, None, [], "fixture")
+            else:
+                harness.preflight_selected_skill_roots(targets, None, [], "fixture")
+            self.assertEqual(before, harness.tree_digest(root))
+
+    def test_distinct_case_sensitive_absent_parents_stay_independent(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                claude_home = root / "claude-home"
+                claude_home.mkdir()
+                SkillTreeFilesystemLookupTests.set_case_sensitive(self, claude_home)
+                first, second = claude_home / "Skills", claude_home / "skills"
+                first.mkdir()
+                try:
+                    second.mkdir()
+                except FileExistsError:
+                    self.skipTest(
+                        "host cannot represent distinct case-sensitive parents"
+                    )
+                first.rmdir()
+                second.rmdir()
+                args = self.build(root, "sample", "sample", first, claude_home)
+                args.apply = apply
+                before = harness.tree_digest(root)
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(harness.sync_global(args), 0)
+                if apply:
+                    self.assertTrue((first / "sample/SKILL.md").is_file())
+                    self.assertTrue((second / "sample/SKILL.md").is_file())
+                else:
+                    self.assertEqual(before, harness.tree_digest(root))
+
+
 if __name__ == "__main__":
     unittest.main()
