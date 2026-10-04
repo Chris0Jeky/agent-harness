@@ -183,31 +183,47 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
             action = {s["id"]: s for s in journeys[journey_id]["steps"]}[step_id]["action"].lower()
             for field in fields:
                 self.assertIn(field, action, f"{journey_id}/{step_id} omits {field}")
+        # Each boundary must be an assertion of the step that tests it, not text elsewhere in the journey.
         claims = {
-            "admin-agent-acts": ("not silently overwritten", "does not borrow",
-                                 "narration without a receipt is never counted as an effect",
-                                 "never named as the actor of an agent act"),
-            "adversarial-audit": ("cannot write", "never the audited agent's summary", "never reported as clean",
-                                  "zero examined items is not a clean pass", "cannot apply the correction itself"),
-            "two-agent-correction": ("different agent identity from the proposer",
-                                     "does not transfer to the new revision", "nothing is applied",
-                                     "escalated to sam in the next digest instead of being applied"),
-            "archive-not-delete": ("archived, not deleted", "permanent deletion stays a person-only act",
-                                   "neither archives it nor reports it deleted", "not applied silently"),
-            "tldr-undo-cadence": ("without overlap or gap", "shows a conflict with both states",
-                                  "agents never follow undo links", "unknown delivery is not delivered",
-                                  "from the last delivered window end", "never presented as available"),
+            ("admin-agent-acts", "triage"): ("never named as the actor of an agent act",),
+            ("admin-agent-acts", "stale-target"): ("not silently overwritten",),
+            ("admin-agent-acts", "out-of-scope"): ("does not borrow",),
+            ("admin-agent-acts", "narrated-only"): ("narration without a receipt is never counted as an effect",),
+            ("adversarial-audit", "independent-identity"): ("cannot write",),
+            ("adversarial-audit", "feed-not-report"): ("never the audited agent's summary",),
+            ("adversarial-audit", "partial-coverage"): ("never reported as clean",),
+            ("adversarial-audit", "finding"): ("cannot apply the correction itself",),
+            ("adversarial-audit", "clean-window"): ("zero examined items is not a clean pass",),
+            ("two-agent-correction", "self-approval"): ("different agent identity from the proposer",),
+            ("two-agent-correction", "stale-approval"): ("does not transfer to the new revision",),
+            ("two-agent-correction", "rejected"): ("nothing is applied",),
+            ("two-agent-correction", "rarity-budget"): ("escalated to sam in the next digest instead of being applied",),
+            ("archive-not-delete", "cleanup-archives"): ("archived, not deleted",),
+            ("archive-not-delete", "hard-delete-refused"): ("permanent deletion stays a person-only act",),
+            ("archive-not-delete", "absence-not-deletion"): ("neither archives it nor reports it deleted",),
+            ("archive-not-delete", "retention-visible"): ("is deferred until it closes",),
+            ("tldr-undo-cadence", "evening-wrap"): ("without overlap or gap", "exactly one daily window"),
+            ("tldr-undo-cadence", "undo-conflict"): ("shows a conflict with both states",),
+            ("tldr-undo-cadence", "undo-by-person"): ("agents never follow undo links",),
+            ("tldr-undo-cadence", "missed-delivery"): ("unknown delivery is not delivered",
+                                                        "carries each undelivered earlier window under that "
+                                                        "window's own identity"),
+            ("tldr-undo-cadence", "undo-unavailable"): ("never presented as available",),
         }
-        for journey_id, phrases in claims.items():
-            text = self.journey_text(journey_id)
+        for (journey_id, step_id), phrases in claims.items():
+            step = {s["id"]: s for s in journeys[journey_id]["steps"]}[step_id]
+            asserted = " ".join(step["assertions"]).lower()
             for phrase in phrases:
-                self.assertIn(phrase, text, f"{journey_id} omits {phrase!r}")
-            self.assertIn("never the person's", text)
+                self.assertIn(phrase, asserted, f"{journey_id}/{step_id} does not assert {phrase!r}")
+        for journey_id in expected_steps:
+            self.assertIn("never the person's", " ".join(journeys[journey_id]["preconditions"]).lower())
         profile = self.profile_text()
         for claim in ("the approver is a different agent from the proposer",
                       "permanent delete is refused to every agent",
                       "the person is never recorded as the actor of an agent's act",
-                      "never fills it from the agent's own account",
+                      "must never fill it from the agent's own account",
+                      "a missed digest's window is carried into the next delivered digest",
+                      "credential identifier (never the secret)",
                       "advisory and `not_run` like the three above"):
             self.assertIn(claim, profile)
 

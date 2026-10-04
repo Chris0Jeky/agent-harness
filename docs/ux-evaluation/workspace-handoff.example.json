@@ -682,7 +682,7 @@
       "steps": [
         {
           "id": "triage",
-          "action": "The admin agent moves a new inbox item to a list and schedules it. Act receipt fields: operation id, acting agent identity and credential, role, authority scope and policy version, target item and the revision read before acting, committed before and after state, reason, undo handle and its availability, application commit time (UTC) and change-feed reference.",
+          "action": "The admin agent moves a new inbox item to a list and schedules it. Act receipt fields: operation id, acting agent identity and credential identifier (never the secret), role, authority scope and policy version, target item and the revision read before acting, committed before and after state, reason, undo handle and its availability, application commit time (UTC) and change-feed reference.",
           "assertions": [
             "The receipt comes from the application's committed change feed, not from the agent's narration.",
             "The actor is the admin agent's own credential; the person is never named as the actor of an agent act."
@@ -1000,7 +1000,7 @@
           "id": "retention-visible",
           "action": "An archived item is scheduled to be purged by retention.",
           "assertions": [
-            "The purge time is visible in the digest, and a purge that would end restorability before the undo window closes is reported, not applied silently."
+            "The purge time is visible in the digest; a purge that would end restorability before the undo window closes is deferred until it closes, and the deferral is reported rather than applied silently."
           ],
           "evidence_required": [
             "action_log",
@@ -1050,7 +1050,7 @@
           "id": "evening-wrap",
           "action": "Produce the evening wrap; its window starts exactly where the morning window ended.",
           "assertions": [
-            "Morning and evening windows alternate without overlap or gap, so each act appears in exactly one daily digest; the weekly review covers the same acts again."
+            "Each digest carries a window identity; morning and evening windows partition the committed feed without overlap or gap, so each act belongs to exactly one daily window, and the weekly review covers the same acts again."
           ],
           "evidence_required": [
             "action_log",
@@ -1100,7 +1100,7 @@
           "id": "missed-delivery",
           "action": "One digest's delivery fails or its outcome is unknown.",
           "assertions": [
-            "Unknown delivery is not delivered; the next digest covers the gap from the last delivered window end, not from now."
+            "Unknown delivery is not delivered; the next delivered digest carries each undelivered earlier window under that window's own identity, so no act is dropped and none is counted in two daily windows."
           ],
           "evidence_required": [
             "action_log",
