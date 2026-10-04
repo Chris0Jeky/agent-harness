@@ -6706,25 +6706,83 @@ _GIT_PUSH_HISTORY_OPTIONS = (
 def git_push_history_option(token: str) -> str | None:
     """The history-relevant push option a token spells, abbreviations included.
 
-    Git accepts unambiguous long-option prefixes. An ambiguous one is a git
-    error, so mapping it onto the first option it abbreviates errs toward the
-    guard, never away from it.
+    Git accepts any unambiguous long-option prefix, one character included
+    (`--m` is `--mirror`). An ambiguous one is a git error, so mapping it onto
+    the first option it abbreviates errs toward the guard, never away from it.
     """
     option = token.split("=", 1)[0]
     if option in _GIT_PUSH_HISTORY_OPTIONS:
         return option
     for candidate in _GIT_PUSH_HISTORY_OPTIONS:
-        if git_option_abbreviates(token, candidate):
+        if git_option_abbreviates(token, candidate, min_prefix=1):
             return candidate
     return None
 
 
+def git_push_option_tokens(args: list[str]) -> list[str]:
+    """The option tokens of a push argv, in order, never an option's value.
+
+    Git permutes options and operands until `--`, and a value-taking option
+    consumes the next token whatever it spells: `-o --mirror` is push-option
+    data, not `--mirror`.
+    """
+    value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
+    tokens = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            break
+        if token in value_options:
+            tokens.append(token)
+            index += 2
+            continue
+        if token.startswith("-") and len(token) > 1:
+            _flags, consumes_next = git_push_short_option_shape(token)
+            tokens.append(token)
+            index += 2 if consumes_next else 1
+            continue
+        index += 1
+    return tokens
+
+
+def git_push_history_flags(args: list[str]) -> set[str]:
+    """The history options a push argv leaves active, `--no-<option>` honoured."""
+    active = set()
+    for token in git_push_option_tokens(args):
+        name = token.split("=", 1)[0]
+        if name.startswith("--no-") and f"--{name[5:]}" in _GIT_PUSH_HISTORY_OPTIONS:
+            active.discard(f"--{name[5:]}")
+            continue
+        short_flags, _consumes_next = git_push_short_option_shape(token)
+        if "f" in short_flags:
+            active.add("--force")
+        if "d" in short_flags:
+            active.add("--delete")
+        history_option = git_push_history_option(token)
+        if history_option:
+            active.add(history_option)
+    return active
+
+
+def git_config_bool_is_true(value: str) -> bool:
+    """Git's boolean reading: a valueless key, true/yes/on, or a non-zero integer."""
+    lowered = value.strip().lower()
+    if lowered in {"", "true", "yes", "on"}:
+        return True
+    integer = re.fullmatch(r"([-+]?\d+)[kmg]?", lowered)
+    return bool(integer) and int(integer.group(1)) != 0
+
+
 def git_push_ref_is_bare_name(destination: str) -> bool:
-    """Whether a push destination is a bare name git resolves by DWIM."""
-    return (
-        "*" not in destination
-        and not destination.lower().startswith(("refs/", "tags/", "heads/", "remotes/"))
-        and destination not in {"HEAD", "@"}
+    """Whether a push destination is a name git resolves by DWIM.
+
+    Only `refs/...` (full) and `tags/...` (a tag by spelling) are decided by
+    their text. `heads/x`, `remotes/x` and `HEAD` are DWIM names too: git also
+    tries `refs/tags/<name>`, so a local tag of that name decides them.
+    """
+    return "*" not in destination and not destination.lower().startswith(
+        ("refs/", "tags/")
     )
 
 
@@ -6744,8 +6802,6 @@ def git_push_ref_may_be_tag(destination: str, local_tags: set[str] | None) -> bo
         return lowered == "refs/tags" or lowered.startswith("refs/tags/")
     if lowered.startswith("tags/"):
         return True
-    if lowered.startswith(("heads/", "remotes/")) or destination in {"HEAD", "@"}:
-        return False
     return local_tags is None or destination in local_tags
 
 
@@ -6784,6 +6840,8 @@ def git_push_history_targets(
         source, colon, destination = body.rpartition(":")
         if colon and not source:
             targets.append((destination, "delete"))
+            continue
+        if not colon and body in {"HEAD", "@"}:
             continue
         if not colon:
             destination = body
@@ -8144,6 +8202,7 @@ def configured_bare_push_is_dangerous(
     command_runner=command_output,
     deadline: float | None = None,
     forced: bool = False,
+    selector: bool = False,
 ) -> str:
     """What a refspec-less `git push` inherits from config that the floor guards.
 
@@ -8153,13 +8212,15 @@ def configured_bare_push_is_dangerous(
       - "tag": `remote.<name>.mirror` (force + delete of every remote ref), or a
         push refspec that force-updates ('+', or any refspec when the command
         line itself forces or prunes: `forced`) or deletes (':dst') a
-        destination that may be a tag;
+        destination that may be a tag (a bare configured name is looked up as
+        a local tag, as on the command line);
       - "receive-pack": `remote.<name>.receivepack`, a configured receiver
         command that executes;
       - "" otherwise.
     Since floor 1.8.0 (#356 step 2) forced or deleting BRANCH refspecs are not
-    reported: the default branch is protected server-side. Configured refspecs
-    are classified syntactically (a bare configured name is not looked up).
+    reported: the default branch is protected server-side. With `selector`
+    (`--all`/`--tags`) git ignores the configured push refspecs, so only a
+    configured mirror counts.
     Over-approximates across all remotes. Resolution failure/absence -> "" ->
     nothing inherited, matching git's own non-fast-forward-rejecting default
     for an unconfigured bare push. This is a deliberate fail-open direction: if
@@ -8179,6 +8240,7 @@ def configured_bare_push_is_dangerous(
         deadline,
     )
     receive_pack = False
+    bare_destinations: list[str] = []
     for line in output.splitlines():
         parts = line.split(None, 1)
         if not parts:
@@ -8187,20 +8249,29 @@ def configured_bare_push_is_dangerous(
         value = parts[1].strip() if len(parts) == 2 else ""
         if key.endswith(".mirror"):
             # git treats a valueless boolean key (`mirror` with no `= value`) as
-            # true, and `--get-regexp` emits it with no value — so empty counts.
-            if value == "" or value.lower() in {"true", "yes", "on", "1"}:
+            # true, and `--get-regexp` emits it with no value — so empty counts,
+            # and so does any non-zero integer (`mirror = 2`).
+            if git_config_bool_is_true(value):
                 return "tag"
             continue
         if key.endswith(".receivepack"):
             receive_pack = True
             continue
+        if selector:
+            continue
         # A configured push value is a refspec, never a CLI option: a leading
         # '+' forces and an empty source (':dst') deletes the destination ref.
-        for _destination, effect in git_push_history_targets(
+        for destination, _effect in git_push_history_targets(
             value.split(), force=forced, delete=False, prune=False
         ):
-            if git_push_ref_may_be_tag(_destination, set()):
+            if git_push_ref_may_be_tag(destination, set()):
                 return "tag"
+            if git_push_ref_is_bare_name(destination):
+                bare_destinations.append(destination)
+    if bare_destinations and local_tag_names(
+        project_dir, bare_destinations, git_globals, command_runner, deadline
+    ):
+        return "tag"
     return "receive-pack" if receive_pack else ""
 
 
@@ -11783,7 +11854,8 @@ def check(
                 # A literal --mirror is guarded before the opacity checks, so a
                 # dynamic token elsewhere in the push cannot render it as mere
                 # parser uncertainty under the core posture (floor 1.8.0).
-                if any(git_push_history_option(token) == "--mirror" for token in args):
+                push_history_flags = git_push_history_flags(args)
+                if "--mirror" in push_history_flags:
                     return "deny", _TAG_GUARD_MIRROR
                 if not quote_aware and any(
                     re.search(r"[*?\[]", token) for token in raw_args
@@ -11819,20 +11891,11 @@ def check(
                 # deletion and --prune proceed; the default branch is protected
                 # server-side. These flags only decide whether a TAG destination
                 # is rewritten or deleted (the tag guard below).
-                force_requested = False
-                delete_requested = False
-                prune_requested = False
-                for t in args:
-                    short_flags, _short_consumes_next = git_push_short_option_shape(t)
-                    history_option = git_push_history_option(t)
-                    if history_option in {"--force", "--force-with-lease"} or (
-                        "f" in short_flags
-                    ):
-                        force_requested = True
-                    if history_option == "--delete" or "d" in short_flags:
-                        delete_requested = True
-                    if history_option == "--prune":
-                        prune_requested = True
+                force_requested = bool(
+                    push_history_flags & {"--force", "--force-with-lease"}
+                )
+                delete_requested = "--delete" in push_history_flags
+                prune_requested = "--prune" in push_history_flags
 
                 push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
                 # `--all`/`--tags`/`--repo` are recognized DURING the option walk,
@@ -12040,20 +12103,18 @@ def check(
                     )
                     if opaque:
                         return opaque
-                if (
-                    has_explicit_refspec
-                    and not refspec_operands
-                    and not explicit_selector
-                    and (force_requested or prune_requested)
-                ):
-                    # Only a shell redirection made this forced push look
-                    # explicit (issue #65), so it still inherits configured push
-                    # refspecs: resolve them for a tag before letting it through.
+                if not refspec_operands and (has_explicit_refspec or explicit_selector):
+                    # No refspec operand is left, yet the bare-push path above was
+                    # skipped: a shell redirection made the push look explicit
+                    # (issue #65), or `--all`/`--tags` stands in for refspecs. Both
+                    # still inherit a configured mirror, and a redirection-only push
+                    # inherits configured push refspecs too.
                     if configured_bare_push_is_dangerous(
                         current_cwd,
                         push_git_globals,
                         deadline=_remote_deadline,
-                        forced=True,
+                        forced=force_requested or prune_requested,
+                        selector=explicit_selector,
                     ) not in {"", "receive-pack"}:
                         return "deny", _TAG_GUARD_CONFIG
                 if sensitive:
@@ -13693,6 +13754,8 @@ def command_carries_core_hint(command: str) -> bool:
     text = core_hint_text(command)
     if _CORE_HINT.search(text):
         return True
+    if push_segment_spells_tag_or_mirror(text):
+        return True
     if _CORE_PIPE_HINT.search(text) and pipes_program_text_into_interpreter(text):
         return True
     if _CORE_DOWNLOAD_ASSIGNED.search(text) and _CORE_EVALUATOR.search(text):
@@ -13700,6 +13763,37 @@ def command_carries_core_hint(command: str) -> bool:
     for token in text.split():
         if _CORE_PATH_SHAPED.search(token) and (
             _CORE_SECRET_NAME.search(token) or _SECRET_PATH.search(token.strip("'\"`"))
+        ):
+            return True
+    return False
+
+
+# The tag guard's spellings (1.8.0). An earlier verdict in the same push -- an
+# opaque token, an abbreviated value option, a receive-pack override, inline
+# config -- is returned first and is not core, so without this hint core would
+# let a literal tag deletion or mirror through behind it (review of #466).
+_CORE_TAG_SPELLING = re.compile(
+    r"(?<![\w-])--m(?:i(?:r(?:r(?:or?)?)?)?)?(?![\w-])|\.mirror\b"
+    r"|refs/tags/|(?<![\w/.-])tags/",
+    re.IGNORECASE,
+)
+_CORE_GIT_WORD = re.compile(r"\bgit\b", re.IGNORECASE)
+_CORE_PUSH_WORD = re.compile(r"\bpush\b", re.IGNORECASE)
+
+
+def push_segment_spells_tag_or_mirror(text: str) -> bool:
+    """Whether one segment holds `git ... push` and a tag or mirror spelling.
+
+    Split on segment separators rather than spanning them in a regex, so the
+    scan stays linear; the same segment always satisfies the charter hint's
+    `git ... push` alternative, keeping the core hint a subset of it.
+    """
+    for segment in re.split(r"[|;&\n]", text):
+        git_word = _CORE_GIT_WORD.search(segment)
+        if (
+            git_word
+            and _CORE_PUSH_WORD.search(segment, git_word.end())
+            and _CORE_TAG_SPELLING.search(segment)
         ):
             return True
     return False

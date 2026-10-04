@@ -59,6 +59,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(option("--force-with-lease=main:abc"), "--force-with-lease")
         self.assertEqual(option("--forc"), "--force")
         self.assertEqual(option("--mirr"), "--mirror")
+        self.assertEqual(option("--m"), "--mirror")
         self.assertEqual(option("--dele"), "--delete")
         self.assertEqual(option("--pru"), "--prune")
         self.assertIsNone(option("--follow-tags"))
@@ -85,7 +86,6 @@ class HelperTests(unittest.TestCase):
             "heads/main",
             "remotes/origin/main",
             "HEAD",
-            "@",
             "feature/x",
         ):
             with self.subTest(destination=destination):
@@ -121,12 +121,35 @@ class HelperTests(unittest.TestCase):
             [("refs/tags/*", "prune")],
         )
         self.assertEqual(targets(["main:"], True, False, False), [("main", "force")])
+        # a colon-less HEAD pushes the current branch
+        self.assertEqual(targets(["HEAD", "@"], True, False, False), [])
+
+    def test_option_walk_honours_values_and_negation(self):
+        flags = dispatch.git_push_history_flags
+        self.assertEqual(flags(["-o", "--mirror", "origin", "main"]), set())
+        self.assertEqual(flags(["--force", "--no-force", "origin"]), set())
+        self.assertEqual(flags(["--no-force", "--force", "origin"]), {"--force"})
+        self.assertEqual(flags(["origin", "main", "-fd"]), {"--force", "--delete"})
+        self.assertEqual(flags(["--", "--mirror"]), set())
+        self.assertEqual(flags(["--push-option", "--prune", "origin"]), set())
+
+    def test_git_booleans(self):
+        true = dispatch.git_config_bool_is_true
+        for value in ("", "true", "YES", "on", "1", "2", "-1", "1k"):
+            with self.subTest(value=value):
+                self.assertTrue(true(value))
+        for value in ("false", "no", "off", "0", "+0", "maybe"):
+            with self.subTest(value=value):
+                self.assertFalse(true(value))
 
     def test_bare_names(self):
+        # git also tries refs/tags/<name> for heads/x, remotes/x and HEAD, so a
+        # local tag of that name decides them (review of #466).
         bare = dispatch.git_push_ref_is_bare_name
-        self.assertTrue(bare("v1.0"))
-        self.assertTrue(bare("feature/x"))
-        for name in ("refs/heads/x", "tags/v1", "heads/x", "remotes/o/x", "HEAD", "a*"):
+        for name in ("v1.0", "feature/x", "heads/x", "remotes/o/x", "HEAD"):
+            with self.subTest(name=name):
+                self.assertTrue(bare(name))
+        for name in ("refs/heads/x", "tags/v1", "a*"):
             with self.subTest(name=name):
                 self.assertFalse(bare(name))
 
@@ -239,6 +262,171 @@ class LocalTagRepositoryTests(unittest.TestCase):
                 self.assertEqual(decision, "deny", reason)
                 self.assertIn("[tag-guard]", reason)
         self.assertEqual(self.decide("git push --tags origin")[0], "allow")
+
+
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class ReviewRoundOneTests(unittest.TestCase):
+    """Defects the two review lenses on #466 found, each pinned against a real repo."""
+
+    WALL = {"tier": 2, "flags": {}, "floor_posture": "wall"}
+    CORE = {"tier": 2, "flags": {}}
+
+    def repo(self, *config):
+        repo = tempfile.mkdtemp(prefix="floor-tag-guard-r1-")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        git(repo, "init", "-q", "-b", "main")
+        git(
+            repo,
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "init",
+        )
+        for tag in ("v1", "heads/release", "remotes/release"):
+            git(repo, "tag", tag)
+        git(repo, "remote", "add", "origin", "https://example.invalid/repo.git")
+        for key, value in config:
+            git(repo, "config", key, value)
+        return repo
+
+    def render(self, command, repo, cfg):
+        decision, reason = floor_environment.hermetic_check(
+            dispatch, command, cfg, repo, remote_resolver=_private
+        )
+        masked = None
+        if (
+            dispatch.floor_posture(cfg) == "core"
+            and decision != "allow"
+            and not dispatch.verdict_is_core(decision, reason)
+        ):
+            masked = dispatch.masked_segment_verdict(
+                dispatch.core_hint_text(command),
+                cfg,
+                repo,
+                repo,
+                dispatch.check,
+                accepts=dispatch.verdict_is_core,
+            )
+        rendered = dispatch.apply_floor_posture(
+            decision, reason, command, None, cfg, masked
+        )
+        if "DOUBLE-CHECK" in rendered[1]:
+            return "double-check"
+        return rendered[0]
+
+    def check_cases(self, cases):
+        for config, command, cfg, expected in cases:
+            with self.subTest(config=config, command=command):
+                self.assertEqual(
+                    self.render(command, self.repo(*config), cfg), expected
+                )
+
+    def test_configured_bare_tag_refspecs_are_looked_up(self):
+        self.check_cases(
+            [
+                ([("remote.origin.push", ":v1")], "git push origin", self.WALL, "deny"),
+                ([("remote.origin.push", "+v1")], "git push origin", self.WALL, "deny"),
+                (
+                    [("remote.origin.push", "+main")],
+                    "git push origin",
+                    self.WALL,
+                    "allow",
+                ),
+            ]
+        )
+
+    def test_namespace_looking_tag_names_are_looked_up(self):
+        self.check_cases(
+            [
+                ([], "git push origin --delete heads/release", self.WALL, "deny"),
+                ([], "git push --force origin remotes/release", self.WALL, "deny"),
+                ([], "git push origin --delete heads/main", self.WALL, "allow"),
+                ([], "git push --force origin HEAD", self.WALL, "allow"),
+            ]
+        )
+
+    def test_one_character_mirror_and_inherited_mirror(self):
+        mirror = [("remote.origin.mirror", "true")]
+        tag_refspec = [("remote.origin.push", "+refs/tags/*:refs/tags/*")]
+        self.check_cases(
+            [
+                ([], "git push --m origin", self.WALL, "deny"),
+                (mirror, "git push --tags origin", self.WALL, "deny"),
+                (mirror, "git push origin 2>&1", self.WALL, "deny"),
+                ([("remote.origin.mirror", "2")], "git push origin", self.WALL, "deny"),
+                (
+                    [("remote.origin.mirror", "0")],
+                    "git push origin",
+                    self.WALL,
+                    "allow",
+                ),
+                ([], "git push --all origin", self.WALL, "allow"),
+                (tag_refspec, "git push --tags origin", self.WALL, "allow"),
+            ]
+        )
+
+    def test_core_double_checks_a_tag_spelling_behind_an_earlier_verdict(self):
+        core = self.CORE
+        self.check_cases(
+            [
+                ([], "git push --force origin refs/tags/{v1,v2}", core, "double-check"),
+                (
+                    [],
+                    "git push --delete origin refs/tags/v1 --push-o=x",
+                    core,
+                    "double-check",
+                ),
+                (
+                    [],
+                    "git push --receive-pack=rp --mirror backup",
+                    core,
+                    "double-check",
+                ),
+                (
+                    [],
+                    "git -c remote.backup.mirror=true push backup",
+                    core,
+                    "double-check",
+                ),
+                ([], "X=; git push origin $X :refs/tags/v1", core, "double-check"),
+                (
+                    [],
+                    "git -c color.ui=never push --mirror origin",
+                    core,
+                    "double-check",
+                ),
+                ([], "git push origin $BRANCH", core, "allow"),
+            ]
+        )
+
+    def test_option_values_and_cancelled_flags_are_not_tag_guard_verdicts(self):
+        wall = self.WALL
+        self.check_cases(
+            [
+                ([], "git push -o --mirror origin main", wall, "allow"),
+                ([], "git push --force --no-force origin refs/tags/v1", wall, "allow"),
+                ([], "git push --mirror --no-mirror origin main", wall, "allow"),
+                ([], "git push --no-force --force origin refs/tags/v1", wall, "deny"),
+                ([], "git push origin refs/tags/v1 --force", wall, "deny"),
+            ]
+        )
+
+    def test_the_tag_hint_stays_linear(self):
+        import time
+
+        for text in (
+            "git push " * 2500,
+            "git push " + "--mi" * 5000,
+            "git push " + "tags/" * 4000,
+            "git x push --m; " * 1250,
+        ):
+            started = time.perf_counter()
+            dispatch.command_carries_core_hint(text)
+            self.assertLess(time.perf_counter() - started, 1.0)
 
 
 class PostureRenderingTests(unittest.TestCase):

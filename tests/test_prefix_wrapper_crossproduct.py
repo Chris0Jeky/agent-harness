@@ -186,7 +186,12 @@ def _stub_remote_resolver(
 
 
 def _stub_configured_bare_push(
-    project_dir, git_globals=None, command_runner=None, deadline=None, forced=False
+    project_dir,
+    git_globals=None,
+    command_runner=None,
+    deadline=None,
+    forced=False,
+    selector=False,
 ):
     """No `git config` subprocess, and no read of the host's global gitconfig.
 
