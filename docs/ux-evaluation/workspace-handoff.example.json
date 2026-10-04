@@ -669,6 +669,471 @@
         "max_judge_calls": 0,
         "max_retries": 0
       }
+    },
+    {
+      "id": "admin-agent-acts",
+      "goal": "An admin agent triages, schedules, moves and archives items in a person's task system under its own scoped credential, and every act it reports has a committed receipt.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "triage",
+          "action": "The admin agent moves a new inbox item to a list and schedules it. Act receipt fields: operation id, acting agent identity and credential, role, authority scope and policy version, target item and the revision read before acting, committed before and after state, reason, undo handle and its availability, application commit time (UTC) and change-feed reference.",
+          "assertions": [
+            "The receipt comes from the application's committed change feed, not from the agent's narration.",
+            "The actor is the admin agent's own credential; the person is never named as the actor of an agent act."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "stale-target",
+          "action": "Sam edits the item after the agent read it; the agent then writes with the old revision.",
+          "assertions": [
+            "The write is refused as a revision conflict and the agent re-reads; Sam's edit is not silently overwritten."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "out-of-scope",
+          "action": "The agent is asked to change a sharing setting that its credential does not cover.",
+          "assertions": [
+            "The request is refused with a receipt naming the missing scope; the agent does not borrow the person's session or another agent's credential."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "partial-batch",
+          "action": "The agent moves ten items in one batch and three moves fail.",
+          "assertions": [
+            "Each item has its own receipt; the summary counts succeeded, failed and not attempted separately and never reports the batch as done."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "narrated-only",
+          "action": "The agent's report lists an act that has no committed receipt.",
+          "assertions": [
+            "The act is reported as not done; narration without a receipt is never counted as an effect."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 60,
+        "max_seconds": 900,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "adversarial-audit",
+      "goal": "An auditor agent with its own read-only identity checks the admin agent's acts against the application's change feed over a declared window.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "independent-identity",
+          "action": "The auditor reads with its own credential, distinct from the admin agent's. Audit receipt fields: auditor identity, window start (inclusive) and end (exclusive), coverage state, items examined, checks run, findings and change-feed references.",
+          "assertions": [
+            "The auditor credential cannot write; an attempted write is refused and recorded."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "feed-not-report",
+          "action": "The window contains one act missing from the admin agent's report and one reported act missing from the feed.",
+          "assertions": [
+            "Both discrepancies become findings; the auditor's source of truth is the committed change feed, never the audited agent's summary."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "partial-coverage",
+          "action": "Part of the window cannot be read.",
+          "assertions": [
+            "Coverage is recorded as partial or unavailable and findings are scoped to what was read; a partial window is never reported as clean."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "finding",
+          "action": "The auditor records a finding against one act.",
+          "assertions": [
+            "The finding names the operation id, the rule it breaks, evidence references, severity and an optional proposed correction; the auditor cannot apply the correction itself."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "clean-window",
+          "action": "A fully covered window has no findings.",
+          "assertions": [
+            "The clean result records items examined and checks run; zero examined items is not a clean pass."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 60,
+        "max_seconds": 900,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "two-agent-correction",
+      "goal": "A correction to an agent act is applied only with a second, distinct agent's approval bound to the exact proposal, and corrections stay rare.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "propose",
+          "action": "The auditor proposes a correction for one finding. Correction receipt fields: proposal id and digest, proposer identity, approver identity, approval time, target revision at approval, corrected operation id and the applied operation's own receipt.",
+          "assertions": [
+            "The proposal binds the corrected operation id, the target item revision and a digest of the exact proposed change."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "self-approval",
+          "action": "The proposer tries to approve its own proposal.",
+          "assertions": [
+            "Approval is refused: the approver must be a different agent identity from the proposer, and the receipt records both identities."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "stale-approval",
+          "action": "Sam edits the target after approval and before application.",
+          "assertions": [
+            "The approval does not transfer to the new revision; the correction is not applied and a fresh proposal is required."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "apply",
+          "action": "A distinct approver approves and the correction is applied.",
+          "assertions": [
+            "The correction is an ordinary operation with its own receipt linking proposal, approval and corrected operation, and it carries its own undo handle."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "rejected",
+          "action": "The approver rejects a proposal.",
+          "assertions": [
+            "Nothing is applied; the finding and the rejection both appear in the next digest for Sam."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "rarity-budget",
+          "action": "Corrections in one window exceed the declared budget.",
+          "assertions": [
+            "Further corrections stop and the excess is escalated to Sam in the next digest instead of being applied."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 60,
+        "max_seconds": 900,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "archive-not-delete",
+      "goal": "Until undo history exists, agents archive instead of deleting, and only the person deletes permanently.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "cleanup-archives",
+          "action": "The admin agent cleans up a finished item. Archive receipt fields: the act receipt fields plus archive location, restore handle and retention or purge time.",
+          "assertions": [
+            "The item is archived, not deleted; its receipt shows the archive operation and an available restore handle."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "restore",
+          "action": "Sam restores the archived item.",
+          "assertions": [
+            "The item returns with its fields, list, links and history intact, under a restore receipt naming Sam as actor."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "hard-delete-refused",
+          "action": "An agent attempts a permanent delete or an empty-trash operation.",
+          "assertions": [
+            "The attempt is refused by authority with a receipt; permanent deletion stays a person-only act."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "absence-not-deletion",
+          "action": "An item is missing from a partial read.",
+          "assertions": [
+            "The agent neither archives it nor reports it deleted; a missing item in an incomplete observation is unknown."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "retention-visible",
+          "action": "An archived item is scheduled to be purged by retention.",
+          "assertions": [
+            "The purge time is visible in the digest, and a purge that would end restorability before the undo window closes is reported, not applied silently."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 60,
+        "max_seconds": 900,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
+    },
+    {
+      "id": "tldr-undo-cadence",
+      "goal": "Morning, evening and weekly digests tell the person what agents did, each act with its receipt and an undo link that cannot overwrite later work.",
+      "fixture_ref": "authoring-only: isolated workspace handoff simulator (not implemented)",
+      "preconditions": [
+        "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
+        "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+      ],
+      "steps": [
+        {
+          "id": "morning-brief",
+          "action": "Produce the morning brief for the overnight window. Digest receipt fields: cadence, window start (inclusive) and end (exclusive) in commit order, first-run floor, coverage state, acts listed with receipt and undo link, items not examined and delivery state.",
+          "assertions": [
+            "Every listed act links its committed receipt and an undo link."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state",
+            "screenshot"
+          ]
+        },
+        {
+          "id": "evening-wrap",
+          "action": "Produce the evening wrap; its window starts exactly where the morning window ended.",
+          "assertions": [
+            "Morning and evening windows alternate without overlap or gap, so each act appears in exactly one daily digest; the weekly review covers the same acts again."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state",
+            "screenshot"
+          ]
+        },
+        {
+          "id": "weekly-review",
+          "action": "Produce the weekly review over the same committed feed.",
+          "assertions": [
+            "Weekly totals reconcile with the daily digests for the same week, and corrections and rejected proposals are listed separately from ordinary acts."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state",
+            "screenshot"
+          ]
+        },
+        {
+          "id": "undo-conflict",
+          "action": "Sam follows an undo link after editing the same item.",
+          "assertions": [
+            "The undo is bound to the operation id and the revision after the act; with a newer revision it shows a conflict with both states instead of overwriting Sam's edit."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "undo-by-person",
+          "action": "Sam undoes an act from the digest.",
+          "assertions": [
+            "The undo runs under Sam's authority and its receipt names Sam as actor; agents never follow undo links on Sam's behalf."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "missed-delivery",
+          "action": "One digest's delivery fails or its outcome is unknown.",
+          "assertions": [
+            "Unknown delivery is not delivered; the next digest covers the gap from the last delivered window end, not from now."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        },
+        {
+          "id": "undo-unavailable",
+          "action": "An act's undo has been superseded or has expired.",
+          "assertions": [
+            "The digest shows the undo as superseded or expired; a dead undo link is never presented as available."
+          ],
+          "evidence_required": [
+            "action_log",
+            "network_summary",
+            "persisted_state"
+          ]
+        }
+      ],
+      "rubric_dimensions": [
+        "effectiveness",
+        "usability",
+        "simplicity",
+        "clarity",
+        "feel"
+      ],
+      "budget": {
+        "max_actions": 60,
+        "max_seconds": 900,
+        "max_judge_calls": 0,
+        "max_retries": 0
+      }
     }
   ]
 }
