@@ -141,7 +141,9 @@ known counterexample, and multiple model opinions do not establish oracle indepe
 
 ### Fill from live READY
 
-Sample status: **UNFILLED**. No PR below is asserted to be a verified READY sample.
+Sample status: **cohort C1 filled (2026-10-04)**, recorded below. The frame is a private repository,
+so member identities stay in the private evidence record. This public record carries counts,
+digests and links only.
 
 Resolve the authoritative READY/security Priority II triage source. Do not assume READY is a
 GitHub label, infer it from green CI, or translate Priority II into a harness tier. Record source
@@ -152,25 +154,26 @@ provides discovery pointers only. Never expand its numeric range into membership
 or convenience example may be useful, but must be labelled separately and excluded from the
 live-cohort denominator. A pointer that cannot be inspected stays unavailable.
 
-### Placeholder cohort record
+### Cohort C1 record
 
 | Cohort field | Value |
 |---|---|
-| Snapshot time, UTC | UNFILLED |
-| Authoritative READY source and revision/permalink | UNFILLED |
-| READY criteria used by that source | UNFILLED |
-| Candidate-universe artifact and digest, if available | UNFILLED |
-| Selection rule, seed/tie-break and predeclared budget | UNFILLED |
-| Risk/size/dependency strata and quotas | UNFILLED |
-| Selected / inspected / unavailable counts | UNFILLED |
-| Collector identity and access limitations | UNFILLED |
+| Snapshot time, UTC | 2026-10-04T02:37Z (protocol preregistered before any outcome was inspected) |
+| Authoritative READY source and revision/permalink | A coordinator-owned PR drain tracker, a versioned file in the private product repository, read at the commit that last changed it (2026-09-27); identity in the private record |
+| READY criteria used by that source | The tracker has no explicit READY legend; its header lines were quoted into the private manifest, and that absence is recorded as a deviation |
+| Candidate-universe artifact and digest, if available | Private `manifest.json`, SHA-256 `071a4d3205a76abeeaac075281ababc547792c7c097d271c2b6b95a33c3debf4` |
+| Selection rule, seed/tie-break and predeclared budget | [Protocol](https://github.com/Chris0Jeky/agent-harness/issues/307#issuecomment-5975847671), SHA-256 `25390683a86cd7b6970c7ed075b1126bf23bb33a6ced46466f03572496e9edbe`: rank by `sha256("e4-c1-2026-10-04:" + PR number)`, lower PR number on a tie; budget 5 |
+| Risk/size/dependency strata and quotas | Conventional-commit type: fix 2, test 2, other 1, fixed spill-over order; one member stacked (dependent) |
+| Selected / inspected / unavailable counts | Universe 25 (fix 13, test 2, other 10); selected 5; inspected 5; unavailable 0 |
+| Collector identity and access limitations | A read-only agent pass over REST PR metadata, exact-head check-runs, bodies and comments. Reviews were not fetched, and cited artifacts returned 404 |
 
-| Exact PR URL | Head at selection | READY evidence permalink | Risk / Priority II source | Selection reason | Inspection outcome |
-|---|---|---|---|---|---|
-| UNFILLED: fill from live READY | UNFILLED | UNFILLED | UNFILLED | UNFILLED | NOT RUN |
-
-The placeholder row is not a sample. Leaving it unfilled permits document review, not E4
-sample acceptance. A future curated manifest can be linked instead of copying a mutable list.
+Per-member rows (exact PR, head, READY evidence, selection reason, inspection outcome) are in the
+private record behind the manifest digest. The [checklist results](https://github.com/Chris0Jeky/agent-harness/issues/308#issuecomment-5975900300)
+show 28 PASS, 12 GAP and 5 UNAVAILABLE over 5 members × 9 items. There is one confirmed
+contradiction: on 3 of 5 merged heads, a failed required-gate run conflicts with the recorded
+exact-head green; its cause is an untested hypothesis. No cited receipt could be retrieved (0/5).
+This is a retrospective five-case pilot: no merge verdict, catch rate, effort figure or
+representativeness claim.
 
 ### Avoiding easy-PR bias
 
