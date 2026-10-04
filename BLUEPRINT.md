@@ -123,7 +123,7 @@ these defaults, and `merge: gated`/`human-only` means exactly that at any tier.
 
 | Tier | Name | Defined by (blast radius) | Standing context | CI | Authority (default) | Estate examples |
 |---|---|---|---|---|---|---|
-| T0 | **Tombstone** | Nothing runs here | ≤200 tokens | none | none | jekyt, repos, Taskdeck-gemini, pr812-fixes, junk wrappers |
+| T0 | **Tombstone** | Nothing runs here | ≤200 tokens | none | none | home-directory wrapper folders, stale product clones, one-off fix checkouts, junk wrappers |
 | T1 | **Sandbox** | Only irreversible loss matters (secrets, privacy, money) | ≤1k | none | push+merge free behind global law 2's gate | hq-private (+`sensitive_data`), LeetCode, CV-builder, new prototypes |
 | T2 | **Daily driver** | Lost work / lost context costs real hours | ≤3k | none (optional fast pre-commit) | push+merge free behind global law 2's gate | extract-api (reference implementation), NavSentinel |
 | T3 | **Workshop** | Regressions are expensive; sole stakeholder | ≤6k | required lane, single-OS, <10 min | push+merge free behind global law 2's gate, plus a second lens for high-risk work | Taskdeck (after diet), wealthlens-hq |
@@ -272,8 +272,8 @@ One logical, argv-aware PreToolUse deny floor (dispatcher spec in SPECS §5), wi
 and explicit runtime adapters. Effective rendering depends on posture, tier and overlays;
 wiring is declared separately. The invariant is the bounded analyzer contract, not an
 identical runtime refusal at every tier. The floor addresses the IRREVERSIBLE wherever it is
-wired. Claude wires the shared dispatcher at user scope on hosts that keep one (DESKTOP-IHKOOJS
-runs none by owner decision; a repository can declare `floor_wiring: none`); each active Codex repo owns one project adapter carrying an
+wired. Claude wires the shared dispatcher at user scope on hosts that keep one (the primary
+workstation runs none by owner decision; a repository can declare `floor_wiring: none`); each active Codex repo owns one project adapter carrying an
 **audit-only** normalized dispatcher marker — a declaration the runtime never verifies, so a
 dispatcher change obliges refreshing every consumer marker and re-trusting each adapter in a
 fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor:

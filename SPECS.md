@@ -209,7 +209,7 @@ here.` / `Live successor: <path or "none">`.
 ## §5 Dispatcher hook wiring
 
 The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
-at user scope on hosts that keep one (none on DESKTOP-IHKOOJS; a repo may declare
+at user scope on hosts that keep one (none on the primary workstation; a repo may declare
 `floor_wiring: none`). Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
 the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. A repository's owner
 may declare it floorless (agent-harness itself and claude-config, owner decision 2026-09-07): it then
