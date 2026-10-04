@@ -11,7 +11,6 @@ import unittest
 from unittest import mock
 
 from replay_v0.cli import main
-from replay_v0.digests import sha256_file
 
 ROOT = Path(__file__).parents[2]
 BASELINE = ROOT / "replay_v0" / "fixtures" / "legacy-decisions.jsonl"
@@ -120,7 +119,7 @@ class DeterminismTests(unittest.TestCase):
 
     def test_public_extraction_manifest_is_exact_and_replay_only(self) -> None:
         manifest = json.loads(EXTRACTION_MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual("public-v0-extraction-manifest.v1", manifest["schema_version"])
+        self.assertEqual("public-v0-extraction-manifest.v2", manifest["schema_version"])
         self.assertEqual("owner-approved", manifest["status"])
         self.assertEqual("Cristian Tcaci", manifest["approved_by"])
         self.assertEqual("2026-07-30", manifest["approved_at"])
@@ -144,7 +143,9 @@ class DeterminismTests(unittest.TestCase):
                 self.assertFalse(any(value in entry["path"] for value in disallowed))
                 target = ROOT.joinpath(*path.parts)
                 self.assertTrue(target.is_file())
-                self.assertEqual(entry["sha256"], sha256_file(target))
+                # v2 pins paths and kinds only (owner decision, #395): a digest
+                # field reappearing would be an unchecked claim, so reject it.
+                self.assertEqual({"path", "kind"}, set(entry))
                 self.assertIn(
                     entry["kind"],
                     {"source", "schema", "corpus", "fixture", "test", "documentation"},
