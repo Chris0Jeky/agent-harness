@@ -392,14 +392,15 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
         self.target.write_bytes(b"previous agent")
         set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
         before = self.dacl(self.target)
-        real = harness.windows_file_dacl_descriptor
-        broader = real(self.parent)
+        real = harness.windows_file_security_descriptor
 
-        def merged(path):
+        def merged(path, information):
             # Simulate a host that merged the shared parent's entries at creation.
-            return broader if path.name.startswith(".harness-agent-") else real(path)
+            if path.name.startswith(".harness-agent-"):
+                return real(self.parent, information)
+            return real(path, information)
 
-        with mock.patch.object(harness, "windows_file_dacl_descriptor", merged):
+        with mock.patch.object(harness, "windows_file_security_descriptor", merged):
             with self.assertRaises(harness.HarnessError):
                 harness.write_managed_codex_file(self.target, b"new agent", 0o644)
         self.assertEqual(self.target.read_bytes(), b"previous agent")
@@ -454,7 +455,6 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), b"new agent")
         self.assertFalse(self.target.stat().st_mode & stat.S_IWRITE)
         self.assertEqual(self.staging(), [])
-
 
     def test_existing_destination_keeps_its_owner(self):
         self.target.write_bytes(b"previous agent")
