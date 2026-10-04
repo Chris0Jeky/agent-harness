@@ -98,12 +98,13 @@ and one search per merged PR, paced under the search rate limit. A revert is rec
 GitHub's own revert-PR body ("Reverts owner/repo#N", searched `in:body`) on a merged PR. A failed
 probe or a non-object response leaves the state null with the error.
 `extract --pr-states` joins that file on PR URL.
+Replace `<swarm-runs-root>` with the local swarm's runs directory (its real path is machine-specific and not published).
 
 ```powershell
 $L = "$env:USERPROFILE\.estate\outcome-ledger"
-py -3 scripts\outcome_ledger.py extract --runs-root "$env:USERPROFILE\swarm-runs" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl"
+py -3 scripts\outcome_ledger.py extract --runs-root "<swarm-runs-root>" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl"
 py -3 scripts\outcome_ledger.py fetch-pr-states --ledger "$L\ledger.jsonl" --out "$L\pr-states.json"
-py -3 scripts\outcome_ledger.py extract --runs-root "$env:USERPROFILE\swarm-runs" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl" --pr-states "$L\pr-states.json"
+py -3 scripts\outcome_ledger.py extract --runs-root "<swarm-runs-root>" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl" --pr-states "$L\pr-states.json"
 py -3 scripts\outcome_ledger.py metrics --ledger "$L\ledger.jsonl"
 ```
 

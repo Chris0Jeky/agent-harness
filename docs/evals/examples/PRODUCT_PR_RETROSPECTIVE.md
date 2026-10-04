@@ -67,10 +67,11 @@ product PR. It must not be used to mark omitted repository requirements optional
 ### Recorded candidate execution
 
 **FACT:** The retrieved Ubuntu backend job uses .NET SDK `8.0.425`, VSTest `17.11.1`,
-and `net8.0` assemblies [JOB]. The Application step ran:
+and `net8.0` assemblies [JOB]. The Application step ran (the product's project name is redacted
+as `<Product>`; every other token is as logged):
 
 ```text
-dotnet test backend/tests/Product.Application.Tests/Product.Application.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=application.trx" --results-directory "backend/TestResults/backend-unit/ubuntu-latest/application"
+dotnet test backend/tests/<Product>.Application.Tests/<Product>.Application.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=application.trx" --results-directory "backend/TestResults/backend-unit/ubuntu-latest/application"
 ```
 
 This is a **transcription of a retrieved execution**, not authorization to run it.
