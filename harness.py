@@ -7338,6 +7338,132 @@ def nearest_available_skill_directory(path: Path, label: str) -> Path:
     return candidate
 
 
+def skill_destination_anchor(path: Path, label: str) -> tuple[Path, tuple[str, ...]]:
+    """Split ``path`` into its nearest existing directory and the names below it."""
+    candidate = path
+    while not candidate.is_dir():
+        if candidate.parent == candidate:
+            raise HarnessError(f"{label} has no available ancestor: {path}")
+        candidate = candidate.parent
+    return candidate, path.relative_to(candidate).parts
+
+
+def skill_name_chains_alias(
+    anchor: Path, longer: tuple[str, ...], shorter: tuple[str, ...]
+) -> bool:
+    """Return whether ``shorter`` names the leading entries of ``longer``.
+
+    Both chains are absent names below ``anchor``. Equal spellings match
+    outright; any other pair is settled by the anchor's own lookup, using a
+    disposable probe tree that is removed before returning.
+    """
+    count = len(shorter)
+    if len(longer) < count:
+        return False
+    if count == 0 or tuple(longer[:count]) == shorter:
+        return True
+    created: list[Path] = []
+    try:
+        try:
+            scratch = Path(tempfile.mkdtemp(prefix=".harness-name-probe-", dir=anchor))
+            created.append(scratch)
+            sensitive = (
+                skill_directory_case_sensitive(anchor) if os.name == "nt" else None
+            )
+            if sensitive is not None and (
+                skill_directory_case_sensitive(scratch) != sensitive
+            ):
+                skill_directory_case_sensitive(scratch, sensitive)
+            current = scratch
+            for name in longer[:count]:
+                current = current / name
+                current.mkdir()
+                created.append(current)
+                if sensitive is not None and (
+                    skill_directory_case_sensitive(current) != sensitive
+                ):
+                    skill_directory_case_sensitive(current, sensitive)
+            current = scratch
+            for name in shorter:
+                current = current / name
+                if not os.path.lexists(current):
+                    return False
+            return True
+        finally:
+            for path in reversed(created):
+                path.rmdir()
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot preflight selected skill roots: {anchor}: {exc}"
+        ) from exc
+
+
+def skill_destination_directories_alias(left: Path, right: Path, label: str) -> bool:
+    """Return whether two destination directories are one by native lookup."""
+    if str(left) == str(right):
+        return True
+    left_anchor, left_names = skill_destination_anchor(left, label)
+    right_anchor, right_names = skill_destination_anchor(right, label)
+    return (
+        len(left_names) == len(right_names)
+        and left_anchor.samefile(right_anchor)
+        and skill_name_chains_alias(left_anchor, left_names, right_names)
+    )
+
+
+def skill_destination_within(
+    inner: tuple[Path, tuple[str, ...]], outer: tuple[Path, tuple[str, ...]]
+) -> bool:
+    """Return whether the ``inner`` destination is the ``outer`` one or beneath it."""
+    inner_anchor, inner_names = inner
+    outer_anchor, outer_names = outer
+    if not outer_names:
+        return any(
+            candidate.samefile(outer_anchor)
+            for candidate in (inner_anchor, *inner_anchor.parents)
+        )
+    return (
+        len(inner_names) >= len(outer_names)
+        and inner_anchor.samefile(outer_anchor)
+        and skill_name_chains_alias(inner_anchor, inner_names, outer_names)
+    )
+
+
+def preflight_skill_destination_overlap(
+    codex_targets: list[Path], claude_targets: list[Path]
+) -> None:
+    """Refuse a Codex skill root nested inside a Claude one, or the reverse.
+
+    Same-parent siblings are the name probe's concern; here one family's
+    effective destination lies inside the other family's selected target, so
+    installing one tree would add paths the other lane then refuses as unknown.
+    Existing and absent targets are compared by directory identity and by the
+    nearest existing ancestor's lookup. Nothing is reserved or copied.
+    """
+    label = "skill destination"
+    try:
+        codex = [skill_destination_anchor(target, label) for target in codex_targets]
+        claude = [skill_destination_anchor(target, label) for target in claude_targets]
+        for codex_target, codex_entry in zip(codex_targets, codex):
+            for claude_target, claude_entry in zip(claude_targets, claude):
+                codex_inside = skill_destination_within(codex_entry, claude_entry)
+                claude_inside = skill_destination_within(claude_entry, codex_entry)
+                if codex_inside == claude_inside:
+                    continue  # unrelated, or the same root (the name probe's case)
+                outer, inner = (
+                    (claude_target, codex_target)
+                    if codex_inside
+                    else (codex_target, claude_target)
+                )
+                raise HarnessError(
+                    f"selected skill destinations overlap: {outer} contains {inner}"
+                )
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot compare selected skill destinations: {exc}"
+        ) from exc
+
+
 def preflight_selected_skill_roots(
     targets: list[Path],
     backup_parent: Path | None,
@@ -7361,11 +7487,11 @@ def preflight_selected_skill_roots(
         try:
             for known, names in by_parent:
                 # Path equality case-folds on Windows even in sensitive directories.
-                # Existing parents must share actual identity; absent identical
-                # spellings still group before their first installation.
-                if str(parent) == str(known) or (
-                    parent.exists() and known.exists() and parent.samefile(known)
-                ):
+                # Parents group by filesystem identity: the nearest existing
+                # ancestor plus that directory's own lookup of the absent names
+                # below it, so differently spelled absent parents still group
+                # before their first installation.
+                if skill_destination_directories_alias(parent, known, label):
                     names.append(target.name)
                     break
             else:
@@ -10960,6 +11086,10 @@ def sync_global(args: argparse.Namespace) -> int:
         None,
         [],
         "skill destination",
+    )
+    preflight_skill_destination_overlap(
+        [target for _source, target in skill_actions],
+        [target for _source, target in claude_skill_actions],
     )
     skill_states = []
     for source, target in skill_actions:

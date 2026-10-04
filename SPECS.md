@@ -692,7 +692,11 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   Recovery-name checks run only for changed existing Codex targets and changed Claude staging
   targets (including new trees); identical trees never require a backup-name probe. Roots the
   destination's own lookup merges (for example `Foo` and `foo` on a case-insensitive volume) are
-  refused before any live or backup write, dry run included. Qualifications, not guarantees: an
+  refused before any live or backup write, dry run included. Destination parents group by
+  filesystem identity (an existing parent by `samefile`; absent parents by their nearest existing
+  ancestor plus that directory's own lookup of the absent names, via a removed probe tree), never
+  by casefolding. A Codex target nested inside a Claude target, or the reverse, is refused the
+  same way (`selected skill destinations overlap`). Qualifications, not guarantees: an
   installed skill holding a hard link to a case-variant entry stays an ambiguous-spelling refusal
   (the message names the entries; remove the extra link or stale entry and re-run), and a destination
   that fakes mode bits (exFAT/FAT on POSIX) fails the post-copy digest check, which compares
