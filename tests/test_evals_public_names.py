@@ -24,7 +24,7 @@ PATTERN = re.compile(
     re.IGNORECASE,
 )
 # The control-plane abbreviation is only private when it stands alone as a word.
-ABBREVIATION = re.compile(r"\b" + "H" + "Q" + r"\b")
+ABBREVIATION = re.compile(r"\b" + "H" + "Q" + r"\b", re.IGNORECASE)
 
 
 class EvalsPublicNamesTests(unittest.TestCase):
