@@ -3,7 +3,7 @@
 Status: implemented, experimental, 2026-09-27. Parent: [#299](https://github.com/Chris0Jeky/agent-harness/issues/299)
 (E1 taxonomy: this is the *development* outcome dataset). Tool: `scripts/outcome_ledger.py`.
 
-The Muse swarm produces a JSON receipt per job and a coordinator item table per lane, but neither
+The local swarm produces a JSON receipt per job and a coordinator item table per lane, but neither
 answers "which recipe finds real defects", "which effort level wastes turns" or "did the PR stick".
 The coordinator also prunes decided items after 30 days and keeps only its last 200 turns, so
 its own history is lossy. The ledger is the durable, normalised record the swarm's learning
@@ -14,7 +14,7 @@ judged against. It lives outside both producers so neither can grade itself.
 
 - **Read-only over the swarm.** Inputs are `<root>/<lane>/state/waves/<NNN>/run/<repo>--<entry>/result.json`
   and `<root>/<lane>/coordinator/state.json`. `extract` refuses an `--out` inside the runs root.
-- **A data contract, not an import.** Nothing from claude-config is loaded (AH-9). The one
+- **A data contract, not an import.** Nothing from the private control plane is loaded (AH-9). The one
   producer rule restated here is the coordinator's item id, `"f-" + sha1(repo|file|claim[:200])[:10]`,
   pinned by a test against a live item. If the producer changes it, the summary's
   `unjoined_items` rises instead of the join silently failing.
@@ -53,9 +53,9 @@ to receipt-only findings; wrong-typed fields degrade to nulls rather than aborti
 
 `fingerprint` is autonomy-v2 C8's identity: sha256 of repo | recipe | normalised path | line
 bucket (`int(line) // 40`, or `-` when the line is not a number) | first 12 normalised claim
-words, truncated to 12 hex. The coordinator computes the same value (claude-config
-`tools/muse_coordinator.py` `fingerprint()`); the ledger restates it as a data contract and the
-tests pin the coordinator's vectors (#387). `cluster` is the same without the recipe. Each
+words, truncated to 12 hex. The coordinator computes the same value (its
+`fingerprint()`); the ledger restates it as a data contract and the
+tests pin the coordinator's vectors. `cluster` is the same without the recipe. Each
 finding names its `key_rule`; a carried record keyed before that rule is re-keyed from its stored
 fields and names the digest it `supersedes`, while a current-rule record keeps its key. The bucket was `line // 20` before 2026-09-29, so the
 split was redrawn then; the B-015 figures below predate it. MESH's claim key (no recipe, full
@@ -98,12 +98,13 @@ and one search per merged PR, paced under the search rate limit. A revert is rec
 GitHub's own revert-PR body ("Reverts owner/repo#N", searched `in:body`) on a merged PR. A failed
 probe or a non-object response leaves the state null with the error.
 `extract --pr-states` joins that file on PR URL.
+Replace `<swarm-runs-root>` with the local swarm's runs directory (its real path is machine-specific and not published).
 
 ```powershell
 $L = "$env:USERPROFILE\.estate\outcome-ledger"
-py -3 scripts\outcome_ledger.py extract --runs-root "$env:USERPROFILE\muse-swarm-runs" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl"
+py -3 scripts\outcome_ledger.py extract --runs-root "<swarm-runs-root>" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl"
 py -3 scripts\outcome_ledger.py fetch-pr-states --ledger "$L\ledger.jsonl" --out "$L\pr-states.json"
-py -3 scripts\outcome_ledger.py extract --runs-root "$env:USERPROFILE\muse-swarm-runs" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl" --pr-states "$L\pr-states.json"
+py -3 scripts\outcome_ledger.py extract --runs-root "<swarm-runs-root>" --out "$L\ledger.jsonl" --prior "$L\ledger.jsonl" --pr-states "$L\pr-states.json"
 py -3 scripts\outcome_ledger.py metrics --ledger "$L\ledger.jsonl"
 ```
 
@@ -120,7 +121,7 @@ ledger stays private; its sha256 was
   fraction 11.4%; **decided fraction 2.0%** (67 findings), with 319 still pending triage.
 - Judge-agreed precision 0.343 (23 confirmed / 44 refuted). By recipe: **bug-hunt 0.818 (9/11),
   test-gaps 0.333 (12/36), review-range 0.25 (1/4), doc-drift 0.062 (1/16).**
-- By judge: muse 0.526, codex 0.286, grok 0.25. Confounded by which lanes each judged, so it is
+- By judge: local-swarm 0.526, codex 0.286, grok 0.25. Confounded by which lanes each judged, so it is
   a calibration question, not a ranking.
 - Job failure rate by effort: high 1.6% (16/1,013), xhigh 3.6% (3/84), **max 21.2% (7/33)**,
   mostly stream idle timeouts and missing terminal events.

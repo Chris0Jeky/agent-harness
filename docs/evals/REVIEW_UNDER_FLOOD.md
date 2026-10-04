@@ -118,7 +118,7 @@ name alone never grants that status. No row installs a gate or changes a merge r
 | LLM summary, bot LGTM, confidence or consensus | Advisory | Candidate findings, never an LLM merge check |
 | Coverage/catch-rate/evidence dashboard | Advisory | Counts do not establish oracle adequacy, permission or estate safety |
 | Trace/span/cost summaries | Advisory | Telemetry is not a merge gate; unknown children/cost remain unknown |
-| Muse or other computer-use observation | Advisory | Never merge-adjacent proof; separately recorded deterministic checks stand on their own evidence |
+| Local-swarm or other computer-use observation | Advisory | Never merge-adjacent proof; separately recorded deterministic checks stand on their own evidence |
 
 Human or existing-process authorization remains separate from these evidence classes. This
 profile does not impose universal human sign-off or relax existing required reviews.
@@ -137,7 +137,7 @@ remains the reusable review guidance. Apply it within the existing review budget
 cohort application in a follow-up issue, not another policy file. Green checks do not erase a
 known counterexample, and multiple model opinions do not establish oracle independence.
 
-## Real Taskdeck READY samples
+## Real product READY samples
 
 ### Fill from live READY
 
@@ -202,7 +202,7 @@ These experiment IDs are local to this profile, not replacements for the epic's 
 |---|---|---|---|
 | F1 | Frozen-cohort packet read-through | Each selected case has a traceable record or explicit unavailability; no missing check becomes PASS; no known blocker disappears behind green CI | No substitutions or estate-wide rate |
 | F2 | Oracle discrimination on existing regression evidence | Named bad state fails for the intended reason; corrected state and known-good control succeed; setup failure is distinguished | No product mutation or newly fabricated defect required in this docs wave |
-| F3 | Head/stack-drift evidence audit | Original and inspected identities remain visible; affected evidence is re-owed; parent CI does not qualify a child | Use existing history read-only; no Taskdeck PR |
+| F3 | Head/stack-drift evidence audit | Original and inspected identities remain visible; affected evidence is re-owed; parent CI does not qualify a child | Use existing history read-only; no private product PR |
 | F4 | Advisory/completeness tabletop | Bot LGTM cannot override a failed check; missing required evidence remains a gap; missing optional span does not invalidate independent evidence | Synthetic cases are labelled and excluded from real-cohort measurements |
 
 ## Submission and completion boundary
@@ -240,7 +240,7 @@ Related homes: [taxonomy #300](https://github.com/Chris0Jeky/agent-harness/issue
 Use issue links until sibling docs land; do not duplicate their full contracts here.
 
 No code, serialized-schema changes, CI changes, opentelemetry-sdk, collector, second harness,
-product rewrite, Taskdeck PR, auto-merge or LLM merge gate. Sister
+product rewrite, private product PR, auto-merge or LLM merge gate. Sister
 [UX epic #281](https://github.com/Chris0Jeky/agent-harness/issues/281) remains outside this scope.
-[claude-config#308](https://github.com/Chris0Jeky/claude-config/issues/308) skills/workflow
-packaging is explicitly deferred until the source-of-truth docs and packet mapping stabilize.
+The private skills/workflow
+packaging issue is explicitly deferred until the source-of-truth docs and packet mapping stabilize.
