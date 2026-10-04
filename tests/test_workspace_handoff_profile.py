@@ -34,7 +34,9 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
         self.assertFalse(result["gate_eligible"])
         self.assertEqual(result["journey_ids"], ["durable-capture", "stale-scope", "attempt-is-not-outcome",
                                                  "incomplete-observation", "cancellation-at-admission", "evidence-ladder",
-                                                 "catch-up-contract", "fix-round-discipline"])
+                                                 "catch-up-contract", "fix-round-discipline", "admin-agent-acts",
+                                                 "adversarial-audit", "two-agent-correction", "archive-not-delete",
+                                                 "tldr-undo-cadence"])
 
     def test_revision_and_permission_negative_controls_are_independent(self) -> None:
         journey = self.load_example()["journeys"][1]
@@ -144,6 +146,70 @@ class WorkspaceHandoffProfileTests(unittest.TestCase):
                       "resume position does not skip deferred rows", "exact fix revision"):
             self.assertIn(claim, text)
         self.assertIn("one scoped verification after every fix round", self.profile_text())
+
+    def test_agent_admin_journeys_pin_steps_receipts_and_boundaries(self) -> None:
+        journeys = {j["id"]: j for j in self.load_example()["journeys"]}
+        expected_steps = {
+            "admin-agent-acts": ["triage", "stale-target", "out-of-scope", "partial-batch", "narrated-only"],
+            "adversarial-audit": ["independent-identity", "feed-not-report", "partial-coverage", "finding",
+                                  "clean-window"],
+            "two-agent-correction": ["propose", "self-approval", "stale-approval", "apply", "rejected",
+                                     "rarity-budget"],
+            "archive-not-delete": ["cleanup-archives", "restore", "hard-delete-refused", "absence-not-deletion",
+                                   "retention-visible"],
+            "tldr-undo-cadence": ["morning-brief", "evening-wrap", "weekly-review", "undo-conflict",
+                                  "undo-by-person", "missed-delivery", "undo-unavailable"],
+        }
+        for journey_id, step_ids in expected_steps.items():
+            self.assertEqual([step["id"] for step in journeys[journey_id]["steps"]], step_ids, journey_id)
+        receipts = {
+            ("admin-agent-acts", "triage"): ("operation id", "acting agent identity and credential", "role",
+                                             "authority scope and policy version", "revision read before acting",
+                                             "committed before and after state", "reason",
+                                             "undo handle and its availability", "commit time (utc)",
+                                             "change-feed reference"),
+            ("adversarial-audit", "independent-identity"): ("auditor identity", "window start (inclusive)",
+                                                            "end (exclusive)", "coverage state", "items examined",
+                                                            "checks run", "findings"),
+            ("two-agent-correction", "propose"): ("proposal id and digest", "proposer identity", "approver identity",
+                                                  "target revision at approval", "corrected operation id"),
+            ("archive-not-delete", "cleanup-archives"): ("act receipt fields", "restore handle",
+                                                         "retention or purge time"),
+            ("tldr-undo-cadence", "morning-brief"): ("cadence", "first-run floor", "coverage state",
+                                                     "receipt and undo link", "items not examined",
+                                                     "delivery state"),
+        }
+        for (journey_id, step_id), fields in receipts.items():
+            action = {s["id"]: s for s in journeys[journey_id]["steps"]}[step_id]["action"].lower()
+            for field in fields:
+                self.assertIn(field, action, f"{journey_id}/{step_id} omits {field}")
+        claims = {
+            "admin-agent-acts": ("not silently overwritten", "does not borrow",
+                                 "narration without a receipt is never counted as an effect",
+                                 "never named as the actor of an agent act"),
+            "adversarial-audit": ("cannot write", "never the audited agent's summary", "never reported as clean",
+                                  "zero examined items is not a clean pass", "cannot apply the correction itself"),
+            "two-agent-correction": ("different agent identity from the proposer",
+                                     "does not transfer to the new revision", "nothing is applied",
+                                     "escalated to sam in the next digest instead of being applied"),
+            "archive-not-delete": ("archived, not deleted", "permanent deletion stays a person-only act",
+                                   "neither archives it nor reports it deleted", "not applied silently"),
+            "tldr-undo-cadence": ("without overlap or gap", "shows a conflict with both states",
+                                  "agents never follow undo links", "unknown delivery is not delivered",
+                                  "from the last delivered window end", "never presented as available"),
+        }
+        for journey_id, phrases in claims.items():
+            text = self.journey_text(journey_id)
+            for phrase in phrases:
+                self.assertIn(phrase, text, f"{journey_id} omits {phrase!r}")
+            self.assertIn("never the person's", text)
+        profile = self.profile_text()
+        for claim in ("the approver is a different agent from the proposer",
+                      "permanent delete is refused to every agent",
+                      "the person is never recorded as the actor of an agent's act",
+                      "never fills it from the agent's own account",
+                      "advisory and `not_run` like the three above"):
+            self.assertIn(claim, profile)
 
     def test_expected_revision_must_match_even_for_a_fictional_example(self) -> None:
         with self.assertRaisesRegex(ContractError, "subject_mismatch"):
