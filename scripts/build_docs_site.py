@@ -324,7 +324,9 @@ def scan_blocks(lines):
     HTML blocks, no link reference definitions spanning lines.
     """
     blocks = []
-    containers = []  # ("q", None) for a blockquote, ("l", content column) for a list item
+    containers = (
+        []
+    )  # ("q", None) for a blockquote, ("l", content column) for a list item
     para = []
     fence = None  # (character, length) of the open fenced block
 
@@ -449,7 +451,9 @@ def relative_path(from_dir, to):
     base = [part for part in from_dir.split("/") if part]
     dest = to.split("/")
     common = 0
-    while common < len(base) and common < len(dest) - 1 and base[common] == dest[common]:
+    while (
+        common < len(base) and common < len(dest) - 1 and base[common] == dest[common]
+    ):
         common += 1
     return "/".join([".."] * (len(base) - common) + dest[common:])
 
@@ -719,7 +723,9 @@ def check_built_site(site_dir, baseurl="/agent-harness"):
             path = unquote(path)
             if path.startswith("/"):
                 if base and path != base and not path.startswith(base + "/"):
-                    problems.append(f"{rel}: root-relative link outside {base}/: {href}")
+                    problems.append(
+                        f"{rel}: root-relative link outside {base}/: {href}"
+                    )
                     continue
                 target = posixpath.normpath(path[len(base) :].lstrip("/") or ".")
             else:

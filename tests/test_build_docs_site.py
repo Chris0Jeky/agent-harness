@@ -567,12 +567,16 @@ class CodeAwareLinkTests(StageBase):
         return self.page(rel)
 
     def test_indented_code_is_left_alone(self):
-        text = self.doc(f"# I\n\nPara.\n\n    {TOOL}\n\nAfter [y](../scripts/tool.py).\n")
+        text = self.doc(
+            f"# I\n\nPara.\n\n    {TOOL}\n\nAfter [y](../scripts/tool.py).\n"
+        )
         self.assertIn(f"\n    {TOOL}\n", text)
         self.assertIn(f"After [y]({BLOB}).", text)
 
     def test_indented_code_after_a_heading_and_tab_indent(self):
-        text = self.doc(f"# I\n    {TOOL}\n\n## H\n\n\t{TOOL}\n\n[z](../scripts/tool.py)\n")
+        text = self.doc(
+            f"# I\n    {TOOL}\n\n## H\n\n\t{TOOL}\n\n[z](../scripts/tool.py)\n"
+        )
         self.assertIn(f"    {TOOL}\n", text)
         self.assertIn(f"\t{TOOL}\n", text)
         self.assertIn(f"[z]({BLOB})", text)
@@ -817,7 +821,11 @@ class StagedLinkTests(StageBase):
         self.assertIn("docs/evals/X.md", read_tree(self.out))
 
     def test_the_link_checker_itself_notices_breakage(self):
-        write(self.root, "docs/BAD.md", "# Bad\n\n[a](NOPE.html) [b](/SPECS.md) [c](GUIDE.md)\n")
+        write(
+            self.root,
+            "docs/BAD.md",
+            "# Bad\n\n[a](NOPE.html) [b](/SPECS.md) [c](GUIDE.md)\n",
+        )
         self.build()
         (self.out / "docs" / "BAD.md").write_text(
             "[a](NOPE.html) [b](/SPECS.md) [c](GUIDE.md)\n", encoding="utf-8"
