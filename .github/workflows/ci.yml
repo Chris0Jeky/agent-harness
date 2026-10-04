@@ -73,6 +73,7 @@ jobs:
           scripts/build_charter_corpus.py
           scripts/replay_corpus.py
           scripts/review_evidence.py tests/test_review_evidence.py
+          scripts/build_docs_site.py tests/test_build_docs_site.py
           scripts/authority_doc_drift.py tests/test_authority_doc_drift.py
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
