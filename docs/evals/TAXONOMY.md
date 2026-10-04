@@ -26,7 +26,7 @@ A classification example is not an executed experiment.
 
 Only an applicable, repo-owned, contract-valid deterministic oracle may acquire
 automated merge authority. LLM semantic judgments, review-bot verdicts, vendor
-scores, telemetry, and HQ coverage may not. Eligibility is not enrollment:
+scores, telemetry, and control-plane index coverage may not. Eligibility is not enrollment:
 nothing in this file makes a check required or changes existing tier/review rules.
 See the existing [oracle practice](../REVIEW_EVIDENCE.md) and companion #304.
 
@@ -81,6 +81,11 @@ Separate rollout/incident policies are outside this merge-evaluation freeze.
 
 ## Estate map and maximum claims
 
+**Public-safe naming (2026-10-04).** This repository is public. The map names public surfaces
+by path or link and private ones by role only (a private product repository, a private control
+plane, a local swarm). Their identities and pinned revisions live in the adopter's private
+evidence record. A role row claims no more than a linked row: inspected source, not results.
+
 **FACT:** The following source inventory was inspected at agent-harness
 `b586bbf10629b50bcdb08d8b5f99bc60b06795ec`. **INFER:** Its layer assignments and
 maximum-claim descriptions apply only to the named boundaries. Source inspection
@@ -97,7 +102,7 @@ does not prove a check ran or that GitHub branch protection requires it.
 | [BENCHMARKS](../BENCHMARKS.md) | Cross-layer historical evidence | Measurement ledger; no automatic merge authority | Bounded measured results with limitations, not refreshed baselines |
 | [Reviewer packet](../REVIEW_EVIDENCE.md) | Cross-layer evidence / declared environment | Authoring and review aid; exact source results remain distinct | Presence of fields or digests does not authenticate execution |
 | [UX evaluation](../ux-evaluation) and [#281](https://github.com/Chris0Jeky/agent-harness/issues/281) | Scenario and product observation | Separate owner; semantic judgments remain advisory | Classify only; no UX rubric or observe/judge implementation here |
-| Taskdeck [CI source](https://github.com/Chris0Jeky/Taskdeck/blob/56e4b6acbca399aa2b98e612270c0cc282a41996/.github/workflows/ci-required.yml) | Unit and integration/scenario / CI | Existing backend, API, migration jobs; Taskdeck owns adoption | Workflow calls were inspected, not all test oracles or current check results |
+| A private product repository's required-CI workflow (identity in the adopter's private record) | Unit and integration/scenario / CI | Existing backend, API, migration jobs; the product repository owns adoption | Workflow calls were inspected, not all test oracles or current check results |
 
 ### Proposed and unqualified surfaces
 
@@ -108,15 +113,15 @@ diagnostics, logical-job accounting, and mapped authority-document drift.
 They are not dependencies of this document or evidence of shipped capability.
 Their deterministic diagnostic reports do not acquire product merge authority.
 
-**INFER:** Muse/OpenCode/Claude Code/Codex runs use the same vocabulary, but no
+**INFER:** Local swarm, OpenCode, Claude Code and Codex runs use the same vocabulary, but no
 native run was qualified here. Proposed examples include an approval-before-write
 sequence (trajectory), an adapter denial (tool-use), a complete issue-resolution
 task (scenario), and a live failed/retried job (online/prod).
 Do not invent captured spans, tool support, task success, or measured coverage.
 
-### agent-hq indexing without authority
+### Control-plane indexing without authority
 
-**FACT:** [agent-hq#10](https://github.com/Chris0Jeky/agent-hq/issues/10), created
+**FACT:** A private control-plane evidence-index issue, created
 2026-09-22, specifies descriptive coverage with `authority: "none"` and
 `gate_eligible: false`. It prohibits treating completeness as correctness,
 approval, or promotion.
@@ -124,15 +129,15 @@ approval, or promotion.
 **INFER:** An eval index may describe subject/revision, producer, source result,
 layer, environment, metric denominator, synthetic/recorded/live status,
 availability, and limitations. These are conceptual indexing needs, not additions
-to HQ's current schemas. Keep payloads and sensitive source data at their owner.
+to the control plane's current schemas. Keep payloads and sensitive source data at their owner.
 
-| Indexed source | What HQ may preserve | What HQ must not infer |
+| Indexed source | What the index may preserve | What the index must not infer |
 |---|---|---|
-| Deterministic CI result for SHA A | Source status, exact identity and provenance | That HQ now implements or may waive that gate |
+| Deterministic CI result for SHA A | Source status, exact identity and provenance | That the index now implements or may waive that gate |
 | Judge report for SHA A | Advisory assessment and its limitations | That a high score approves A |
 | Incident observation for live run B | Observed outcome and population/window | That an unrelated PR is mergeable or blocked |
 
-A producer verdict remains source data. Even complete HQ coverage remains
+A producer verdict remains source data. Even complete index coverage remains
 `gate_eligible: false`; metadata completeness is not evidence of semantic success.
 
 ## Reliability and confidence limits
@@ -219,7 +224,7 @@ to every benchmark author. **INFER:** Borrow protocols without borrowing authori
 | One successful retry proves dependable unattended operation | pass@1, attempts, pass@k/pass^k, cost, and protocol |
 | Human-preference agreement proves semantic correctness | Advisory findings and counterexamples |
 | Bot catch-rate, approval, or silence completes review | Causal findings and their reproducible evidence |
-| Fixture, screenshot, or HQ coverage completeness proves product success | Separate artifact structure, execution, assertion result, and indexing |
+| Fixture, screenshot, or index coverage completeness proves product success | Separate artifact structure, execution, assertion result, and indexing |
 | Green cost/latency dashboards prove merge readiness | Bounded operational diagnosis |
 
 ## Ownership, gaps, and next slices
@@ -251,8 +256,8 @@ issue is justified merely by exposing tool-use or an environment qualifier.
 The source links above are bounded by the inspected harness revision
 `b586bbf10629b50bcdb08d8b5f99bc60b06795ec`; relative links follow the checkout being
 read. [Pinned source snapshot](https://github.com/Chris0Jeky/agent-harness/tree/b586bbf10629b50bcdb08d8b5f99bc60b06795ec).
-Taskdeck's cited workflow was inspected at
-`56e4b6acbca399aa2b98e612270c0cc282a41996`; job calls are source facts, not test results.
+The private product workflow was inspected at a pinned commit recorded privately; job calls are
+source facts, not test results.
 Issue contents are mutable and were inspected on 2026-09-23.
 
 BENCHMARKS labels its snapshot 2026-07-31. No result there was rerun or promoted to
