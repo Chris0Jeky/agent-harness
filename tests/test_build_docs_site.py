@@ -1,6 +1,7 @@
 """Contract tests for the GitHub Pages docs-site stager."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import posixpath
@@ -57,6 +58,13 @@ def make_repo(root, readme=None, extra=None):
     write(root, "tests/test_x.py", "pass\n")
     write(root, "templates/hooks/dispatch.py", "pass\n")
     write(root, "harness.py", "pass\n")
+    for (
+        name
+    ) in (
+        site.THEME_FILES
+    ):  # the real theme: the layout is part of what these tests exercise
+        theme = (ROOT / site.THEME_DIR / name).read_text(encoding="utf-8")
+        write(root, f"{site.THEME_DIR}/{name}", theme)
     for rel, text in (extra or {}).items():
         write(root, rel, text)
     return root
@@ -126,6 +134,31 @@ def read_tree(out):
     }
 
 
+NAV_ITEM = re.compile(r'^ +- \{title: (".*"), url: (".*")\}$')
+GROUP_HEAD = re.compile(r'^  - title: (".*")$')
+
+
+def parse_nav(text):
+    """`_data/docs_nav.yml` as {top: [(title, url)], groups: [(title, [(title, url)])], scalars: {...}}."""
+    nav = {"top": [], "groups": [], "scalars": {}}
+    section = None
+    for line in text.split("\n"):
+        item, head = NAV_ITEM.match(line), GROUP_HEAD.match(line)
+        if line in ("top:", "groups:"):
+            section = line[:-1]
+        elif head:
+            nav["groups"].append((json.loads(head.group(1)), []))
+        elif item:
+            pair = (json.loads(item.group(1)), json.loads(item.group(2)))
+            (nav["top"] if section == "top" else nav["groups"][-1][1]).append(pair)
+        elif line and not line.startswith(" ") and ": " in line:
+            key, value = line.split(": ", 1)
+            nav["scalars"][key] = json.loads(value) if value.startswith('"') else value
+        elif line.strip() and line.strip() != "pages:":
+            raise AssertionError(f"unexpected line in docs_nav.yml: {line!r}")
+    return nav
+
+
 def liquid_render(text):
     """Minimal model of Liquid for the constructs the stager emits.
 
@@ -174,24 +207,158 @@ class StageBase(unittest.TestCase):
 
 
 class StageTests(StageBase):
-    def test_readme_becomes_index_with_nav(self):
+    def test_readme_becomes_index_without_an_inline_nav_line(self):
         self.build()
         index = self.page("index.md")
         self.assertIn("# agent-harness", index)
         self.assertFalse((self.out / "README.md").exists())
-        nav = (
-            "[Home](index.html) · [Blueprint](BLUEPRINT.html) · [Specs](SPECS.html) · "
-            "[Book](BOOK.html) · [Roadmap](ROADMAP.html) · "
-            "[All documents](docs-index.html)"
-        )
-        self.assertIn(nav, index)
+        self.assertNotIn("[Home](", index)  # navigation now comes from the layout
+        self.assertNotIn(" · ", index)
+        for rel in ("docs/GUIDE.md", "docs/evals/TAXONOMY.md", "docs-index.md"):
+            self.assertNotIn("[Home](", self.page(rel), rel)
 
-    def test_nav_links_are_relative_from_any_depth(self):
+    def test_pages_name_the_layout_and_their_source(self):
         self.build()
-        self.assertIn("[Home](../index.html)", self.page("docs/GUIDE.md"))
-        deep = self.page("docs/evals/TAXONOMY.md")
-        self.assertIn("[Home](../../index.html)", deep)
-        self.assertIn("[All documents](../../docs-index.html)", deep)
+        self.assertIn("\nlayout: default\n", self.page("index.md"))
+        self.assertIn('\nsource_path: "README.md"\n', self.page("index.md"))
+        taxonomy = self.page("docs/evals/TAXONOMY.md")
+        self.assertIn('\nsource_path: "docs/evals/TAXONOMY.md"\n', taxonomy)
+        self.assertIn("\nlayout: default\n", self.page("docs-index.md"))
+        self.assertNotIn(
+            "source_path", self.page("docs-index.md")
+        )  # generated: no file to edit
+
+    def test_nav_data_has_brand_top_entries_and_grouped_sidebar(self):
+        self.build()
+        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        self.assertEqual(nav["scalars"]["title"], "agent-harness")
+        self.assertEqual(nav["scalars"]["tagline"], site.DESCRIPTION)
+        self.assertEqual(nav["scalars"]["repo"], REPO_URL)
+        self.assertEqual(nav["scalars"]["license"], "GPL-3.0-only")
+        self.assertEqual(
+            nav["top"],
+            [
+                ("Home", "/"),
+                ("Blueprint", "/BLUEPRINT.html"),
+                ("Specs", "/SPECS.html"),
+                ("Book", "/BOOK.html"),
+                ("Roadmap", "/ROADMAP.html"),
+                ("All documents", "/docs-index.html"),
+            ],
+        )
+        self.assertEqual(
+            [title for title, _ in nav["groups"]], ["Overview", "Docs", "Evals"]
+        )
+        groups = dict(nav["groups"])
+        self.assertEqual(
+            groups["Overview"][0], ("agent-harness", "/")
+        )  # the index leads its group
+        self.assertIn(("Title of SPECS.md", "/SPECS.html"), groups["Overview"])
+        self.assertEqual(groups["Docs"], [("The Guide", "/docs/GUIDE.html")])
+        self.assertEqual(
+            groups["Evals"], [("Eval Taxonomy", "/docs/evals/TAXONOMY.html")]
+        )
+
+    def test_nav_data_lists_every_staged_page_once(self):
+        staged = self.build()
+        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        urls = [url for _, pages in nav["groups"] for _, url in pages]
+        self.assertEqual(len(urls), len(set(urls)))
+        expected = {
+            "/" if rel == "index.md" else "/" + rel[:-3] + ".html" for rel in staged
+        }
+        # The sidebar lists the content pages; the generated listing is reached from the top navigation.
+        self.assertEqual(set(urls), expected - {"/docs-index.html"})
+
+    def test_every_nav_url_maps_to_a_staged_page(self):
+        self.build()
+        nav = parse_nav(self.page("_data/docs_nav.yml"))
+        urls = [url for _, url in nav["top"]]
+        urls += [url for _, pages in nav["groups"] for _, url in pages]
+        for url in urls:
+            rel = "index.md" if url == "/" else url.lstrip("/")[: -len(".html")] + ".md"
+            self.assertTrue((self.out / rel).is_file(), f"{url} is not a staged page")
+
+    def test_nav_data_is_deterministic_and_quotes_awkward_titles(self):
+        write(self.root, "docs/ODD.md", '# "Quoted": a {{ title }} here\n')
+        self.build()
+        first = self.page("_data/docs_nav.yml")
+        self.assertNotIn(" ", first)
+        nav = parse_nav(first)
+        docs = dict(nav["groups"])["Docs"]
+        self.assertIn(('"Quoted": a {{ title }} here', "/docs/ODD.html"), docs)
+        self.build()
+        self.assertEqual(first, self.page("_data/docs_nav.yml"))
+
+    def test_yaml_strings_escape_line_separators(self):
+        bs = chr(92)
+        raw = "a" + chr(0x2028) + "b" + chr(0x85) + 'c "q" ' + chr(92) + " d"
+        text = site.yaml_string(raw)
+        for char in (chr(0x2028), chr(0x2029), chr(0x85)):
+            self.assertNotIn(char, text)
+        self.assertEqual(
+            text,
+            '"a'
+            + bs
+            + "u2028b"
+            + bs
+            + "u0085c "
+            + bs
+            + '"q'
+            + bs
+            + '" '
+            + bs
+            + bs
+            + ' d"',
+        )
+        self.assertEqual(json.loads(text), raw)  # JSON-quoted strings are valid YAML
+
+    def test_group_titles_are_human_friendly(self):
+        self.assertEqual(site.folder_title(""), "Overview")
+        self.assertEqual(site.folder_title("docs"), "Docs")
+        self.assertEqual(site.folder_title("docs/evals"), "Evals")
+        self.assertEqual(site.folder_title("docs/evals/examples"), "Evals / Examples")
+        self.assertEqual(site.folder_title("docs/ux-evaluation"), "UX evaluation")
+        self.assertEqual(site.folder_title("docs/review-evidence"), "Review evidence")
+
+    def test_theme_files_are_staged(self):
+        self.build()
+        layout = self.page("_layouts/default.html")
+        self.assertIn("site.data.docs_nav", layout)
+        self.assertIn("{{ content }}", layout)
+        for opener, closer in (("for", "endfor"), ("if", "endif")):
+            opened = len(re.findall(r"\{%-?\s*" + opener + r"\b", layout))
+            closed = len(re.findall(r"\{%-?\s*" + closer + r"\b", layout))
+            self.assertGreater(opened, 0, f"no {opener} blocks found: pattern is wrong")
+            self.assertEqual(
+                opened, closed, f"unbalanced {opener} blocks in the layout"
+            )
+        self.assertNotIn("{{ page.title }}", layout)  # a title is always escaped
+        for output in re.findall(r"\{\{[^}]*page\.title[^}]*\}\}", layout):
+            self.assertIn("| escape", output)
+        self.assertIn("--accent:", self.page("assets/css/docs.css"))
+        for name in site.THEME_FILES:
+            # Text mode: a Windows checkout may hold CRLF, and the stager writes LF.
+            source = (ROOT / site.THEME_DIR / name).read_text(encoding="utf-8")
+            self.assertEqual(self.page(name), source, name)
+
+    def test_missing_theme_file_fails_closed_before_touching_output(self):
+        (self.root / site.THEME_DIR / "_layouts" / "default.html").unlink()
+        with self.assertRaises(site.BuildError) as ctx:
+            self.build()
+        self.assertIn("default.html", str(ctx.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_symlinked_theme_file_is_rejected(self):
+        outside = Path(self._tmp.name) / "outside.css"
+        outside.write_text("body{}\n", encoding="utf-8")
+        target = self.root / site.THEME_DIR / "assets" / "css" / "docs.css"
+        target.unlink()
+        symlink_or_skip(self, target, outside)
+        with self.assertRaises(site.BuildError) as ctx:
+            self.build()
+        self.assertIn("docs.css", str(ctx.exception))
+        self.assertFalse(self.out.exists())
 
     def test_docs_index_lists_pages_grouped_by_folder(self):
         self.build()
@@ -231,7 +398,10 @@ class StageTests(StageBase):
         self.build()
         config = self.page("_config.yml")
         self.assertIn("title: agent-harness", config)
-        self.assertIn("theme: jekyll-theme-primer", config)
+        self.assertIn(
+            "\ntheme: null\n", config
+        )  # the site's own layout replaces the stock theme
+        self.assertNotIn("primer", config)
         for plugin in (
             "jekyll-optional-front-matter",
             "jekyll-titles-from-headings",
@@ -239,14 +409,14 @@ class StageTests(StageBase):
         ):
             self.assertIn(f"  - {plugin}\n", config)
 
-    def test_relative_links_plugin_is_not_used(self):
-        # The plugin ran a regex over the whole Markdown, code included; the stager
-        # now converts every link itself, so the plugin (and its settings) must be gone.
+    def test_relative_links_plugin_is_switched_off(self):
+        # The plugin ran a regex over the whole Markdown, code included; the stager converts every link itself.
+        # It is on by default on GitHub Pages, so it is switched off as well as left out of the plugin list.
         self.build()
         config = self.page("_config.yml")
-        self.assertNotIn("relative-links", config)
-        self.assertNotIn("relative_links", config)
-        self.assertNotIn("relative_links", site.CONFIG)
+        self.assertNotIn("  - jekyll-relative-links", config)
+        self.assertIn("relative_links:\n  enabled: false\n", config)
+        self.assertEqual(config, site.CONFIG)
 
     def test_unpublished_links_are_rewritten_to_github(self):
         body = (
@@ -343,15 +513,21 @@ class StageTests(StageBase):
         for rel in ("index.md", "docs/GUIDE.md", "docs-index.md"):
             text = self.page(rel)
             self.assertTrue(text.startswith("---\ntitle: "), rel)
+            self.assertIn("\nlayout: default\n", text, rel)
         self.assertIn('title: "The Guide"', self.page("docs/GUIDE.md"))
 
     def test_existing_front_matter_is_preserved(self):
-        write(self.root, "docs/FM.md", "---\nlayout: default\n---\n# FM Doc\n\nx\n")
+        write(
+            self.root,
+            "docs/FM.md",
+            "---\nlayout: default\npermalink: /fm/\n---\n# FM Doc\n\nx\n",
+        )
         self.build()
         text = self.page("docs/FM.md")
         self.assertTrue(text.startswith("---\n"))
         head, rest = text.split("\n---\n", 1)
-        self.assertIn("layout: default", head)
+        self.assertEqual(head.count("layout:"), 1)
+        self.assertIn("permalink: /fm/", head)
         self.assertIn('title: "FM Doc"', head)
         self.assertIn("{% raw %}", rest)
         self.assertEqual(text.count("\n---\n"), 1)
@@ -1034,13 +1210,23 @@ class BuiltSiteCheckTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
+class WorkflowTests(unittest.TestCase):
+    def test_workflow_watches_the_theme_on_push_and_pull_request(self):
+        workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text(
+            encoding="utf-8"
+        )
+        for path in ("scripts/build_docs_site.py", "scripts/docs_site/**"):
+            self.assertEqual(workflow.count(f'      - "{path}"\n'), 2, path)
+
+
 class RealRepositoryTests(unittest.TestCase):
     def test_real_repository_stages_only_the_allowlist(self):
         out = ROOT / "_site_src" / f"test-{os.getpid()}"
         self.addCleanup(shutil.rmtree, out, True)
         staged = site.build(out, root=ROOT)
         tree = read_tree(out)
-        self.assertEqual(set(staged) | {"_config.yml", site.MARKER}, set(tree))
+        extras = {"_config.yml", site.NAV_DATA, site.MARKER, *site.THEME_FILES}
+        self.assertEqual(set(staged) | extras, set(tree))
         self.assertIn("index.md", tree)
         self.assertIn("docs-index.md", tree)
         for name in site.ROOT_DOCS.values():

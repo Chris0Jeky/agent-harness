@@ -11,12 +11,14 @@ on:
       - "*.md"
       - "docs/**"
       - "scripts/build_docs_site.py"
+      - "scripts/docs_site/**"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "*.md"
       - "docs/**"
       - "scripts/build_docs_site.py"
+      - "scripts/docs_site/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
