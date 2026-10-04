@@ -3,12 +3,14 @@
 import importlib.util
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_docs_site.py"
@@ -156,7 +158,7 @@ def liquid_render(text):
     return "".join(out)
 
 
-class StageTests(unittest.TestCase):
+class StageBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -170,31 +172,34 @@ class StageTests(unittest.TestCase):
     def page(self, rel):
         return (self.out / rel).read_text(encoding="utf-8")
 
+
+class StageTests(StageBase):
     def test_readme_becomes_index_with_nav(self):
         self.build()
         index = self.page("index.md")
         self.assertIn("# agent-harness", index)
         self.assertFalse((self.out / "README.md").exists())
         nav = (
-            "[Home](index.md) · [Blueprint](BLUEPRINT.md) · [Specs](SPECS.md) · "
-            "[Book](BOOK.md) · [Roadmap](ROADMAP.md) · [All documents](docs-index.md)"
+            "[Home](index.html) · [Blueprint](BLUEPRINT.html) · [Specs](SPECS.html) · "
+            "[Book](BOOK.html) · [Roadmap](ROADMAP.html) · "
+            "[All documents](docs-index.html)"
         )
         self.assertIn(nav, index)
 
     def test_nav_links_are_relative_from_any_depth(self):
         self.build()
-        self.assertIn("[Home](../index.md)", self.page("docs/GUIDE.md"))
+        self.assertIn("[Home](../index.html)", self.page("docs/GUIDE.md"))
         deep = self.page("docs/evals/TAXONOMY.md")
-        self.assertIn("[Home](../../index.md)", deep)
-        self.assertIn("[All documents](../../docs-index.md)", deep)
+        self.assertIn("[Home](../../index.html)", deep)
+        self.assertIn("[All documents](../../docs-index.html)", deep)
 
     def test_docs_index_lists_pages_grouped_by_folder(self):
         self.build()
         listing = self.page("docs-index.md")
         self.assertIn("# All documents", listing)
-        self.assertIn("[The Guide](docs/GUIDE.md)", listing)
-        self.assertIn("[Eval Taxonomy](docs/evals/TAXONOMY.md)", listing)
-        self.assertIn("[Title of SPECS.md](SPECS.md)", listing)
+        self.assertIn("[The Guide](docs/GUIDE.html)", listing)
+        self.assertIn("[Eval Taxonomy](docs/evals/TAXONOMY.html)", listing)
+        self.assertIn("[Title of SPECS.md](SPECS.html)", listing)
         self.assertLess(listing.index("## docs\n"), listing.index("## docs/evals\n"))
 
     def test_unpublished_material_is_absent(self):
@@ -228,13 +233,20 @@ class StageTests(unittest.TestCase):
         self.assertIn("title: agent-harness", config)
         self.assertIn("theme: jekyll-theme-primer", config)
         for plugin in (
-            "jekyll-relative-links",
             "jekyll-optional-front-matter",
             "jekyll-titles-from-headings",
             "jekyll-default-layout",
         ):
             self.assertIn(f"  - {plugin}\n", config)
-        self.assertIn("relative_links:\n  enabled: true\n  collections: false", config)
+
+    def test_relative_links_plugin_is_not_used(self):
+        # The plugin ran a regex over the whole Markdown, code included; the stager
+        # now converts every link itself, so the plugin (and its settings) must be gone.
+        self.build()
+        config = self.page("_config.yml")
+        self.assertNotIn("relative-links", config)
+        self.assertNotIn("relative_links", config)
+        self.assertNotIn("relative_links", site.CONFIG)
 
     def test_unpublished_links_are_rewritten_to_github(self):
         body = (
@@ -288,9 +300,9 @@ class StageTests(unittest.TestCase):
         self.build()
         text = self.page("docs/KEEP.md")
         for kept in (
-            "[guide](GUIDE.md)",
-            "[guide2](GUIDE.md#sec)",
-            "[up](../SPECS.md)",
+            "[guide](GUIDE.html)",
+            "[guide2](GUIDE.html#sec)",
+            "[up](../SPECS.html)",
             "[ext](https://example.com/a.py)",
             "[mail](mailto:a@example.com)",
             "[here](#local)",
@@ -301,7 +313,7 @@ class StageTests(unittest.TestCase):
         ):
             self.assertIn(kept, text)
         # README is staged as index.md, so its links follow it.
-        self.assertIn("[home](../index.md#top)", text)
+        self.assertIn("[home](../index.html#top)", text)
         self.assertNotIn("blob/main/scripts/tool.py", text)
 
     def test_liquid_syntax_survives_unrendered(self):
@@ -352,12 +364,12 @@ class StageTests(unittest.TestCase):
     def test_titles_skip_fenced_headings(self):
         write(self.root, "docs/F.md", "```\n# not a title\n```\n\n# Real Title\n")
         self.build()
-        self.assertIn("[Real Title](docs/F.md)", self.page("docs-index.md"))
+        self.assertIn("[Real Title](docs/F.html)", self.page("docs-index.md"))
 
     def test_untitled_page_falls_back_to_stem(self):
         write(self.root, "docs/no_heading.md", "just text\n")
         self.build()
-        self.assertIn("[no_heading](docs/no_heading.md)", self.page("docs-index.md"))
+        self.assertIn("[no_heading](docs/no_heading.html)", self.page("docs-index.md"))
 
     def test_builds_are_byte_identical_and_rebuild_clears_stale_files(self):
         self.build()
@@ -380,7 +392,7 @@ class StageTests(unittest.TestCase):
         write(self.root, "docs/freshly/ADDED.md", "# Added Later\n")
         self.build()
         self.assertIn(
-            "[Added Later](docs/freshly/ADDED.md)", self.page("docs-index.md")
+            "[Added Later](docs/freshly/ADDED.html)", self.page("docs-index.md")
         )
 
     def test_refuses_dangerous_output_paths(self):
@@ -431,7 +443,6 @@ class StageTests(unittest.TestCase):
 
     def test_symlink_detection_does_not_need_symlink_privileges(self):
         import stat as stat_module
-        from unittest import mock
 
         real = os.lstat
         with mock.patch.object(
@@ -489,6 +500,11 @@ class StageTests(unittest.TestCase):
         self.assertNotIn("docs/UNTRACKED.md", staged)
         self.assertIn("docs/GUIDE.md", staged)
         self.assertFalse((self.out / "docs" / "UNTRACKED.md").exists())
+        # Judge by what is on disk, not by the builder's own return value.
+        tree = read_tree(self.out)
+        self.assertNotIn("docs/private-corpus/SECRET.md", tree)
+        self.assertNotIn("docs/UNTRACKED.md", tree)
+        self.assertNotIn("Secret corpus", "".join(v.decode() for v in tree.values()))
 
     def test_hidden_paths_are_not_published_even_when_tracked(self):
         write(self.root, "docs/.hidden/NOTES.md", "# Hidden dir\n")
@@ -497,6 +513,11 @@ class StageTests(unittest.TestCase):
         self.assertNotIn("docs/.hidden/NOTES.md", staged)
         self.assertNotIn("docs/evals/.DRAFT.md", staged)
         self.assertIn("docs/evals/TAXONOMY.md", staged)
+        tree = read_tree(self.out)
+        self.assertNotIn("docs/.hidden/NOTES.md", tree)
+        self.assertNotIn("docs/evals/.DRAFT.md", tree)
+        self.assertNotIn("Hidden", self.page("docs-index.md"))
+        self.assertIn("docs/evals/TAXONOMY.md", tree)
 
     def test_fails_closed_without_git(self):
         plain = make_repo(Path(self._tmp.name) / "plain")
@@ -533,6 +554,486 @@ class StageTests(unittest.TestCase):
         self.assertIn("BOOK.md", proc.stderr)
 
 
+BLOB = f"{REPO_URL}/blob/main/scripts/tool.py"
+TOOL = "[x](../scripts/tool.py)"
+
+
+class CodeAwareLinkTests(StageBase):
+    """Links inside code, in every Markdown form, are never rewritten."""
+
+    def doc(self, body, rel="docs/CODE.md"):
+        write(self.root, rel, body)
+        self.build()
+        return self.page(rel)
+
+    def test_indented_code_is_left_alone(self):
+        text = self.doc(
+            f"# I\n\nPara.\n\n    {TOOL}\n\nAfter [y](../scripts/tool.py).\n"
+        )
+        self.assertIn(f"\n    {TOOL}\n", text)
+        self.assertIn(f"After [y]({BLOB}).", text)
+
+    def test_indented_code_after_a_heading_and_tab_indent(self):
+        text = self.doc(
+            f"# I\n    {TOOL}\n\n## H\n\n\t{TOOL}\n\n[z](../scripts/tool.py)\n"
+        )
+        self.assertIn(f"    {TOOL}\n", text)
+        self.assertIn(f"\t{TOOL}\n", text)
+        self.assertIn(f"[z]({BLOB})", text)
+
+    def test_four_space_continuation_of_a_paragraph_is_text(self):
+        text = self.doc(f"# P\n\nA paragraph\n    still {TOOL} text\n")
+        self.assertIn(f"still [x]({BLOB}) text", text)
+
+    def test_multi_line_code_span_is_left_alone(self):
+        text = self.doc(
+            f"# M\n\nStart `code\n{TOOL}\nmore` then [y](../scripts/tool.py).\n"
+        )
+        self.assertIn(f"\n{TOOL}\nmore` then", text)
+        self.assertIn(f"[y]({BLOB}).", text)
+
+    def test_multi_line_double_backtick_span(self):
+        text = self.doc(f"# M\n\n``a ` b\n{TOOL} c`` and {TOOL}\n")
+        self.assertIn(f"\n{TOOL} c`` and [x]({BLOB})\n", text)
+
+    def test_unclosed_backtick_is_literal_text(self):
+        text = self.doc(f"# U\n\nA lone ` tick and {TOOL}\n\nNext {TOOL}\n")
+        self.assertIn(f"tick and [x]({BLOB})", text)
+        self.assertIn(f"Next [x]({BLOB})", text)
+
+    def test_code_span_does_not_cross_a_paragraph_break(self):
+        text = self.doc(f"# C\n\nopen ` here\n\n{TOOL} and `close`\n")
+        self.assertIn(f"[x]({BLOB}) and `close`", text)
+
+    def test_escaped_backticks_are_not_code(self):
+        text = self.doc(f"# E\n\n\\`{TOOL}\\` and \\{TOOL}\n")
+        self.assertIn(f"\\`[x]({BLOB})\\`", text)
+        self.assertIn(f"\\{TOOL}", text)  # an escaped bracket is no link
+
+    def test_table_rows_do_not_share_a_code_span(self):
+        text = self.doc(
+            f"# T\n\n| a | b |\n|---|---|\n| `x | {TOOL} |\n| y` | {TOOL} |\n"
+        )
+        self.assertEqual(text.count(BLOB), 2)
+
+    def test_fence_inside_a_blockquote(self):
+        text = self.doc(f"# Q\n\n> ```\n> {TOOL}\n> ```\n> after {TOOL}\n\n{TOOL}\n")
+        self.assertIn(f"> {TOOL}\n", text)
+        self.assertIn(f"> after [x]({BLOB})", text)
+        self.assertEqual(text.count(BLOB), 2)
+
+    def test_nested_blockquote_fence_and_lazy_continuation(self):
+        text = self.doc(
+            f"# Q\n\n> > ~~~\n> > {TOOL}\n> > ~~~\n> text `span\n> {TOOL}` end\n"
+            f"lazy {TOOL}\n"
+        )
+        self.assertIn(f"> > {TOOL}\n", text)
+        self.assertIn(f"> {TOOL}` end", text)
+        self.assertIn(f"lazy [x]({BLOB})", text)
+
+    def test_a_fence_ends_with_its_blockquote(self):
+        text = self.doc(f"# Q\n\n> ```\n> {TOOL}\n{TOOL}\n")
+        self.assertIn(f"> {TOOL}\n", text)
+        self.assertIn(f"\n[x]({BLOB})\n", text)
+
+    def test_content_after_an_invalid_closing_fence_stays_code(self):
+        body = (
+            "# F\n\n```python\n[a](../scripts/tool.py)\n```js\n"
+            "[b](../scripts/tool.py)\n```\n[c](../scripts/tool.py)\n"
+        )
+        text = self.doc(body)
+        self.assertIn("[a](../scripts/tool.py)", text)
+        self.assertIn("[b](../scripts/tool.py)", text)
+        self.assertIn(f"[c]({BLOB})", text)
+        self.assertEqual(text.count(BLOB), 1)
+
+    def test_fence_closer_must_match_character_and_length(self):
+        text = self.doc(
+            f"# F\n\n````\n```\n{TOOL}\n~~~~\n{TOOL}\n````\n\n"
+            f"~~~\n{TOOL}\n```\n{TOOL}\n~~~~\n\n{TOOL}\n"
+        )
+        # Only the final link, after both fences really closed, is prose.
+        self.assertEqual(text.count(BLOB), 1)
+        self.assertEqual(text.count(TOOL), 4)
+
+    def test_backtick_fence_info_string_cannot_contain_a_backtick(self):
+        text = self.doc(f"# F\n\n``` a`b\n{TOOL}\n")
+        self.assertIn(f"[x]({BLOB})", text)
+
+    def test_unterminated_fence_runs_to_the_end(self):
+        text = self.doc(f"# F\n\n```\n{TOOL}\n\n{TOOL}\n")
+        self.assertNotIn(BLOB, text)
+
+    def test_list_item_content(self):
+        body = (
+            "# L\n\n"
+            f"- item `span\n  {TOOL}` end\n"
+            f"- real {TOOL}\n\n"
+            f"  ```\n  {TOOL}\n  ```\n\n"
+            f"  continued {TOOL}\n\n"
+            f"      indented code {TOOL}\n\n"
+            f"1. one\n   ```\n   {TOOL}\n   ```\n"
+            f"2. two {TOOL}\n"
+        )
+        text = self.doc(body)
+        self.assertIn(f"  {TOOL}` end", text)
+        self.assertIn(f"real [x]({BLOB})", text)
+        self.assertIn(f"  ```\n  {TOOL}\n  ```", text)
+        self.assertIn(f"continued [x]({BLOB})", text)
+        self.assertIn(f"      indented code {TOOL}", text)
+        self.assertIn(f"   {TOOL}\n   ```", text)
+        self.assertIn(f"two [x]({BLOB})", text)
+        self.assertEqual(text.count(BLOB), 3)
+
+    def test_fence_in_a_list_item_nested_in_a_blockquote(self):
+        text = self.doc(f"# L\n\n> - a\n>   ```\n>   {TOOL}\n>   ```\n> - b {TOOL}\n")
+        self.assertIn(f">   {TOOL}\n", text)
+        self.assertIn(f"- b [x]({BLOB})", text)
+
+    def test_reference_definitions_in_code_are_left_alone(self):
+        text = self.doc(
+            "# R\n\n```\n[t]: ../scripts/tool.py\n```\n\n"
+            "    [u]: ../scripts/tool.py\n\n[v]: ../scripts/tool.py\n"
+        )
+        self.assertIn("\n[t]: ../scripts/tool.py\n", text)
+        self.assertIn("    [u]: ../scripts/tool.py", text)
+        self.assertIn(f"[v]: {BLOB}", text)
+
+    def test_reference_definition_inside_a_paragraph_is_text(self):
+        text = self.doc("# R\n\nsome text\n[t]: ../scripts/tool.py\n")
+        self.assertNotIn(BLOB, text)
+
+    def test_link_text_may_contain_code_and_span_multiple_lines(self):
+        text = self.doc(
+            "# L\n\n[the `tool` and\nmore](../scripts/tool.py) [`k`](../scripts/tool.py)\n"
+        )
+        self.assertEqual(text.count(BLOB), 2)
+
+    def test_headings_in_code_and_quotes_are_not_page_titles(self):
+        write(self.root, "docs/T1.md", "    # indented\n\n> # quoted\n\n# Real\n")
+        write(
+            self.root,
+            "docs/T2.md",
+            "```\n# fenced\n```js\n# still fenced\n```\n\n# Real 2\n",
+        )
+        self.build()
+        listing = self.page("docs-index.md")
+        self.assertIn("[Real](docs/T1.html)", listing)
+        self.assertIn("[Real 2](docs/T2.html)", listing)
+
+
+class StagedLinkTests(StageBase):
+    """Links between staged pages become relative .html links, computed here."""
+
+    def doc(self, rel, body):
+        write(self.root, rel, body)
+        self.build()
+        return self.page(rel)
+
+    def test_links_to_staged_pages_become_relative_html(self):
+        text = self.doc(
+            "docs/evals/L.md",
+            "# L\n\n[a](TAXONOMY.md) [b](../GUIDE.md#sec) [c](./TAXONOMY.md?x=1) "
+            "[d](../../SPECS.md) [e](../../README.md#top) [f](<../GUIDE.md>) "
+            '[g](../GUIDE.md "Guide")\n\n[h]: ../GUIDE.md#x\n',
+        )
+        for expected in (
+            "[a](TAXONOMY.html)",
+            "[b](../GUIDE.html#sec)",
+            "[c](TAXONOMY.html?x=1)",
+            "[d](../../SPECS.html)",
+            "[e](../../index.html#top)",
+            "[f](../GUIDE.html)",
+            '[g](../GUIDE.html "Guide")',
+            "[h]: ../GUIDE.html#x",
+        ):
+            self.assertIn(expected, text)
+
+    def test_root_page_links_do_not_climb(self):
+        text = self.doc(
+            "BOOK.md", "# B\n\n[a](SPECS.md) [b](docs/GUIDE.md) [c](README.md)\n"
+        )
+        self.assertIn("[a](SPECS.html) [b](docs/GUIDE.html) [c](index.html)", text)
+
+    def test_encoded_readme_links_resolve_to_index(self):
+        text = self.doc(
+            "docs/ENC.md",
+            "# E\n\n[a](../%52EADME.md#top) [b](../README%2Emd) "
+            "[c](%2E%2E/README.md?q=1#f) [d](../README.md)\n",
+        )
+        self.assertIn("[a](../index.html#top)", text)
+        self.assertIn("[b](../index.html)", text)
+        self.assertIn("[c](../index.html?q=1#f)", text)
+        self.assertIn("[d](../index.html)", text)
+        self.assertNotIn("%5", text)
+
+    def test_encoded_staged_page_links_resolve(self):
+        text = self.doc(
+            "docs/ENC2.md", "# E\n\n[a](%47UIDE.md#s) [b](../docs/GUIDE.md)\n"
+        )
+        self.assertIn("[a](GUIDE.html#s)", text)
+        self.assertIn("[b](GUIDE.html)", text)
+
+    def test_root_relative_links_are_rebased(self):
+        text = self.doc(
+            "docs/evals/ROOT.md",
+            "# R\n\n[a](/SPECS.md#x) [b](/README.md) [c](/docs/GUIDE.md) "
+            "[d](/harness.py) [e](/scripts/) [f](/nope.md)\n\n[g]: /BOOK.md\n",
+        )
+        self.assertIn("[a](../../SPECS.html#x)", text)
+        self.assertIn("[b](../../index.html)", text)
+        self.assertIn("[c](../GUIDE.html)", text)
+        self.assertIn(f"[d]({REPO_URL}/blob/main/harness.py)", text)
+        self.assertIn(f"[e]({REPO_URL}/tree/main/scripts)", text)
+        self.assertIn("[f](/nope.md)", text)
+        self.assertIn("[g]: ../../BOOK.html", text)
+
+    def test_root_relative_links_from_a_root_page(self):
+        text = self.doc(
+            "SPECS.md", "# S\n\n[a](/BOOK.md) [b](/README.md#r) [c](/docs/GUIDE.md)\n"
+        )
+        self.assertIn("[a](BOOK.html) [b](index.html#r) [c](docs/GUIDE.html)", text)
+
+    def test_staged_links_in_code_stay_as_written(self):
+        body = (
+            "# C\n\n`[a](GUIDE.md)` and\n\n    [b](GUIDE.md)\n\n```\n[c](/SPECS.md)\n```\n"
+            "\n> ```\n> [d](../README.md)\n> ```\n\n[real](GUIDE.md)\n"
+        )
+        text = self.doc("docs/C.md", body)
+        for kept in (
+            "`[a](GUIDE.md)`",
+            "    [b](GUIDE.md)",
+            "[c](/SPECS.md)",
+            "[d](../README.md)",
+        ):
+            self.assertIn(kept, text)
+        self.assertIn("[real](GUIDE.html)", text)
+
+    def test_every_staged_relative_link_resolves_to_a_staged_page(self):
+        write(
+            self.root,
+            "docs/evals/X.md",
+            "# X\n\n[a](../GUIDE.md) [b](/README.md) [c](TAXONOMY.md)\n",
+        )
+        write(self.root, "BOOK.md", "# B\n\n[a](docs/evals/X.md) [b](/docs/GUIDE.md)\n")
+        self.build()
+        self.assertEqual(broken_staged_links(self.out), [])
+        self.assertIn("docs/evals/X.md", read_tree(self.out))
+
+    def test_the_link_checker_itself_notices_breakage(self):
+        write(
+            self.root,
+            "docs/BAD.md",
+            "# Bad\n\n[a](NOPE.html) [b](/SPECS.md) [c](GUIDE.md)\n",
+        )
+        self.build()
+        (self.out / "docs" / "BAD.md").write_text(
+            "[a](NOPE.html) [b](/SPECS.md) [c](GUIDE.md)\n", encoding="utf-8"
+        )
+        self.assertEqual(len(broken_staged_links(self.out)), 3)
+
+
+def broken_staged_links(out):
+    """Independent check: every relative link in staged pages names a staged page.
+
+    Written against the Markdown text with its own naive code-stripping, not the
+    stager's scanner. Returns a list of problems.
+    """
+    out = Path(out)
+    pages = {p.relative_to(out).as_posix() for p in out.rglob("*.md")}
+    problems = []
+    for page in sorted(pages):
+        body = (out / page).read_text(encoding="utf-8")
+        body = re.sub(r"^(```|~~~).*?^\1\s*$", "", body, flags=re.S | re.M)
+        body = re.sub(r"`[^`\n]*`", "", body)
+        targets = re.findall(r"\]\(\s*<?([^)\s>]+)", body)
+        targets += re.findall(r"^\[[^\]\n]+\]:[ \t]*<?(\S+?)>?\s*$", body, flags=re.M)
+        for target in targets:
+            if re.match(r"^([A-Za-z][A-Za-z0-9+.-]*:|//|#)", target):
+                continue
+            path = re.split(r"[?#]", target, maxsplit=1)[0]
+            if not path:
+                continue
+            if path.startswith("/") or path.endswith(".md"):
+                problems.append(f"{page}: {target}")
+                continue
+            if path.endswith(".html"):
+                dest = posixpath.normpath(posixpath.join(posixpath.dirname(page), path))
+                if dest[: -len(".html")] + ".md" not in pages:
+                    problems.append(f"{page}: {target} -> {dest}")
+    return problems
+
+
+class GitBindingTests(StageBase):
+    def track(self):
+        git_track_all(self.root)
+
+    def test_git_runs_bound_to_the_checkout_with_a_clean_environment(self):
+        self.track()
+        calls = []
+        real_run = subprocess.run
+
+        def spy(args, *a, **kw):
+            calls.append((list(args), kw))
+            return real_run(args, *a, **kw)
+
+        with mock.patch.dict(os.environ, {"GIT_DIR": "x", "GIT_WORK_TREE": "y"}):
+            with mock.patch.object(site.subprocess, "run", spy):
+                site.build(self.out, root=self.root)
+        self.assertGreaterEqual(len(calls), 2)
+        for args, kw in calls:
+            self.assertEqual(args[:3], ["git", "-C", str(self.root.resolve())])
+            env = kw.get("env")
+            self.assertIsNotNone(env)
+            self.assertEqual([k for k in env if k.upper().startswith("GIT_")], [])
+
+    def test_inherited_git_variables_cannot_redirect_the_listing(self):
+        foreign = make_repo(
+            Path(self._tmp.name) / "foreign", extra={"docs/FOREIGN.md": "# Foreign\n"}
+        )
+        git_track_all(foreign)
+        self.track()
+        poisoned = {
+            "GIT_DIR": str(foreign / ".git"),
+            "GIT_WORK_TREE": str(foreign),
+            "GIT_INDEX_FILE": str(foreign / ".git" / "index"),
+            "GIT_CEILING_DIRECTORIES": str(self.root.parent),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.worktree",
+            "GIT_CONFIG_VALUE_0": str(foreign),
+        }
+        with mock.patch.dict(os.environ, poisoned):
+            staged = site.build(self.out, root=self.root)
+        tree = read_tree(self.out)
+        self.assertIn("docs/GUIDE.md", tree)
+        self.assertNotIn("docs/FOREIGN.md", tree)
+        self.assertNotIn("docs/FOREIGN.md", staged)
+
+    def test_root_must_be_the_repository_top_level(self):
+        outer = Path(self._tmp.name) / "outer"
+        inner = make_repo(outer / "sub")
+        git(outer, "init", "-q")
+        git(outer, "add", "-A")
+        with self.assertRaises(site.BuildError) as ctx:
+            site.build(inner / "_site_src", root=inner)
+        self.assertIn("top level", str(ctx.exception))
+        self.assertFalse((inner / "_site_src").exists())
+
+    def test_gitlinks_are_not_published(self):
+        self.track()
+        git(
+            self.root,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0123456789abcdef0123456789abcdef01234567,docs/vendored.md",
+        )
+        staged = site.build(self.out, root=self.root)
+        self.assertNotIn("docs/vendored.md", staged)
+        self.assertNotIn("docs/vendored.md", read_tree(self.out))
+        self.assertIn("docs/GUIDE.md", read_tree(self.out))
+
+    def test_missing_git_executable_fails_closed(self):
+        self.track()
+        with mock.patch.object(
+            site.subprocess, "run", side_effect=FileNotFoundError("git")
+        ):
+            with self.assertRaises(site.BuildError) as ctx:
+                site.build(self.out, root=self.root)
+        self.assertIn("git", str(ctx.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_non_zero_toplevel_probe_fails_closed(self):
+        self.track()
+
+        def fake(args, *a, **kw):
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: probe broke")
+
+        with mock.patch.object(site.subprocess, "run", fake):
+            with self.assertRaises(site.BuildError) as ctx:
+                site.build(self.out, root=self.root)
+        self.assertIn("128", str(ctx.exception))
+        self.assertIn("probe broke", str(ctx.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_non_zero_listing_fails_closed(self):
+        self.track()
+        real_run = subprocess.run
+
+        def fake(args, *a, **kw):
+            if "ls-files" in args:
+                return subprocess.CompletedProcess(args, 1, b"", b"fatal: list broke")
+            return real_run(args, *a, **kw)
+
+        with mock.patch.object(site.subprocess, "run", fake):
+            with self.assertRaises(site.BuildError) as ctx:
+                site.build(self.out, root=self.root)
+        self.assertIn("status 1", str(ctx.exception))
+        self.assertIn("list broke", str(ctx.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_a_corrupt_repository_fails_closed(self):
+        broken = make_repo(Path(self._tmp.name) / "broken")
+        (broken / ".git").mkdir()
+        (broken / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+        with self.assertRaises(site.BuildError):
+            site.build(broken / "_site_src", root=broken)
+
+
+class BuiltSiteCheckTests(unittest.TestCase):
+    """`--check-site` verifies Jekyll's rendered HTML, the final published links."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name) / "_site"
+
+    def check_files(self, files, baseurl="/agent-harness"):
+        for rel, text in files.items():
+            write(self.dir, rel, text)
+        return site.check_built_site(self.dir, baseurl)
+
+    def test_valid_site_has_no_problems(self):
+        problems = self.check_files(
+            {
+                "index.html": '<a href="docs/G.html#x">g</a><a href="/agent-harness/">h</a>'
+                '<a href="https://example.com/a.md">e</a><a href="#top">t</a>'
+                '<a href="mailto:a@b.c">m</a><img src="/agent-harness/assets/a.png">',
+                "docs/G.html": '<a href="../index.html">i</a>'
+                '<a href="/agent-harness/docs/G.html">s</a><a href="G.html#y">d</a>',
+                "assets/a.png": "x",
+            }
+        )
+        self.assertEqual(problems, [])
+
+    def test_broken_and_unrebased_links_are_reported(self):
+        problems = self.check_files(
+            {
+                "index.html": '<a href="missing.html">a</a><a href="/SPECS.html">b</a>'
+                '<a href="docs/G.md">c</a><a href="/agent-harness/nope.html">d</a>',
+                "docs/G.html": "",
+            }
+        )
+        joined = "\n".join(problems)
+        for needle in ("missing.html", "/SPECS.html", "docs/G.md", "nope.html"):
+            self.assertIn(needle, joined)
+        self.assertEqual(len(problems), 4)
+
+    def test_links_may_not_escape_the_site(self):
+        problems = self.check_files({"index.html": '<a href="../../etc/passwd">x</a>'})
+        self.assertEqual(len(problems), 1)
+
+    def test_cli_check_site(self):
+        write(self.dir, "index.html", '<a href="gone.html">x</a>')
+        cmd = [sys.executable, str(SCRIPT), "--check-site", str(self.dir)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("gone.html", proc.stderr)
+        write(self.dir, "gone.html", "")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
 class RealRepositoryTests(unittest.TestCase):
     def test_real_repository_stages_only_the_allowlist(self):
         out = ROOT / "_site_src" / f"test-{os.getpid()}"
@@ -559,6 +1060,7 @@ class RealRepositoryTests(unittest.TestCase):
             "CLAUDE_CONFIG_OPERATIONS.md",
         ):
             self.assertNotIn(name, tree)
+        self.assertEqual(broken_staged_links(out), [])
         for rel, data in tree.items():
             if rel.endswith(".md"):
                 text = data.decode("utf-8")

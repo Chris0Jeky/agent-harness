@@ -9,6 +9,13 @@ published; operational files stay out. The build is deterministic (sorted order,
 no timestamps) and fails closed: a named root document that is missing is an
 error, never a silent omission.
 
+Links: every Markdown link between staged pages is converted to a relative `.html`
+link here, relative to the page it sits in, and links to files that are not
+published are pointed at GitHub. No Jekyll plugin rewrites links (the
+`jekyll-relative-links` regex also rewrote text inside code). Code is found by a
+small block scanner (fences, indented code, blockquotes, list items, multi-line
+code spans), so links inside code are left exactly as written.
+
 Liquid safety: GitHub Pages Jekyll 3.10 does not support `render_with_liquid`
 (that arrived in Jekyll 4.0), so every page body is wrapped in
 `{% raw %} ... {% endraw %}` instead, and any literal `{% endraw %}` inside a
@@ -16,6 +23,8 @@ doc is split so it cannot end the block early.
 """
 
 import argparse
+import bisect
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -67,12 +76,12 @@ DENIED_ROOT_FILES = frozenset(
 DENIED_DIRS = ("handoffs", "plans", *EXCLUDED_DIRS)
 
 NAV = (
-    ("Home", "index.md"),
-    ("Blueprint", "BLUEPRINT.md"),
-    ("Specs", "SPECS.md"),
-    ("Book", "BOOK.md"),
-    ("Roadmap", "ROADMAP.md"),
-    ("All documents", "docs-index.md"),
+    ("Home", "index.html"),
+    ("Blueprint", "BLUEPRINT.html"),
+    ("Specs", "SPECS.html"),
+    ("Book", "BOOK.html"),
+    ("Roadmap", "ROADMAP.html"),
+    ("All documents", "docs-index.html"),
 )
 DESCRIPTION = (
     "Tier model, deny floor, and tooling for measuring and improving "
@@ -84,13 +93,9 @@ url: https://chris0jeky.github.io
 baseurl: /agent-harness
 theme: jekyll-theme-primer
 plugins:
-  - jekyll-relative-links
   - jekyll-optional-front-matter
   - jekyll-titles-from-headings
   - jekyll-default-layout
-relative_links:
-  enabled: true
-  collections: false
 """
 MARKER = ".docs-site-stage"
 MARKER_TEXT = "Staged by scripts/build_docs_site.py; safe to clear.\n"
@@ -141,17 +146,65 @@ def validate_source(root, rel):
         raise BuildError(f"source resolves outside the repository: {rel}")
 
 
-def tracked_docs(root):
-    """Tracked files under docs/ (git index only); fail closed when git cannot say."""
+# Only these inherited variables survive into git: everything else under GIT_ can
+# redirect the repository, index, worktree or config that `ls-files` would read.
+GIT_ENV_KEEP = frozenset({"GIT_EXEC_PATH"})
+GITLINK_MODE = b"160000"
+
+
+def git_env():
+    """The environment for git: inherited, minus every GIT_* repository override."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_") or key.upper() in GIT_ENV_KEEP
+    }
+
+
+def run_git(root, *args):
+    """Run git bound to the checkout `root`; return stdout, failing closed."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--", "docs"],
-            capture_output=True,
-            check=True,
+            ["git", "-C", str(root), *args], capture_output=True, env=git_env()
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise BuildError(f"cannot list tracked docs with git: {exc}") from exc
-    return sorted(item.decode("utf-8") for item in proc.stdout.split(b"\0") if item)
+    except OSError as exc:
+        raise BuildError(f"cannot run git: {exc}") from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        raise BuildError(
+            f"git {args[0]} failed with status {proc.returncode}: {detail}"
+        )
+    return proc.stdout
+
+
+def check_checkout(root):
+    """Require `root` to be the top level of the git checkout that answers for it."""
+    top = os.fsdecode(run_git(root, "rev-parse", "--show-toplevel")).strip()
+    try:
+        same = bool(top) and os.path.samefile(top, root)
+    except OSError:
+        same = False
+    if not same:
+        raise BuildError(
+            f"{root} is not the top level of its git checkout (git reports {top or 'nothing'})"
+        )
+
+
+def tracked_docs(root):
+    """Tracked files under docs/ (git index only, gitlinks excluded); fail closed."""
+    check_checkout(root)
+    docs = set()
+    for entry in run_git(root, "ls-files", "-s", "-z", "--", "docs").split(b"\0"):
+        if not entry:
+            continue
+        meta, tab, path = entry.partition(b"\t")
+        fields = meta.split()
+        if not tab or len(fields) != 3:
+            raise BuildError(f"cannot parse git ls-files output: {entry!r}")
+        if fields[0] == GITLINK_MODE:  # a submodule, not a document
+            continue
+        docs.add(path.decode("utf-8"))
+    return sorted(docs)
 
 
 def collect_sources(root):
@@ -199,9 +252,7 @@ def check_output_path(out, root, sources):
     return out
 
 
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-HEADING = re.compile(r"^ {0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
-CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+HEADING = re.compile(r"[ \t]*#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 INLINE_LINK = re.compile(
     r"(!?)\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\(\s*(<[^>\n]*>|[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)"
     r"((?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'))?)\s*\)"
@@ -210,31 +261,181 @@ REF_DEF = re.compile(r"^( {0,3}\[[^\]\n]+\]:[ \t]*)(<[^>\n]*>|\S+)")
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 ENDRAW = re.compile(r"\{%(?=-?\s*endraw\b)")
 
+FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*$")
+ATX = re.compile(r"#{1,6}(?:[ \t]|$)")
+HRULE = re.compile(r"([-*_])(?:[ \t]*\1){2,}[ \t]*$")
+LIST_MARK = re.compile(r"([-+*]|\d{1,9}[.)])(?=[ \t]|$)")
+TABLE_DELIM = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
+ASCII_PUNCT = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+MASK = "\x00"
 
-def iter_lines(text):
-    """Yield (line, in_fence) for each line; fence delimiters count as fenced."""
-    fence = None
-    for line in text.split("\n"):
-        m = FENCE.match(line)
-        if fence is None:
-            if m:
-                fence = m.group(1)
-                yield line, True
-                continue
-            yield line, False
+
+def skip_ws(line, pos, col):
+    """Advance past spaces and tabs (tab stops of 4); return (pos, column)."""
+    while pos < len(line) and line[pos] in " \t":
+        col += 1 if line[pos] == " " else 4 - col % 4
+        pos += 1
+    return pos, col
+
+
+def advance_to(line, pos, col, target):
+    """Advance over whitespace until `col` reaches `target`."""
+    while pos < len(line) and col < target and line[pos] in " \t":
+        col += 1 if line[pos] == " " else 4 - col % 4
+        pos += 1
+    return pos, col
+
+
+def after_quote_marker(line, pos, col):
+    """Step past the optional single space (or tab) that follows a `>`."""
+    if pos < len(line) and line[pos] in " \t":
+        col += 1 if line[pos] == " " else 4 - col % 4
+        pos += 1
+    return pos, col
+
+
+def starts_block(line, pos, indent):
+    """Whether a line begins a block that may interrupt a paragraph."""
+    if indent >= 4 or pos >= len(line):
+        return False
+    if line[pos] == ">" or ATX.match(line, pos) or HRULE.match(line, pos):
+        return True
+    fence = FENCE_OPEN.match(line, pos)
+    if fence and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
+        return True
+    item = LIST_MARK.match(line, pos)
+    if item:
+        marker = item.group(1)
+        blank = not line[item.end() :].strip()
+        return not blank and (marker[0] in "-+*" or marker[:-1] == "1")
+    return False
+
+
+def scan_blocks(lines):
+    """Find the text blocks of a Markdown document.
+
+    Returns [(kind, depth, [(line index, start offset), ...])] for every
+    paragraph, table row and ATX heading ("para" or "heading"); `depth` counts
+    enclosing blockquotes and list items and `start` is where the line's own
+    content begins after those containers' prefixes. Fenced code (inside
+    blockquotes and list items too), indented code and blank lines are left out:
+    that is how callers know where code is. A simplified CommonMark pass: no
+    HTML blocks, no link reference definitions spanning lines.
+    """
+    blocks = []
+    containers = (
+        []
+    )  # ("q", None) for a blockquote, ("l", content column) for a list item
+    para = []
+    fence = None  # (character, length) of the open fenced block
+
+    def flush():
+        nonlocal para
+        if not para:
+            return
+        first = lines[para[0][0]][para[0][1] :]
+        second = lines[para[1][0]][para[1][1] :] if len(para) > 1 else ""
+        if "|" in first and "|" in second and TABLE_DELIM.match(second.strip()):
+            for item in para:  # table cells never share a code span across rows
+                blocks.append(("para", len(containers), [item]))
         else:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
-                fence = None
-            yield line, True
+            blocks.append(("para", len(containers), para))
+        para = []
+
+    for idx, line in enumerate(lines):
+        pos = col = matched = 0
+        for kind, content_col in containers:
+            p, c = skip_ws(line, pos, col)
+            if kind == "q":
+                if c - col < 4 and p < len(line) and line[p] == ">":
+                    pos, col = after_quote_marker(line, p + 1, c + 1)
+                    matched += 1
+                    continue
+            elif p >= len(line):  # a blank line keeps list items open
+                pos, col = p, c
+                matched += 1
+                continue
+            elif c >= content_col:
+                pos, col = advance_to(line, pos, col, content_col)
+                matched += 1
+                continue
+            break
+        whole = matched == len(containers)
+        if fence:
+            if whole:
+                p, c = skip_ws(line, pos, col)
+                closer = FENCE_CLOSE.match(line, p)
+                if (
+                    closer
+                    and c - col < 4
+                    and closer.group(1)[0] == fence[0]
+                    and len(closer.group(1)) >= fence[1]
+                ):
+                    fence = None
+                continue
+            fence = None  # the fence's container ended
+        if not whole:
+            p, c = skip_ws(line, pos, col)
+            if para and p < len(line) and not starts_block(line, p, c - col):
+                para.append((idx, pos))  # lazy continuation of the open paragraph
+                continue
+            flush()
+            del containers[matched:]
+        while True:  # open any new containers this line starts
+            p, c = skip_ws(line, pos, col)
+            if p >= len(line) or c - col >= 4:
+                break
+            if line[p] == ">":
+                flush()
+                containers.append(("q", None))
+                pos, col = after_quote_marker(line, p + 1, c + 1)
+                continue
+            item = LIST_MARK.match(line, p)
+            if not item or HRULE.match(line, p):
+                break
+            marker_end = c + len(item.group(1))
+            q, qc = skip_ws(line, item.end(), marker_end)
+            blank = q >= len(line)
+            if para and not starts_block(line, p, c - col):
+                break  # cannot interrupt a paragraph: it is paragraph text
+            flush()
+            if blank or qc - marker_end >= 5:
+                content_col = marker_end + 1
+            else:
+                content_col = qc
+            containers.append(("l", content_col))
+            pos, col = advance_to(line, item.end(), marker_end, content_col)
+        p, c = skip_ws(line, pos, col)
+        if p >= len(line):
+            flush()
+        elif c - col >= 4:
+            if para:  # indented text continues a paragraph; otherwise it is code
+                para.append((idx, pos))
+        else:
+            opener = FENCE_OPEN.match(line, p)
+            if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
+                flush()
+                fence = (opener.group(1)[0], len(opener.group(1)))
+            elif ATX.match(line, p):
+                flush()
+                blocks.append(("heading", len(containers), [(idx, pos)]))
+            elif HRULE.match(line, p):
+                flush()
+            else:
+                para.append((idx, pos))
+    flush()
+    return blocks
 
 
 def first_title(text):
-    for line, fenced in iter_lines(text):
-        if fenced:
-            continue
-        m = HEADING.match(line)
-        if m and m.group(1):
-            return plain_title(m.group(1))
+    lines = text.split("\n")
+    for kind, depth, items in scan_blocks(lines):
+        if kind == "heading" and depth == 0:
+            index, start = items[0]
+            m = HEADING.match(lines[index], start)
+            if m and m.group(1):
+                return plain_title(m.group(1))
     return None
 
 
@@ -245,8 +446,24 @@ def plain_title(raw):
     return " ".join(title.split())
 
 
+def relative_path(from_dir, to):
+    """The relative path from directory `from_dir` to `to` (both posix, repo-style)."""
+    base = [part for part in from_dir.split("/") if part]
+    dest = to.split("/")
+    common = 0
+    while (
+        common < len(base) and common < len(dest) - 1 and base[common] == dest[common]
+    ):
+        common += 1
+    return "/".join([".."] * (len(base) - common) + dest[common:])
+
+
 def link_target(raw, src_rel, root, staged, image):
-    """Return the rewritten link target, or None to leave it untouched."""
+    """Return the rewritten link target, or None to leave it untouched.
+
+    A link to a staged page becomes a relative `.html` link from the page it is
+    in; a link to any other file or folder in the repository points at GitHub.
+    """
     wrapped = raw.startswith("<") and raw.endswith(">")
     target = raw[1:-1] if wrapped else raw
     if (
@@ -273,9 +490,9 @@ def link_target(raw, src_rel, root, staged, image):
     if resolved == ".." or resolved.startswith("../"):
         return None
     if resolved in staged:
-        if resolved == "README.md" and decoded.endswith("README.md"):
-            return path[: -len("README.md")] + "index.md" + suffix
-        return None
+        here = posixpath.dirname(staged[src_rel])
+        page = relative_path(here, html_name(staged[resolved]))
+        return quote(page, safe="/") + suffix
     full = root / resolved
     if resolved == ".":
         return f"{REPO_URL}/tree/main{suffix}"
@@ -288,33 +505,93 @@ def link_target(raw, src_rel, root, staged, image):
     return None
 
 
+def mask_code(text):
+    """Blank out code spans and backslash escapes so link syntax inside is not seen.
+
+    Same length as `text` (newlines kept), so offsets stay valid. A backtick run
+    closes only on a run of the same length; an unclosed run is plain text; an
+    escaped backtick opens nothing.
+    """
+    out = list(text)
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n and text[i + 1] in ASCII_PUNCT:
+            out[i] = out[i + 1] = MASK
+            i += 2
+        elif ch == "`":
+            j = i
+            while j < n and text[j] == "`":
+                j += 1
+            run = j - i
+            k = j
+            close = -1
+            while k < n:
+                if text[k] != "`":
+                    k += 1
+                    continue
+                e = k
+                while e < n and text[e] == "`":
+                    e += 1
+                if e - k == run:
+                    close = e
+                    break
+                k = e
+            if close == -1:
+                i = j
+            else:
+                for t in range(i, close):
+                    if text[t] != "\n":
+                        out[t] = MASK
+                i = close
+        else:
+            i += 1
+    return "".join(out)
+
+
+def rewrite_block(contents, src_rel, root, staged):
+    """Rewrite the links of one paragraph (its lines' own content, without prefixes)."""
+    out = list(contents)
+    defs = 0
+    for k, text in enumerate(contents):  # definitions only open a paragraph
+        ref = REF_DEF.match(text)
+        if not ref:
+            break
+        new = link_target(ref.group(2), src_rel, root, staged, False)
+        if new is not None:
+            out[k] = ref.group(1) + new + text[ref.end() :]
+        defs += 1
+    rest = out[defs:]
+    virtual = "\n".join(rest)
+    starts = []
+    offset = 0
+    for text in rest:
+        starts.append(offset)
+        offset += len(text) + 1
+    edits = []
+    for m in INLINE_LINK.finditer(mask_code(virtual)):
+        new = link_target(
+            virtual[m.start(3) : m.end(3)], src_rel, root, staged, m.group(1) == "!"
+        )
+        if new is not None:
+            edits.append((m.start(3), m.end(3), new))
+    for begin, end, new in reversed(edits):
+        k = bisect.bisect_right(starts, begin) - 1
+        line = rest[k]
+        rest[k] = line[: begin - starts[k]] + new + line[end - starts[k] :]
+    return out[:defs] + rest
+
+
 def rewrite_links(text, src_rel, root, staged):
-    out = []
-    for line, fenced in iter_lines(text):
-        if fenced:
-            out.append(line)
-            continue
-        spans = [m.span() for m in CODE_SPAN.finditer(line)]
-
-        def in_code(pos, spans=spans):
-            return any(a <= pos < b for a, b in spans)
-
-        def inline(m):
-            if in_code(m.start()):
-                return m.group(0)
-            new = link_target(m.group(3), src_rel, root, staged, m.group(1) == "!")
-            if new is None:
-                return m.group(0)
-            return f"{m.group(1)}[{m.group(2)}]({new}{m.group(4)})"
-
-        line = INLINE_LINK.sub(inline, line)
-        ref = REF_DEF.match(line)
-        if ref:
-            new = link_target(ref.group(2), src_rel, root, staged, False)
-            if new is not None:
-                line = ref.group(1) + new + line[ref.end() :]
-        out.append(line)
-    return "\n".join(out)
+    lines = text.split("\n")
+    for _kind, _depth, items in scan_blocks(lines):
+        contents = [lines[index][start:] for index, start in items]
+        for (index, start), new in zip(
+            items, rewrite_block(contents, src_rel, root, staged)
+        ):
+            lines[index] = lines[index][:start] + new
+    return "\n".join(lines)
 
 
 def split_front_matter(text):
@@ -324,6 +601,11 @@ def split_front_matter(text):
         if end != -1:
             return text[4:end], text[end + 5 :]
     return None, text
+
+
+def html_name(staged):
+    """The page Jekyll produces for a staged Markdown file."""
+    return posixpath.splitext(staged)[0] + ".html"
 
 
 def nav_line(depth):
@@ -359,7 +641,7 @@ def docs_index(pages):
         for staged, title in sorted(
             groups[folder], key=lambda p: (p[0] != "index.md", p)
         ):
-            lines.append(f"- [{title}]({staged})")
+            lines.append(f"- [{title}]({quote(html_name(staged), safe='/')})")
     return "\n".join(lines) + "\n"
 
 
@@ -403,13 +685,90 @@ def build(out, root=REPO_ROOT):
     return sorted(rendered)
 
 
+class LinkCollector(HTMLParser):
+    """Collect the targets of `<a href>` and `<img src>` in one rendered page."""
+
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if value and (tag, name) in (("a", "href"), ("img", "src")):
+                self.links.append(value)
+
+
+def check_built_site(site_dir, baseurl="/agent-harness"):
+    """Check the rendered HTML Jekyll produced; return a list of problems.
+
+    Every relative link, and every root-relative link under `baseurl`, must name
+    a file (or a folder with an index page, or an extensionless page) inside the
+    site; root-relative links outside `baseurl` would 404 once deployed; and no
+    link may still point at a `.md` file.
+    """
+    site_dir = Path(site_dir).resolve()
+    base = baseurl.rstrip("/")
+    pages = sorted(site_dir.rglob("*.html"))
+    if not pages:
+        return [f"no HTML pages found in {site_dir.name}"]
+    problems = []
+    for page in pages:
+        rel = page.relative_to(site_dir).as_posix()
+        collector = LinkCollector()
+        collector.feed(page.read_text(encoding="utf-8"))
+        for href in collector.links:
+            path = re.split(r"[?#]", href, maxsplit=1)[0]
+            if not path or href.startswith("//") or SCHEME.match(href):
+                continue
+            path = unquote(path)
+            if path.startswith("/"):
+                if base and path != base and not path.startswith(base + "/"):
+                    problems.append(
+                        f"{rel}: root-relative link outside {base}/: {href}"
+                    )
+                    continue
+                target = posixpath.normpath(path[len(base) :].lstrip("/") or ".")
+            else:
+                target = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(rel), path)
+                )
+            if target == ".." or target.startswith("../"):
+                problems.append(f"{rel}: link leaves the site: {href}")
+            elif path.endswith(".md"):
+                problems.append(f"{rel}: link still points at Markdown: {href}")
+            else:
+                found = site_dir / target
+                if not (
+                    found.is_file()
+                    or (found / "index.html").is_file()
+                    or found.with_name(found.name + ".html").is_file()
+                ):
+                    problems.append(f"{rel}: broken link: {href}")
+    return problems
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--out", default="_site_src", help="output folder inside the repository"
     )
+    parser.add_argument(
+        "--check-site",
+        metavar="DIR",
+        help="instead of staging, check the links in the Jekyll-built site in DIR",
+    )
+    parser.add_argument(
+        "--baseurl", default="/agent-harness", help="site base path for --check-site"
+    )
     parser.add_argument("--root", default=str(REPO_ROOT), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.check_site:
+        problems = check_built_site(args.check_site, args.baseurl)
+        for problem in problems:
+            print(f"build_docs_site: {problem}", file=sys.stderr)
+        if not problems:
+            print(f"checked the links of {args.check_site}")
+        return 1 if problems else 0
     root = Path(args.root).resolve()
     out = Path(args.out)
     if not out.is_absolute():
