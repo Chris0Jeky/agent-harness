@@ -2,11 +2,15 @@
 
 Covers `harness.effective_floor_posture` and
 `harness.default_branch_protection_findings` with a resolver keyed on argv:
-no process is spawned and no network is touched.
+network probes are injected. A separate native-Git control uses only temporary
+local repositories and a non-writing push dry run.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -151,13 +155,224 @@ class EffectiveFloorPostureTests(unittest.TestCase):
 
 class BranchProtectionFindingTests(unittest.TestCase):
     def run_protection(self, data, responses, remote_rows=GITHUB_REMOTE_ROWS):
-        full = {REMOTE_ARGV: (True, remote_rows)}
+        full = {
+            REMOTE_ARGV: (True, remote_rows),
+            ("git", "remote"): (
+                True,
+                "\n".join(
+                    dict.fromkeys(
+                        line.split()[0]
+                        for line in remote_rows.splitlines()
+                        if line.split()
+                    )
+                ),
+            ),
+        }
         full.update(responses)
         runner = ArgvRunner(full)
         findings = harness.default_branch_protection_findings(
             Path("."), data, command_runner=runner, deadline=None
         )
         return runner, findings
+
+    def test_url_less_remote_is_counted_before_implicit_fallback(self):
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {
+                ("git", "remote"): (True, "mirror\nunused\n"),
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            },
+            remote_rows=GITHUB_REMOTE_ROWS.replace("origin", "mirror"),
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_unavailable_name_enumeration_is_not_a_proven_fallback(self):
+        for result in ((False, "", "git could not be started"), (True, "")):
+            with self.subTest(result=result):
+                runner, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        ("git", "remote"): result,
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                    },
+                    remote_rows=GITHUB_REMOTE_ROWS.replace("origin", "mirror"),
+                )
+                self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+                self.assertEqual(runner.gh_calls(), [])
+
+    def test_explicit_selection_needs_no_implicit_name_enumeration(self):
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {
+                ("git", "config", "--get", "remote.pushDefault"): (True, "mirror"),
+                ("git", "remote"): (False, "", "unavailable"),
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            },
+            remote_rows=GITHUB_REMOTE_ROWS.replace("origin", "mirror"),
+        )
+        self.assertEqual([item["status"] for item in findings], ["ok"])
+        self.assertNotIn(["git", "remote"], runner.calls)
+
+    def test_successfully_read_empty_selectors_do_not_use_fallback(self):
+        for key in (
+            "branch.work.pushRemote",
+            "remote.pushDefault",
+            "branch.work.remote",
+        ):
+            with self.subTest(key=key):
+                runner, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        ("git", "rev-parse", "--abbrev-ref", "HEAD"): (True, "work"),
+                        ("git", "config", "--get", key): (True, "\n"),
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                    },
+                    remote_rows=GITHUB_REMOTE_ROWS.replace("origin", "mirror"),
+                )
+                self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+                self.assertEqual(runner.gh_calls(), [])
+                self.assertNotIn(["git", "remote"], runner.calls)
+
+    def test_implicit_sole_remote_is_measured(self):
+        rows = GITHUB_REMOTE_ROWS.replace("origin", "mirror")
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            },
+            remote_rows=rows,
+        )
+        self.assertEqual([item["status"] for item in findings], ["ok"])
+        self.assertEqual(
+            runner.gh_calls(),
+            [list(DEFAULT_BRANCH_ARGV), list(RULES_ARGV), list(BYPASS_7)],
+        )
+
+    def test_explicit_missing_origin_never_becomes_the_sole_remote(self):
+        rows = GITHUB_REMOTE_ROWS.replace("origin", "mirror")
+        for key in (
+            "branch.work.pushRemote",
+            "remote.pushDefault",
+            "branch.work.remote",
+        ):
+            with self.subTest(key=key):
+                runner, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        ("git", "rev-parse", "--abbrev-ref", "HEAD"): (True, "work"),
+                        ("git", "config", "--get", key): (True, "origin"),
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                    },
+                    remote_rows=rows,
+                )
+                self.assertFalse(any(item["status"] == "ok" for item in findings))
+                self.assertEqual(runner.gh_calls(), [])
+
+    def test_failed_sole_remote_selection_is_not_a_fallback(self):
+        runner, findings = self.run_protection(
+            make_tier_data(),
+            {
+                ("git", "config", "--get", "remote.pushDefault"): (
+                    False,
+                    "",
+                    "git could not be started: fixture",
+                ),
+            },
+            remote_rows=GITHUB_REMOTE_ROWS.replace("origin", "mirror"),
+        )
+        self.assertEqual([item["status"] for item in findings], ["UNPROVEN"])
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_multiple_implicit_remotes_do_not_guess_the_first(self):
+        rows = GITHUB_REMOTE_ROWS.replace("origin", "mirror") + (
+            "\nother\thttps://github.com/acme/other.git (push)"
+        )
+        runner, findings = self.run_protection(make_tier_data(), {}, remote_rows=rows)
+        self.assertFalse(any(item["status"] == "ok" for item in findings))
+        self.assertEqual(runner.gh_calls(), [])
+
+    def test_mixed_push_urls_measure_each_github_destination_once_in_order(self):
+        other_branch = tuple(
+            part.replace("acme/widgets", "acme/other") for part in DEFAULT_BRANCH_ARGV
+        )
+        rows = GITHUB_REMOTE_ROWS + (
+            "\norigin\thttps://git.example.invalid/acme/internal.git (push)"
+            "\norigin\tssh://git@github.com/acme/widgets.git (push)"
+            "\norigin\thttps://github.com/acme/other.git (push)"
+            "\norigin\thttps://github.com/acme/widgets.git (push)"
+        )
+        for remote_rows in (rows, "\n".join(reversed(rows.splitlines()))):
+            with self.subTest(remote_rows=remote_rows):
+                runner, findings = self.run_protection(
+                    make_tier_data(),
+                    {
+                        DEFAULT_BRANCH_ARGV: (True, "main"),
+                        RULES_ARGV: (True, BOTH_RULES),
+                        BYPASS_7: (True, "never"),
+                        other_branch: (False, "", "gh: HTTP 403 forbidden"),
+                    },
+                    remote_rows=remote_rows,
+                )
+                self.assertEqual(
+                    [item["status"] for item in findings], ["ok", "UNPROVEN"]
+                )
+                self.assertIn("acme/widgets", findings[0]["detail"])
+                self.assertIn("acme/other", findings[1]["detail"])
+                self.assertEqual(
+                    runner.gh_calls(),
+                    [
+                        list(DEFAULT_BRANCH_ARGV),
+                        list(RULES_ARGV),
+                        list(BYPASS_7),
+                        list(other_branch),
+                    ],
+                )
+
+    def test_mixed_push_urls_share_the_deadline(self):
+        rows = GITHUB_REMOTE_ROWS + (
+            "\norigin\thttps://git.example.invalid/acme/internal.git (push)"
+            "\norigin\thttps://github.com/acme/other.git (push)"
+        )
+        clock = {"now": 0.0}
+
+        class ExpiringRunner(ArgvRunner):
+            def __call__(self, argv, cwd=None, **kwargs):
+                result = super().__call__(argv, cwd, **kwargs)
+                if tuple(argv) == BYPASS_7:
+                    clock["now"] = 1000.0
+                return result
+
+        runner = ExpiringRunner(
+            {
+                REMOTE_ARGV: (True, rows),
+                ("git", "remote"): (True, "origin"),
+                DEFAULT_BRANCH_ARGV: (True, "main"),
+                RULES_ARGV: (True, BOTH_RULES),
+                BYPASS_7: (True, "never"),
+            }
+        )
+        with mock.patch.object(harness, "monotonic", lambda: clock["now"]):
+            findings = harness.default_branch_protection_findings(
+                Path("."), make_tier_data(), command_runner=runner, deadline=500.0
+            )
+        self.assertEqual([item["status"] for item in findings], ["ok", "UNPROVEN"])
+        self.assertEqual(
+            runner.gh_calls(),
+            [list(DEFAULT_BRANCH_ARGV), list(RULES_ARGV), list(BYPASS_7)],
+        )
 
     def test_ok_when_ruleset_blocks_both(self):
         runner, findings = self.run_protection(
@@ -262,7 +477,12 @@ class BranchProtectionFindingTests(unittest.TestCase):
         self.assertIn("unmeasured", findings[0]["detail"])
 
     def test_unproven_when_offline_refuses_network_probes(self):
-        runner = OfflineRunner({REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS)})
+        runner = OfflineRunner(
+            {
+                REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                ("git", "remote"): (True, "origin"),
+            }
+        )
         findings = harness.default_branch_protection_findings(
             Path("."), make_tier_data(), command_runner=runner, deadline=None
         )
@@ -530,6 +750,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
         runner = ArgvRunner(
             {
                 REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                ("git", "remote"): (True, "origin"),
                 DEFAULT_BRANCH_ARGV: (True, "main"),
                 RULES_ARGV: (True, BOTH_RULES),
                 BYPASS_7: (True, "never"),
@@ -619,6 +840,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
                 runner = ExpiringRunner(
                     {
                         REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                        ("git", "remote"): (True, "origin"),
                         DEFAULT_BRANCH_ARGV: (True, "main"),
                         RULES_ARGV: (True, BOTH_RULES),
                         BYPASS_7: (True, "never"),
@@ -725,7 +947,12 @@ class BranchProtectionFindingTests(unittest.TestCase):
                     clock["now"] = 1000.0
                 return result
 
-        runner = ExpiringRunner({REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS)})
+        runner = ExpiringRunner(
+            {
+                REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                ("git", "remote"): (True, "origin"),
+            }
+        )
         with mock.patch.object(harness, "monotonic", lambda: clock["now"]):
             findings = harness.default_branch_protection_findings(
                 Path("."), make_tier_data(), command_runner=runner, deadline=500.0
@@ -933,6 +1160,7 @@ class BranchProtectionFindingTests(unittest.TestCase):
             runner = ArgvRunner(
                 {
                     REMOTE_ARGV: (True, GITHUB_REMOTE_ROWS),
+                    ("git", "remote"): (True, "origin"),
                     DEFAULT_BRANCH_ARGV: (True, "main"),
                     RULES_ARGV: (True, BOTH_RULES),
                     BYPASS_7: (True, "never"),
@@ -953,6 +1181,110 @@ class BranchProtectionFindingTests(unittest.TestCase):
             vendored = next(i for i, x in enumerate(labels) if "vendored" in x)
             history = next(i for i, x in enumerate(labels) if "history protection" in x)
             self.assertLess(vendored, history)
+
+
+class NativePushDefaultTests(unittest.TestCase):
+    def test_native_git_implicit_sole_remote_and_explicit_origin_are_distinct(self):
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("native Git is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            empty = root / "empty.gitconfig"
+            empty.write_text("", encoding="utf-8")
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.upper().startswith("GIT_")
+            }
+            env.update(
+                {
+                    "GIT_CONFIG_GLOBAL": str(empty),
+                    "GIT_CONFIG_SYSTEM": str(empty),
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_AUTHOR_NAME": "Fixture",
+                    "GIT_COMMITTER_NAME": "Fixture",
+                    "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                    "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+                }
+            )
+            repo, remote = root / "repo", root / "remote.git"
+            repo.mkdir()
+
+            def run(*args, cwd=repo):
+                return subprocess.run(
+                    [git, *args],
+                    cwd=cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+
+            for command in (
+                ("init", "-q", "--initial-branch=work"),
+                (
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                    "--allow-empty",
+                ),
+                ("init", "--bare", "-q", str(remote)),
+                ("remote", "add", "mirror", str(remote)),
+                ("config", "push.default", "current"),
+            ):
+                result = run(*command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            dry_run = run("push", "--dry-run", "--porcelain")
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn(str(remote), dry_run.stdout)
+            self.assertIn("[new branch]", dry_run.stdout)
+            self.assertEqual(run("show-ref", cwd=remote).stdout, "")
+            # URL-less remotes are absent from --verbose but still participate
+            # in Git's implicit remote selection.
+            result = run(
+                "config", "remote.unused.fetch", "+refs/heads/*:refs/remotes/unused/*"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                set(run("remote").stdout.splitlines()), {"mirror", "unused"}
+            )
+            url_rows = [
+                line
+                for line in run("remote", "--verbose").stdout.splitlines()
+                if line.endswith((" (fetch)", " (push)"))
+            ]
+            self.assertFalse(any(line.startswith("unused") for line in url_rows))
+            self.assertNotEqual(run("push", "--dry-run", "--porcelain").returncode, 0)
+            self.assertEqual(run("show-ref", cwd=remote).stdout, "")
+            self.assertEqual(
+                run("config", "--remove-section", "remote.unused").returncode, 0
+            )
+            for key in (
+                "branch.work.pushRemote",
+                "remote.pushDefault",
+                "branch.work.remote",
+            ):
+                with self.subTest(empty_selector=key):
+                    self.assertEqual(run("config", key, "").returncode, 0)
+                    selected = run("config", "--get", key)
+                    self.assertEqual(
+                        (selected.returncode, selected.stdout.strip()), (0, "")
+                    )
+                    self.assertNotEqual(
+                        run("push", "--dry-run", "--porcelain").returncode, 0
+                    )
+                    self.assertEqual(run("show-ref", cwd=remote).stdout, "")
+                    self.assertEqual(run("config", "--unset", key).returncode, 0)
+            result = run("config", "remote.pushDefault", "origin")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            refused = run("push", "--dry-run", "--porcelain")
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(run("show-ref", cwd=remote).stdout, "")
 
 
 if __name__ == "__main__":

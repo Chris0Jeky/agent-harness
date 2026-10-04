@@ -1,6 +1,7 @@
 """Disposable bundle root, rename-boundary and inspection recovery controls."""
 
 from contextlib import redirect_stdout
+import errno
 import io
 import json
 import os
@@ -399,3 +400,86 @@ class BundlePreflightRecoveryTests(unittest.TestCase):
         runs = list((home / ".harness-backups/sync-global-bundles").iterdir())
         self.assertEqual((runs[0] / "backups/0000").read_bytes(), b"old worker")
         self.assertFalse((runs[0] / "receipt.json").exists())
+
+    @unittest.skipUnless(os.name == "posix", "native POSIX undecodable filename")
+    def test_undecodable_promoted_tree_name_is_quarantined_and_restores_prior_components(
+        self,
+    ):
+        for present in (False, True):
+            with self.subTest(present=present):
+                config, home, bin_home, args = self.make(
+                    f"unicode-inspection-{present}"
+                )
+                first = home / "tools/worker.py"
+                first.parent.mkdir(parents=True)
+                first.write_bytes(b"previous first")
+                target = bin_home / "muse-recipes"
+                if present:
+                    target.mkdir(parents=True)
+                    (target / "previous.txt").write_bytes(b"previous tree")
+                previous = harness.tree_digest(target)
+                source_before = harness.tree_digest(config)
+                # Use the host's byte-name API; the digest itself is not mocked.
+                raw_name = b"late-\xff.txt"
+                probe = os.fsencode(config.parent) + b"/" + raw_name
+                try:
+                    with open(probe, "wb") as stream:
+                        stream.write(b"probe")
+                except OSError as exc:
+                    if exc.errno == errno.EILSEQ:
+                        self.skipTest("filesystem refuses undecodable byte names")
+                    raise
+                decoded = os.fsdecode(raw_name)
+                try:
+                    decoded.encode("utf-8")
+                except UnicodeEncodeError:
+                    pass
+                else:
+                    os.unlink(probe)
+                    self.skipTest("host filename codec decodes every fixture byte")
+                os.unlink(probe)
+                rename = Path.rename
+                injected = []
+
+                def publish_with_late_name(path, destination):
+                    result = rename(path, destination)
+                    if path.parent.name == "staged" and Path(destination) == target:
+                        with open(
+                            os.fsencode(target) + b"/" + raw_name, "wb"
+                        ) as stream:
+                            stream.write(b"late writer bytes")
+                        injected.append(True)
+                    return result
+
+                with mock.patch.object(Path, "rename", publish_with_late_name):
+                    with redirect_stdout(io.StringIO()):
+                        try:
+                            harness.sync_global(args)
+                        except harness.HarnessError as exc:
+                            problem = str(exc)
+                        except UnicodeError as exc:
+                            self.fail(f"inspection escaped recovery: {exc}")
+                        else:
+                            self.fail("unverified tree was reported installed")
+                self.assertEqual(injected, [True])
+                self.assertIn("inspection failed", problem)
+                self.assertIn("recovery backups:", problem)
+                self.assertEqual(first.read_bytes(), b"previous first")
+                self.assertEqual(harness.tree_digest(target), previous)
+                self.assertEqual(harness.tree_digest(config), source_before)
+                runs = list((home / ".harness-backups/sync-global-bundles").iterdir())
+                self.assertEqual(len(runs), 1)
+                quarantine = runs[0] / "unverified/0001"
+                with open(os.fsencode(quarantine) + b"/" + raw_name, "rb") as stream:
+                    self.assertEqual(stream.read(), b"late writer bytes")
+                self.assertEqual(
+                    (quarantine / "review.md").read_bytes(), b"new recipe\n"
+                )
+                self.assertEqual(
+                    (runs[0] / "backups/0000").read_bytes(), b"previous first"
+                )
+                if present:
+                    self.assertEqual(
+                        harness.tree_digest(runs[0] / "backups/0001"), previous
+                    )
+                self.assertFalse((runs[0] / "receipt.json").exists())
