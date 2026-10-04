@@ -5333,6 +5333,7 @@ def configured_push_remote(
     deadline: float | None,
     *,
     strict: bool = False,
+    fallback_remote: str = PUBLISHING_REMOTE,
 ) -> tuple[str, bool]:
     """(remote `git push` targets, whether that selection was measured).
 
@@ -5357,6 +5358,10 @@ def configured_push_remote(
     returns `False`, instead of falling back to `origin` and grading a
     repository whose real push remote was never read. The default keeps the
     historical behaviour for `sensitive_data_findings`.
+
+    A caller that has enumerated exactly one remote may supply `fallback_remote`
+    for Git's implicit single-remote default. It is used only after every
+    selection key was read as unset, never over an explicit name or failed probe.
     """
     unreadable = False
 
@@ -5368,7 +5373,12 @@ def configured_push_remote(
         resolved, value, failure = result_before_deadline(
             command_runner, ["git", "config", "--get", key], repo, deadline
         )
-        if strict and not resolved and (failure.strip() or value.strip()):
+        if strict and (
+            (not resolved and (failure.strip() or value.strip()))
+            or (resolved and not value.strip())
+        ):
+            # A successfully read empty selector is explicit configuration,
+            # not proof that the key is absent. Git does not use a fallback.
             unreadable = True
         return value.strip() if resolved else ""
 
@@ -5394,7 +5404,7 @@ def configured_push_remote(
         configured_name = configured(key)
         if configured_name:
             return configured_name, True
-    return PUBLISHING_REMOTE, not exhausted()
+    return fallback_remote, not exhausted()
 
 
 def configured_remote_urls(
@@ -5887,15 +5897,31 @@ def default_branch_protection_findings(
     # first (#370). A selection the budget never let git answer is unmeasured,
     # never a guess of `origin`.
     publishing_remote, selection_proven = configured_push_remote(
-        repo, command_runner, deadline, strict=True
+        repo, command_runner, deadline, strict=True, fallback_remote=""
     )
+    if selection_proven and not publishing_remote:
+        # Verbose URL rows omit URL-less remotes, which still count toward
+        # Git's sole-remote fallback. Enumerate names only when fallback is
+        # needed; an explicit selector has already supplied its destination.
+        names_resolved, names_output = output_before_deadline(
+            command_runner, ["git", "remote"], repo, deadline
+        )
+        names = {line.strip() for line in names_output.splitlines() if line.strip()}
+        if not names_resolved or any(
+            name not in names for name, _url, _direction in rows
+        ):
+            selection_proven = False
+        else:
+            publishing_remote = (
+                next(iter(names)) if len(names) == 1 else PUBLISHING_REMOTE
+            )
     if not selection_proven:
         return [
             reality_finding(
                 BRANCH_PROTECTION_CHECK,
                 REALITY_UNPROVEN,
-                "git's push-remote configuration could not be read in full (a probe "
-                "timed out, failed to start, or the budget expired), so which "
+                "git's push-remote selection is unproven (configuration was empty, "
+                "a probe failed, enumeration was inconsistent, or the budget expired), so which "
                 "remote publishes this repo is unmeasured",
             )
         ]
@@ -5929,9 +5955,9 @@ def default_branch_protection_findings(
                     "goes, so its default-branch protection is unmeasured",
                 )
             ]
-    slugs = [github_repo_slug(url) for url in push_urls]
-    if not slugs or not all(slugs):
-        return []  # no such remote, or a push destination off GitHub: out of scope
+    # Git pushes to every pushurl. Scope each URL independently: an off-host
+    # destination cannot hide the GitHub members of the same publishing remote.
+    slugs = [slug for url in push_urls if (slug := github_repo_slug(url))]
     findings: list[dict] = []
     for slug in dict.fromkeys(slugs):
         findings.extend(
