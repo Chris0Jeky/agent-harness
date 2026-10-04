@@ -1,7 +1,7 @@
 # Merge-gate model
 
 Status: implemented, experimental, 2026-09-27. Tool: `scripts/merge_gate_model.py`.
-For: the finite merge state machine in claude-config #432 (control plane v3), and the estate laws
+For: the finite merge state machine in the private control plane (v3), and the estate laws
 it must obey (`rules/laws.md` 2 and 11). Parent epic: [#299](https://github.com/Chris0Jeky/agent-harness/issues/299)
 (a deterministic oracle that may gate; see [MERGE_BOUNDARY](MERGE_BOUNDARY.md)).
 

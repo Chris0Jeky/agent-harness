@@ -27,7 +27,7 @@ Before implementing, reconcile the pending
 [#295 reader](https://github.com/Chris0Jeky/agent-harness/pull/295) and
 [#296 accounting](https://github.com/Chris0Jeky/agent-harness/pull/296) contracts.
 No pending API is promised. Reader diagnostics retain `execution_verified=false` and
-`merge_verdict=null`. [agent-hq#10](https://github.com/Chris0Jeky/agent-hq/issues/10)
+`merge_verdict=null`. A private control-plane issue
 indexes evidence, never promotes authority. Only executed measurements enter
 [BENCHMARKS](../BENCHMARKS.md).
 
@@ -37,9 +37,8 @@ Review #301, then this note; curate the real cohort separately. #295/#296/
 [#298](https://github.com/Chris0Jeky/agent-harness/pull/298) Verify-red work does not block docs.
 Do not change CI or waive merge requirements.
 
-Defer [claude-config#308](https://github.com/Chris0Jeky/claude-config/issues/308)
-skills/workflow packaging until source-of-truth docs and packet mapping stabilize.
+Defer the private skills/workflow packaging issue until source-of-truth docs and packet mapping stabilize.
 No packaging PR now.
 
 No second harness, runner, collector, opentelemetry-sdk, runtime-schema migration,
-Taskdeck PR, product rewrite, UX scoring, or LLM merge gate.
+private product PR, product rewrite, UX scoring, or LLM merge gate.
