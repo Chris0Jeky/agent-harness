@@ -37,14 +37,18 @@ Permissions differ by platform, because a renamed file keeps its own access cont
   its owner: the staging file requests it at creation and the owner is read back. When
   Windows refuses that owner (`ERROR_INVALID_OWNER`, for example a user-owned file
   rewritten under an elevated token) or the read-back differs, the replacement falls back
-  to the token's default owner and one note naming the file is printed to stderr; this
-  grants no new privilege, because such a token already holds take-ownership rights. A
+  to the token's default owner (the staging file is recreated without an owner and its
+  owner must read back as the token's TokenOwner, or publication is refused) and one note
+  naming the file is printed to stderr. ERROR_INVALID_OWNER means only that the caller
+  cannot assign that SID as owner. A
   mandatory integrity label on the destination is applied to the staging file before any
   byte is written and read back (label SID and mask); if it cannot be applied or does not
   read back identically, publication is refused, the destination is left untouched, and
   the staging sibling is removed. Applying a label needs WRITE_OWNER under the
   destination's DACL and cannot raise a label above the writer's own integrity level, so
-  such destinations refuse rather than lose their label. Other SACL entries (audit ACEs)
+  such destinations refuse rather than lose their label. An unlabelled destination whose
+  staging file inherited a label from its parent directory is refused too, never
+  relabelled. Other SACL entries (audit ACEs)
   are not copied. Measured on NTFS: a
   destination that another process holds open without delete sharing, or that is
   read-only, refuses replacement; the live bytes, attribute and DACL stay unchanged and
