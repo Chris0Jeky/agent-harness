@@ -169,9 +169,11 @@ live-cohort denominator. A pointer that cannot be inspected stays unavailable.
 
 Per-member rows (exact PR, head, READY evidence, selection reason, inspection outcome) are in the
 private record behind the manifest digest. The [checklist results](https://github.com/Chris0Jeky/agent-harness/issues/308#issuecomment-5975900300)
-show 28 PASS, 12 GAP and 5 UNAVAILABLE over 5 members × 9 items. There is one confirmed
-contradiction: on 3 of 5 merged heads, a failed required-gate run conflicts with the recorded
-exact-head green; its cause is an untested hypothesis. No cited receipt could be retrieved (0/5).
+show 28 PASS, 12 GAP and 5 UNAVAILABLE over 5 members × 9 items. On 3 of 5 merged heads, a
+required-gate run created *after* the merge failed on the same SHA. That is later drift, recorded
+with its timestamps, not a contradiction of the green-at-merge record: nothing shows it belongs to
+the same gate decision, and its cause is an untested hypothesis. No cited receipt could be
+retrieved (0/5).
 This is a retrospective five-case pilot: no merge verdict, catch rate, effort figure or
 representativeness claim.
 
