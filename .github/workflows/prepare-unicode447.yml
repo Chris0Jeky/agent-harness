@@ -1,7 +1,7 @@
-name: Prepare 447 Unicode recovery correction
+name: Qualify integrated bundle 447 review correction
 on:
   push:
-    branches: [prep/unicode447-1004]
+    branches: [prep/integrated447-1004]
 permissions:
   contents: write
 jobs:
@@ -17,23 +17,35 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.11'
-      - name: Prepare hash-bound correction and prove the native regression
+      - name: Integrate pinned audit and bundle source with the scoped review correction
         run: |
           import hashlib, json, os, pathlib, subprocess, sys, zlib
           source = pathlib.Path.cwd()
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unicode447'
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integrated447'
           evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence447'
           evidence.mkdir()
           patch = zlib.decompress((source / '.github/preparation/unicode447.patch.zlib').read_bytes())
           assert hashlib.sha256(patch).hexdigest() == 'd86eea698c2f96fabee080b6861b632e33b5a434bb8e509e622d69a1800d0f85'
-          (evidence / 'input.patch').write_bytes(patch)
-          subprocess.run(['git', 'worktree', 'add', '--detach', str(root), '22fda72d98c96a66307682abc55a0c54dd2a708d'], check=True)
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root, text=True).strip() == '2ccecd729f647fc17bc79e669ce382bac03f1ae5'
-          subprocess.run(['git', 'apply', '--index', str(evidence / 'input.patch')], cwd=root, check=True)
+          (evidence / 'unicode-input.patch').write_bytes(patch)
+          base = '1bab3c9536fbca53f000512e4f7484f0f9229bdb'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(root), base], check=True)
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root, text=True).strip() == '0e57fb603fc6183dea40af2494f817ab2e60d553'
+          bundle_patch = subprocess.check_output(['git', 'diff', '--binary', '3102fc6797b06078a6189765c25c0e2f40f5ad68', '22fda72d98c96a66307682abc55a0c54dd2a708d'], cwd=root)
+          (evidence / 'bundle-input.patch').write_bytes(bundle_patch)
+          subprocess.run(['git', 'apply', '--3way', '--index', str(evidence / 'bundle-input.patch')], cwd=root, check=True)
+          subprocess.run(['git', 'apply', '--3way', '--index', str(evidence / 'unicode-input.patch')], cwd=root, check=True)
+          test = root / 'tests/test_bundle_preflight_recovery.py'
+          text = test.read_text(encoding='utf-8')
+          assert text.count('import io\n') == 1
+          text = text.replace('import io\n', 'import errno\nimport io\n')
+          old = '                with open(probe, "wb") as stream:\n                    stream.write(b"probe")\n'
+          new = '                try:\n                    with open(probe, "wb") as stream:\n                        stream.write(b"probe")\n                except OSError as exc:\n                    if exc.errno == errno.EILSEQ:\n                        self.skipTest("filesystem refuses undecodable byte names")\n                    raise\n'
+          assert text.count(old) == 1
+          test.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
           subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', 'requirements-dev.txt'], cwd=root, check=True)
           paths = ['harness.py', 'tests/test_bundle_preflight_recovery.py']
           for command in (['-m', 'black', *paths], ['-m', 'ruff', 'check', *paths], ['-m', 'black', '--check', *paths], ['-m', 'py_compile', *paths]):
@@ -41,20 +53,20 @@ jobs:
           target = root / 'harness.py'
           candidate = target.read_bytes()
           try:
-              target.write_bytes(subprocess.check_output(['git', 'show', 'HEAD:harness.py'], cwd=root))
+              target.write_bytes(subprocess.check_output(['git', 'show', '22fda72d98c96a66307682abc55a0c54dd2a708d:harness.py'], cwd=root))
               result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_preflight_recovery.py', '-v'], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               (evidence / 'red.log').write_bytes(result.stdout)
-              (evidence / 'red-exit.json').write_text(json.dumps({'exit_code': result.returncode}) + '\n')
+              (evidence / 'red-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'harness_baseline': '22fda72d98c96a66307682abc55a0c54dd2a708d'}) + '\n')
               assert result.returncode == 1 and b'FAILED (failures=2)' in result.stdout, result.stdout[-2000:]
               print(result.stdout[-1800:].decode('utf-8', errors='backslashreplace'))
           finally:
               target.write_bytes(candidate)
-      - name: Run complete verification and record exits before rendering
+      - name: Verify both lanes together and preserve exact exit records
         run: |
           import json, os, pathlib, subprocess, sys
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unicode447'
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integrated447'
           evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence447'
-          commands = {'focused': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_preflight_recovery.py', '-v'], 'root-units': ['-m', 'unittest', 'discover', '-s', 'tests', '-v'], 'replay': ['-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'], 'smoke': ['templates/hooks/smoke_test.py']}
+          commands = {'focused': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_bundle_preflight_recovery.py', '-v'], 'audit': ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_audit_branch_protection.py', '-v'], 'root-units': ['-m', 'unittest', 'discover', '-s', 'tests', '-v'], 'replay': ['-m', 'unittest', 'discover', '-s', 'replay_v0/tests', '-v'], 'smoke': ['templates/hooks/smoke_test.py']}
           for name, args in commands.items():
               log = evidence / (name + '.log')
               with log.open('wb') as stream:
@@ -64,11 +76,11 @@ jobs:
               print(log.read_bytes()[-1500:].decode('utf-8', errors='backslashreplace'), flush=True)
               if result.returncode:
                   raise SystemExit(result.returncode)
-      - name: Observe Doctor without modifying globals
+      - name: Record Doctor observation without global mutation
         if: always()
         run: |
           import json, os, pathlib, subprocess, sys
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unicode447'
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integrated447'
           evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence447'
           if not (root / 'harness.py').exists():
               raise SystemExit('candidate unavailable')
@@ -76,20 +88,20 @@ jobs:
               result = subprocess.run([sys.executable, 'harness.py', 'doctor'], cwd=root, stdout=stream, stderr=subprocess.STDOUT)
           (evidence / 'doctor-exit.json').write_text(json.dumps({'exit_code': result.returncode, 'installed_runtime_qualified': False}) + '\n')
           print('Doctor observational exit:', result.returncode)
-      - name: Export only the verified immutable correction blobs
+      - name: Export only the verified immutable integration blobs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unicode447'
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integrated447'
           evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'evidence447'
-          for name in ('focused', 'root-units', 'replay', 'smoke'):
+          for name in ('focused', 'audit', 'root-units', 'replay', 'smoke'):
               assert json.loads((evidence / (name + '-exit.json')).read_text())['exit_code'] == 0
-          paths = ['harness.py', 'tests/test_bundle_preflight_recovery.py']
+          paths = ['.github/workflows/ci.yml', 'SPECS.md', 'harness.py', 'tests/test_bundle_preflight_recovery.py']
           subprocess.run(['git', 'add', '--', *paths], cwd=root, check=True)
           assert subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=root, text=True).splitlines() == paths
           subprocess.run(['git', 'diff', '--cached', '--check'], cwd=root, check=True)
-          manifest = {'base': '22fda72d98c96a66307682abc55a0c54dd2a708d', 'preparation_commit': os.environ['GITHUB_SHA'], 'candidate_tree': subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip(), 'files': {}}
+          manifest = {'base': '1bab3c9536fbca53f000512e4f7484f0f9229bdb', 'base_tree': '0e57fb603fc6183dea40af2494f817ab2e60d553', 'bundle_head': '22fda72d98c96a66307682abc55a0c54dd2a708d', 'preparation_commit': os.environ['GITHUB_SHA'], 'candidate_tree': subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip(), 'files': {}}
           for path in paths:
               data = (root / path).read_bytes()
               expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
@@ -105,7 +117,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: unicode447-verification
+          name: integrated447-verification
           path: ${{ runner.temp }}/evidence447/
           retention-days: 14
           if-no-files-found: error
