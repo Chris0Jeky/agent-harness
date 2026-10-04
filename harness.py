@@ -7969,6 +7969,9 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
 
 
 WINDOWS_DACL_SECURITY_INFORMATION = 0x4
+WINDOWS_OWNER_SECURITY_INFORMATION = 0x1
+WINDOWS_LABEL_SECURITY_INFORMATION = 0x10
+WINDOWS_ERROR_INVALID_OWNER = 1307
 
 
 def windows_security_libraries() -> tuple[Any, Any]:
@@ -8031,17 +8034,20 @@ def windows_security_libraries() -> tuple[Any, Any]:
 
 def windows_file_dacl_descriptor(path: Path) -> bytes:
     """Return an existing file's self-relative DACL descriptor, protection flag included."""
+    return windows_file_security_descriptor(path, WINDOWS_DACL_SECURITY_INFORMATION)
+
+
+def windows_file_security_descriptor(path: Path, information: int) -> bytes:
+    """Return the self-relative descriptor holding the requested parts of a file."""
     advapi, _kernel = windows_security_libraries()
     needed = ctypes.c_uint32(0)
-    advapi.GetFileSecurityW(
-        str(path), WINDOWS_DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(needed)
-    )
+    advapi.GetFileSecurityW(str(path), information, None, 0, ctypes.byref(needed))
     if needed.value == 0:
         raise ctypes.WinError(ctypes.get_last_error())
     buffer = ctypes.create_string_buffer(needed.value)
     if not advapi.GetFileSecurityW(
         str(path),
-        WINDOWS_DACL_SECURITY_INFORMATION,
+        information,
         buffer,
         needed.value,
         ctypes.byref(needed),
@@ -8071,6 +8077,105 @@ def windows_dacl_signature(descriptor: bytes) -> tuple[bool, bool, str]:
         raise OSError(f"unrecognised DACL descriptor: {sddl!r}")
     flags = re.findall(r"P|AI|AR|NO_ACCESS_CONTROL", match.group(1))
     return "P" in flags, "NO_ACCESS_CONTROL" in flags, match.group(2)
+
+
+def windows_descriptor_sddl(descriptor: bytes, information: int) -> str:
+    """Render the requested parts of a self-relative descriptor as SDDL."""
+    advapi, kernel = windows_security_libraries()
+    buffer = ctypes.create_string_buffer(descriptor)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        buffer, 1, information, ctypes.byref(text), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+
+
+def windows_descriptor_owner(descriptor: bytes) -> str:
+    """Return a descriptor's owner as SDDL renders it; both compared sides render alike."""
+    sddl = windows_descriptor_sddl(descriptor, WINDOWS_OWNER_SECURITY_INFORMATION)
+    return sddl[2:] if sddl.startswith("O:") else ""
+
+
+def windows_label_signature(descriptor: bytes) -> tuple[tuple[str, str], ...]:
+    """Return the sorted (mask, SID) pairs of a descriptor's mandatory-label ACEs."""
+    sddl = windows_descriptor_sddl(descriptor, WINDOWS_LABEL_SECURITY_INFORMATION)
+    pairs = []
+    for ace in re.findall(r"\(ML;[^)]*\)", sddl):
+        fields = ace[1:-1].split(";")
+        pairs.append((fields[2], fields[5]))
+    return tuple(sorted(pairs))
+
+
+def windows_set_file_label(path: Path, descriptor: bytes) -> None:
+    """Apply the mandatory label carried by a self-relative descriptor to a file."""
+    advapi, _kernel = windows_security_libraries()
+    advapi.SetFileSecurityW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    advapi.SetFileSecurityW.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(descriptor)
+    if not advapi.SetFileSecurityW(
+        str(path), WINDOWS_LABEL_SECURITY_INFORMATION, buffer
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def windows_token_default_owner() -> str:
+    """Return the token's default owner (TokenOwner) rendered like a descriptor owner."""
+    advapi, kernel = windows_security_libraries()
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)  # TOKEN_QUERY
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = ctypes.c_uint32(0)
+        advapi.GetTokenInformation(token, 4, None, 0, ctypes.byref(needed))  # Owner
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        owner = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, 4, owner, needed.value, ctypes.byref(needed)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
+    # TOKEN_OWNER holds one SID pointer.
+    sid_text = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(
+        ctypes.c_void_p.from_buffer(owner).value, ctypes.byref(sid_text)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = f"O:{ctypes.wstring_at(sid_text.value)}"
+    finally:
+        kernel.LocalFree(sid_text)
+    descriptor = ctypes.c_void_p()
+    size = ctypes.c_uint32(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return windows_descriptor_owner(ctypes.string_at(descriptor.value, size.value))
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def windows_discard_staging_file(descriptor: int, temporary: Path) -> None:
+    """Close and remove a reserved staging sibling that never received any byte."""
+    os.close(descriptor)
+    try:
+        temporary.unlink(missing_ok=True)
+    except PermissionError:
+        temporary.chmod(stat.S_IREAD | stat.S_IWRITE)
+        temporary.unlink()
 
 
 def windows_owner_only_descriptor() -> bytes:
@@ -8194,28 +8299,111 @@ def write_managed_codex_file(
         if os.name == "nt":
             # A renamed sibling keeps its own DACL, so it must be the destination's: an
             # inherited parent DACL could broaden a deliberately restricted file (#431).
-            security = (
-                windows_file_dacl_descriptor(path)
-                if path.exists()
-                else windows_owner_only_descriptor()
-            )
+            # An existing destination also lends its owner and mandatory label (#435).
+            fallback: bytes | None = None
+            label: bytes | None = None
+            if path.exists():
+                security = windows_file_security_descriptor(
+                    path,
+                    WINDOWS_OWNER_SECURITY_INFORMATION
+                    | WINDOWS_DACL_SECURITY_INFORMATION,
+                )
+                fallback = windows_file_dacl_descriptor(path)
+                label = windows_file_security_descriptor(
+                    path, WINDOWS_LABEL_SECURITY_INFORMATION
+                )
+            else:
+                security = windows_owner_only_descriptor()
             read_only = mode is not None and not mode & stat.S_IWRITE
             requested = windows_dacl_signature(security)
-            descriptor, temporary = windows_create_staging_file(
-                path.parent, ".harness-agent-", security, read_only
-            )
-            # Prove the created DACL before any byte exists: refuse rather than publish
-            # if Windows merged parent entries or dropped the requested protection.
+            owner_fallback = False
             try:
-                staged = windows_dacl_signature(windows_file_dacl_descriptor(temporary))
-            except OSError:
-                os.close(descriptor)
+                descriptor, temporary = windows_create_staging_file(
+                    path.parent, ".harness-agent-", security, read_only
+                )
+            except OSError as exc:
+                if (
+                    fallback is None
+                    or getattr(exc, "winerror", None) != WINDOWS_ERROR_INVALID_OWNER
+                ):
+                    raise
+                # The caller cannot assign that SID as owner (#435).
+                owner_fallback = True
+                descriptor, temporary = windows_create_staging_file(
+                    path.parent, ".harness-agent-", fallback, read_only
+                )
+            # Prove the created DACL, owner and label before any byte exists: refuse
+            # rather than publish if Windows merged parent entries or dropped protection.
+            try:
+                staged_security = windows_file_security_descriptor(
+                    temporary,
+                    WINDOWS_OWNER_SECURITY_INFORMATION
+                    | WINDOWS_DACL_SECURITY_INFORMATION,
+                )
+                if (
+                    fallback is not None
+                    and not owner_fallback
+                    and windows_descriptor_owner(staged_security)
+                    != windows_descriptor_owner(security)
+                ):
+                    # The requested owner did not stick: start over without one.
+                    owner_fallback = True
+                    old_descriptor, old_temporary = descriptor, temporary
+                    temporary = None
+                    windows_discard_staging_file(old_descriptor, old_temporary)
+                    descriptor, temporary = windows_create_staging_file(
+                        path.parent, ".harness-agent-", fallback, read_only
+                    )
+                    staged_security = windows_file_security_descriptor(
+                        temporary,
+                        WINDOWS_OWNER_SECURITY_INFORMATION
+                        | WINDOWS_DACL_SECURITY_INFORMATION,
+                    )
+                if windows_dacl_signature(staged_security) != requested:
+                    raise HarnessError(
+                        f"staging file did not receive the destination's DACL; "
+                        f"refusing publication: {path}"
+                    )
+                if (
+                    owner_fallback
+                    and windows_descriptor_owner(staged_security)
+                    != windows_token_default_owner()
+                ):
+                    raise HarnessError(
+                        f"staging file is owned by neither the destination's owner "
+                        f"nor this token's default owner; refusing publication: {path}"
+                    )
+                if label is not None:
+                    # Always read back: an unlabelled destination must not gain a
+                    # label the staging file inherited from its parent directory.
+                    wanted_label = windows_label_signature(label)
+                    try:
+                        if wanted_label:
+                            windows_set_file_label(temporary, label)
+                        staged_label = windows_label_signature(
+                            windows_file_security_descriptor(
+                                temporary, WINDOWS_LABEL_SECURITY_INFORMATION
+                            )
+                        )
+                    except OSError as exc:
+                        raise HarnessError(
+                            f"cannot carry the destination's mandatory label to the "
+                            f"staging file; refusing publication: {path}: {exc}"
+                        ) from exc
+                    if staged_label != wanted_label:
+                        raise HarnessError(
+                            f"staging file's mandatory label differs from the "
+                            f"destination's; refusing publication: {path}"
+                        )
+            except BaseException:
+                if temporary is not None:
+                    os.close(descriptor)
                 raise
-            if staged != requested:
-                os.close(descriptor)
-                raise HarnessError(
-                    f"staging file did not receive the destination's DACL; "
-                    f"refusing publication: {path}"
+            if owner_fallback:
+                print(
+                    f"note: Windows refused the existing owner of {path}; the "
+                    f"replacement is owned by this token's default owner",
+                    file=sys.stderr,
                 )
         else:
             descriptor, temporary_name = tempfile.mkstemp(
