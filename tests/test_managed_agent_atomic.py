@@ -457,6 +457,13 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
         self.assertEqual(self.staging(), [])
 
     def test_existing_destination_keeps_its_owner(self):
+        if token_owner_sid() == self.user:
+            # The default owner would already be the user: name a different owner so
+            # that only carrying the destination's owner can pass.
+            self.skipTest(
+                "TokenOwner equals TokenUser and no other assignable owner exists "
+                "unprivileged; the injected owner tests cover the carry-over"
+            )
         self.target.write_bytes(b"previous agent")
         set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
         before = file_dacl_sddl(self.target, 0x1)
@@ -487,6 +494,68 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), b"new agent")
         self.assertIn("default owner", stderr.getvalue())
         self.assertIn(str(self.target), stderr.getvalue())
+        self.assertEqual(self.staging(), [])
+
+    def test_owner_read_back_mismatch_recreates_with_default_owner(self):
+        self.target.write_bytes(b"previous agent")
+        set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
+        real = harness.windows_file_security_descriptor
+        staged = []
+
+        def first_staging_owned_by_system(path, information):
+            if path.name.startswith(".harness-agent-") and information & 0x1:
+                staged.append(path)
+                if len(staged) == 1:
+                    return descriptor_bytes("O:SY" + file_dacl_sddl(path), information)
+            return real(path, information)
+
+        stderr = io.StringIO()
+        with mock.patch.object(
+            harness, "windows_file_security_descriptor", first_staging_owned_by_system
+        ):
+            with redirect_stderr(stderr):
+                harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(len(set(staged)), 2)
+        self.assertEqual(self.target.read_bytes(), b"new agent")
+        self.assertEqual(
+            file_dacl_sddl(self.target, 0x1),
+            canonical(f"O:{token_owner_sid()}", 0x1),
+        )
+        self.assertIn("default owner", stderr.getvalue())
+        self.assertEqual(self.staging(), [])
+
+    def test_unexpected_owner_after_fallback_refuses(self):
+        self.target.write_bytes(b"previous agent")
+        set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
+        before = {info: file_dacl_sddl(self.target, info) for info in (0x1, 0x4)}
+        real = harness.windows_file_security_descriptor
+
+        def staging_owned_by_system(path, information):
+            if path.name.startswith(".harness-agent-") and information & 0x1:
+                return descriptor_bytes("O:SY" + file_dacl_sddl(path), information)
+            return real(path, information)
+
+        with mock.patch.object(
+            harness, "windows_file_security_descriptor", staging_owned_by_system
+        ):
+            with self.assertRaises(harness.HarnessError):
+                harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(self.target.read_bytes(), b"previous agent")
+        after = {info: file_dacl_sddl(self.target, info) for info in (0x1, 0x4)}
+        self.assertEqual(after, before)
+        self.assertEqual(self.staging(), [])
+
+    def test_inherited_parent_label_on_unlabelled_destination_refuses(self):
+        self.target.write_bytes(b"previous agent")
+        set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
+        # Labelling the parent afterwards does not touch the existing file, but a new
+        # staging sibling inherits the object-inheritable Low label.
+        set_label(self.parent, "S:(ML;OI;NW;;;LW)")
+        self.assertEqual(file_dacl_sddl(self.target, 0x10), "")
+        with self.assertRaises(harness.HarnessError):
+            harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+        self.assertEqual(self.target.read_bytes(), b"previous agent")
+        self.assertEqual(file_dacl_sddl(self.target, 0x10), "")
         self.assertEqual(self.staging(), [])
 
     def test_low_mandatory_label_survives_publication(self):
@@ -662,6 +731,76 @@ def file_dacl_sddl(path: Path, information: int = 0x4) -> str:
 def ace_body(text: str) -> str:
     """Drop the DACL control flags (P, AI) and keep the ordered ACE list."""
     return text[text.index("(") :]
+
+
+def token_owner_sid() -> str:
+    """Read the token's default owner (TokenOwner) SID independently."""
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    advapi.OpenProcessToken.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.GetTokenInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    advapi.ConvertSidToStringSidW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_string_buffer(256)
+        needed = ctypes.c_uint32(0)
+        if not advapi.GetTokenInformation(token, 4, buffer, 256, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(
+        ctypes.c_void_p.from_buffer(buffer).value, ctypes.byref(text)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+
+
+def descriptor_bytes(text: str, information: int) -> bytes:
+    """Build a self-relative descriptor from SDDL (for injected read-backs)."""
+    del information
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    descriptor = ctypes.c_void_p()
+    size = ctypes.c_uint32(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text, 1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(descriptor.value, size.value)
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 def set_label(path: Path, text: str) -> None:
