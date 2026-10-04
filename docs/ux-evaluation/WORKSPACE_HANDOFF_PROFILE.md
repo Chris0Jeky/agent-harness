@@ -59,6 +59,20 @@ Three further journeys are advisory and `not_run`; they make no execution claim.
 These are authored acceptance requirements. Passing the profile's declaration tests does not
 prove that any product implements them, and no additional simulator or scheduler is introduced.
 
+### Agent-admin workspace journeys
+
+Five more journeys cover agents that do a person's admin inside their task system. They are advisory and `not_run` like the three above, and use a fictional person, Sam, with synthetic items and one synthetic credential per agent. The model: an **admin agent** acts, an **adversarial auditor** checks it, a **correction** needs a second agent's approval and stays rare, agents **archive rather than delete** until undo history exists (shipping undo does not by itself widen this; only the person can), and the person reads **digests with undo links** on a morning, evening and weekly cadence.
+
+| Journey | What a qualifying implementation must show |
+|---|---|
+| `admin-agent-acts` | Each act has a committed receipt from the change feed; a stale revision is a conflict, never an overwrite; out-of-scope requests are refused without borrowing another identity; a partial batch counts succeeded, failed and not attempted; narration without a receipt is not an effect |
+| `adversarial-audit` | The auditor has its own read-only identity and audits the committed change feed over a declared window, not the audited agent's report; partial coverage is never clean; zero examined items is not a pass; the auditor cannot apply its own correction |
+| `two-agent-correction` | The proposal binds operation, target revision and a digest of the exact change; the approver is a different agent from the proposer; an approval never transfers to a newer revision; a rejection applies nothing; corrections past the window's budget escalate to the person instead of applying |
+| `archive-not-delete` | Cleanup archives with a restore handle; restore keeps fields, links and history; permanent delete is refused to every agent; an item missing from a partial read is unknown, not deleted; a retention purge that would end restorability early is deferred and reported |
+| `tldr-undo-cadence` | Each digest declares its commit-ordered window, first-run floor, coverage and delivery state; daily windows partition the feed without overlap or gap, and a missed digest's window is carried into the next delivered digest under its own identity, never dropped; every act links its receipt and undo; undo after a later edit is a conflict; undo runs under the person's authority, never an agent's; unknown delivery is not delivered; a superseded undo is never shown as available |
+
+**Receipt fields.** Every agent act records: operation id, acting agent identity and credential identifier (never the secret), role, authority scope and policy version, target item and the revision read before acting, committed before and after state, reason, undo handle and its availability, application commit time (UTC) and change-feed reference. A refused or conflicting act records its after state as unavailable and keeps the revision it read. The person is never recorded as the actor of an agent's act, and an agent never as the actor of the person's undo. Audits add the auditor identity, window bounds, coverage, items examined, checks run and findings. Corrections add proposal id and digest, proposer and approver identities, approval time, the target revision at approval, and the window's declared correction budget (an integer on the policy version; proposals and rejections do not count) with the count applied so far. Archives add the archive location, restore handle and purge time. Digests add cadence, window, first-run floor, coverage, items not examined and delivery state. A qualifying receipt records an unavailable field as unavailable; it must never fill it from the agent's own account.
+
 ## Fictional adoption profile
 
 This table assigns conformance questions to generic roles. It records no native adoption; the example pack remains `ux-scenario-pack/0`, advisory and `not_run`. Keep any real repository map and native receipts in the adopter's private evidence record.
@@ -73,6 +87,7 @@ This table assigns conformance questions to generic roles. It records no native 
 | Cancellation and late success | Runtime, receiver and effect owner | Separately observed request, admission stop, process acknowledgement and reconciled effects; unavailable observations stay unknown |
 | Successful worker without accepted human outcome | Work application | Attempt result/evidence recorded while human work remains open; completion uses a separate authorized transition |
 | Restored owners with copied epoch/fence | Effect receiver | Receiver-enforced fencing or explicit old-writer isolation; the receipt lab's two-owner counterexample proves neither |
+| Agent acts, audits, two-agent corrections, archive-not-delete and digests with undo | Work application, admin and auditor agents | The agent-admin receipt fields above, read from the application's committed change feed; the person's undo and permanent delete stay the person's acts |
 
 Cancellation requested does not establish that admission stopped. Admission stopped does not establish process acknowledgement, and process acknowledgement does not establish reconciled effects. Record each observation separately, including `blocked` or `not_run` where appropriate. Repeating the receipt lab's cancelled-work/late-success case is reference coverage, not native adoption evidence.
 
