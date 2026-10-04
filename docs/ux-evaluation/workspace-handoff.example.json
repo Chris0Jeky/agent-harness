@@ -848,12 +848,13 @@
       "preconditions": [
         "This is authoring-only data. Implement and approve an isolated fixture before attempting execution; the synthetic revision is not a real checkout.",
         "Use a fictional person (Sam) and a fictional task system seeded with synthetic items only; every agent holds its own synthetic local credential, never the person's.",
-        "Abort rather than infer success when persistence, authority or delivery observations are unavailable."
+        "Abort rather than infer success when persistence, authority or delivery observations are unavailable.",
+        "The policy version declares the correction budget before the run: an integer count of applied corrections per digest window; proposals and rejections do not count against it."
       ],
       "steps": [
         {
           "id": "propose",
-          "action": "The auditor proposes a correction for one finding. Correction receipt fields: proposal id and digest, proposer identity, approver identity, approval time, target revision at approval, corrected operation id and the applied operation's own receipt.",
+          "action": "The auditor proposes a correction for one finding. Correction receipt fields: proposal id and digest, proposer identity, approver identity, approval time, target revision at approval, corrected operation id, the applied operation's own receipt, and the window's declared correction budget with the count applied so far.",
           "assertions": [
             "The proposal binds the corrected operation id, the target item revision and a digest of the exact proposed change."
           ],
@@ -913,7 +914,7 @@
         },
         {
           "id": "rarity-budget",
-          "action": "Corrections in one window exceed the declared budget.",
+          "action": "Applying one more approved correction would exceed the window's declared budget.",
           "assertions": [
             "Further corrections stop and the excess is escalated to Sam in the next digest instead of being applied."
           ],
