@@ -7352,15 +7352,29 @@ def preflight_selected_skill_roots(
     copies of ``backup_targets``, is probed with name-only directories before
     any live or backup write, whether the destination is absent or populated.
     """
-    if len(targets) < 2:
+    if len(targets) < 2 and (backup_parent is None or len(backup_targets) < 2):
         return
-    by_parent: dict[Path, list[str]] = {}
+    by_parent: list[tuple[Path, list[str]]] = []
     for target in targets:
         reject_sync_path_aliases(target, label)
-        by_parent.setdefault(target.parent, []).append(target.name)
-    checks = [
-        (parent, sorted(names)) for parent, names in by_parent.items() if len(names) > 1
-    ]
+        parent = target.parent
+        try:
+            for known, names in by_parent:
+                # Path equality case-folds on Windows even in sensitive directories.
+                # Existing parents must share actual identity; absent identical
+                # spellings still group before their first installation.
+                if str(parent) == str(known) or (
+                    parent.exists() and known.exists() and parent.samefile(known)
+                ):
+                    names.append(target.name)
+                    break
+            else:
+                by_parent.append((parent, [target.name]))
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect skill destination parent: {parent}: {exc}"
+            ) from exc
+    checks = [(parent, sorted(names)) for parent, names in by_parent if len(names) > 1]
     if backup_parent is not None and len(backup_targets) > 1:
         checks.append((backup_parent, sorted(target.name for target in backup_targets)))
     for parent, names in checks:
@@ -10746,11 +10760,18 @@ def sync_global(args: argparse.Namespace) -> int:
             for name in sorted(selected_skills)
         ]
     )
+    assert claude_home is not None or not selected_claude_skills
+    claude_skill_actions = [
+        (config_root / "skills" / name, claude_home / "skills" / name)
+        for name in sorted(selected_claude_skills)
+    ]
+    # Both families can be pointed at the same parent. Validate their combined
+    # names before either lane plans recovery or mutates a live destination.
     preflight_selected_skill_roots(
-        [target for _source, target in skill_actions],
-        codex_home / "backups" if codex_home is not None else None,
-        [target for _source, target in skill_actions if target.exists()],
-        "Codex skill destination",
+        [target for _source, target in [*skill_actions, *claude_skill_actions]],
+        None,
+        [],
+        "skill destination",
     )
     skill_states = []
     for source, target in skill_actions:
@@ -10758,18 +10779,7 @@ def sync_global(args: argparse.Namespace) -> int:
         if not equal:
             preflight_skill_source_names(source, target)
         skill_states.append((source, target, equal))
-    assert claude_home is not None or not selected_claude_skills
-    claude_skill_actions = [
-        (config_root / "skills" / name, claude_home / "skills" / name)
-        for name in sorted(selected_claude_skills)
-    ]
     claude_skill_states: list[tuple[Path, Path, str, str | None, bool]] = []
-    preflight_selected_skill_roots(
-        [target for _source, target in claude_skill_actions],
-        claude_home / ".harness-backups" if claude_home is not None else None,
-        [target for _source, target in claude_skill_actions],
-        "Claude skill destination",
-    )
     for source, target in claude_skill_actions:
         source_digest, target_digest, equal = preflight_claude_skill(source, target)
         claude_skill_states.append(
@@ -10785,6 +10795,16 @@ def sync_global(args: argparse.Namespace) -> int:
             [skills_home, *(source for source, _target in skill_actions)],
             "Codex skill backup",
         )
+        preflight_selected_skill_roots(
+            [],
+            codex_skill_backup_parent,
+            [
+                target
+                for _source, target, equal in skill_states
+                if not equal and target.exists()
+            ],
+            "Codex skill backup",
+        )
     claude_skill_backup_parent: Path | None = None
     if selected_claude_skills:
         assert claude_home is not None
@@ -10792,6 +10812,18 @@ def sync_global(args: argparse.Namespace) -> int:
         preflight_sync_backup_parent(
             claude_skill_backup_parent,
             [path for action in claude_skill_actions for path in action],
+            "Claude skill backup",
+        )
+        # Every changed Claude tree is staged here, including absent targets;
+        # an identical tree needs neither a staging slot nor a recovery copy.
+        preflight_selected_skill_roots(
+            [],
+            claude_skill_backup_parent,
+            [
+                target
+                for _source, target, _sd, _td, equal in claude_skill_states
+                if not equal
+            ],
             "Claude skill backup",
         )
     agent_source = codex_source / "agents"
