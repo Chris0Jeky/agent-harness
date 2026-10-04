@@ -1,5 +1,7 @@
 # agent-harness
 
+Docs site: https://chris0jeky.github.io/agent-harness/
+
 An active agent-operations workbench for measuring, diagnosing, and improving the policies and
 configuration used across Chris's Codex and Claude repositories. The frozen legacy deny floor,
 the internal replay Policy Lab, Doctor, estate operations, measurements, and runtime adapters
