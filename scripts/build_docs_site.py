@@ -16,6 +16,10 @@ published are pointed at GitHub. No Jekyll plugin rewrites links (the
 small block scanner (fences, indented code, blockquotes, list items, multi-line
 code spans), so links inside code are left exactly as written.
 
+Look: the site's own theme (a layout and one stylesheet in `scripts/docs_site`) is copied into the staged
+site, and `_data/docs_nav.yml` carries the top navigation and the sidebar groups the layout renders. Every
+page names `layout: default`; no navigation is written into page bodies.
+
 Liquid safety: GitHub Pages Jekyll 3.10 does not support `render_with_liquid`
 (that arrived in Jekyll 4.0), so every page body is wrapped in
 `{% raw %} ... {% endraw %}` instead, and any literal `{% endraw %}` inside a
@@ -75,14 +79,22 @@ DENIED_ROOT_FILES = frozenset(
 )
 DENIED_DIRS = ("handoffs", "plans", *EXCLUDED_DIRS)
 
+# (label, staged page) for the top navigation.
 NAV = (
-    ("Home", "index.html"),
-    ("Blueprint", "BLUEPRINT.html"),
-    ("Specs", "SPECS.html"),
-    ("Book", "BOOK.html"),
-    ("Roadmap", "ROADMAP.html"),
-    ("All documents", "docs-index.html"),
+    ("Home", "index.md"),
+    ("Blueprint", "BLUEPRINT.md"),
+    ("Specs", "SPECS.md"),
+    ("Book", "BOOK.md"),
+    ("Roadmap", "ROADMAP.md"),
+    ("All documents", "docs-index.md"),
 )
+# The theme: copied as-is from THEME_DIR into the staged site, after the same input checks as every document.
+THEME_DIR = "scripts/docs_site"
+THEME_FILES = ("_layouts/default.html", "assets/css/docs.css")
+NAV_DATA = "_data/docs_nav.yml"
+SITE_LICENSE = "GPL-3.0-only"
+ROOT_GROUP = "Overview"
+GROUP_ACRONYMS = {"ux": "UX"}
 DESCRIPTION = (
     "Tier model, deny floor, and tooling for measuring and improving "
     "coding-agent policies."
@@ -91,11 +103,13 @@ CONFIG = f"""title: agent-harness
 description: {DESCRIPTION}
 url: https://chris0jeky.github.io
 baseurl: /agent-harness
-theme: jekyll-theme-primer
+theme: null
 plugins:
   - jekyll-optional-front-matter
   - jekyll-titles-from-headings
   - jekyll-default-layout
+relative_links:
+  enabled: false
 """
 MARKER = ".docs-site-stage"
 MARKER_TEXT = "Staged by scripts/build_docs_site.py; safe to clear.\n"
@@ -608,39 +622,101 @@ def html_name(staged):
     return posixpath.splitext(staged)[0] + ".html"
 
 
-def nav_line(depth):
-    prefix = "../" * depth
-    return " · ".join(f"[{label}]({prefix}{target})" for label, target in NAV)
+def page_url(staged):
+    """The site-relative URL Jekyll gives a staged page (`page.url`)."""
+    return "/" if staged == "index.md" else "/" + html_name(staged)
 
 
-def wrap_page(title, body, depth):
-    """Front matter, nav and a Liquid-safe body for one page."""
+def yaml_string(value):
+    """A double-quoted YAML scalar. JSON strings are YAML, bar three line separators JSON leaves raw."""
+    text = json.dumps(value, ensure_ascii=False)
+    for char in ("\x85", "\u2028", "\u2029"):
+        text = text.replace(char, "\\u%04x" % ord(char))
+    return text
+
+
+def folder_title(folder):
+    """A human-friendly sidebar title for a staged folder ("" is the repository root)."""
+    if not folder:
+        return ROOT_GROUP
+    parts = folder.split("/")
+    if parts[0] == "docs" and len(parts) > 1:
+        parts = parts[1:]
+    words = []
+    for part in parts:
+        text = part.replace("-", " ").replace("_", " ")
+        words.append(" ".join(GROUP_ACRONYMS.get(w, w) for w in text.split()))
+    return " / ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def grouped(pages):
+    """Pages grouped by folder in listing order: [(folder, [(staged path, title)])].
+
+    The root folder comes first, then folders sorted by path; within a folder the index page leads and the rest
+    sort by path. pages: [(staged path, title)].
+    """
+    groups = {}
+    for staged, title in pages:
+        groups.setdefault(posixpath.dirname(staged), []).append((staged, title))
+    return [
+        (folder, sorted(groups[folder], key=lambda p: (p[0] != "index.md", p)))
+        for folder in sorted(groups, key=lambda f: (f != "", f))
+    ]
+
+
+def nav_data(pages):
+    """`_data/docs_nav.yml`: brand, top navigation and sidebar groups for the layout."""
+
+    def item(title, url):
+        return "{title: %s, url: %s}" % (yaml_string(title), yaml_string(url))
+
+    lines = [
+        "title: agent-harness",
+        f"tagline: {yaml_string(DESCRIPTION)}",
+        f"repo: {yaml_string(REPO_URL)}",
+        f"license: {yaml_string(SITE_LICENSE)}",
+        "top:",
+    ]
+    lines += [f"  - {item(label, page_url(target))}" for label, target in NAV]
+    lines.append("groups:")
+    for folder, members in grouped(pages):
+        lines += [f"  - title: {yaml_string(folder_title(folder))}", "    pages:"]
+        lines += [
+            f"      - {item(title, page_url(staged))}" for staged, title in members
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def wrap_page(title, body, source=None):
+    """Front matter and a Liquid-safe body for one page. Navigation comes from the layout.
+
+    Front matter the document already carries is kept; `layout` and `source_path` (the repository file the
+    page is built from, for the layout's "Edit this page" link) are added unless it already names them.
+    """
     front, body = split_front_matter(body)
     lines = [] if front is None else front.split("\n")
     if not any(line.startswith("title:") for line in lines):
         lines.insert(0, f"title: {json.dumps(title, ensure_ascii=False)}")
+    if not any(line.startswith("layout:") for line in lines):
+        lines.append("layout: default")
+    if source is not None and not any(
+        line.startswith("source_path:") for line in lines
+    ):
+        lines.append(f"source_path: {yaml_string(source)}")
     safe = ENDRAW.sub('{% endraw %}{{ "{%" }}{% raw %}', body.strip("\n"))
-    content = f"{nav_line(depth)}\n\n{safe}"
-    return (
-        "---\n" + "\n".join(lines) + "\n---\n{% raw %}\n" + content + "\n{% endraw %}\n"
-    )
+    return "---\n" + "\n".join(lines) + "\n---\n{% raw %}\n" + safe + "\n{% endraw %}\n"
 
 
 def docs_index(pages):
     """The 'All documents' listing, grouped by folder. pages: [(staged path, title)]."""
-    groups = {}
-    for staged, title in pages:
-        groups.setdefault(posixpath.dirname(staged), []).append((staged, title))
     lines = [
         "# All documents",
         "",
         "Every page published on this site, grouped by folder.",
     ]
-    for folder in sorted(groups, key=lambda f: (f != "", f)):
+    for folder, members in grouped(pages):
         lines += ["", f"## {folder or 'Root'}", ""]
-        for staged, title in sorted(
-            groups[folder], key=lambda p: (p[0] != "index.md", p)
-        ):
+        for staged, title in members:
             lines.append(f"- [{title}]({quote(html_name(staged), safe='/')})")
     return "\n".join(lines) + "\n"
 
@@ -655,10 +731,15 @@ def read_source(path):
 
 
 def build(out, root=REPO_ROOT):
-    """Stage the site into `out`; return the staged page paths (excluding _config.yml)."""
+    """Stage the site into `out`; return the staged page paths (not the config, navigation data or theme)."""
     root = Path(root).resolve()
     sources = collect_sources(root)
-    out = check_output_path(Path(out), root, sources)
+    # Check and read the theme before `out` is touched, like every other input.
+    theme_paths = [posixpath.join(THEME_DIR, name) for name in THEME_FILES]
+    for rel in theme_paths:
+        validate_source(root, rel)
+    theme = {name: read_source(root / THEME_DIR / name) for name in THEME_FILES}
+    out = check_output_path(Path(out), root, [*sources, *theme_paths])
     staged_map = sources
     rendered = {}
     pages = []
@@ -670,9 +751,8 @@ def build(out, root=REPO_ROOT):
             or posixpath.splitext(posixpath.basename(staged))[0]
         )
         pages.append((staged, title))
-        rendered[staged] = wrap_page(title, text, staged.count("/"))
-    index_title = "All documents"
-    rendered["docs-index.md"] = wrap_page(index_title, docs_index(pages), 0)
+        rendered[staged] = wrap_page(title, text, rel)
+    rendered["docs-index.md"] = wrap_page("All documents", docs_index(pages))
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -680,7 +760,11 @@ def build(out, root=REPO_ROOT):
         dest = out / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(text.encode("utf-8"))
-    (out / "_config.yml").write_bytes(CONFIG.encode("utf-8"))
+    extras = {"_config.yml": CONFIG, NAV_DATA: nav_data(pages), **theme}
+    for rel, text in sorted(extras.items()):
+        dest = out / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(text.encode("utf-8"))
     (out / MARKER).write_bytes(MARKER_TEXT.encode("utf-8"))
     return sorted(rendered)
 
