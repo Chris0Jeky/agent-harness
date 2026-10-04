@@ -466,6 +466,9 @@ class ManagedAgentWindowsPublicationTests(unittest.TestCase):
             )
         self.target.write_bytes(b"previous agent")
         set_dacl(self.target, f"D:(A;;FA;;;{self.user})", True)
+        # Creation gave the file the token's default owner; make it user-owned so
+        # only carrying the destination's owner keeps the user after publication.
+        set_owner(self.target, self.user)
         before = file_dacl_sddl(self.target, 0x1)
         self.assertEqual(before, canonical(f"O:{self.user}", 0x1))
         stderr = io.StringIO()
@@ -829,6 +832,35 @@ def set_label(path: Path, text: str) -> None:
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
         kernel.LocalFree(descriptor)
+
+
+def set_owner(path: Path, sid_text: str) -> None:
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    advapi.ConvertStringSidToSidW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi.SetNamedSecurityInfoW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    sid = ctypes.c_void_p()
+    if not advapi.ConvertStringSidToSidW(sid_text, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION: the token user is always assignable.
+        error = advapi.SetNamedSecurityInfoW(str(path), 1, 0x1, sid, None, None, None)
+        if error:
+            raise ctypes.WinError(error)
+    finally:
+        kernel.LocalFree(sid)
 
 
 def set_dacl(path: Path, text: str, protected: bool) -> None:
