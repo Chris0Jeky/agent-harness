@@ -988,13 +988,13 @@ class BuiltSiteCheckTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name) / "_site"
 
-    def check(self, files, baseurl="/agent-harness"):
+    def check_files(self, files, baseurl="/agent-harness"):
         for rel, text in files.items():
             write(self.dir, rel, text)
         return site.check_built_site(self.dir, baseurl)
 
     def test_valid_site_has_no_problems(self):
-        problems = self.check(
+        problems = self.check_files(
             {
                 "index.html": '<a href="docs/G.html#x">g</a><a href="/agent-harness/">h</a>'
                 '<a href="https://example.com/a.md">e</a><a href="#top">t</a>'
@@ -1007,7 +1007,7 @@ class BuiltSiteCheckTests(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_broken_and_unrebased_links_are_reported(self):
-        problems = self.check(
+        problems = self.check_files(
             {
                 "index.html": '<a href="missing.html">a</a><a href="/SPECS.html">b</a>'
                 '<a href="docs/G.md">c</a><a href="/agent-harness/nope.html">d</a>',
@@ -1020,7 +1020,7 @@ class BuiltSiteCheckTests(unittest.TestCase):
         self.assertEqual(len(problems), 4)
 
     def test_links_may_not_escape_the_site(self):
-        problems = self.check({"index.html": '<a href="../../etc/passwd">x</a>'})
+        problems = self.check_files({"index.html": '<a href="../../etc/passwd">x</a>'})
         self.assertEqual(len(problems), 1)
 
     def test_cli_check_site(self):
