@@ -17,10 +17,13 @@ doc is split so it cannot end the block early.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import posixpath
 import re
 import shutil
+import stat
+import subprocess
 import sys
 from urllib.parse import quote, unquote
 
@@ -46,7 +49,7 @@ TITLE_OVERRIDES = {
     "REPLAY_TOOL_PRODUCT.md": "Replay tool product brief",
 }
 # Globbed documents (may vary as docs are added) and what the glob must skip.
-DOC_GLOB = "docs/**/*.md"
+DOC_GLOB = "docs/**/*.md"  # selected from `git ls-files`, never from the filesystem
 EXCLUDED_DIRS = ("docs/archive", "docs/superpowers")
 # Never published, whatever the allowlist says (belt and braces).
 DENIED_ROOT_FILES = frozenset(
@@ -107,29 +110,69 @@ def check_not_denied(rel):
             raise BuildError(f"refusing to publish denied path: {rel}")
 
 
+def validate_source(root, rel):
+    """Require a regular file reached without any symlink or reparse point.
+
+    Every component from the repository root down is checked with lstat, the
+    resolved path must stay inside the repository and outside `.git`, and the
+    leaf must be a regular file. Applies to root documents and globbed ones alike.
+    """
+    root = Path(root).resolve()
+    parts = rel.split("/")
+    if rel.startswith("/") or ".." in parts or ".git" in parts:
+        raise BuildError(f"refusing source path outside the published tree: {rel}")
+    current = root
+    info = None
+    for part in parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            raise BuildError(f"cannot read source {rel}: {exc.strerror}") from exc
+        reparse = (getattr(info, "st_file_attributes", 0) or 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        )
+        if stat.S_ISLNK(info.st_mode) or reparse:
+            raise BuildError(f"refusing symlink or reparse point in source path: {rel}")
+    if not stat.S_ISREG(info.st_mode):
+        raise BuildError(f"source is not a regular file: {rel}")
+    resolved = current.resolve()
+    if root not in resolved.parents or ".git" in resolved.relative_to(root).parts:
+        raise BuildError(f"source resolves outside the repository: {rel}")
+
+
+def tracked_docs(root):
+    """Tracked files under docs/ (git index only); fail closed when git cannot say."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", "docs"],
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise BuildError(f"cannot list tracked docs with git: {exc}") from exc
+    return sorted(item.decode("utf-8") for item in proc.stdout.split(b"\0") if item)
+
+
 def collect_sources(root):
-    """Return {repo-relative path: staged path}, sorted; fail closed on a missing root doc."""
-    sources = {}
-    missing = [name for name in ROOT_DOCS if not (root / name).is_file()]
+    """Return {repo-relative path: staged path}, sorted; fail closed on any doubt."""
+    root = Path(root)
+    missing = [name for name in ROOT_DOCS if not os.path.lexists(root / name)]
     if missing:
         raise BuildError(
             "missing required root document(s): " + ", ".join(sorted(missing))
         )
-    for name, staged in ROOT_DOCS.items():
-        sources[name] = staged
-    globbed = sorted(
-        p.relative_to(root).as_posix()
-        for p in root.glob(DOC_GLOB)
-        if p.is_file() or p.is_symlink()
-    )
-    for rel in globbed:
+    sources = dict(ROOT_DOCS)
+    for rel in tracked_docs(root):
+        parts = rel.split("/")
+        if not rel.endswith(".md") or any(part.startswith(".") for part in parts):
+            continue
         if any(rel.startswith(d + "/") for d in EXCLUDED_DIRS):
             continue
-        if (root / rel).is_symlink():
-            raise BuildError(f"refusing to publish symlink: {rel}")
         sources[rel] = rel
     for rel in sources:
         check_not_denied(rel)
+        validate_source(root, rel)
     return dict(sorted(sources.items()))
 
 

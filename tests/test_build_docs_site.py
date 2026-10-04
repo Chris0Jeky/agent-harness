@@ -60,6 +60,61 @@ def make_repo(root, readme=None, extra=None):
     return root
 
 
+def git(root, *args):
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def git_track_all(root):
+    """Make `root` a git repository with everything (not ignored) in the index."""
+    root = Path(root)
+    if not (root / ".git").exists():
+        git(root, "init", "-q")
+    git(root, "add", "-A")
+
+
+def symlink_or_skip(testcase, link, target, directory=False):
+    try:
+        os.symlink(target, link, target_is_directory=directory)
+        return
+    except (OSError, NotImplementedError) as exc:
+        failure = exc
+    if directory and sys.platform == "win32":  # a junction needs no privilege
+        done = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True
+        )
+        if done.returncode == 0:
+            return
+    testcase.skipTest(f"symlinks unavailable: {failure}")
+
+
+def fake_lstat(real, rel_name, mode=None, attributes=None):
+    """An os.lstat that reports `rel_name` as a symlink (mode) or reparse point."""
+
+    def lstat(path, *args, **kwargs):
+        info = real(path, *args, **kwargs)
+        if Path(path).name != rel_name:
+            return info
+        fields = list(info)
+        if mode is not None:
+            fields[0] = mode
+        result = os.stat_result(fields)
+        if attributes is None:
+            return result
+
+        class Wrapped:
+            st_mode = result.st_mode
+            st_file_attributes = attributes
+
+        return Wrapped()
+
+    return lstat
+
+
 def read_tree(out):
     out = Path(out)
     return {
@@ -109,6 +164,7 @@ class StageTests(unittest.TestCase):
         self.out = self.root / "_site_src"
 
     def build(self, **kwargs):
+        git_track_all(self.root)
         return site.build(self.out, root=self.root, **kwargs)
 
     def page(self, rel):
@@ -359,7 +415,97 @@ class StageTests(unittest.TestCase):
             site.check_not_denied("plans/ACTIVE.md")
         site.check_not_denied("docs/GUIDE.md")
 
+    def test_root_symlink_is_rejected(self):
+        secret = Path(self._tmp.name) / "external.md"
+        secret.write_text("# External secret\n", encoding="utf-8")
+        for name in ("README.md", "SPECS.md"):
+            target = self.root / name
+            target.unlink()
+            symlink_or_skip(self, target, secret)
+            with self.assertRaises(site.BuildError, msg=name) as ctx:
+                self.build()
+            self.assertIn(name, str(ctx.exception))
+            self.assertFalse(self.out.exists())
+            target.unlink()
+            write(self.root, name, f"# {name}\n")
+
+    def test_symlink_detection_does_not_need_symlink_privileges(self):
+        import stat as stat_module
+        from unittest import mock
+
+        real = os.lstat
+        with mock.patch.object(
+            site.os, "lstat", fake_lstat(real, "README.md", stat_module.S_IFLNK | 0o777)
+        ):
+            with self.assertRaises(site.BuildError):
+                site.validate_source(self.root, "README.md")
+        with mock.patch.object(
+            site.os, "lstat", fake_lstat(real, "docs", attributes=0x400)
+        ):
+            with self.assertRaises(site.BuildError):
+                site.validate_source(self.root, "docs/GUIDE.md")
+        site.validate_source(self.root, "README.md")
+
+    def test_root_symlink_to_excluded_doc_is_rejected(self):
+        (self.root / "ROADMAP.md").unlink()
+        symlink_or_skip(self, self.root / "ROADMAP.md", self.root / "HANDOFF.md")
+        with self.assertRaises(site.BuildError):
+            self.build()
+        self.assertFalse(self.out.exists())
+
+    def test_globbed_symlink_is_rejected(self):
+        symlink_or_skip(self, self.root / "docs" / "LINK.md", self.root / "HANDOFF.md")
+        with self.assertRaises(site.BuildError):
+            self.build()
+        self.assertFalse(self.out.exists())
+
+    def test_symlinked_parent_component_is_rejected(self):
+        elsewhere = Path(self._tmp.name) / "elsewhere"
+        write(elsewhere, "X.md", "# X\n")
+        symlink_or_skip(self, self.root / "docs" / "linked", elsewhere, directory=True)
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, "docs/linked/X.md")
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, "docs/linked")
+        site.validate_source(self.root, "docs/GUIDE.md")
+
+    def test_validate_source_requires_a_regular_file_inside_the_repo(self):
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, "docs")  # a directory
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, "docs/NOPE.md")  # missing
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, "../outside.md")
+        with self.assertRaises(site.BuildError):
+            site.validate_source(self.root, ".git/config")
+
+    def test_untracked_and_ignored_docs_are_not_published(self):
+        write(self.root, ".gitignore", "docs/private-corpus/\n")
+        write(self.root, "docs/private-corpus/SECRET.md", "# Secret corpus\n")
+        git_track_all(self.root)
+        write(self.root, "docs/UNTRACKED.md", "# Untracked\n")
+        staged = site.build(self.out, root=self.root)
+        self.assertNotIn("docs/private-corpus/SECRET.md", staged)
+        self.assertNotIn("docs/UNTRACKED.md", staged)
+        self.assertIn("docs/GUIDE.md", staged)
+        self.assertFalse((self.out / "docs" / "UNTRACKED.md").exists())
+
+    def test_hidden_paths_are_not_published_even_when_tracked(self):
+        write(self.root, "docs/.hidden/NOTES.md", "# Hidden dir\n")
+        write(self.root, "docs/evals/.DRAFT.md", "# Hidden file\n")
+        staged = self.build()
+        self.assertNotIn("docs/.hidden/NOTES.md", staged)
+        self.assertNotIn("docs/evals/.DRAFT.md", staged)
+        self.assertIn("docs/evals/TAXONOMY.md", staged)
+
+    def test_fails_closed_without_git(self):
+        plain = make_repo(Path(self._tmp.name) / "plain")
+        with self.assertRaises(site.BuildError):
+            site.build(plain / "_site_src", root=plain)
+        self.assertFalse((plain / "_site_src").exists())
+
     def test_cli_builds_into_out(self):
+        git_track_all(self.root)
         out = self.root / "_site_cli"
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--root", str(self.root), "--out", str(out)],
