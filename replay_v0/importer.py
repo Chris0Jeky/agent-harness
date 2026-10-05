@@ -943,7 +943,7 @@ def _iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
                 continue
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 stats["unparsed-lines"] += 1
                 continue
             if isinstance(record, dict):
