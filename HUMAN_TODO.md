@@ -268,11 +268,11 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
 - [ ] **H-22**: **Floor history-check deletion (issue #356 step 2). Answered 2026-10-04, being carried out.** You chose option (a), "Delete the checks", with these design choices: scope everywhere including `sensitive_data` repositories (the public-remote privacy guard stays); keep a narrow tag guard (force-push or deletion of `refs/tags/*` and `--mirror` stay blocked, since the server ruleset protects `main` only); roll out now (re-pin PRs in the 5 Codex consumer repositories); move the other workstation's user-scope floor at the next canary. This is an owner-ratified exception to BLUEPRINT's FEATURE-FROZEN rule (it is not a false-positive fix, a #21 slice or a §6 repair); the implementation PR records it there, as the Developer Lens contract is recorded, before `dispatch.py` changes. You were also offered rolling out later, folded into H-14, and chose rolling out now: that is an owner exception to the rule that no new version is deployed until the deployed one is canaried. For each re-pinned root, the 1.8.0 re-trust and canaries replace H-14's 1.7.2 canary there; H-14 is re-pointed when the re-pin PRs open. **Agent side done 2026-10-05.**
   - Floor 1.8.0 merged as #466 (`0580544`, marker `21a4110e…`), after two review rounds; residuals are tracked in #467 and #468.
-  - The shared bytes are vendored for deployment in claude-config#713.
-  - Marker PRs: SwarmingLilMen#101, collaborative-hill-lab#25, Pulseboard#199 and EvidenceDeck#41. EvidenceDeck#41 replaces the unmerged 1.7.2 refresh #35.
+  - The shared bytes are vendored in claude-config#713 (merged). This workstation's `~/.claude` was fast-forwarded on 2026-10-05: `hooks/dispatch.py` is 1.8.0, and doctor reports canonical == deployed.
+  - Marker PRs merged: SwarmingLilMen#101, collaborative-hill-lab#25, Pulseboard#199 and EvidenceDeck#41. EvidenceDeck#41 replaces the unmerged 1.7.2 refresh #35.
   - The extract-api Codex root carries no marker (its wrapper calls the shared dispatcher directly), so it needs no PR. Its bytes still change, so its canary is owed too.
 
-  **What is yours, per Codex root, once its marker PR is merged and this workstation's `~/.claude` checkout holds claude-config `main` with the 1.8.0 bytes:**
+  **What is yours, per Codex root (ready now on this workstation):**
   1. Open a new normal Codex session whose cwd is that repository's root. A reused session, a worktree or a subfolder does not count.
   2. Run `/hooks`. Review the single PreToolUse handler (matcher `^Bash$`, `--event pre --runtime codex`, five-second timeout, marker `21a4110e…`), then trust it individually and confirm it is enabled.
   3. Allow canary: `git status --short --branch` must execute.
@@ -282,13 +282,13 @@ Declared as this repo's human-action file in `.agent-harness/tier.json` (`human_
 
   The roots are SwarmingLilMen, collaborative-hill-lab, EvidenceDeck and the extract-api Codex checkout on this workstation. Pulseboard's live checkout is on the other workstation, so its canary runs there.
 
-  **The other workstation (owner inbox action, at your next canary session):** fast-forward its `~/.claude` checkout to claude-config `main` once #713 is merged, then run the same three canaries in a fresh session. Its user-scope floor moves to 1.8.0 only then.
+  **The other workstation (owner inbox action, at your next canary session):** fast-forward its `~/.claude` checkout to claude-config `main` (claude-config#713 is merged), then run the same three canaries in a fresh session. Its user-scope floor moves to 1.8.0 only then.
 
   Close when every root above has recorded results.
 
 ## Changelog
 
-- 2026-10-05: **H-22 agent side done; H-14 superseded.** Floor 1.8.0 merged (#466); claude-config#713 and four consumer marker PRs opened; your per-root re-trust and canary steps added to H-22.
+- 2026-10-05: **H-22 agent side done; H-14 superseded.** Floor 1.8.0 merged (#466) and deployed on this workstation; claude-config#713 and four consumer marker PRs merged; your per-root re-trust and canary steps added to H-22.
 - 2026-10-04: **guided walkthrough.** H-20 closed (the `test` ruleset was deleted; 25/25). H-22 answered (delete the history checks; design choices recorded on the item).
 - 2026-10-04: **H-22 added** (floor history-check deletion, #356 step 2, posed in the owner inbox); **H-20 re-measured** (25/25 protected; one stacked pre-existing ruleset keeps the literal close condition open).
 - 2026-10-04: **H-21 closed** (you chose to pin paths only; the manifest amendment records it, #395).
