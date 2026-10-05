@@ -6,8 +6,11 @@ Runtime copies are installed through explicit sync commands or repo-owned adapte
 `harness sync-global` installs the shared bytes; Codex wiring remains project-local.
 
 Contract (BLUEPRINT §2, SPECS §5-6):
-- Blocks only the IRREVERSIBLE at every tier: force-push in all spellings, rm -rf outside
-  the project, pipe-to-shell installs, sudo, secret-file mutation, PowerShell pipe-deletes.
+- Blocks only the IRREVERSIBLE at every tier: rm -rf outside the project, pipe-to-shell
+  installs, sudo, secret-file mutation, PowerShell pipe-deletes, and a forced or deleting
+  push of a TAG or `git push --mirror` (the tag guard). Since 1.8.0 (#356 step 2, owner
+  decision 2026-10-04) branch history -- force, lease, +refspec, branch deletion, --prune --
+  is left to the server-side default-branch ruleset.
 - Work-loss guards (reset --hard, clean -f, checkout -- ., restore .,
   worktree remove --force) are tier-dependent:
   allow at T1-T2, ask at T3, deny at T4 or wave_mode. A repo whose declared posture is
@@ -43,8 +46,8 @@ Contract (BLUEPRINT §2, SPECS §5-6):
              SERVER-side by rulesets, so the client floor keeps only LOCAL destruction:
              a destructive delete outside the project or through an unresolved operand,
              a secret-file mutation, downloaded program text run directly, and privilege
-             elevation. Those render exactly as under guide; every other verdict
-             (force-push, git config execution, ref deletion, work-loss asks, launchers,
+             elevation, plus the tag guard (1.8.0). Those render exactly as under guide;
+             every other verdict (git config execution, work-loss asks, launchers,
              pure opacity) proceeds unless the command text carries a core hint or one
              of its segments earns a core verdict. Core never denies what guide allows,
              and a sensitive_data repository never runs it (a declared core -> guide).
@@ -70,7 +73,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.7.3 (2026-10-01)"
+FLOOR_VERSION = "1.8.0 (2026-10-04)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -6661,50 +6664,194 @@ _GIT_CLONE_VALUE_OPTIONS = {
     "--upload-pack",
 }
 
-_FEATURE_BRANCH_ROOTS = {
-    "chore",
-    "ci",
-    "docs",
-    "feat",
-    "feature",
-    "fix",
-    "infra",
-    "perf",
-    "refactor",
-    "security",
-    "test",
-    "tests",
-}
-_AUTOMATION_BRANCH_ROOTS = {"dependabot", "renovate"}
-_SAFE_BRANCH_SUFFIX = re.compile(r"[A-Za-z0-9._@-]+(?:/[A-Za-z0-9._@-]+)*")
+# Floor 1.8.0 (#356 step 2, owner decision 2026-10-04): the default branch is
+# protected server-side by a repository ruleset on every floored repository, so
+# branch history (force, lease, +refspec, branch deletion, --prune) proceeds.
+# Rulesets there protect the default branch only, so the floor keeps one narrow
+# history guard: a forced update or deletion of a TAG, and --mirror (which
+# force-updates and deletes every remote ref, tags included).
+_TAG_GUARD_MIRROR = (
+    "[tag-guard] git push --mirror force-updates and deletes every remote ref, "
+    "tags included; push named branches instead."
+)
+_TAG_GUARD_FORCE = (
+    "[tag-guard] A forced push to a tag rewrites a published release marker, and "
+    "tags are not server-protected; push a new tag instead."
+)
+_TAG_GUARD_DELETE = (
+    "[tag-guard] Deleting a remote tag removes a published release marker, and "
+    "tags are not server-protected."
+)
+_TAG_GUARD_PRUNE = (
+    "[tag-guard] git push --prune over a tag destination deletes remote tags that "
+    "have no local counterpart."
+)
+_TAG_GUARD_CONFIG = (
+    "[tag-guard] A refspec-less git push inherits a configured mirror, or a forced "
+    "or deleting tag refspec, from remote config; push an explicit refspec instead."
+)
+_TAG_GUARD_UNRESOLVED = (
+    "[tag-guard] A forced or deleting push names a bare ref while a repository "
+    "override or uncertain cwd hides whether it is a local tag; name refs/heads/<branch>."
+)
+_GIT_PUSH_HISTORY_OPTIONS = (
+    "--force",
+    "--force-with-lease",
+    "--delete",
+    "--mirror",
+    "--prune",
+)
 
 
-def force_with_lease_target_is_feature(refspec: str) -> bool:
-    """Allow leases only when the destination is positively a feature ref."""
-    candidate = refspec.lstrip("+")
-    if ":" in candidate:
-        _source, target = candidate.rsplit(":", 1)
-    else:
-        target = candidate
-    if target.startswith("refs/") and not target.startswith("refs/heads/"):
-        return False
-    target = target.removeprefix("refs/heads/").strip("/")
-    root, separator, suffix = target.partition("/")
-    root = root.lower()
-    if root in _FEATURE_BRANCH_ROOTS:
-        return not separator or bool(_SAFE_BRANCH_SUFFIX.fullmatch(suffix))
-    return (
-        root in _AUTOMATION_BRANCH_ROOTS
-        and bool(separator)
-        and bool(_SAFE_BRANCH_SUFFIX.fullmatch(suffix))
+def git_push_history_option(token: str) -> str | None:
+    """The history-relevant push option a token spells, abbreviations included.
+
+    Git accepts any unambiguous long-option prefix, one character included
+    (`--m` is `--mirror`). An ambiguous one is a git error, so mapping it onto
+    the first option it abbreviates errs toward the guard, never away from it.
+    """
+    option = token.split("=", 1)[0]
+    if option in _GIT_PUSH_HISTORY_OPTIONS:
+        return option
+    for candidate in _GIT_PUSH_HISTORY_OPTIONS:
+        if git_option_abbreviates(token, candidate, min_prefix=1):
+            return candidate
+    return None
+
+
+def git_push_option_tokens(args: list[str]) -> list[str]:
+    """The option tokens of a push argv, in order, never an option's value.
+
+    Git permutes options and operands until `--`, and a value-taking option
+    consumes the next token whatever it spells: `-o --mirror` is push-option
+    data, not `--mirror`.
+    """
+    value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
+    tokens = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            break
+        if token in value_options:
+            tokens.append(token)
+            index += 2
+            continue
+        if token.startswith("-") and len(token) > 1:
+            _flags, consumes_next = git_push_short_option_shape(token)
+            tokens.append(token)
+            index += 2 if consumes_next else 1
+            continue
+        index += 1
+    return tokens
+
+
+def git_push_history_flags(args: list[str]) -> set[str]:
+    """The history options a push argv leaves active, `--no-<option>` honoured."""
+    active = set()
+    for token in git_push_option_tokens(args):
+        name = token.split("=", 1)[0]
+        if name.startswith("--no-") and f"--{name[5:]}" in _GIT_PUSH_HISTORY_OPTIONS:
+            active.discard(f"--{name[5:]}")
+            continue
+        short_flags, _consumes_next = git_push_short_option_shape(token)
+        if "f" in short_flags:
+            active.add("--force")
+        if "d" in short_flags:
+            active.add("--delete")
+        history_option = git_push_history_option(token)
+        if history_option:
+            active.add(history_option)
+    return active
+
+
+def git_config_bool_is_true(value: str) -> bool:
+    """Git's boolean reading: a valueless key, true/yes/on, or a non-zero integer."""
+    lowered = value.strip().lower()
+    if lowered in {"", "true", "yes", "on"}:
+        return True
+    integer = re.fullmatch(r"([-+]?\d+)[kmg]?", lowered)
+    return bool(integer) and int(integer.group(1)) != 0
+
+
+def git_push_ref_is_bare_name(destination: str) -> bool:
+    """Whether a push destination is a name git resolves by DWIM.
+
+    Only `refs/...` (full) and `tags/...` (a tag by spelling) are decided by
+    their text. `heads/x`, `remotes/x` and `HEAD` are DWIM names too: git also
+    tries `refs/tags/<name>`, so a local tag of that name decides them.
+    """
+    return "*" not in destination and not destination.lower().startswith(
+        ("refs/", "tags/")
     )
 
 
-def force_with_lease_targets_are_features(refspecs: list[str]) -> bool:
-    """Return whether every explicit lease destination is a feature ref."""
-    return bool(refspecs) and all(
-        force_with_lease_target_is_feature(refspec) for refspec in refspecs
-    )
+def git_push_ref_may_be_tag(destination: str, local_tags: set[str] | None) -> bool:
+    """Whether a push destination may name a tag on the remote.
+
+    `refs/tags/...` and git's DWIM `tags/...` are tags. A pattern may match tags
+    unless it is anchored in another explicit namespace (`refs/heads/*`). A bare
+    name resolves against the remote's refs, approximated by the local tags:
+    `local_tags` None means they could not be read, so every bare name counts.
+    """
+    lowered = destination.lower()
+    if "*" in destination:
+        namespace = re.match(r"refs/([^/*]+)/", lowered)
+        return namespace is None or namespace.group(1) == "tags"
+    if lowered.startswith("refs/"):
+        return lowered == "refs/tags" or lowered.startswith("refs/tags/")
+    if lowered.startswith("tags/"):
+        return True
+    return local_tags is None or destination in local_tags
+
+
+def git_push_history_targets(
+    operands: list[str], force: bool, delete: bool, prune: bool
+) -> list[tuple[str, str]]:
+    """(destination, effect) for every refspec operand that rewrites or deletes.
+
+    `effect` is `force`, `delete` or `prune`. A plain refspec is omitted: git
+    refuses to move an existing tag without force, so a non-forced push can
+    only create one. `tag <name>` is git's shorthand for refs/tags/<name>.
+    """
+    targets = []
+    index = 0
+    while index < len(operands):
+        operand = operands[index]
+        index += 1
+        if operand == "tag":
+            name = operands[index] if index < len(operands) else ""
+            index += 1
+            effect = "delete" if delete else "force" if force else "prune"
+            if delete or force or prune:
+                targets.append((f"refs/tags/{name}", effect))
+            continue
+        if operand.startswith("^"):
+            continue
+        if delete:
+            # git rejects `+` and `src:dst` under --delete; classify the
+            # destination they spell anyway, never the raw operand.
+            targets.append((operand.lstrip("+").rpartition(":")[2], "delete"))
+            continue
+        forced = force or operand.startswith("+")
+        body = operand[1:] if operand.startswith("+") else operand
+        if body in {"", ":"}:
+            continue
+        source, colon, destination = body.rpartition(":")
+        if colon and not source:
+            targets.append((destination, "delete"))
+            continue
+        if not colon and body in {"HEAD", "@"}:
+            continue
+        if not colon:
+            destination = body
+        elif not destination:
+            destination = source
+        if forced:
+            targets.append((destination, "force"))
+        elif prune:
+            targets.append((destination, "prune"))
+    return targets
 
 
 def abbreviated_git_push_value_option(token: str) -> bool:
@@ -8054,25 +8201,32 @@ def configured_bare_push_is_dangerous(
     git_globals: list[str] | None = None,
     command_runner=command_output,
     deadline: float | None = None,
-) -> bool:
-    """True when a refspec-less `git push` would FORCE, DELETE, or MIRROR by config.
+    forced: bool = False,
+    selector: bool = False,
+) -> str:
+    """What a refspec-less `git push` inherits from config that the floor guards.
 
     A bare push (no command-line refspec) inherits `remote.<name>.push`,
-    `remote.<name>.mirror`, AND `remote.<name>.receivepack`, so it can silently
-    perform charter-blocked updates
-    (BLUEPRINT §2) that no argv token reveals:
-      - a push refspec with a leading '+' -> forced update,
-      - a push refspec with an empty source (':dst') -> remote ref deletion,
-      - `remote.<name>.mirror=true` -> --mirror (force + delete of removed refs).
-      - `remote.<name>.receivepack` -> execution of a configured receiver command.
-    Command-line force/lease/`:ref`/`--mirror` are handled elsewhere; only the
-    CONFIGURED forms reach here. Over-approximates across all remotes. Resolution
-    failure/absence -> "" -> not dangerous, matching git's own
-    non-fast-forward-rejecting default for an unconfigured bare push. This is a
-    deliberate fail-open direction: if the shared resolver deadline is already
-    exhausted the read returns "" and the bare push is graduated — acceptable
-    because the floor's own `git config` reads are local and fast, so a forcing
-    config in practice resolves within budget."""
+    `remote.<name>.mirror` AND `remote.<name>.receivepack`, which no argv token
+    reveals. Returns:
+      - "tag": `remote.<name>.mirror` (force + delete of every remote ref), or a
+        push refspec that force-updates ('+', or any refspec when the command
+        line itself forces or prunes: `forced`) or deletes (':dst') a
+        destination that may be a tag (a bare configured name is looked up as
+        a local tag, as on the command line);
+      - "receive-pack": `remote.<name>.receivepack`, a configured receiver
+        command that executes;
+      - "" otherwise.
+    Since floor 1.8.0 (#356 step 2) forced or deleting BRANCH refspecs are not
+    reported: the default branch is protected server-side. With `selector`
+    (`--all`/`--tags`) git ignores the configured push refspecs, so only a
+    configured mirror counts.
+    Over-approximates across all remotes. Resolution failure/absence -> "" ->
+    nothing inherited, matching git's own non-fast-forward-rejecting default
+    for an unconfigured bare push. This is a deliberate fail-open direction: if
+    the shared resolver deadline is already exhausted the read returns "" and
+    the bare push proceeds -- acceptable because the floor's own `git config`
+    reads are local and fast."""
     output = command_output_before_deadline(
         command_runner,
         [
@@ -8085,6 +8239,8 @@ def configured_bare_push_is_dangerous(
         project_dir,
         deadline,
     )
+    receive_pack = False
+    bare_destinations: list[str] = []
     for line in output.splitlines():
         parts = line.split(None, 1)
         if not parts:
@@ -8093,20 +8249,67 @@ def configured_bare_push_is_dangerous(
         value = parts[1].strip() if len(parts) == 2 else ""
         if key.endswith(".mirror"):
             # git treats a valueless boolean key (`mirror` with no `= value`) as
-            # true, and `--get-regexp` emits it with no value — so empty counts.
-            if value == "" or value.lower() in {"true", "yes", "on", "1"}:
-                return True
+            # true, and `--get-regexp` emits it with no value — so empty counts,
+            # and so does any non-zero integer (`mirror = 2`).
+            if git_config_bool_is_true(value):
+                return "tag"
             continue
         if key.endswith(".receivepack"):
-            return True
-        for refspec in value.split():
-            # A configured push value is a refspec, never a CLI option: a leading
-            # '+' forces and an empty source (':dst') deletes the destination ref.
-            if refspec.startswith("+") or (
-                refspec.startswith(":") and len(refspec) > 1
-            ):
-                return True
-    return False
+            receive_pack = True
+            continue
+        if selector:
+            continue
+        # A configured push value is a refspec, never a CLI option: a leading
+        # '+' forces and an empty source (':dst') deletes the destination ref.
+        for destination, _effect in git_push_history_targets(
+            value.split(), force=forced, delete=False, prune=False
+        ):
+            if git_push_ref_may_be_tag(destination, set()):
+                return "tag"
+            if git_push_ref_is_bare_name(destination):
+                bare_destinations.append(destination)
+    if bare_destinations and local_tag_names(
+        project_dir, bare_destinations, git_globals, command_runner, deadline
+    ):
+        return "tag"
+    return "receive-pack" if receive_pack else ""
+
+
+def local_tag_names(
+    project_dir: str,
+    names: list[str],
+    git_globals: list[str] | None = None,
+    command_runner=command_output,
+    deadline: float | None = None,
+) -> set[str]:
+    """Which of `names` exist as local tags (`refs/tags/<name>`).
+
+    Resolution failure or absence reads as "no such tag": the same deliberate
+    fail-open direction as `configured_bare_push_is_dangerous`, because the
+    read is local and fast. Remote tags are fetched by default, so a local tag
+    is the floor's proxy for the remote ref a bare destination resolves to.
+    """
+    candidates = sorted({name for name in names if name})
+    if not candidates:
+        return set()
+    output = command_output_before_deadline(
+        command_runner,
+        [
+            "git",
+            *(git_globals or []),
+            "for-each-ref",
+            "--format=%(refname)",
+            *(f"refs/tags/{name}" for name in candidates),
+        ],
+        project_dir,
+        deadline,
+    )
+    found = set()
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("refs/tags/") and line[len("refs/tags/") :] in candidates:
+            found.add(line[len("refs/tags/") :])
+    return found
 
 
 _REPOSITORY_CONFIG_PATH_CANDIDATE = re.compile(
@@ -11648,6 +11851,12 @@ def check(
                         "deny",
                         "A custom git receive-pack program can execute commands outside floor inspection.",
                     )
+                # A literal --mirror is guarded before the opacity checks, so a
+                # dynamic token elsewhere in the push cannot render it as mere
+                # parser uncertainty under the core posture (floor 1.8.0).
+                push_history_flags = git_push_history_flags(args)
+                if "--mirror" in push_history_flags:
+                    return "deny", _TAG_GUARD_MIRROR
                 if not quote_aware and any(
                     re.search(r"[*?\[]", token) for token in raw_args
                 ):
@@ -11678,70 +11887,15 @@ def check(
                         "deny",
                         "sensitive_data repo: recursive submodule pushes have additional destinations.",
                     )
-                lease_requested = False
-                lease_selectors = []
-                delete_requested = False
-                delete_colon_targets = []
-                for t in args:
-                    short_flags, _short_consumes_next = git_push_short_option_shape(t)
-                    dangerous_options = {
-                        "--force",
-                        "--force-with-lease",
-                        "--delete",
-                        "--mirror",
-                        "--prune",
-                    }
-                    option_name = t.split("=", 1)[0]
-                    if option_name not in dangerous_options and any(
-                        git_option_abbreviates(t, dangerous)
-                        for dangerous in dangerous_options
-                    ):
-                        return (
-                            "deny",
-                            "An abbreviated destructive git-push option is floor-blocked.",
-                        )
-                    if t == "--force" or (t.startswith("--force=")):
-                        return (
-                            "deny",
-                            "Force-push rewrites shared history. Use --force-with-lease on your own branch, or merge instead.",
-                        )
-                    if t == "--force-with-lease" or t.startswith("--force-with-lease="):
-                        if strict:
-                            return (
-                                "deny",
-                                "T4/wave: no force variants at all — other work rides on these refs.",
-                            )
-                        lease_requested = True
-                        if t.startswith("--force-with-lease="):
-                            selector = t.split("=", 1)[1].split(":", 1)[0]
-                            if selector:
-                                lease_selectors.append(selector)
-                        continue
-                    if "f" in short_flags:
-                        return (
-                            "deny",
-                            "git push -f is a force-push. Use --force-with-lease on your own branch, or merge instead.",
-                        )
-                    if t.startswith("+") and len(t) > 1:
-                        return "deny", "A +refspec is a forced update in disguise."
-                    if t.startswith(":") and len(t) > 1:
-                        # A leading-colon refspec is a deletion; validated as a
-                        # named-branch delete below (floor 1.6.29).
-                        delete_colon_targets.append(t[1:])
-                        continue
-                    if t in {"--mirror", "--prune"}:
-                        return (
-                            "deny",
-                            "Mirroring or pruning remote refs is floor-blocked.",
-                        )
-                    if t == "--delete" or ("d" in short_flags):
-                        # Owner decision 2026-08-18 (floor 1.6.29): explicit
-                        # single-branch deletions are allowed — the GitHub web
-                        # UI already permits the same action, so the blanket
-                        # deny was ceremony. Targets validated after the
-                        # positional walk: literal branch names only, never
-                        # protected/production refs, never wildcards or tags.
-                        delete_requested = True
+                # Floor 1.8.0 (#356 step 2): force, lease, +refspec, branch
+                # deletion and --prune proceed; the default branch is protected
+                # server-side. These flags only decide whether a TAG destination
+                # is rewritten or deleted (the tag guard below).
+                force_requested = bool(
+                    push_history_flags & {"--force", "--force-with-lease"}
+                )
+                delete_requested = "--delete" in push_history_flags
+                prune_requested = "--prune" in push_history_flags
 
                 push_value_options = _GIT_PUSH_VALUE_LONG_OPTIONS | {"-o"}
                 # `--all`/`--tags`/`--repo` are recognized DURING the option walk,
@@ -11756,6 +11910,7 @@ def check(
                 # strip_shell_redirections).
                 masked_positionals = []
                 explicit_selector = False
+                tags_selector = False
                 repository_via_option = False
                 index = 0
                 while index < len(args):
@@ -11781,8 +11936,11 @@ def check(
                     if short_consumes_next:
                         index += 2
                         continue
-                    if token in {"--all", "--tags"}:
+                    if token in {"--all", "--tags"} or git_option_abbreviates(
+                        token, "--tags"
+                    ):
                         explicit_selector = True
+                        tags_selector = tags_selector or token != "--all"
                         index += 1
                         continue
                     if token.startswith("--") or (
@@ -11793,66 +11951,77 @@ def check(
                     positionals.append(token)
                     masked_positionals.append(raw_args[index])
                     index += 1
-                if delete_requested or delete_colon_targets:
-                    # Floor 1.6.29: named-branch deletions only. Everything a
-                    # deletion could destroy beyond one explicitly named,
-                    # unprotected branch stays denied: wildcards, tags/other
-                    # ref namespaces, protected/production branches, dynamic
-                    # tokens the hook cannot read.
-                    protected_deletion_names = {
-                        "main",
-                        "master",
-                        "head",
-                        "app_production",
-                        "options_prod",
-                    }
-                    deletion_targets = list(delete_colon_targets)
-                    if delete_requested:
-                        deletion_targets.extend(
-                            positionals if repository_via_option else positionals[1:]
+                # The SHELL consumes redirections; git never sees them in argv, so
+                # `git push --force origin v1.0 2>&1` names one destination, not
+                # two (issue #44). The strip runs over the MASKED operands and
+                # decodes after, because only an unquoted `2>&1` is structure the
+                # shell eats: quoted, it is a refspec (PR #70 review). It decides
+                # only the tag guard's operands: `positionals` also decides
+                # `has_explicit_refspec`, where stripping is a tightening tracked
+                # in issue #65.
+                push_operands = [
+                    decode_inert_git_token(token, inert_placeholders)
+                    for token in strip_shell_redirections(
+                        masked_positionals, descriptor_may_be_detached=quote_aware
+                    )
+                ]
+                refspec_operands = (
+                    push_operands if repository_via_option else push_operands[1:]
+                )
+                push_git_globals = (
+                    git_toks[1:subcommand_index] if subcommand_index else None
+                )
+                push_repository_environment = effective_git_repository_environment | {
+                    name.upper()
+                    for name in os.environ
+                    if name.upper() in _GIT_REPOSITORY_ENVIRONMENT
+                }
+                # The tag guard (floor 1.8.0, owner decision 2026-10-04): the
+                # server ruleset protects the default branch only, so a forced or
+                # deleting update of a TAG stays a CORE double-check.
+                if tags_selector and force_requested:
+                    return "deny", _TAG_GUARD_FORCE
+                if tags_selector and prune_requested:
+                    return "deny", _TAG_GUARD_PRUNE
+                history_targets = git_push_history_targets(
+                    refspec_operands,
+                    force=force_requested,
+                    delete=delete_requested,
+                    prune=prune_requested,
+                )
+                bare_history_names = [
+                    destination
+                    for destination, _effect in history_targets
+                    if git_push_ref_is_bare_name(destination)
+                ]
+                local_tags: set[str] | None = set()
+                if bare_history_names:
+                    if (
+                        push_repository_environment
+                        & (
+                            _GIT_REPOSITORY_COMMAND_ENVIRONMENT
+                            | _GIT_REPOSITORY_ENVIRONMENT
                         )
-                    if not deletion_targets:
-                        return (
-                            "deny",
-                            "A remote-ref deletion with no explicit branch name is floor-blocked.",
+                        or cwd_uncertain
+                    ):
+                        local_tags = None
+                    else:
+                        local_tags = local_tag_names(
+                            current_cwd,
+                            bare_history_names,
+                            push_git_globals,
+                            deadline=_remote_deadline,
                         )
-                    for deletion_target in deletion_targets:
-                        deletion_name = deletion_target
-                        if deletion_name.startswith("refs/"):
-                            if not deletion_name.startswith("refs/heads/"):
-                                return (
-                                    "deny",
-                                    "Only branch refs (refs/heads/*) may be deleted; other ref namespaces are floor-blocked.",
-                                )
-                            deletion_name = deletion_name[len("refs/heads/") :]
-                        # Issue #259: git resolves `heads/main`, `tags/v1.0` and
-                        # `remotes/x/y` by DWIM abbreviation, so a namespace
-                        # prefix without `refs/` still names a protected branch
-                        # or a tag. Only a bare branch name is a branch name.
-                        if not deletion_target.startswith("refs/heads/") and re.match(
-                            r"(?:heads|tags|remotes|refs)/",
-                            deletion_name,
-                            re.IGNORECASE,
-                        ):
-                            return (
-                                "deny",
-                                "Deleting a ref through a namespace prefix "
-                                "(heads/, tags/, remotes/) is floor-blocked; name the branch bare.",
-                            )
-                        if (
-                            not deletion_name
-                            or re.search(r"[*?\[\]]", deletion_name)
-                            or has_dynamic_shell_token(deletion_target)
-                        ):
-                            return (
-                                "deny",
-                                "Deleting remote refs by wildcard or dynamic name is floor-blocked.",
-                            )
-                        if deletion_name.lower() in protected_deletion_names:
-                            return (
-                                "deny",
-                                f"Deleting protected branch '{deletion_name}' is floor-blocked.",
-                            )
+                for destination, effect in history_targets:
+                    if not git_push_ref_may_be_tag(destination, local_tags):
+                        continue
+                    if local_tags is None and git_push_ref_is_bare_name(destination):
+                        return "deny", _TAG_GUARD_UNRESOLVED
+                    if effect == "force":
+                        return "deny", _TAG_GUARD_FORCE
+                    if effect == "delete":
+                        return "deny", _TAG_GUARD_DELETE
+                    return "deny", _TAG_GUARD_PRUNE
                 has_explicit_refspec = len(positionals) >= (
                     1 if repository_via_option else 2
                 )
@@ -11913,62 +12082,41 @@ def check(
                             "config, but a repository-environment override or uncertain cwd "
                             "prevents verifying it; push an explicit refspec instead.",
                         )
-                    if configured_bare_push_is_dangerous(
+                    inherited = configured_bare_push_is_dangerous(
                         current_cwd,
-                        git_toks[1:subcommand_index] if subcommand_index else None,
+                        push_git_globals,
                         deadline=_remote_deadline,
-                    ):
+                        forced=force_requested or prune_requested,
+                    )
+                    if inherited == "receive-pack":
                         return (
                             "deny",
-                            "[push-config-force] A refspec-less git push inherits a configured "
-                            "force ('+'), delete (':ref'), mirror update, or receive-pack "
-                            "command from remote config; "
-                            "push an explicit non-forcing refspec instead.",
+                            "[push-config-receive-pack] A refspec-less git push inherits a "
+                            "configured receive-pack command from remote config; "
+                            "push an explicit refspec instead.",
                         )
+                    if inherited:
+                        return "deny", _TAG_GUARD_CONFIG
                     opaque = graduated_opacity(
                         "push-opaque-refspec",
                         "A git push without an explicit refspec can inherit opaque config.",
                     )
                     if opaque:
                         return opaque
-                # The SHELL consumes redirections; git never sees them in argv.
-                # Leaving them in the destination list made `git push
-                # --force-with-lease origin fix/x 2>&1` a push to the two
-                # destinations `fix/x` and `2>&1`, so the guard refused the one
-                # spelling agents type while plain `--force` was unaffected --
-                # steering toward the MORE dangerous verb (issue #44).
-                #
-                # Deliberately scoped to the lease destinations. `positionals`
-                # also decides `has_explicit_refspec`, and stripping there is a
-                # tightening: a corpus replay measured 135 unique commands
-                # (`cd <repo> && git push 2>&1 | tail -3`) moving allow ->
-                # [push-config-unverifiable]. That bypass is real and tracked in
-                # issue #65; closing it belongs with the work on that rule's
-                # own false-positive rate, not in this fix.
-                #
-                # The strip runs over the MASKED operands and decodes after,
-                # because only an unquoted `2>&1` is structure the shell eats:
-                # quoted, it is a refspec git pushes to `refs/heads/2>&1`, and
-                # stripping it there let a non-feature destination through the
-                # lease guard (PR #70 review).
-                lease_destinations = [
-                    decode_inert_git_token(token, inert_placeholders)
-                    for token in strip_shell_redirections(
-                        masked_positionals, descriptor_may_be_detached=quote_aware
-                    )
-                ]
-                if lease_requested and (
-                    explicit_selector
-                    or not force_with_lease_targets_are_features(lease_destinations[1:])
-                    or (
-                        lease_selectors
-                        and not force_with_lease_targets_are_features(lease_selectors)
-                    )
-                ):
-                    return (
-                        "deny",
-                        "Force-with-lease is allowed only for an explicit non-shared feature branch.",
-                    )
+                if not refspec_operands and (has_explicit_refspec or explicit_selector):
+                    # No refspec operand is left, yet the bare-push path above was
+                    # skipped: a shell redirection made the push look explicit
+                    # (issue #65), or `--all`/`--tags` stands in for refspecs. Both
+                    # still inherit a configured mirror, and a redirection-only push
+                    # inherits configured push refspecs too.
+                    if configured_bare_push_is_dangerous(
+                        current_cwd,
+                        push_git_globals,
+                        deadline=_remote_deadline,
+                        forced=force_requested or prune_requested,
+                        selector=explicit_selector,
+                    ) not in {"", "receive-pack"}:
+                        return "deny", _TAG_GUARD_CONFIG
                 if sensitive:
                     repository_environment = effective_git_repository_environment | {
                         name.upper()
@@ -13357,7 +13505,7 @@ _CORE_REASON = re.compile(
     r"|dynamic delete|recursive-delete|recursive remove-item|\brm -rf\b"
     r"|enumerate and delete|piping into remove-item|find execution/deletion"
     r"|secret|straight into a shell|downloader output"
-    r"|privilege/identity elevation|^sensitive_data repo:",
+    r"|privilege/identity elevation|^sensitive_data repo:|\[tag-guard\]",
     re.IGNORECASE,
 )
 
@@ -13606,6 +13754,8 @@ def command_carries_core_hint(command: str) -> bool:
     text = core_hint_text(command)
     if _CORE_HINT.search(text):
         return True
+    if push_segment_spells_tag_or_mirror(text):
+        return True
     if _CORE_PIPE_HINT.search(text) and pipes_program_text_into_interpreter(text):
         return True
     if _CORE_DOWNLOAD_ASSIGNED.search(text) and _CORE_EVALUATOR.search(text):
@@ -13613,6 +13763,37 @@ def command_carries_core_hint(command: str) -> bool:
     for token in text.split():
         if _CORE_PATH_SHAPED.search(token) and (
             _CORE_SECRET_NAME.search(token) or _SECRET_PATH.search(token.strip("'\"`"))
+        ):
+            return True
+    return False
+
+
+# The tag guard's spellings (1.8.0). An earlier verdict in the same push -- an
+# opaque token, an abbreviated value option, a receive-pack override, inline
+# config -- is returned first and is not core, so without this hint core would
+# let a literal tag deletion or mirror through behind it (review of #466).
+_CORE_TAG_SPELLING = re.compile(
+    r"(?<![\w-])--m(?:i(?:r(?:r(?:or?)?)?)?)?(?![\w-])|\.mirror\b"
+    r"|refs/tags/|(?<![\w/.-])tags/",
+    re.IGNORECASE,
+)
+_CORE_GIT_WORD = re.compile(r"\bgit\b", re.IGNORECASE)
+_CORE_PUSH_WORD = re.compile(r"\bpush\b", re.IGNORECASE)
+
+
+def push_segment_spells_tag_or_mirror(text: str) -> bool:
+    """Whether one segment holds `git ... push` and a tag or mirror spelling.
+
+    Split on segment separators rather than spanning them in a regex, so the
+    scan stays linear; the same segment always satisfies the charter hint's
+    `git ... push` alternative, keeping the core hint a subset of it.
+    """
+    for segment in re.split(r"[|;&\n]", text):
+        git_word = _CORE_GIT_WORD.search(segment)
+        if (
+            git_word
+            and _CORE_PUSH_WORD.search(segment, git_word.end())
+            and _CORE_TAG_SPELLING.search(segment)
         ):
             return True
     return False

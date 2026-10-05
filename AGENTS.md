@@ -21,8 +21,9 @@ section you need.
 
 - `templates/hooks/dispatch.py` is shared infrastructure. Any change requires its smoke suite,
   harness unit tests, and an independent read-only review. It is feature-frozen (BLUEPRINT.md,
-  "FEATURE-FROZEN"): only false-positive fixes, the ratified #21 slices and SPECS §6 charter
-  repairs may change it; a newly found bypass family becomes one line in `FLOOR_LIMITATIONS.md`.
+  "FEATURE-FROZEN"): only false-positive fixes, the ratified #21 slices, SPECS §6 charter
+  repairs and the owner-ratified exceptions recorded there may change it; a newly found bypass
+  family becomes one line in `FLOOR_LIMITATIONS.md`.
 - Keep `harness.py` dependency-free and portable across Windows/macOS/Linux.
 - Do not hard-code a user profile. Discover `$HOME`, `$CODEX_HOME`, and Git roots at runtime.
 - `seed` must be write-once. `sync-global` must show a dry-run and back up overwritten files.

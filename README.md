@@ -294,9 +294,14 @@ fails closed for linked worktrees whose primary checkout uses `--separate-git-di
 common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
 the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
 
-Producer source (2026-10-01): **1.7.3** restores the unscaled dispatcher-error deny when a
-later-fragment analyzer raises; the source adapter's audit marker matches those bytes. It is not
-deployed: installed 1.7.2, consumer markers and H-14 runtime trust/canaries remain unchanged.
+Producer source (2026-10-04): **1.8.0** deletes the branch-history families from the analyzer
+(owner decision on #356 step 2): force, lease, `+refspec`, branch deletion and `--prune` proceed at
+every tier, `sensitive_data` included, because every floored repository protects its default branch
+with a server-side ruleset. The narrow tag guard stays (`[tag-guard]`: a forced or deleting tag
+push, `--mirror`), a core double-check. The source adapter's audit marker matches those bytes.
+Deployment and consumer re-pins follow as separate reviewed rollout work, each with an owner
+re-trust and canary (HUMAN_TODO H-22). The previous producer source, 1.7.3, restored the
+unscaled dispatcher-error deny when a later-fragment analyzer raises.
 
 Posture baseline (2026-09-28): **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
 false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core

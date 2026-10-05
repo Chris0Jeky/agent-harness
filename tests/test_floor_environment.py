@@ -442,7 +442,7 @@ class BarePushSubprocessIsolationTests(unittest.TestCase):
             )
         decision, reason = hermetic("git push", project_dir=repo)
         self.assertEqual(decision, "deny", reason)
-        self.assertIn("push-config-force", reason)
+        self.assertIn("push-config-receive-pack", reason)
 
 
 class HermeticCheckTests(unittest.TestCase):

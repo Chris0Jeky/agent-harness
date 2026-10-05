@@ -278,7 +278,9 @@ workstation runs none by owner decision; a repository can declare `floor_wiring:
 dispatcher change obliges refreshing every consumer marker and re-trusting each adapter in a
 fresh `/hooks` session (SPECS §5). Never stack a global and project Codex floor:
 
-- force-push in all spellings (`--force`, `-f`, `+refspec`) to shared branches
+- a forced or deleting push of a TAG and `git push --mirror` (the tag guard, floor 1.8.0);
+  branch history — force, lease, `+refspec`, branch deletion, `--prune` — is guarded by the
+  server-side default-branch ruleset instead (owner decision 2026-10-04, #356 step 2)
 - `rm -rf` outside repo/scratch paths; `| Remove-Item` PowerShell forms; `sudo`; `curl|sh`
 - secret-file mutation; with `sensitive_data`: pushes to public remotes, `gh repo create --public`
   (public pushes carry the issue-#48 attribution exemption — §1 overlay flags — when the pushed repo
@@ -319,20 +321,27 @@ review) no matter which repo it runs in.
 
 The default below T4/`wave_mode` for a non-sensitive repository is `floor_posture: core`.
 Destructive deletes outside the project, secret-file mutation, downloaded program text run
-directly and privilege elevation remain double-checks (`FLOOR_ACK`); force-push, ref deletion,
+directly, privilege elevation and the tag guard remain double-checks (`FLOOR_ACK`);
 git-config execution, work-loss and launcher verdicts proceed. A `sensitive_data` repository
 never runs `core`: a declared `core` renders as `guide`. T4, `wave_mode` and the default
 sensitive posture retain walls; an eligible repository can declare `guide` or `wall`.
-SPECS §5.4 defines precedence and rendering, including guide's opacity handling. The analyzer
-and SPECS §6 charter matrix are unchanged. A repository declaring `floor_wiring: none` has
-no client-floor runtime claim.
+SPECS §5.4 defines precedence and rendering, including guide's opacity handling. Since floor
+1.8.0 the analyzer itself no longer flags branch history at any tier or posture, `sensitive_data`
+included: every floored repository protects its default branch with a server-side ruleset, and
+the client keeps only what that ruleset does not cover, tags and `--mirror` (SPECS §6). The
+`sensitive_data` public-remote privacy guard is unchanged. A repository declaring
+`floor_wiring: none` has no client-floor runtime claim.
 
 **FEATURE-FROZEN.** Only false-positive fixes that blocked real work, the ratified #21 slice
 sequence, and repairs to a SPECS §6 charter regression as literally written may change
 `dispatch.py`. A newly discovered bypass family is recorded in
 [FLOOR_LIMITATIONS.md](./FLOOR_LIMITATIONS.md), not implemented. The owner-authorized
 Developer Lens exact-route publication contract is the separately ratified, bounded
-exception; it does not reopen general parser work. Permitted source fixes may merge and bump
+exception; it does not reopen general parser work. A second owner-ratified exception (#356
+step 2, owner decision 2026-10-04) deleted the branch-history families in floor 1.8.0 and kept
+the narrow tag guard; it is a removal, not new parser surface. For that rollout only, the owner
+chose to re-pin the consumers before the deployed 1.7.x was canaried, so each re-pinned root's
+1.8.0 re-trust and canaries replace the older canary it still owed (HUMAN_TODO H-22). Permitted source fixes may merge and bump
 `FLOOR_VERSION`, but no new version is deployed until the currently deployed one is re-trusted
 and canaried. Current operator gates live in [HUMAN_TODO.md](./HUMAN_TODO.md); a source merge
 is not permission to run `sync-global --apply` or refresh consumer markers.
