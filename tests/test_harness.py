@@ -13092,6 +13092,37 @@ class WorktreeCloseoutTests(unittest.TestCase):
         env = {"PATH": os.pathsep.join(["tools", absolute, "./bin", ""])}
         self.assertEqual(harness.probe_search_directories(env), [absolute])
 
+    def test_probe_candidates_prefer_late_image_over_early_shim(self) -> None:
+        d1 = os.path.join("d1")
+        d2 = os.path.join("d2")
+        candidates = harness.probe_candidate_paths("tool", [d1, d2], [".EXE", ".CMD"])
+        expected = [
+            os.path.join(d1, "tool.EXE"),
+            os.path.join(d2, "tool.EXE"),
+            os.path.join(d1, "tool.CMD"),
+            os.path.join(d2, "tool.CMD"),
+        ]
+        self.assertEqual(candidates, expected)
+        self.assertLess(
+            candidates.index(os.path.join(d2, "tool.EXE")),
+            candidates.index(os.path.join(d1, "tool.CMD")),
+        )
+        self.assertLess(
+            candidates.index(os.path.join(d1, "tool.EXE")),
+            candidates.index(os.path.join(d2, "tool.EXE")),
+        )
+        self.assertLess(
+            candidates.index(os.path.join(d1, "tool.CMD")),
+            candidates.index(os.path.join(d2, "tool.CMD")),
+        )
+        inverted = [
+            os.path.join(d1, "tool.EXE"),
+            os.path.join(d1, "tool.CMD"),
+            os.path.join(d2, "tool.EXE"),
+            os.path.join(d2, "tool.CMD"),
+        ]
+        self.assertNotEqual(candidates, inverted)
+
     def test_probe_shim_hazard_refuses_metachar_argument(self) -> None:
         shim = "gh.cmd"
         metachar = harness.probe_shim_hazard([shim, "--ref", "HEAD^{commit}"])
