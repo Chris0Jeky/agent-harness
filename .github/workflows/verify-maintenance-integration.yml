@@ -1,0 +1,146 @@
+name: Verify bounded maintenance integration
+on:
+  push:
+    branches: [verify/maintenance-integration-20261007]
+permissions:
+  contents: read
+jobs:
+  bundle-integration:
+    name: Bundle integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      BASE: e686bb2ca5ef69e2bc004eb956d707c82d8a8b36
+      BUNDLE_HEAD: 6bc96e18a429e7f6653f62bc0f448044df672454
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 6bc96e18a429e7f6653f62bc0f448044df672454
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Verify the pinned merge and affected seams
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = 9f7b5b3e6c17ca7350a541e6469b70c9d1da5e5d
+          test "$(git rev-parse "$BUNDLE_HEAD^{tree}")" = ad352a9e08167922637e601c2f929eeb460951b4
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          work="$RUNNER_TEMP/bundle-integration"
+          git worktree add --detach "$work" "$BUNDLE_HEAD"
+          cd "$work"
+          git merge --no-commit --no-ff "$BASE"
+          expected=$'replay_v0/importer.py\nreplay_v0/tests/unit/test_importer.py\ntests/test_harness.py'
+          test "$(git diff --cached --name-only | sort)" = "$expected"
+          git diff --check
+          git diff --cached --check
+          python -m unittest discover -s tests -p 'test_bundle*.py' -q
+          python -m unittest replay_v0.tests.unit.test_importer -q
+          python -m unittest tests.test_harness -k probe -q
+          printf 'Verified bundle head %s with base %s; integration tree %s\n' "$BUNDLE_HEAD" "$BASE" "$(git write-tree)" | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff --cached --stat | tee -a "$GITHUB_STEP_SUMMARY"
+  prepare-probe:
+    name: Preserve both probe tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      BASE: e686bb2ca5ef69e2bc004eb956d707c82d8a8b36
+      PROBE_HEAD: 4941c32292920de56c786c48609c487aac846ea5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: e686bb2ca5ef69e2bc004eb956d707c82d8a8b36
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Apply only the original probe method to current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = 9f7b5b3e6c17ca7350a541e6469b70c9d1da5e5d
+          test "$(git rev-parse "$BASE:tests/test_harness.py")" = 124eed84572152180bbce686bbe60de1cbbb78f7
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          git worktree add --detach "$RUNNER_TEMP/probe-integration" "$BASE"
+          cd "$RUNNER_TEMP/probe-integration"
+          python - <<'PY'
+          import ast, os, pathlib, subprocess
+          path = pathlib.Path('tests/test_harness.py')
+          source = subprocess.check_output(['git', 'show', os.environ['PROBE_HEAD'] + ':tests/test_harness.py'], text=True)
+          name = 'test_probe_shim_hazard_refuses_metachar_argument'
+          methods = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef) and n.name == name]
+          assert len(methods) == 1
+          method = methods[0]
+          addition = ''.join(source.splitlines(keepends=True)[method.lineno - 1:method.end_lineno])
+          assert len(addition.splitlines()) == 7
+          current = path.read_text()
+          assert name not in current
+          marker = '\n\nif __name__ == "__main__":\n'
+          assert current.count(marker) == 1
+          path.write_text(current.replace(marker, addition + marker))
+          candidate = ast.parse(path.read_text())
+          matches = [(c, n) for c in candidate.body if isinstance(c, ast.ClassDef) for n in c.body if isinstance(n, ast.FunctionDef) and n.name == name]
+          assert len(matches) == 1
+          parent, added = matches[0]
+          assert parent.name == 'WorktreeCloseoutTests', parent.name
+          assert ast.dump(added) == ast.dump(method)
+          parent.body.remove(added)
+          assert ast.dump(candidate) == ast.dump(ast.parse(current))
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'probe-expected-ast.txt').write_text(ast.dump(ast.parse(path.read_text())))
+          print('Original method preserved exactly; all current-main definitions unchanged.')
+          PY
+      - name: Run focused gates and mutation controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/probe-integration"
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -m black tests/test_harness.py
+          python -m ruff check tests/test_harness.py
+          python -m black --check tests/test_harness.py
+          python - <<'PY'
+          import ast, os, pathlib
+          expected = pathlib.Path(os.environ['RUNNER_TEMP'], 'probe-expected-ast.txt').read_text()
+          assert ast.dump(ast.parse(pathlib.Path('tests/test_harness.py').read_text())) == expected
+          PY
+          python -m unittest tests.test_harness -k probe -v
+          python - <<'PY'
+          import unittest
+          from unittest.mock import patch
+          from tests.test_harness import WorktreeCloseoutTests
+          for value in ('', 'reject'):
+              result = unittest.TestResult()
+              with patch('harness.probe_shim_hazard', return_value=value):
+                  WorktreeCloseoutTests('test_probe_shim_hazard_refuses_metachar_argument').run(result)
+              assert result.testsRun == 1 and len(result.failures) == 1 and not result.errors, result.__dict__
+              print('Mutation rejected:', repr(value))
+          PY
+          python -m py_compile tests/test_harness.py
+          git diff --check
+      - name: Publish the product tree to a temporary branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/probe-integration"
+          test "$(git diff --name-only "$BASE")" = tests/test_harness.py
+          git add tests/test_harness.py
+          git diff --cached --check
+          git commit -m 'Preserve command-shim regression alongside merged probe-order test'
+          test "$(git diff --name-only "$BASE" HEAD)" = tests/test_harness.py
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/prepared/probe475-20261007
+          printf 'Prepared probe commit %s tree %s test blob %s on base %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" "$(git rev-parse HEAD:tests/test_harness.py)" "$BASE" | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff --stat "$BASE" HEAD | tee -a "$GITHUB_STEP_SUMMARY"
