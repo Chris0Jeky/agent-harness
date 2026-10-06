@@ -10397,26 +10397,94 @@ def write_atomic_json(path: Path, payload: Mapping[str, Any], label: str) -> Non
         raise HarnessError(f"cannot write {label} {path}: {exc}") from exc
 
 
-def sync_bundle_roots(args: argparse.Namespace) -> dict[str, Path]:
-    """Resolve only the two logical destination roots the manifest may name."""
-    claude_input = sync_input_path(
-        args.claude_home or Path.home() / ".claude", "bundle Claude home"
-    )
-    user_bin_input = sync_input_path(
-        getattr(args, "user_bin_home", None) or Path.home() / ".local" / "bin",
-        "bundle user bin home",
-    )
-    reject_sync_path_aliases(claude_input, "bundle Claude home")
-    reject_sync_path_aliases(user_bin_input, "bundle user bin home")
-    roots = {
-        "claude-home": claude_input.resolve(strict=False),
-        "user-bin-home": user_bin_input.resolve(strict=False),
-    }
-    if worktree_path_key(roots["claude-home"]) == worktree_path_key(
-        roots["user-bin-home"]
-    ):
-        raise HarnessError("bundle destination roots must be distinct")
-    return roots
+class SyncBundleRoots(Mapping[str, Path]):
+    """Resolve only roots actually used by selected components or recovery."""
+
+    _names = ("claude-home", "user-bin-home")
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.resolved: dict[str, Path] = {}
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._names
+
+    def __getitem__(self, name: str) -> Path:
+        if name not in self:
+            raise KeyError(name)
+        if name not in self.resolved:
+            if name == "claude-home":
+                value = self.args.claude_home or Path.home() / ".claude"
+                label = "bundle Claude home"
+            else:
+                value = (
+                    getattr(self.args, "user_bin_home", None)
+                    or Path.home() / ".local" / "bin"
+                )
+                label = "bundle user bin home"
+            logical = sync_input_path(value, label)
+            reject_sync_path_aliases(logical, label)
+            resolved = logical.resolve(strict=False)
+            if any(
+                worktree_path_key(resolved) == worktree_path_key(other)
+                for other in self.resolved.values()
+            ):
+                raise HarnessError("bundle destination roots must be distinct")
+            self.resolved[name] = resolved
+        return self.resolved[name]
+
+
+def sync_bundle_roots(args: argparse.Namespace) -> Mapping[str, Path]:
+    return SyncBundleRoots(args)
+
+
+def bundle_path_device(path: Path) -> int:
+    """Observe an entry's device, or the ancestor where it would be created."""
+    reject_sync_path_aliases(path, "bundle rename path")
+    candidate = path
+    while True:
+        try:
+            metadata = candidate.stat()
+        except FileNotFoundError:
+            if candidate.parent == candidate:
+                raise HarnessError(f"bundle path has no available ancestor: {path}")
+            candidate = candidate.parent
+            continue
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect bundle filesystem for {path}: {exc}"
+            ) from exc
+        if candidate != path and not stat.S_ISDIR(metadata.st_mode):
+            raise HarnessError(f"bundle path ancestor is not a directory: {candidate}")
+        return metadata.st_dev
+
+
+def preflight_bundle_storage(
+    parent: Path, components: list[dict[str, Any]], *, installing: bool
+) -> None:
+    """Keep recovery outside live/source trees and reject cross-device renames.
+
+    Device equality is necessary, not a guarantee that every later rename will
+    succeed. This is an observation, not exclusion of concurrent filesystem edits.
+    """
+    protected = [component["target"] for component in components]
+    if installing:
+        protected.extend(component["source"] for component in components)
+    preflight_sync_backup_parent(parent, protected, "bundle recovery")
+    device = bundle_path_device(parent)
+    for component in components:
+        target = component["target"]
+        if any(bundle_path_device(path) != device for path in (target, target.parent)):
+            raise HarnessError(
+                f"bundle requires same-filesystem rename: target {target}; "
+                f"recovery storage {parent}; choose homes on the same filesystem"
+            )
 
 
 def validate_bundle_targets(components: list[dict[str, Any]]) -> None:
@@ -10550,14 +10618,7 @@ def apply_sync_bundle(
     """Stage, revalidate, install, and atomically receipt one bundle."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_parent = roots["claude-home"] / ".harness-backups" / "sync-global-bundles"
-    preflight_sync_backup_parent(
-        backup_parent,
-        [
-            *(component["source"] for component in components),
-            *(component["target"] for component in components),
-        ],
-        "bundle backup",
-    )
+    preflight_bundle_storage(backup_parent, components, installing=True)
     backup_root = reserve_backup_root(backup_parent, f"{stamp}-{bundle_name}")
     staged: list[Path] = []
     for index, component in enumerate(components):
@@ -10628,18 +10689,29 @@ def apply_sync_bundle(
                 raise HarnessError(
                     f"cannot promote staged bundle component: {target}: {exc}"
                 ) from exc
-            installed_digest = bundle_component_digest(
-                component["kind"], target, "installed bundle target"
-            )
+            inspection_error: str | None = None
+            try:
+                installed_digest = bundle_component_digest(
+                    component["kind"], target, "installed bundle target"
+                )
+            except (HarnessError, OSError, UnicodeError) as exc:
+                # A failed observation is not a verified installation. Use the
+                # same quarantine/recovery path as a mismatched digest.
+                installed_digest = None
+                inspection_error = str(exc)
             if installed_digest != component["source_digest"]:
                 # The unverified replacement must not stay live (#277 review, #278). Keep its
                 # bytes in the recovery tree, put the previous target back, then fail.
                 quarantine = backup_root / "unverified" / f"{index:04d}"
-                quarantine.parent.mkdir(parents=True, exist_ok=True)
                 problem = f"installed bundle target did not verify: {target}"
+                if inspection_error is not None:
+                    problem += f"; inspection failed: {inspection_error}"
                 try:
+                    reject_sync_path_aliases(quarantine, "bundle quarantine")
+                    reject_sync_path_aliases(target.parent, "bundle quarantine source")
+                    quarantine.parent.mkdir(parents=True, exist_ok=True)
                     target.rename(quarantine)
-                except OSError as exc:
+                except (HarnessError, OSError) as exc:
                     previous = (
                         str(backup)
                         if backup is not None
@@ -10815,6 +10887,7 @@ def load_bundle_rollback_receipt(
 def rollback_sync_bundle(
     receipt_path: Path, components: list[dict[str, Any]], apply: bool
 ) -> None:
+    preflight_bundle_storage(receipt_path.parent, components, installing=False)
     for component in components:
         action = "restore" if component["backup"] is not None else "remove"
         print(f"bundle rollback {action} {component['target']}")
@@ -10905,7 +10978,6 @@ def rollback_sync_bundle(
 
 def sync_global_bundle(args: argparse.Namespace, bundle_name: str) -> int:
     """Run the isolated manifest bundle lane or its receipt rollback."""
-    config_root_input = sync_input_path(args.config_root, "sync config root")
     roots = sync_bundle_roots(args)
     rollback_receipt = getattr(args, "rollback_receipt", None)
     if rollback_receipt:
@@ -10913,7 +10985,15 @@ def sync_global_bundle(args: argparse.Namespace, bundle_name: str) -> int:
         components = load_bundle_rollback_receipt(receipt_path, roots, bundle_name)
         rollback_sync_bundle(receipt_path, components, bool(args.apply))
         return 0
+    config_root_input = sync_input_path(args.config_root, "sync config root")
     _manifest, components = load_sync_bundle(config_root_input, roots, bundle_name)
+    # Claude home is required for installation recovery, even for a bin-only
+    # bundle. A preview must report the same static refusal as an apply.
+    preflight_bundle_storage(
+        roots["claude-home"] / ".harness-backups" / "sync-global-bundles",
+        components,
+        installing=True,
+    )
     print(f"Bundle: {bundle_name}")
     for component in components:
         equal = component["source_digest"] == component["target_digest"]

@@ -740,6 +740,17 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   and relative paths, never trusted absolute targets. The reviewed Muse manifest must exclude
   vendor executables, runtime settings, credentials, policy, repository declarations, and
   noncanonical launchers.
+  Logical destination roots are resolved only when used. Installation always validates
+  `claude-home` for recovery storage, even for a bin-only preview; `user-bin-home` defaults
+  to `~/.local/bin` only when selected. Receipt rollback does not read an unused config root
+  or logical home. Used homes remain alias-free and distinct. Preview and apply both reject
+  recovery storage that aliases or overlaps a source/live component, and reject observed
+  cross-filesystem rename boundaries before reserving recovery space or copying bytes.
+  Sources may be copied from another filesystem; live targets and rename recovery storage
+  must share a filesystem. Device equality is necessary, not proof every rename will succeed.
+  A post-promotion inspection error follows the same quarantine/restore path as a digest
+  mismatch. Failed quarantine leaves live state explicitly unverified and names recovery
+  storage; it does not follow an aliased target parent or report successful installation.
 - `harness.py sync-global --config-root <claude-config> --only bundle:muse-runtime
   --rollback-receipt <path> [--apply]` — previews or executes receipt rollback. Before any target
   moves, every live target must still equal its installed digest and every present-state backup
