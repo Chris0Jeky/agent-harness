@@ -13095,9 +13095,7 @@ class WorktreeCloseoutTests(unittest.TestCase):
     def test_probe_candidates_prefer_late_image_over_early_shim(self) -> None:
         d1 = os.path.join("d1")
         d2 = os.path.join("d2")
-        candidates = harness.probe_candidate_paths(
-            "tool", [d1, d2], [".EXE", ".CMD"]
-        )
+        candidates = harness.probe_candidate_paths("tool", [d1, d2], [".EXE", ".CMD"])
         expected = [
             os.path.join(d1, "tool.EXE"),
             os.path.join(d2, "tool.EXE"),
