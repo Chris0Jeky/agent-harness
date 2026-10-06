@@ -431,8 +431,8 @@ create a parallel plan (law 9).
    (production money, deployed daily): convert absolute-path hooks to `$CLAUDE_PROJECT_DIR`
    (they silently break worktree agents today); verify branch protection actually requires
    named checks via `gh api`. Two hours, real risk retired.
-3. **Tombstones + REVIVAL.md files** (30 min): jekyt, repos, Taskdeck-gemini,
-   TaskdeckDemoExpansion, pr812-fixes, AgentForge(+Archive), all junk wrappers;
+3. **Tombstones + REVIVAL.md files** (30 min): the home-directory wrapper folders, stale product clones and
+   demo copies, one-off fix checkouts, archived experiments, all junk wrappers;
    REVIVAL.md for platform-identity and metricalgo/staticprofit (replacing the stale-path
    245-line AGENTS.md). Then cold-archive or delete the dead duplicates (several GB of
    search noise).

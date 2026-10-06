@@ -5,6 +5,12 @@ T4 reopened a charter force-push: `remote.<name>.push = +src:dst` silently
 force-updates a shared branch on a refspec-less push, and an agent can write
 `.git/config` itself. The floor now resolves that config and denies the bare push
 when it could force, while still allowing the common non-force bare push.
+
+Floor 1.8.0 (#356 step 2, owner decision 2026-10-04): the default branch is
+protected server-side, so a configured BRANCH force or deletion now proceeds.
+What stays guarded is what the ruleset does not cover: a configured mirror, a
+configured tag force or deletion (`[tag-guard]`), and a configured receive-pack
+command (`[push-config-receive-pack]`).
 """
 
 import importlib.util
@@ -93,25 +99,50 @@ class PushConfigForceTests(unittest.TestCase):
             remote_resolver=lambda *a, **k: (False, "stub-private"),
         )
 
-    def test_helper_flags_configured_force(self) -> None:
-        repo = self._repo("+HEAD:refs/heads/main")
-        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+    def test_helper_flags_configured_tag_force(self) -> None:
+        for refspec in (
+            "+refs/tags/*:refs/tags/*",
+            "+HEAD:refs/tags/v1",
+            "+refs/*:refs/*",
+        ):
+            with self.subTest(refspec=refspec):
+                repo = self._repo(refspec)
+                self.assertEqual(
+                    self.dispatch.configured_bare_push_is_dangerous(repo), "tag"
+                )
 
-    def test_helper_flags_configured_delete(self) -> None:
-        repo = self._repo(":refs/heads/old")
-        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+    def test_helper_flags_configured_tag_delete(self) -> None:
+        repo = self._repo(":refs/tags/v1")
+        self.assertEqual(self.dispatch.configured_bare_push_is_dangerous(repo), "tag")
+
+    def test_helper_ignores_configured_branch_force_and_delete(self) -> None:
+        for refspec in ("+HEAD:refs/heads/main", ":refs/heads/old"):
+            with self.subTest(refspec=refspec):
+                repo = self._repo(refspec)
+                self.assertEqual(
+                    self.dispatch.configured_bare_push_is_dangerous(repo), ""
+                )
+
+    def test_helper_forced_command_line_makes_a_tag_refspec_forcing(self) -> None:
+        repo = self._repo("refs/tags/*:refs/tags/*")
+        self.assertEqual(self.dispatch.configured_bare_push_is_dangerous(repo), "")
+        self.assertEqual(
+            self.dispatch.configured_bare_push_is_dangerous(repo, forced=True), "tag"
+        )
 
     def test_helper_flags_configured_mirror(self) -> None:
         repo = self._repo(None, mirror=True)
-        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+        self.assertEqual(self.dispatch.configured_bare_push_is_dangerous(repo), "tag")
 
     def test_helper_flags_valueless_mirror(self) -> None:
         repo = self._repo(None, valueless_mirror=True)
-        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+        self.assertEqual(self.dispatch.configured_bare_push_is_dangerous(repo), "tag")
 
     def test_helper_flags_configured_receivepack(self) -> None:
         repo = self._repo(None, receivepack="helper --unsafe")
-        self.assertTrue(self.dispatch.configured_bare_push_is_dangerous(repo))
+        self.assertEqual(
+            self.dispatch.configured_bare_push_is_dangerous(repo), "receive-pack"
+        )
 
     def test_helper_ignores_non_force_refspec(self) -> None:
         repo = self._repo("HEAD:refs/heads/main")
@@ -125,26 +156,47 @@ class PushConfigForceTests(unittest.TestCase):
         repo = self._repo(None)
         self.assertFalse(self.dispatch.configured_bare_push_is_dangerous(repo))
 
-    def test_bare_push_denied_when_config_forces(self) -> None:
-        for refspec in ("+HEAD:refs/heads/main", ":refs/heads/old"):
+    def test_bare_push_denied_when_config_forces_a_tag(self) -> None:
+        for refspec in ("+refs/tags/*:refs/tags/*", ":refs/tags/v1"):
             repo = self._repo(refspec)
             for command in ("git push", "git push origin"):
                 with self.subTest(refspec=refspec, command=command):
                     decision, reason = self._decide(repo, command)
                     self.assertEqual(decision, "deny", reason)
-                    self.assertIn("push-config-force", reason)
+                    self.assertIn("[tag-guard]", reason)
+
+    def test_bare_push_allowed_when_config_forces_a_branch(self) -> None:
+        for refspec in ("+HEAD:refs/heads/main", ":refs/heads/old"):
+            repo = self._repo(refspec)
+            for command in ("git push", "git push origin", "git push --force origin"):
+                with self.subTest(refspec=refspec, command=command):
+                    decision, reason = self._decide(repo, command)
+                    self.assertEqual(decision, "allow", reason)
+
+    def test_forced_bare_push_over_a_configured_tag_refspec_is_denied(self) -> None:
+        repo = self._repo("refs/tags/*:refs/tags/*")
+        self.assertEqual(self._decide(repo, "git push origin")[0], "allow")
+        for command in (
+            "git push --force origin",
+            "git push --prune origin",
+            "git push -f origin 2>&1",
+        ):
+            with self.subTest(command=command):
+                decision, reason = self._decide(repo, command)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("[tag-guard]", reason)
 
     def test_bare_push_denied_when_config_mirrors(self) -> None:
         repo = self._repo(None, mirror=True)
         decision, reason = self._decide(repo, "git push origin")
         self.assertEqual(decision, "deny", reason)
-        self.assertIn("push-config-force", reason)
+        self.assertIn("[tag-guard]", reason)
 
     def test_bare_push_denied_when_receivepack_is_configured(self) -> None:
         repo = self._repo(None, receivepack="helper --unsafe")
         decision, reason = self._decide(repo, "git push origin")
         self.assertEqual(decision, "deny", reason)
-        self.assertIn("push-config-force", reason)
+        self.assertIn("push-config-receive-pack", reason)
 
     def test_bare_push_denied_under_git_dir_override(self) -> None:
         # A GIT_DIR override points git at a different repo than the resolver's

@@ -209,7 +209,7 @@ here.` / `Live successor: <path or "none">`.
 ## §5 Dispatcher hook wiring
 
 The shared dispatcher owns exactly one event: the `PreToolUse(Bash)` deny floor. Claude wires it
-at user scope on hosts that keep one (none on DESKTOP-IHKOOJS; a repo may declare
+at user scope on hosts that keep one (none on the primary workstation; a repo may declare
 `floor_wiring: none`). Each active Codex repo wires exactly one project `.codex/hooks.json` adapter that pins
 the shared `~/.claude/hooks/dispatch.py`; Codex has no global floor matcher. A repository's owner
 may declare it floorless (agent-harness itself and claude-config, owner decision 2026-09-07): it then
@@ -457,9 +457,9 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 | Analyzer verdict | `wall` | `guide` | `core` |
 |---|---|---|---|
 | allow | allow | allow | allow |
-| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) | **allow**, unless the command carries a CORE hint (`dispatch._CORE_HINT`: the charter hint's deletion verbs, privilege heads, downloaded program text piped or substituted into an interpreter, and secret-looking names — never git push/force, gh, nested program text or work-loss spellings) or a later segment earns a core verdict: then double-check |
-| a CORE deny (`dispatch.verdict_is_core`): `rm -rf`/`Remove-Item` outside the project or at a root, an unresolved delete operand, `find -delete`, pipe-to-Remove-Item, a secret-looking target, downloaded program text run directly, privilege elevation (a `sensitive_data` repository never runs `core`; see below) | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` | **double-check**, same mechanism |
-| any other deny — force spellings, `+refspec`, remote-ref destruction, git config/environment execution, launchers, T4 work-loss spellings, and the git pathspec-file opacity guide keeps as guarded (`git rm --pathspec-from-file`) | deny | **double-check** | **allow**, unless the command carries a core hint or a later segment earns a core verdict: then double-check |
+| deny whose reason is pure opacity — `cannot be inspected`, `cannot safely`, `opaque`, `malformed`, `nesting`/`depth exceeds`, `comment inside a scriptblock`, `[push-config-unverifiable]` — but never one naming a `secret-looking` target or an unresolved delete/removal/pathspec operand (`rm -rf $dir`, a splatted `Remove-Item`, `find -delete`, `git rm --pathspec-from-file`): those are #62's GUARDED opacity and take the row below. **And only when the command text, quotes included, carries no charter hint** (`dispatch._CHARTER_HINT`: force spellings or any `git push`, deletion verbs, `sudo`/`doas`/`su`, program text piped or substituted into an interpreter, nested program text such as `-c`/`eval`/`-x`/`foreach`/`bisect run`, brace expansion, secret-looking names, copy/move/write verbs) — the analyzer returns its FIRST deny, so `git push --force origin $BRANCH` is denied as a dynamic refspec before the force check, and the hint keeps it a double-check | deny | **allow** — the parser's uncertainty is not the agent's fault (#21) | **allow**, unless the command carries a CORE hint (`dispatch._CORE_HINT`: the charter hint's deletion verbs, privilege heads, downloaded program text piped or substituted into an interpreter, and secret-looking names, plus — since 1.8.0 — a tag or mirror spelling inside a `git … push` segment (`refs/tags/`, `tags/`, `--mirror` in any abbreviation, `.mirror`), so an earlier verdict in the same push cannot hide those spellings — a bare local-tag name or `tag <name>` behind an earlier non-core verdict is not covered (FLOOR_LIMITATIONS); never other git push/force spellings, gh, nested program text or work-loss spellings) or a later segment earns a core verdict: then double-check |
+| a CORE deny (`dispatch.verdict_is_core`): `rm -rf`/`Remove-Item` outside the project or at a root, an unresolved delete operand, `find -delete`, pipe-to-Remove-Item, a secret-looking target, downloaded program text run directly, privilege elevation, the tag guard (`[tag-guard]`, 1.8.0: a forced or deleting push of a tag, `--mirror`) (a `sensitive_data` repository never runs `core`; see below) | deny | **double-check**: deny once with a key; allow when the identical command carries `# FLOOR_ACK=<key>` | **double-check**, same mechanism |
+| any other deny — git config/environment execution, launchers, T4 work-loss spellings, and the git pathspec-file opacity guide keeps as guarded (`git rm --pathspec-from-file`). Branch force, `+refspec` and branch deletion are no longer analyzer denies since 1.8.0 | deny | **double-check** | **allow**, unless the command carries a core hint or a later segment earns a core verdict: then double-check |
 | ask (T3 work-loss guards) | ask (Codex: deny) | double-check, same mechanism, both runtimes | **allow**, with the same core-hint and later-segment exception |
 | dispatcher error (fail-closed) | deny | deny — never scaled, never acknowledgeable | deny — never scaled |
 
@@ -476,7 +476,10 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
   repository that runs the floor. A ruleset sees every runtime — Claude, Codex, the Muse swarm,
   Grok and humans — and has no parser to fool, while the client floor ran in six Codex roots and
   paid the #21 false-positive tax for history families the server now covers. So below T4/wave
-  the client keeps only what no server can protect: local destruction. Security given up, by the
+  the client keeps only what no server can protect: local destruction. Floor 1.8.0 (owner
+  decision 2026-10-04, #356 step 2) went further and deleted the branch-history families from
+  the analyzer at every tier and posture, `sensitive_data` included; the rulesets protect the
+  default branch only, so a forced or deleting tag push and `--mirror` stay a core double-check. Security given up, by the
   owner's explicit productivity-first choice: a force-push to a NON-default branch (recoverable
   from the reflog and the PR record, and nothing merges without the gate), local work-loss
   (`reset --hard`, `clean -fdx`, `checkout -- .`, `worktree remove --force`), git
@@ -504,10 +507,20 @@ RENDERED by the effective posture (`floor_posture`, resolved by `dispatch.floor_
 ## §6 Deny-floor bypass test matrix (must-block / must-allow)
 
 This matrix pins the ANALYZER (every fixture declares `wall`). How a verdict renders below
-T4/wave is §5.4's posture table: under the default `core` posture the history families below are
-guarded server-side instead and proceed on the client.
+T4/wave is §5.4's posture table.
 
-MUST BLOCK (all tiers): `git push -f`, `git push --force`, `git push origin +main`,
+Branch history is not in this matrix since floor 1.8.0 (owner decision 2026-10-04, #356 step 2):
+the default branch of every floored repository is protected server-side by a ruleset, so
+`git push -f`, `git push --force`, `git push origin +main`, `--force-with-lease`, branch deletion
+and `--prune` over branches are MUST ALLOW at every tier, `sensitive_data` included (whose
+public-remote privacy guard still judges the destination).
+
+MUST BLOCK (all tiers): the tag guard — a forced or deleting push whose destination may be a tag
+(`git push --force origin v1.0` where `v1.0` is a local tag, `+refs/tags/*`, `:refs/tags/v1`,
+`--delete origin tags/v1`, `git push --force origin tag v1`, `--force`/`--prune` with `--tags`, a
+pattern destination outside an explicit non-tag namespace such as `refs/*`), `git push --mirror`
+in any abbreviation, and a refspec-less push that inherits a configured mirror or a forced or
+deleting tag refspec;
 `rm -rf /`, `rm -rf ~`, `rm -rf` outside repo/scratch, `... | Remove-Item`, `... | del`,
 `curl … | sh`, `wget … | sh`, `sudo …`, write to `.env`/`*credentials*`/`*secret*` files;
 with `sensitive_data`: `git push <public-remote>`, `gh repo create --public` — with the two
@@ -566,10 +579,10 @@ floor cannot see detached-ness in argv). All measured on git 2.45.1 and pinned b
 Keep no `.env` that must outlive its worktree.
 
 MUST ALLOW (false-positive regression tests): commit/PR bodies *describing* dangerous commands
-(`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, `git push --force-with-lease`
-with an explicit non-shared feature-branch refspec at T1–T2, and compound commands where the
-dangerous-looking text is inside quotes. Lease pushes to shared/default branch names, selectors,
-or ambiguous `HEAD` destinations remain blocked.
+(`git commit -m "block rm -rf in hook"`), `gh pr create --body-file …`, branch force, lease,
+`+refspec`, deletion and `--prune` at every tier (1.8.0), a non-forced push of a tag (git refuses
+to move an existing tag without force), and compound commands where the dangerous-looking text is
+inside quotes.
 
 Parsing notes: tokenize argv (shlex for POSIX; separate lightweight matcher for PowerShell
 pipe forms — shlex won't parse `| Remove-Item`); split on `;`, `&&`, `|` and check each
@@ -687,10 +700,16 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   `<codex-home>/backups/<timestamp>/skills/`, outside the recursively scanned `skills-home`; custom
   overlapping home/source layouts fail before writes, and legacy `skills-home/.harness-backups/`
   trees are neither migrated nor deleted.
-  Selected skill roots (`skill:` and `claude-skill:`) are probed together with name-only directories on
-  the destination parent, and on the backup parent for roots that need a recovery copy. Roots the
+  Selected skill roots (`skill:` and `claude-skill:`) are probed together across both families with
+  name-only directories on each shared destination parent before either family applies changes.
+  Recovery-name checks run only for changed existing Codex targets and changed Claude staging
+  targets (including new trees); identical trees never require a backup-name probe. Roots the
   destination's own lookup merges (for example `Foo` and `foo` on a case-insensitive volume) are
-  refused before any live or backup write, dry run included. Qualifications, not guarantees: an
+  refused before any live or backup write, dry run included. Destination parents group by
+  filesystem identity (an existing parent by `samefile`; absent parents by their nearest existing
+  ancestor plus that directory's own lookup of the absent names, via a removed probe tree), never
+  by casefolding. A Codex target nested inside a Claude target, or the reverse, is refused the
+  same way (`selected skill destinations overlap`). Qualifications, not guarantees: an
   installed skill holding a hard link to a case-variant entry stays an ambiguous-spelling refusal
   (the message names the entries; remove the extra link or stale entry and re-run), and a destination
   that fakes mode bits (exFAT/FAT on POSIX) fails the post-copy digest check, which compares

@@ -205,9 +205,9 @@ class PostureResolutionTests(unittest.TestCase):
 
 class ReasonClassificationTests(unittest.TestCase):
     CHARTER = (
-        "Force-push rewrites shared history.",
-        "git push -f is a force-push.",
-        "A +refspec is a forced update in disguise.",
+        "[tag-guard] A forced push to a tag rewrites a published release marker",
+        "[tag-guard] git push --mirror force-updates and deletes every remote ref",
+        "[tag-guard] Deleting a remote tag removes a published release marker",
         "rm -rf outside the project: /srv/x",
         "rm -rf /: refusing a filesystem/home root.",
         "Piping a download straight into a shell is irreversible-by-design.",
@@ -215,7 +215,7 @@ class ReasonClassificationTests(unittest.TestCase):
         "Mutating a secret-looking file (.env) is floor-blocked.",
         "Redirecting output into a secret-looking file (.env) is floor-blocked.",
         "sensitive_data repo: refusing a push to public remote origin",
-        "Deleting protected branch 'main' is floor-blocked.",
+        "[tag-guard] git push --prune over a tag destination deletes remote tags",
         # Guarded opacity (#62): an unresolved operand OF a delete stays a
         # double-check -- rm -rf-class uncertainty is what the owner kept.
         "Dynamic delete options/targets cannot be inspected safely.",
@@ -348,7 +348,7 @@ class ReasonClassificationTests(unittest.TestCase):
             if "secret-looking" in reason:
                 self.assertIn(reason, walls, reason)
         for needle in (
-            "orce-push",
+            "[tag-guard]",
             "outside the project",
             "irreversible-by-design",
             "Dynamic delete",
@@ -380,12 +380,11 @@ class CorePostureTests(unittest.TestCase):
         "recursive-delete",
         "enumerate and delete",
         "sensitive_data repo:",
+        "[tag-guard]",
     )
     NON_CORE = (
-        "Force-push rewrites shared history.",
-        "git push -f is a force-push.",
-        "A +refspec is a forced update in disguise.",
-        "Deleting protected branch 'main' is floor-blocked.",
+        "[push-config-receive-pack] A refspec-less git push inherits a configured "
+        "receive-pack command from remote config; push an explicit refspec instead.",
         "Inline Git config can change execution or destination semantics.",
         "Git execution or push-destination config mutation is floor-blocked.",
         "T4/wave: hard reset discards work that may not be yours. Inspect state; ask.",
@@ -648,12 +647,18 @@ class CorePostureTests(unittest.TestCase):
                     self.assertEqual(guide[0], "deny")
 
     def test_rendering_matrix(self):
-        force = ("deny", "Force-push rewrites shared history.")
+        given_up = (
+            "deny",
+            "Inline Git config can change execution or destination semantics.",
+        )
         rm = ("deny", "rm -rf outside the project: /srv/x")
         ask = ("ask", "T3: git reset --hard discards uncommitted work.")
         opaque = ("deny", "A dynamic redirect target cannot be inspected safely.")
         self.assertEqual(
-            dispatch.apply_floor_posture(*force, "git push -f", None, T1), ("allow", "")
+            dispatch.apply_floor_posture(
+                *given_up, "git -c core.editor=vi commit", None, T1
+            ),
+            ("allow", ""),
         )
         self.assertEqual(
             dispatch.apply_floor_posture(*ask, "git reset --hard", None, T3),
@@ -672,18 +677,21 @@ class CorePostureTests(unittest.TestCase):
         )
         # A non-core verdict whose text spells a core action is a double-check.
         hinted = dispatch.apply_floor_posture(
-            *force, "git push -f && rm -rf /srv/x", None, T1
+            *given_up, "git -c core.editor=vi commit && rm -rf /srv/x", None, T1
         )
         self.assertEqual(hinted[0], "deny")
         # A masked core verdict in a later segment is named and double-checked.
         masked = dispatch.apply_floor_posture(
-            *force, "git push -f; ./cleanup", None, T1, masked=rm
+            *given_up, "git -c core.editor=vi commit; ./cleanup", None, T1, masked=rm
         )
         self.assertEqual(masked[0], "deny")
         self.assertIn("A later segment: rm -rf outside the project", masked[1])
         # The walls are untouched.
         self.assertEqual(
-            dispatch.apply_floor_posture(*force, "git push -f", None, T4), force
+            dispatch.apply_floor_posture(
+                *given_up, "git -c core.editor=vi commit", None, T4
+            ),
+            given_up,
         )
 
 
@@ -1064,7 +1072,7 @@ class HookRoundTripTests(unittest.TestCase):
         for runtime in (None, "codex"):
             with self.subTest(runtime=runtime):
                 decision, reason = self.invoke(
-                    f"git push --force origin feat; ./x; {RM_OUTSIDE}", runtime
+                    f"git -c core.editor=vi commit; ./x; {RM_OUTSIDE}", runtime
                 )
                 self.assertEqual(decision, "deny")
                 self.assertIn("A later segment:", reason)
@@ -1234,9 +1242,12 @@ class RemoteBudgetThreadingTests(unittest.TestCase):
 
     def test_core_re_checks_segments_with_the_shared_cache(self):
         calls = self._drive_main(
-            "git push --force origin main; ./build",
+            "git -c core.editor=vi commit; ./build",
             {"tier": 3, "flags": {}, "floor_posture": "core"},
-            first=("deny", "Force-push rewrites shared history."),
+            first=(
+                "deny",
+                "Inline Git config can change execution or destination semantics.",
+            ),
         )
         self.assertGreaterEqual(len(calls), 2, calls)
         self.assertEqual(len({id(cache) for _, cache, _ in calls}), 1)

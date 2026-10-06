@@ -101,8 +101,8 @@ intentionally conservative: reject anything it cannot prove safe.
 Invoked as a PreToolUse hook with `--event pre --runtime claude|codex`; reads the repo's tier
 from `.agent-harness/tier.json` (strictest of it and legacy `.claude/`) and emits the
 allow/ask/deny JSON. Contract (docstring + BLUEPRINT §2, SPECS §5-6):
-- The analyzer flags only the irreversible (force-push, rm -rf outside project, pipe-to-shell,
-  sudo, secret-file mutation); work-loss guards are tier-dependent; posture decides rendering
+- The analyzer flags only the irreversible (tag force/delete and --mirror since 1.8.0, rm -rf
+  outside project, pipe-to-shell, sudo, secret-file mutation); work-loss is tier-dependent
 - Posture (SPECS §5.4): below T4/wave the default is `core` (1.7.0, #356) — only local destruction
   (deletes outside the project, secrets, pipe-to-shell, sudo) is an acknowledgeable double-check
   (`# FLOOR_ACK=<key>`); `guide`/`wall` are declarable; T4/wave/sensitive keep the walls
@@ -137,9 +137,9 @@ repo (see `normalized_text_sha256` in harness.py), then, for every enabled consu
 - `templates/hooks/dispatch.py` is T4-class shared infrastructure regardless of this repo's
   tier: any change requires the smoke suite, the harness unit tests, and an independent
   read-only review before merge. It is FEATURE-FROZEN (BLUEPRINT §2; issue #96): only
-  false-positive fixes and the ratified #21 slices may change it — a new bypass family
-  becomes a `FLOOR_LIMITATIONS.md` line, never a fix — unless it regresses the SPECS §6
-  charter matrix in canonical form, which is always repaired.
+  false-positive fixes, the ratified #21 slices and owner-ratified exceptions in BLUEPRINT §2
+  may change it; a new bypass family becomes a `FLOOR_LIMITATIONS.md` line, never a fix,
+  unless it regresses the SPECS §6 charter matrix in canonical form (always repaired).
 - Keep `harness.py` and `dispatch.py` stdlib-only and portable across Windows/macOS/Linux.
 - Never hard-code a user profile path (audit flags it); discover `$HOME`, `$CODEX_HOME`, and
   Git roots at runtime.

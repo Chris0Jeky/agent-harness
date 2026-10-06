@@ -943,7 +943,7 @@ def _iter_jsonl(path: Path, stats: Counter[str]) -> Iterator[dict[str, Any]]:
                 continue
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 stats["unparsed-lines"] += 1
                 continue
             if isinstance(record, dict):
@@ -1169,11 +1169,20 @@ def run_import(args: argparse.Namespace) -> int:
         return 2
     terms: list[str] = []
     if args.redact_terms:
-        terms = [
-            line.strip()
-            for line in Path(args.redact_terms).read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        try:
+            terms = [
+                line.strip()
+                for line in Path(args.redact_terms)
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+        except (OSError, UnicodeDecodeError):
+            print(
+                f"import: cannot read --redact-terms file: {args.redact_terms}",
+                flush=True,
+            )
+            return 2
     stats: Counter[str] = Counter()
     sources: list[tuple[str, Iterator[tuple[str, str, str | None]]]] = []
     claude_root = _root(args.claude_root, ".claude", "projects")

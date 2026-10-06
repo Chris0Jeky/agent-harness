@@ -17,6 +17,9 @@ option in a subcommand that cannot parse it:
   `--force-with-lease` denied the only spelling agents type while `--force`
   was unaffected. Only an UNQUOTED redirection is structure the shell eats:
   quoted, `"2>&1"` is an ordinary argv entry and stays a lease destination.
+  Since floor 1.8.0 (#356 step 2) branch force and lease proceed; the same
+  stripped operand list now feeds the tag guard, so a redirection still must
+  not hide a tag destination.
 
 The risk in all three is the one from #25/#29: a relaxation removes whatever
 coverage the over-broad rule was providing by accident. So every case is pinned
@@ -259,7 +262,9 @@ FORMAT_PATCH_TERMINATOR_STILL_TRUNCATES = (
 
 # ---------------------------------------------------------------- issue #44
 
-LEASE_WITH_REDIRECT_ALLOWED = (
+# Floor 1.8.0: a forced or leased BRANCH push proceeds at every tier, T4
+# included, whatever redirection follows it.
+FORCED_BRANCH_WITH_REDIRECT_ALLOWED = (
     "git push --force-with-lease origin fix/x",
     "git push --force-with-lease origin fix/x | tail -4",
     "git push --force-with-lease origin fix/x 2>&1",
@@ -271,91 +276,47 @@ LEASE_WITH_REDIRECT_ALLOWED = (
     "git push --force-with-lease origin feat/y 1>out.txt 2>&1",
     "git push --force-with-lease origin feat/y &> out.txt",
     "git push --force-with-lease origin chore/z 2>&1 | Select-Object -Last 4",
-    # Bash's NAMED descriptor. Bash consumes `{log}>out` exactly like `2>out`,
-    # so leaving it in argv read it as a third positional and refused a lease
-    # push bash would have handed Git as two (PR #70 review).
     "git push --force-with-lease origin fix/x {log}>out",
     "git push --force-with-lease origin fix/x {fd}>>push.log",
     "git push --force-with-lease origin feat/y {log}>out 2>&1",
-)
-
-LEASE_NON_FEATURE_STILL_DENIED = (
-    # the destination the guard exists for, with every redirect spelling
     "git push --force-with-lease origin main 2>&1",
-    "git push --force-with-lease origin main > out.txt",
-    "git push --force-with-lease origin main 2>/dev/null",
-    "git push --force-with-lease origin master >out.txt",
-    "git push --force-with-lease origin develop 2>&1 | tail -4",
-    "git push --force-with-lease origin refs/tags/v1 2>&1",
-    "git push --force-with-lease origin HEAD:main 2>&1",
-    # a redirect must not hide a second destination
+    "git push --force origin main > out.txt",
+    "git push -f origin HEAD:main 2>&1",
     "git push --force-with-lease origin fix/x main 2>&1",
-    "git push --force-with-lease origin 2>&1 main",
-    "git push --force-with-lease origin fix/x 2>&1 master",
-    # no refspec at all is still not an explicit feature branch
-    "git push --force-with-lease 2>&1",
-    "git push --force-with-lease origin 2>&1",
-    "git push --force-with-lease --all origin fix/x 2>&1",
-    "git push --force-with-lease --tags origin fix/x 2>&1",
-    # the dangerous verb is untouched by the redirect handling
-    "git push --force origin fix/x 2>&1",
-    "git push -f origin fix/x 2>&1",
-    "git push --force origin fix/x > out.txt",
-    # ... including behind the named descriptor, so admitting that spelling
-    # cannot become a way to hide a destination or a force.
-    "git push --force origin fix/x {log}>out",
-    "git push --force-with-lease origin main {log}>out",
-    "git push --force-with-lease origin fix/x {log}>out master",
-)
-
-# The other direction of the SAME fix. Quoting turns a redirection into data:
-# the shell hands git the literal argv entry `2>&1`, `git check-ref-format
-# --branch '2>&1'` accepts that name, and the push creates `refs/heads/2>&1`.
-# So a quoted redirect lookalike is a lease DESTINATION and must be judged as
-# one -- stripping it would smuggle a non-feature branch past the guard, which
-# is what the first cut of the #44 fix did (PR #70 review).
-LEASE_QUOTED_REDIRECT_LOOKALIKES_DENIED = (
+    "git push --force-with-lease --all origin 2>&1",
     'git push --force-with-lease origin fix/x "2>&1"',
-    "git push --force-with-lease origin fix/x '2>&1'",
-    'git push --force-with-lease origin fix/x "2>/dev/null"',
-    'git push --force-with-lease origin fix/x "> out.txt"',
-    "git push --force-with-lease origin fix/x '>out'",
-    'git push --force-with-lease origin fix/x ">>push.log"',
-    'git push --force-with-lease origin "2>&1"',
-    'git push --force-with-lease origin fix/x "2>&1" | tail -4',
-    # provenance has to survive the recursion into a nested shell too
+    "git push --force-with-lease origin fix/x 2 >out.txt",
     "bash -c 'git push --force-with-lease origin fix/x \"2>&1\"'",
 )
 
-# ...and quoting an ordinary feature branch must not start denying it: the fix
-# only stops treating quoted text as shell structure.
-LEASE_QUOTED_FEATURE_STILL_ALLOWED = (
-    'git push --force-with-lease origin "fix/x"',
-    "git push --force-with-lease origin 'feat/y' 2>&1",
-    'git push --force-with-lease origin "chore/z" > out.txt',
-    "bash -c 'git push --force-with-lease origin fix/x 2>&1'",
+# The stripped operand list feeds the tag guard: no redirection spelling, before
+# or after the tag, may hide it, and neither may a named descriptor.
+TAG_DESTINATION_BEHIND_A_REDIRECT_DENIED = (
+    "git push --force-with-lease origin refs/tags/v1 2>&1",
+    "git push --force-with-lease origin refs/tags/v1 > out.txt",
+    "git push --force-with-lease origin refs/tags/v1 2>/dev/null",
+    "git push --force origin refs/tags/v1 >out.txt",
+    "git push -f origin refs/tags/v1 2>&1 | tail -4",
+    "git push --force-with-lease origin HEAD:refs/tags/v1 2>&1",
+    "git push --force-with-lease origin fix/x refs/tags/v1 2>&1",
+    "git push --force-with-lease origin 2>&1 refs/tags/v1",
+    "git push --force-with-lease origin fix/x 2>&1 refs/tags/v1",
+    "git push --force-with-lease --tags origin fix/x 2>&1",
+    "git push --force origin refs/tags/v1 {log}>out",
+    "git push --force-with-lease origin fix/x {log}>out refs/tags/v1",
+    "git push origin :refs/tags/v1 2>&1",
+    "git push origin +refs/tags/v1 > out.txt",
+    "git push --mirror origin 2>&1",
 )
 
-# A DETACHED numeric token is a refspec, not a file descriptor. Measured on
-# bash 5.2: `f z 2 >out` passes `[z] [2]` to `f`, while `f y 2>&1` passes only
-# `[y]` -- the descriptor has to be glued to the operator. The whitespace pass
-# preserves that spacing, so it must not pop the preceding token; popping it hid
-# a non-feature refspec from the lease guard (PR #70 review).
-LEASE_SPACED_DESCRIPTOR_IS_A_REFSPEC = (
-    "git push --force-with-lease origin fix/x 2 >out.txt",
-    "git push --force-with-lease origin fix/x 2 > out.txt",
-    "git push --force-with-lease origin fix/x 2 >& 1",
-    "git push --force-with-lease origin fix/x 1 >>push.log",
-)
-
-# The other direction of that same fix: a GLUED descriptor really is consumed by
-# the shell, and so is bash's noclobber override `>|` -- which used to leave its
-# target behind in the destination list and deny (PR #70 review).
+# A glued descriptor and bash's noclobber override `>|` are consumed whole, so
+# nothing they name reaches the operand list (PR #70 review).
 COMPLETE_REDIRECTION_OPERATORS_ALLOWED = (
     "git push --force-with-lease origin fix/x 2>out.txt",
     "git push --force-with-lease origin fix/x >| out.txt",
     "git push --force-with-lease origin fix/x >|out.txt",
     "git push --force-with-lease origin fix/x 2>| err.log",
+    "git push --force origin fix/x >| refs/tags/v1",
 )
 
 # ---------------------------------------------------------------- PR #70 r2
@@ -636,35 +597,30 @@ class SwallowedOptionTerminatorTests(unittest.TestCase):
 class PushRedirectionTests(unittest.TestCase):
     """Issue #44: the shell eats redirections, so the operand walk must too."""
 
-    def test_lease_on_a_feature_branch_survives_a_redirect(self):
-        for command in LEASE_WITH_REDIRECT_ALLOWED:
-            for tier in (1, 2, 3):
+    def test_a_forced_branch_push_survives_a_redirect_at_every_tier(self):
+        for command in FORCED_BRANCH_WITH_REDIRECT_ALLOWED:
+            for tier in TIERS:
                 with self.subTest(command=command, tier=tier):
                     decision, reason = decide(command, tier)
                     self.assertEqual(decision, "allow", f"{command} -> {reason}")
 
-    def test_lease_is_still_a_t4_force_variant(self):
-        for command in LEASE_WITH_REDIRECT_ALLOWED:
-            with self.subTest(command=command):
-                decision, _reason = decide(command, 4)
-                self.assertEqual(decision, "deny", command)
-
-    def test_non_feature_lease_destinations_still_deny_at_every_tier(self):
-        for command in LEASE_NON_FEATURE_STILL_DENIED:
+    def test_a_redirect_never_hides_a_tag_destination(self):
+        for command in TAG_DESTINATION_BEHIND_A_REDIRECT_DENIED:
             for tier in TIERS:
                 with self.subTest(command=command, tier=tier):
-                    decision, _reason = decide(command, tier)
-                    self.assertNotEqual(decision, "allow", command)
+                    decision, reason = decide(command, tier)
+                    self.assertEqual(decision, "deny", command)
+                    self.assertIn("[tag-guard]", reason)
 
-    def test_the_fix_is_scoped_to_the_lease_destinations(self):
-        """Nothing but the lease path may change verdict.
+    def test_the_fix_is_scoped_to_the_tag_guard_operands(self):
+        """The strip decides only the tag guard's operands.
 
         The same parser bug also loosens the refspec-LESS guard (a redirect
         makes `git push origin 2>&1` look like it carries an explicit refspec),
         but stripping there is a TIGHTENING: a corpus replay measured 135 unique
         `cd <repo> && git push 2>&1 | tail -3` commands moving allow ->
-        [push-config-unverifiable]. That bypass is tracked as issue #65, so this
-        slice must leave those verdicts exactly where it found them.
+        [push-config-unverifiable]. That bypass is tracked as issue #65, so
+        these verdicts stay exactly where they were.
         """
         for tier in TIERS:
             for command in (
@@ -675,9 +631,9 @@ class PushRedirectionTests(unittest.TestCase):
                 with self.subTest(tier=tier, command=command):
                     self.assertEqual(decide(command, tier)[0], "allow")
         # `git push 2>&1` is the one shape the two tokenizers already disagreed
-        # about before this change (the sanitized pass keeps `2>&1` as a single
-        # token, so it counts one positional and the T4 opacity rule fires).
-        # Unchanged here, and pinned so a later slice notices when it moves.
+        # about (the sanitized pass keeps `2>&1` as a single token, so it counts
+        # one positional and the T4 opacity rule fires). Pinned so a later
+        # slice notices when it moves.
         for tier in (1, 2, 3):
             with self.subTest(tier=tier):
                 self.assertEqual(decide("git push 2>&1", tier)[0], "allow")
@@ -731,20 +687,6 @@ class PushRedirectionTests(unittest.TestCase):
         self.assertEqual(strip(["origin", "main"]), ["origin", "main"])
         self.assertEqual(strip([]), [])
 
-    def test_a_quoted_redirect_lookalike_stays_a_lease_destination(self):
-        for command in LEASE_QUOTED_REDIRECT_LOOKALIKES_DENIED:
-            for tier in TIERS:
-                with self.subTest(command=command, tier=tier):
-                    decision, _reason = decide(command, tier)
-                    self.assertNotEqual(decision, "allow", command)
-
-    def test_quoting_a_feature_branch_does_not_start_denying_it(self):
-        for command in LEASE_QUOTED_FEATURE_STILL_ALLOWED:
-            for tier in (1, 2, 3):
-                with self.subTest(command=command, tier=tier):
-                    decision, reason = decide(command, tier)
-                    self.assertEqual(decision, "allow", f"{command} -> {reason}")
-
     def test_the_strip_runs_before_quoted_spans_are_decoded(self):
         """The masked token carries no redirection character, so it survives.
 
@@ -773,23 +715,12 @@ class PushRedirectionTests(unittest.TestCase):
             ["origin", "fix/x"],
         )
 
-    def test_a_spaced_descriptor_is_a_refspec_not_a_descriptor(self):
-        for command in LEASE_SPACED_DESCRIPTOR_IS_A_REFSPEC:
-            for tier in TIERS:
-                with self.subTest(command=command, tier=tier):
-                    decision, _reason = decide(command, tier)
-                    self.assertNotEqual(decision, "allow", command)
-
     def test_complete_redirection_operators_are_still_consumed(self):
         for command in COMPLETE_REDIRECTION_OPERATORS_ALLOWED:
-            for tier in (1, 2, 3):
+            for tier in TIERS:
                 with self.subTest(command=command, tier=tier):
                     decision, reason = decide(command, tier)
                     self.assertEqual(decision, "allow", f"{command} -> {reason}")
-
-    def test_dropping_operands_fails_closed(self):
-        """An emptied destination list must refuse, not vacuously pass."""
-        self.assertFalse(dispatch.force_with_lease_targets_are_features([]))
 
 
 if __name__ == "__main__":

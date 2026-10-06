@@ -7338,6 +7338,132 @@ def nearest_available_skill_directory(path: Path, label: str) -> Path:
     return candidate
 
 
+def skill_destination_anchor(path: Path, label: str) -> tuple[Path, tuple[str, ...]]:
+    """Split ``path`` into its nearest existing directory and the names below it."""
+    candidate = path
+    while not candidate.is_dir():
+        if candidate.parent == candidate:
+            raise HarnessError(f"{label} has no available ancestor: {path}")
+        candidate = candidate.parent
+    return candidate, path.relative_to(candidate).parts
+
+
+def skill_name_chains_alias(
+    anchor: Path, longer: tuple[str, ...], shorter: tuple[str, ...]
+) -> bool:
+    """Return whether ``shorter`` names the leading entries of ``longer``.
+
+    Both chains are absent names below ``anchor``. Equal spellings match
+    outright; any other pair is settled by the anchor's own lookup, using a
+    disposable probe tree that is removed before returning.
+    """
+    count = len(shorter)
+    if len(longer) < count:
+        return False
+    if count == 0 or tuple(longer[:count]) == shorter:
+        return True
+    created: list[Path] = []
+    try:
+        try:
+            scratch = Path(tempfile.mkdtemp(prefix=".harness-name-probe-", dir=anchor))
+            created.append(scratch)
+            sensitive = (
+                skill_directory_case_sensitive(anchor) if os.name == "nt" else None
+            )
+            if sensitive is not None and (
+                skill_directory_case_sensitive(scratch) != sensitive
+            ):
+                skill_directory_case_sensitive(scratch, sensitive)
+            current = scratch
+            for name in longer[:count]:
+                current = current / name
+                current.mkdir()
+                created.append(current)
+                if sensitive is not None and (
+                    skill_directory_case_sensitive(current) != sensitive
+                ):
+                    skill_directory_case_sensitive(current, sensitive)
+            current = scratch
+            for name in shorter:
+                current = current / name
+                if not os.path.lexists(current):
+                    return False
+            return True
+        finally:
+            for path in reversed(created):
+                path.rmdir()
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot preflight selected skill roots: {anchor}: {exc}"
+        ) from exc
+
+
+def skill_destination_directories_alias(left: Path, right: Path, label: str) -> bool:
+    """Return whether two destination directories are one by native lookup."""
+    if str(left) == str(right):
+        return True
+    left_anchor, left_names = skill_destination_anchor(left, label)
+    right_anchor, right_names = skill_destination_anchor(right, label)
+    return (
+        len(left_names) == len(right_names)
+        and left_anchor.samefile(right_anchor)
+        and skill_name_chains_alias(left_anchor, left_names, right_names)
+    )
+
+
+def skill_destination_within(
+    inner: tuple[Path, tuple[str, ...]], outer: tuple[Path, tuple[str, ...]]
+) -> bool:
+    """Return whether the ``inner`` destination is the ``outer`` one or beneath it."""
+    inner_anchor, inner_names = inner
+    outer_anchor, outer_names = outer
+    if not outer_names:
+        return any(
+            candidate.samefile(outer_anchor)
+            for candidate in (inner_anchor, *inner_anchor.parents)
+        )
+    return (
+        len(inner_names) >= len(outer_names)
+        and inner_anchor.samefile(outer_anchor)
+        and skill_name_chains_alias(inner_anchor, inner_names, outer_names)
+    )
+
+
+def preflight_skill_destination_overlap(
+    codex_targets: list[Path], claude_targets: list[Path]
+) -> None:
+    """Refuse a Codex skill root nested inside a Claude one, or the reverse.
+
+    Same-parent siblings are the name probe's concern; here one family's
+    effective destination lies inside the other family's selected target, so
+    installing one tree would add paths the other lane then refuses as unknown.
+    Existing and absent targets are compared by directory identity and by the
+    nearest existing ancestor's lookup. Nothing is reserved or copied.
+    """
+    label = "skill destination"
+    try:
+        codex = [skill_destination_anchor(target, label) for target in codex_targets]
+        claude = [skill_destination_anchor(target, label) for target in claude_targets]
+        for codex_target, codex_entry in zip(codex_targets, codex):
+            for claude_target, claude_entry in zip(claude_targets, claude):
+                codex_inside = skill_destination_within(codex_entry, claude_entry)
+                claude_inside = skill_destination_within(claude_entry, codex_entry)
+                if codex_inside == claude_inside:
+                    continue  # unrelated, or the same root (the name probe's case)
+                outer, inner = (
+                    (claude_target, codex_target)
+                    if codex_inside
+                    else (codex_target, claude_target)
+                )
+                raise HarnessError(
+                    f"selected skill destinations overlap: {outer} contains {inner}"
+                )
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot compare selected skill destinations: {exc}"
+        ) from exc
+
+
 def preflight_selected_skill_roots(
     targets: list[Path],
     backup_parent: Path | None,
@@ -7352,15 +7478,29 @@ def preflight_selected_skill_roots(
     copies of ``backup_targets``, is probed with name-only directories before
     any live or backup write, whether the destination is absent or populated.
     """
-    if len(targets) < 2:
+    if len(targets) < 2 and (backup_parent is None or len(backup_targets) < 2):
         return
-    by_parent: dict[Path, list[str]] = {}
+    by_parent: list[tuple[Path, list[str]]] = []
     for target in targets:
         reject_sync_path_aliases(target, label)
-        by_parent.setdefault(target.parent, []).append(target.name)
-    checks = [
-        (parent, sorted(names)) for parent, names in by_parent.items() if len(names) > 1
-    ]
+        parent = target.parent
+        try:
+            for known, names in by_parent:
+                # Path equality case-folds on Windows even in sensitive directories.
+                # Parents group by filesystem identity: the nearest existing
+                # ancestor plus that directory's own lookup of the absent names
+                # below it, so differently spelled absent parents still group
+                # before their first installation.
+                if skill_destination_directories_alias(parent, known, label):
+                    names.append(target.name)
+                    break
+            else:
+                by_parent.append((parent, [target.name]))
+        except OSError as exc:
+            raise HarnessError(
+                f"cannot inspect skill destination parent: {parent}: {exc}"
+            ) from exc
+    checks = [(parent, sorted(names)) for parent, names in by_parent if len(names) > 1]
     if backup_parent is not None and len(backup_targets) > 1:
         checks.append((backup_parent, sorted(target.name for target in backup_targets)))
     for parent, names in checks:
@@ -7955,6 +8095,9 @@ def read_managed_codex_agents_state(state_path: Path) -> dict[str, str]:
 
 
 WINDOWS_DACL_SECURITY_INFORMATION = 0x4
+WINDOWS_OWNER_SECURITY_INFORMATION = 0x1
+WINDOWS_LABEL_SECURITY_INFORMATION = 0x10
+WINDOWS_ERROR_INVALID_OWNER = 1307
 
 
 def windows_security_libraries() -> tuple[Any, Any]:
@@ -8017,17 +8160,20 @@ def windows_security_libraries() -> tuple[Any, Any]:
 
 def windows_file_dacl_descriptor(path: Path) -> bytes:
     """Return an existing file's self-relative DACL descriptor, protection flag included."""
+    return windows_file_security_descriptor(path, WINDOWS_DACL_SECURITY_INFORMATION)
+
+
+def windows_file_security_descriptor(path: Path, information: int) -> bytes:
+    """Return the self-relative descriptor holding the requested parts of a file."""
     advapi, _kernel = windows_security_libraries()
     needed = ctypes.c_uint32(0)
-    advapi.GetFileSecurityW(
-        str(path), WINDOWS_DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(needed)
-    )
+    advapi.GetFileSecurityW(str(path), information, None, 0, ctypes.byref(needed))
     if needed.value == 0:
         raise ctypes.WinError(ctypes.get_last_error())
     buffer = ctypes.create_string_buffer(needed.value)
     if not advapi.GetFileSecurityW(
         str(path),
-        WINDOWS_DACL_SECURITY_INFORMATION,
+        information,
         buffer,
         needed.value,
         ctypes.byref(needed),
@@ -8057,6 +8203,105 @@ def windows_dacl_signature(descriptor: bytes) -> tuple[bool, bool, str]:
         raise OSError(f"unrecognised DACL descriptor: {sddl!r}")
     flags = re.findall(r"P|AI|AR|NO_ACCESS_CONTROL", match.group(1))
     return "P" in flags, "NO_ACCESS_CONTROL" in flags, match.group(2)
+
+
+def windows_descriptor_sddl(descriptor: bytes, information: int) -> str:
+    """Render the requested parts of a self-relative descriptor as SDDL."""
+    advapi, kernel = windows_security_libraries()
+    buffer = ctypes.create_string_buffer(descriptor)
+    text = ctypes.c_void_p()
+    if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        buffer, 1, information, ctypes.byref(text), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(text.value)
+    finally:
+        kernel.LocalFree(text)
+
+
+def windows_descriptor_owner(descriptor: bytes) -> str:
+    """Return a descriptor's owner as SDDL renders it; both compared sides render alike."""
+    sddl = windows_descriptor_sddl(descriptor, WINDOWS_OWNER_SECURITY_INFORMATION)
+    return sddl[2:] if sddl.startswith("O:") else ""
+
+
+def windows_label_signature(descriptor: bytes) -> tuple[tuple[str, str], ...]:
+    """Return the sorted (mask, SID) pairs of a descriptor's mandatory-label ACEs."""
+    sddl = windows_descriptor_sddl(descriptor, WINDOWS_LABEL_SECURITY_INFORMATION)
+    pairs = []
+    for ace in re.findall(r"\(ML;[^)]*\)", sddl):
+        fields = ace[1:-1].split(";")
+        pairs.append((fields[2], fields[5]))
+    return tuple(sorted(pairs))
+
+
+def windows_set_file_label(path: Path, descriptor: bytes) -> None:
+    """Apply the mandatory label carried by a self-relative descriptor to a file."""
+    advapi, _kernel = windows_security_libraries()
+    advapi.SetFileSecurityW.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    advapi.SetFileSecurityW.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(descriptor)
+    if not advapi.SetFileSecurityW(
+        str(path), WINDOWS_LABEL_SECURITY_INFORMATION, buffer
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def windows_token_default_owner() -> str:
+    """Return the token's default owner (TokenOwner) rendered like a descriptor owner."""
+    advapi, kernel = windows_security_libraries()
+    token = ctypes.c_void_p()
+    if not advapi.OpenProcessToken(
+        kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)  # TOKEN_QUERY
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = ctypes.c_uint32(0)
+        advapi.GetTokenInformation(token, 4, None, 0, ctypes.byref(needed))  # Owner
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        owner = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, 4, owner, needed.value, ctypes.byref(needed)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(token)
+    # TOKEN_OWNER holds one SID pointer.
+    sid_text = ctypes.c_void_p()
+    if not advapi.ConvertSidToStringSidW(
+        ctypes.c_void_p.from_buffer(owner).value, ctypes.byref(sid_text)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = f"O:{ctypes.wstring_at(sid_text.value)}"
+    finally:
+        kernel.LocalFree(sid_text)
+    descriptor = ctypes.c_void_p()
+    size = ctypes.c_uint32(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return windows_descriptor_owner(ctypes.string_at(descriptor.value, size.value))
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def windows_discard_staging_file(descriptor: int, temporary: Path) -> None:
+    """Close and remove a reserved staging sibling that never received any byte."""
+    os.close(descriptor)
+    try:
+        temporary.unlink(missing_ok=True)
+    except PermissionError:
+        temporary.chmod(stat.S_IREAD | stat.S_IWRITE)
+        temporary.unlink()
 
 
 def windows_owner_only_descriptor() -> bytes:
@@ -8180,28 +8425,111 @@ def write_managed_codex_file(
         if os.name == "nt":
             # A renamed sibling keeps its own DACL, so it must be the destination's: an
             # inherited parent DACL could broaden a deliberately restricted file (#431).
-            security = (
-                windows_file_dacl_descriptor(path)
-                if path.exists()
-                else windows_owner_only_descriptor()
-            )
+            # An existing destination also lends its owner and mandatory label (#435).
+            fallback: bytes | None = None
+            label: bytes | None = None
+            if path.exists():
+                security = windows_file_security_descriptor(
+                    path,
+                    WINDOWS_OWNER_SECURITY_INFORMATION
+                    | WINDOWS_DACL_SECURITY_INFORMATION,
+                )
+                fallback = windows_file_dacl_descriptor(path)
+                label = windows_file_security_descriptor(
+                    path, WINDOWS_LABEL_SECURITY_INFORMATION
+                )
+            else:
+                security = windows_owner_only_descriptor()
             read_only = mode is not None and not mode & stat.S_IWRITE
             requested = windows_dacl_signature(security)
-            descriptor, temporary = windows_create_staging_file(
-                path.parent, ".harness-agent-", security, read_only
-            )
-            # Prove the created DACL before any byte exists: refuse rather than publish
-            # if Windows merged parent entries or dropped the requested protection.
+            owner_fallback = False
             try:
-                staged = windows_dacl_signature(windows_file_dacl_descriptor(temporary))
-            except OSError:
-                os.close(descriptor)
+                descriptor, temporary = windows_create_staging_file(
+                    path.parent, ".harness-agent-", security, read_only
+                )
+            except OSError as exc:
+                if (
+                    fallback is None
+                    or getattr(exc, "winerror", None) != WINDOWS_ERROR_INVALID_OWNER
+                ):
+                    raise
+                # The caller cannot assign that SID as owner (#435).
+                owner_fallback = True
+                descriptor, temporary = windows_create_staging_file(
+                    path.parent, ".harness-agent-", fallback, read_only
+                )
+            # Prove the created DACL, owner and label before any byte exists: refuse
+            # rather than publish if Windows merged parent entries or dropped protection.
+            try:
+                staged_security = windows_file_security_descriptor(
+                    temporary,
+                    WINDOWS_OWNER_SECURITY_INFORMATION
+                    | WINDOWS_DACL_SECURITY_INFORMATION,
+                )
+                if (
+                    fallback is not None
+                    and not owner_fallback
+                    and windows_descriptor_owner(staged_security)
+                    != windows_descriptor_owner(security)
+                ):
+                    # The requested owner did not stick: start over without one.
+                    owner_fallback = True
+                    old_descriptor, old_temporary = descriptor, temporary
+                    temporary = None
+                    windows_discard_staging_file(old_descriptor, old_temporary)
+                    descriptor, temporary = windows_create_staging_file(
+                        path.parent, ".harness-agent-", fallback, read_only
+                    )
+                    staged_security = windows_file_security_descriptor(
+                        temporary,
+                        WINDOWS_OWNER_SECURITY_INFORMATION
+                        | WINDOWS_DACL_SECURITY_INFORMATION,
+                    )
+                if windows_dacl_signature(staged_security) != requested:
+                    raise HarnessError(
+                        f"staging file did not receive the destination's DACL; "
+                        f"refusing publication: {path}"
+                    )
+                if (
+                    owner_fallback
+                    and windows_descriptor_owner(staged_security)
+                    != windows_token_default_owner()
+                ):
+                    raise HarnessError(
+                        f"staging file is owned by neither the destination's owner "
+                        f"nor this token's default owner; refusing publication: {path}"
+                    )
+                if label is not None:
+                    # Always read back: an unlabelled destination must not gain a
+                    # label the staging file inherited from its parent directory.
+                    wanted_label = windows_label_signature(label)
+                    try:
+                        if wanted_label:
+                            windows_set_file_label(temporary, label)
+                        staged_label = windows_label_signature(
+                            windows_file_security_descriptor(
+                                temporary, WINDOWS_LABEL_SECURITY_INFORMATION
+                            )
+                        )
+                    except OSError as exc:
+                        raise HarnessError(
+                            f"cannot carry the destination's mandatory label to the "
+                            f"staging file; refusing publication: {path}: {exc}"
+                        ) from exc
+                    if staged_label != wanted_label:
+                        raise HarnessError(
+                            f"staging file's mandatory label differs from the "
+                            f"destination's; refusing publication: {path}"
+                        )
+            except BaseException:
+                if temporary is not None:
+                    os.close(descriptor)
                 raise
-            if staged != requested:
-                os.close(descriptor)
-                raise HarnessError(
-                    f"staging file did not receive the destination's DACL; "
-                    f"refusing publication: {path}"
+            if owner_fallback:
+                print(
+                    f"note: Windows refused the existing owner of {path}; the "
+                    f"replacement is owned by this token's default owner",
+                    file=sys.stderr,
                 )
         else:
             descriptor, temporary_name = tempfile.mkstemp(
@@ -10826,11 +11154,22 @@ def sync_global(args: argparse.Namespace) -> int:
             for name in sorted(selected_skills)
         ]
     )
+    assert claude_home is not None or not selected_claude_skills
+    claude_skill_actions = [
+        (config_root / "skills" / name, claude_home / "skills" / name)
+        for name in sorted(selected_claude_skills)
+    ]
+    # Both families can be pointed at the same parent. Validate their combined
+    # names before either lane plans recovery or mutates a live destination.
     preflight_selected_skill_roots(
+        [target for _source, target in [*skill_actions, *claude_skill_actions]],
+        None,
+        [],
+        "skill destination",
+    )
+    preflight_skill_destination_overlap(
         [target for _source, target in skill_actions],
-        codex_home / "backups" if codex_home is not None else None,
-        [target for _source, target in skill_actions if target.exists()],
-        "Codex skill destination",
+        [target for _source, target in claude_skill_actions],
     )
     skill_states = []
     for source, target in skill_actions:
@@ -10838,18 +11177,7 @@ def sync_global(args: argparse.Namespace) -> int:
         if not equal:
             preflight_skill_source_names(source, target)
         skill_states.append((source, target, equal))
-    assert claude_home is not None or not selected_claude_skills
-    claude_skill_actions = [
-        (config_root / "skills" / name, claude_home / "skills" / name)
-        for name in sorted(selected_claude_skills)
-    ]
     claude_skill_states: list[tuple[Path, Path, str, str | None, bool]] = []
-    preflight_selected_skill_roots(
-        [target for _source, target in claude_skill_actions],
-        claude_home / ".harness-backups" if claude_home is not None else None,
-        [target for _source, target in claude_skill_actions],
-        "Claude skill destination",
-    )
     for source, target in claude_skill_actions:
         source_digest, target_digest, equal = preflight_claude_skill(source, target)
         claude_skill_states.append(
@@ -10865,6 +11193,16 @@ def sync_global(args: argparse.Namespace) -> int:
             [skills_home, *(source for source, _target in skill_actions)],
             "Codex skill backup",
         )
+        preflight_selected_skill_roots(
+            [],
+            codex_skill_backup_parent,
+            [
+                target
+                for _source, target, equal in skill_states
+                if not equal and target.exists()
+            ],
+            "Codex skill backup",
+        )
     claude_skill_backup_parent: Path | None = None
     if selected_claude_skills:
         assert claude_home is not None
@@ -10872,6 +11210,18 @@ def sync_global(args: argparse.Namespace) -> int:
         preflight_sync_backup_parent(
             claude_skill_backup_parent,
             [path for action in claude_skill_actions for path in action],
+            "Claude skill backup",
+        )
+        # Every changed Claude tree is staged here, including absent targets;
+        # an identical tree needs neither a staging slot nor a recovery copy.
+        preflight_selected_skill_roots(
+            [],
+            claude_skill_backup_parent,
+            [
+                target
+                for _source, target, _sd, _td, equal in claude_skill_states
+                if not equal
+            ],
             "Claude skill backup",
         )
     agent_source = codex_source / "agents"

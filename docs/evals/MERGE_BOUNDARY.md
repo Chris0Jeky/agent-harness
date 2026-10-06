@@ -32,7 +32,7 @@ not new requirements or blanket certification of every test.
 |---|---|
 | Exact unit, parser, build, or artifact-contract check | Specified property for tested inputs and revision |
 | Harness Verify floor/smoke assertions | Named policy/wiring cases, not universal safety or live activation |
-| Taskdeck backend/API/migration contract tests | Checked behavior/state transitions, not UX or production reliability |
+| Private product backend/API/migration contract tests | Checked behavior/state transitions, not UX or production reliability |
 | Controlled tool/trajectory/scenario invariant | Declared effects or sequence contract in its stated environment |
 
 ### Advisory-only: no merge authority
@@ -42,7 +42,7 @@ not new requirements or blanket certification of every test.
 | LLM judgments and review-bot findings/approvals | Investigation and counterexamples |
 | Vendor/benchmark scores, pass@k/pass^k, coverage or mutation percentages | Bounded study interpretation, not accepting this SHA |
 | Spans, dashboards, cost/latency, missing telemetry, live quality estimates | Operational diagnosis |
-| HQ completeness or imported source verdicts | Descriptive indexing; `gate_eligible: false` |
+| Control-plane completeness or imported source verdicts | Descriptive indexing; `gate_eligible: false` |
 
 ### Never
 
@@ -50,9 +50,9 @@ not new requirements or blanket certification of every test.
   or consensus judgments.
 - Require an advisory bot's approval, silence, completion, availability, or
   catch-rate claim, directly or through an aggregate status.
-- Substitute vendor rank, benchmark score, or Muse computer-use output for a
+- Substitute vendor rank, benchmark score, or local-swarm computer-use output for a
   repository-owned correctness contract.
-- Turn telemetry presence/absence or HQ coverage into a merge gate.
+- Turn telemetry presence/absence or control-plane coverage into a merge gate.
 - Treat valid JSON, digests, screenshots, or self-reported PASS as proof of
   execution or semantic correctness.
 - Let an agent-generated expectation appoint itself authoritative.
@@ -116,12 +116,12 @@ under the owning repository's policy. This proposal does not silently demote it,
 waive red, invent a bypass, or change branch protection. The #300/#304 docs-only
 instruction is not a general fail-open policy.
 
-### Telemetry, rollout, and HQ stay separate
+### Telemetry, rollout, and the control plane stay separate
 
-**FACT:** [agent-hq#10](https://github.com/Chris0Jeky/agent-hq/issues/10), created
+**FACT:** A private control-plane issue, created
 2026-09-22, requires coverage to remain descriptive with `authority: "none"` and
 `gate_eligible: false`. **INFER:** Importing a source verdict must not transfer its
-authority to HQ. A complete packet, an empty findings list, or a successfully
+authority to the control plane. A complete packet, an empty findings list, or a successfully
 generated report can coexist with a failed product assertion.
 
 **INFER:** Testing a telemetry serializer against pinned fixtures is a software
@@ -149,7 +149,7 @@ new CI fixtures. Review them within the existing process; no extra review round.
 | Hermetic scenario checks durable state and forbidden side effects | Potentially gate-eligible after adoption | Bounded reproducible behavioral contract |
 | Live agent trial has an exact final-state comparator | Advisory capability evidence in v0 | Trial remains stochastic/uncontrolled |
 | Production span is missing or exporter fails | Advisory missing evidence | Telemetry is not a merge prerequisite |
-| HQ coverage_complete is true | Descriptive; gate-ineligible | Completeness is not correctness |
+| Control-plane coverage_complete is true | Descriptive; gate-ineligible | Completeness is not correctness |
 | Bot finding reproduced by a reviewed regression test | New test may qualify; bot remains advisory | Authority belongs to the independent contract |
 | Negative control fails to start because credentials are absent | Setup failure, not sensitivity proof | Intended boundary was not exercised |
 | Judge adapter parser rejects malformed input | Exact parser test may qualify | Does not judge semantic correctness |
@@ -179,9 +179,9 @@ Inspected 2026-09-23 at agent-harness
 | [AGENTS](../../AGENTS.md), [tier declaration](../../.agent-harness/tier.json), [REVIEW_EVIDENCE](../REVIEW_EVIDENCE.md) | Existing verification and authority owners | No authority setting changed; root-prose drift remains separate |
 | [Hosted CI](../../.github/workflows/ci.yml) | Verify runs unit/replay/smoke/lint/format/compile checks | This document does not certify all oracles or their latest executions |
 | [Floor limitations](../../FLOOR_LIMITATIONS.md) | Floor scope limits have an existing home | The ledger is not a merge verdict; static tests are not runtime activation |
-| [Taskdeck CI](https://github.com/Chris0Jeky/Taskdeck/blob/56e4b6acbca399aa2b98e612270c0cc282a41996/.github/workflows/ci-required.yml) | Backend/API/migration job calls at that revision | Source inspection, not a test run or changes to Taskdeck policy |
+| A private product repository's required-CI workflow | Backend/API/migration job calls at the inspected revision | Source inspection, not a test run or changes to that product's policy |
 | [BENCHMARKS](../BENCHMARKS.md), snapshot 2026-07-31 | Results require input, method, number, and limitation | Historical rows are not current baseline proof |
-| [#304 discussion](https://github.com/Chris0Jeky/agent-harness/issues/304#issuecomment-5798216357) and [HQ #10](https://github.com/Chris0Jeky/agent-hq/issues/10) | Telemetry and coverage are non-authoritative | Issue contracts are not rollout evidence |
+| [#304 discussion](https://github.com/Chris0Jeky/agent-harness/issues/304#issuecomment-5798216357) and the private control-plane issue | Telemetry and coverage are non-authoritative | Issue contracts are not rollout evidence |
 
 The machine-local ORACLES/REVIEW_BOTS scavenge files were not directly inspected.
 This file links their published #304 scope and the landed REVIEW_EVIDENCE note

@@ -9,3 +9,7 @@ __pycache__/
 **/private-corpus/
 /build/
 *.egg-info/
+
+# Staged and built GitHub Pages docs site (scripts/build_docs_site.py).
+/_site_src/
+/_site/

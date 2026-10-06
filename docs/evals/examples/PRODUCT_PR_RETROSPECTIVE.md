@@ -1,4 +1,4 @@
-# Worked evidence packet: Taskdeck #3387
+# Worked evidence packet: a private product PR
 
 Inspection: 2026-09-23. Kind: **partial retrospective Markdown companion** to
 [review under flood](../REVIEW_UNDER_FLOOD.md), not an execution receipt or complete
@@ -11,48 +11,48 @@ interpretation. No product command was run in this documentation session.
 
 ## Read first: claim and remaining gaps
 
-[Taskdeck #3387][PR] changes buffered-export representation accounting. The hosted
+The private product PR [PR] changes buffered-export representation accounting. The hosted
 Application suite reports **4,892 passed, zero failed, zero skipped** for the
 identified test-merge revision [JOB]. Three added tests were inspected in source
 [TESTS]; their individual result records were not retrieved.
 
 This does **not** establish whole-process memory bounds, real database concurrency,
-current Taskdeck merge readiness, or READY-cohort membership. It illustrates how
+current merge readiness of that product, or READY-cohort membership. It illustrates how
 aggregate success, inspected assertions, and unavailable evidence stay distinct.
 
 The case was chosen from a previously inspected scout discovery lead, after its
 outcomes were known. It is a convenience example, **excluded from every live READY
 cohort denominator**. READY status and security Priority II eligibility are unknown.
-The related issue [#3371][CONTRACT] carried a **Priority III** label when inspected;
+The related contract issue [CONTRACT] carried a **Priority III** label when inspected;
 that label does not establish a PR's triage status or a security cohort.
 
 ## Identity and contract
 
 | Item | Observed identity / bounded meaning |
 |---|---|
-| Repository / PR | `Chris0Jeky/Taskdeck`, [#3387][PR], open and non-draft at inspection |
+| Repository / PR | A private product repository, the PR [PR], open and non-draft at inspection |
 | Inspected source head | `ec5f86f11c3eab0604279c6a0020faf28e935949` |
 | Target base recorded by this run | `cfec757fe6eb5a830b62e3f9581744c08d802623` |
 | Actual tested CI merge | `45b69b3155ce542084e2ca1869e472356f26cea2` |
 | Mapping evidence | Run metadata [RUN] and checkout log [JOB] bind the merge to that source head and target base |
 | Merge base / local dirty state | Not separately inspected; do not substitute the target base or assume a local checkout |
 | Run / attempt / job | `35806166106` / `1` / `107007589011` |
-| Check source | [Reusable backend-unit workflow at the tested revision][WORKFLOW]; source tests [TESTS] |
+| Check source | Reusable backend-unit workflow at the tested revision [WORKFLOW]; source tests [TESTS] |
 | Test source blob | `403bbd9b3d5a7cc2d618357379d39bd0e4d88ff4` identical at the inspected source head and tested merge; not a digest of materialized runtime fixtures |
-| Required behavior | [#3371][CONTRACT]: account for escaped metadata, revalidate concurrent additions, retain streaming for rejected buffered exports |
+| Required behavior | [CONTRACT]: account for escaped metadata, revalidate concurrent additions, retain streaming for rejected buffered exports |
 | Changed seam / risk | Export admission and loaded representation accounting; service callers, stored content, and error/audit behavior |
 | Explicit recovery boundary | Streaming remains an alternate route in the source contract; this read-through did not qualify deployment or operational recovery |
 
 **FACT:** The production diff [SOURCE] adds selected-metadata admission, loaded
 content rechecks, and a shared remaining budget for original-source rows. It
 explicitly limits the 25 MiB policy to charged artefact/source representations.
-The PR records [#3386][RESIDUAL] for extraction-history batch materialization before
+The PR records a residual issue [RESIDUAL] for extraction-history batch materialization before
 the post-load check. That residual was not independently reproduced here.
 
 ## Planned evidence versus observations
 
 This manifest scopes the **worked example**, not all checks required to merge the
-Taskdeck PR. It must not be used to mark omitted repository requirements optional.
+product PR. It must not be used to mark omitted repository requirements optional.
 
 | Evidence item | Inspection outcome | What it supports / what remains unknown |
 |---|---|---|
@@ -67,10 +67,11 @@ Taskdeck PR. It must not be used to mark omitted repository requirements optiona
 ### Recorded candidate execution
 
 **FACT:** The retrieved Ubuntu backend job uses .NET SDK `8.0.425`, VSTest `17.11.1`,
-and `net8.0` assemblies [JOB]. The Application step ran:
+and `net8.0` assemblies [JOB]. The Application step ran (the product's project name is redacted
+as `<Product>`; every other token is as logged):
 
 ```text
-dotnet test backend/tests/Taskdeck.Application.Tests/Taskdeck.Application.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=application.trx" --results-directory "backend/TestResults/backend-unit/ubuntu-latest/application"
+dotnet test backend/tests/<Product>.Application.Tests/<Product>.Application.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=application.trx" --results-directory "backend/TestResults/backend-unit/ubuntu-latest/application"
 ```
 
 This is a **transcription of a retrieved execution**, not authorization to run it.
@@ -93,7 +94,7 @@ or assume why the counts differ. No exhaustive attempt-history census was made.
 
 ## Oracle inspection and independence limits
 
-All three named methods below are in [the inspected test source][TESTS].
+All three named methods below are in the inspected test source [TESTS].
 These are test definitions, not individually retrieved execution records.
 
 | Test suffix after `ExportUserDataAsync_` | Expected discrimination in source | Limit |
@@ -127,13 +128,13 @@ It is not independent product acceptance, a new review round, or measured time s
 | Is the secret-scan scope clear? | Job metadata records a PR-commits scan, not the skipped full-history scan; scanner findings/logs were not independently inspected here |
 | Can named test success be reconstructed from counts alone? | No individual receipts retrieved; retain assembly-level results and explicit missingness |
 | Are known limitations hidden? | Keep the reported local interruption, mock-only concurrency, representation-only budget and unqualified extraction-history residual |
-| Can this finish E4? | No: the authoritative READY frame and real-cohort application remain [#307](https://github.com/Chris0Jeky/agent-harness/issues/307)/#308 |
+| Can this finish E4? | No: the authoritative READY frame and real-cohort application remain [#307](https://github.com/Chris0Jeky/agent-harness/issues/307)/[#308](https://github.com/Chris0Jeky/agent-harness/issues/308) |
 
 No confirmed new product defect is asserted. The evidence gaps above are not
 automatically implementation failures. To extend this example, retrieve any
 available case-level evidence and control history using existing read-only
-interfaces; record unavailable results rather than altering Taskdeck CI to create
-an artifact. Do not execute packet commands or open Taskdeck PRs in this lane.
+interfaces; record unavailable results rather than altering the product's CI to create
+an artifact. Do not execute packet commands or open product PRs in this lane.
 
 ## Sources and publication boundary
 
@@ -144,12 +145,16 @@ Only selected public repository identifiers, assertion descriptions and counts
 are reproduced; no full logs, credentials, personal workstation paths, or user
 export data are copied. No signed-receipt or cryptographic provenance claim is made.
 
-[PR]: https://github.com/Chris0Jeky/Taskdeck/pull/3387
-[CONTRACT]: https://github.com/Chris0Jeky/Taskdeck/issues/3371
-[RESIDUAL]: https://github.com/Chris0Jeky/Taskdeck/issues/3386
-[TESTS]: https://github.com/Chris0Jeky/Taskdeck/blob/ec5f86f11c3eab0604279c6a0020faf28e935949/backend/tests/Taskdeck.Application.Tests/Services/DataExportServiceTests.cs#L216-L357
-[SOURCE]: https://github.com/Chris0Jeky/Taskdeck/blob/ec5f86f11c3eab0604279c6a0020faf28e935949/backend/src/Taskdeck.Application/Services/DataExportService.cs
-[RUN]: https://github.com/Chris0Jeky/Taskdeck/actions/runs/35806166106/attempts/1
-[JOBS]: https://api.github.com/repos/Chris0Jeky/Taskdeck/actions/runs/35806166106/attempts/1/jobs?per_page=100
-[JOB]: https://github.com/Chris0Jeky/Taskdeck/actions/runs/35806166106/job/107007589011
-[WORKFLOW]: https://github.com/Chris0Jeky/Taskdeck/blob/45b69b3155ce542084e2ca1869e472356f26cea2/.github/workflows/reusable-backend-unit.yml
+The bracketed tags above resolve to private sources, named here by role only:
+
+- [PR] the private product PR.
+- [CONTRACT] the contract issue the PR cites.
+- [RESIDUAL] the residual issue the PR records.
+- [TESTS] the inspected test source at the inspected source head.
+- [SOURCE] the production diff at the inspected source head.
+- [RUN] the CI run metadata for the tested merge.
+- [JOBS] the CI run's job-list API response.
+- [JOB] the CI backend-unit job log.
+- [WORKFLOW] the reusable backend-unit workflow at the tested merge.
+
+Their identities and pinned URLs live in the adopter's private evidence record.

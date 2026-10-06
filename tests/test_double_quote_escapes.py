@@ -198,7 +198,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + ' y"',
             'git commit -m "x '
             + BACKTICK
-            + "git push --force origin main"
+            + "git push --force origin refs/tags/v1"
             + BACKTICK
             + ' y"',
             'bash -c "' + BACKTICK + "rm -rf /critical/outside" + BACKTICK + '"',
@@ -230,7 +230,7 @@ class DoubleQuoteEscapeTests(unittest.TestCase):
             + '"',
             'sh -c "'
             + ESCAPED_BACKTICK
-            + "git push --force origin main"
+            + "git push --force origin refs/tags/v1"
             + ESCAPED_BACKTICK
             + '"',
             'bash -c "' + ESCAPED_BACKTICK + "sudo rm -rf /" + ESCAPED_BACKTICK + '"',

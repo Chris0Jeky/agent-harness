@@ -585,15 +585,34 @@ class SensitivePushNarrowingTests(unittest.TestCase):
             allowed, _detail = self.narrowing(args, self.nonsensitive)
             self.assertFalse(allowed, args)
 
-    def test_plain_force_options_stay_denied_before_the_narrowing(self):
-        for option in ("--force", "-f"):
+    def test_force_options_reach_the_narrowing_since_floor_1_8_0(self):
+        # Floor 1.8.0 (#356 step 2): branch force is no longer refused ahead of
+        # the privacy check, so the push is judged on attribution and
+        # destination like any other. An attributable non-sensitive repository
+        # passes; the self-sensitive repository still refuses the public remote.
+        for option in ("--force", "-f", "--force-with-lease"):
             decision, reason = checked(
                 f'git -C "{self.nonsensitive}" push {option} origin main',
                 self.sensitive_root,
                 remote_resolver=_public_resolver,
             )
+            self.assertEqual(decision, "allow", f"{option}: {reason}")
+            decision, reason = checked(
+                f'git -C "{self.self_sensitive}" push {option} origin main',
+                self.sensitive_root,
+                remote_resolver=_public_resolver,
+            )
             self.assertEqual(decision, "deny", option)
-            self.assertIn("force-push", reason.lower())
+            self.assertIn("sensitive_data repo:", reason)
+
+    def test_a_forced_tag_push_is_refused_before_the_narrowing(self):
+        decision, reason = checked(
+            f'git -C "{self.nonsensitive}" push --force origin refs/tags/v1',
+            self.sensitive_root,
+            remote_resolver=_public_resolver,
+        )
+        self.assertEqual(decision, "deny")
+        self.assertIn("[tag-guard]", reason)
 
     def test_non_branch_sources_keep_the_deny(self):
         for source in (

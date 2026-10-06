@@ -193,12 +193,15 @@ def neutral_bare_push_config(dispatch):
     """
     original = dispatch.configured_bare_push_is_dangerous
 
-    def neutral(project_dir, git_globals=None, command_runner=None, deadline=None):
+    def neutral(
+        project_dir, git_globals=None, command_runner=None, deadline=None, **kwargs
+    ):
         return original(
             project_dir,
             git_globals,
             neutral_git_command_runner if command_runner is None else command_runner,
             deadline,
+            **kwargs,
         )
 
     dispatch.configured_bare_push_is_dangerous = neutral

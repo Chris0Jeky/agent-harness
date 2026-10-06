@@ -118,7 +118,7 @@ name alone never grants that status. No row installs a gate or changes a merge r
 | LLM summary, bot LGTM, confidence or consensus | Advisory | Candidate findings, never an LLM merge check |
 | Coverage/catch-rate/evidence dashboard | Advisory | Counts do not establish oracle adequacy, permission or estate safety |
 | Trace/span/cost summaries | Advisory | Telemetry is not a merge gate; unknown children/cost remain unknown |
-| Muse or other computer-use observation | Advisory | Never merge-adjacent proof; separately recorded deterministic checks stand on their own evidence |
+| Local-swarm or other computer-use observation | Advisory | Never merge-adjacent proof; separately recorded deterministic checks stand on their own evidence |
 
 Human or existing-process authorization remains separate from these evidence classes. This
 profile does not impose universal human sign-off or relax existing required reviews.
@@ -137,11 +137,13 @@ remains the reusable review guidance. Apply it within the existing review budget
 cohort application in a follow-up issue, not another policy file. Green checks do not erase a
 known counterexample, and multiple model opinions do not establish oracle independence.
 
-## Real Taskdeck READY samples
+## Real product READY samples
 
 ### Fill from live READY
 
-Sample status: **UNFILLED**. No PR below is asserted to be a verified READY sample.
+Sample status: **cohort C1 filled (2026-10-04)**, recorded below. The frame is a private repository,
+so member identities stay in the private evidence record. This public record carries counts,
+digests and links only.
 
 Resolve the authoritative READY/security Priority II triage source. Do not assume READY is a
 GitHub label, infer it from green CI, or translate Priority II into a harness tier. Record source
@@ -152,25 +154,28 @@ provides discovery pointers only. Never expand its numeric range into membership
 or convenience example may be useful, but must be labelled separately and excluded from the
 live-cohort denominator. A pointer that cannot be inspected stays unavailable.
 
-### Placeholder cohort record
+### Cohort C1 record
 
 | Cohort field | Value |
 |---|---|
-| Snapshot time, UTC | UNFILLED |
-| Authoritative READY source and revision/permalink | UNFILLED |
-| READY criteria used by that source | UNFILLED |
-| Candidate-universe artifact and digest, if available | UNFILLED |
-| Selection rule, seed/tie-break and predeclared budget | UNFILLED |
-| Risk/size/dependency strata and quotas | UNFILLED |
-| Selected / inspected / unavailable counts | UNFILLED |
-| Collector identity and access limitations | UNFILLED |
+| Snapshot time, UTC | 2026-10-04T02:37Z (protocol preregistered before any outcome was inspected) |
+| Authoritative READY source and revision/permalink | A coordinator-owned PR drain tracker, a versioned file in the private product repository, read at the commit that last changed it (2026-09-27); identity in the private record |
+| READY criteria used by that source | The tracker has no explicit READY legend; its header lines were quoted into the private manifest, and that absence is recorded as a deviation |
+| Candidate-universe artifact and digest, if available | Private `manifest.json`, SHA-256 `071a4d3205a76abeeaac075281ababc547792c7c097d271c2b6b95a33c3debf4` |
+| Selection rule, seed/tie-break and predeclared budget | [Protocol](https://github.com/Chris0Jeky/agent-harness/issues/307#issuecomment-5975847671), SHA-256 `25390683a86cd7b6970c7ed075b1126bf23bb33a6ced46466f03572496e9edbe`: rank by `sha256("e4-c1-2026-10-04:" + PR number)`, lower PR number on a tie; budget 5 |
+| Risk/size/dependency strata and quotas | Conventional-commit type: fix 2, test 2, other 1, fixed spill-over order; one member stacked (dependent) |
+| Selected / inspected / unavailable counts | Universe 25 (fix 13, test 2, other 10); selected 5; inspected 5; unavailable 0 |
+| Collector identity and access limitations | A read-only agent pass over REST PR metadata, exact-head check-runs, bodies and comments. Reviews were not fetched, and cited artifacts returned 404 |
 
-| Exact PR URL | Head at selection | READY evidence permalink | Risk / Priority II source | Selection reason | Inspection outcome |
-|---|---|---|---|---|---|
-| UNFILLED: fill from live READY | UNFILLED | UNFILLED | UNFILLED | UNFILLED | NOT RUN |
-
-The placeholder row is not a sample. Leaving it unfilled permits document review, not E4
-sample acceptance. A future curated manifest can be linked instead of copying a mutable list.
+Per-member rows (exact PR, head, READY evidence, selection reason, inspection outcome) are in the
+private record behind the manifest digest. The [checklist results](https://github.com/Chris0Jeky/agent-harness/issues/308#issuecomment-5975900300)
+show 28 PASS, 12 GAP and 5 UNAVAILABLE over 5 members × 9 items. On 3 of 5 merged heads, a
+required-gate run created *after* the merge failed on the same SHA. That is later drift, recorded
+with its timestamps, not a contradiction of the green-at-merge record: nothing shows it belongs to
+the same gate decision, and its cause is an untested hypothesis. No cited receipt could be
+retrieved (0/5).
+This is a retrospective five-case pilot: no merge verdict, catch rate, effort figure or
+representativeness claim.
 
 ### Avoiding easy-PR bias
 
@@ -197,7 +202,7 @@ These experiment IDs are local to this profile, not replacements for the epic's 
 |---|---|---|---|
 | F1 | Frozen-cohort packet read-through | Each selected case has a traceable record or explicit unavailability; no missing check becomes PASS; no known blocker disappears behind green CI | No substitutions or estate-wide rate |
 | F2 | Oracle discrimination on existing regression evidence | Named bad state fails for the intended reason; corrected state and known-good control succeed; setup failure is distinguished | No product mutation or newly fabricated defect required in this docs wave |
-| F3 | Head/stack-drift evidence audit | Original and inspected identities remain visible; affected evidence is re-owed; parent CI does not qualify a child | Use existing history read-only; no Taskdeck PR |
+| F3 | Head/stack-drift evidence audit | Original and inspected identities remain visible; affected evidence is re-owed; parent CI does not qualify a child | Use existing history read-only; no private product PR |
 | F4 | Advisory/completeness tabletop | Bot LGTM cannot override a failed check; missing required evidence remains a gap; missing optional span does not invalidate independent evidence | Synthetic cases are labelled and excluded from real-cohort measurements |
 
 ## Submission and completion boundary
@@ -235,7 +240,7 @@ Related homes: [taxonomy #300](https://github.com/Chris0Jeky/agent-harness/issue
 Use issue links until sibling docs land; do not duplicate their full contracts here.
 
 No code, serialized-schema changes, CI changes, opentelemetry-sdk, collector, second harness,
-product rewrite, Taskdeck PR, auto-merge or LLM merge gate. Sister
+product rewrite, private product PR, auto-merge or LLM merge gate. Sister
 [UX epic #281](https://github.com/Chris0Jeky/agent-harness/issues/281) remains outside this scope.
-[claude-config#308](https://github.com/Chris0Jeky/claude-config/issues/308) skills/workflow
-packaging is explicitly deferred until the source-of-truth docs and packet mapping stabilize.
+The private skills/workflow
+packaging issue is explicitly deferred until the source-of-truth docs and packet mapping stabilize.

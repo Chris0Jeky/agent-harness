@@ -51,6 +51,7 @@ jobs:
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/test_tag_guard.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
           tests/test_secret_path_coverage.py
@@ -78,6 +79,8 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          tests/test_evals_public_names.py
+          scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Check Black formatting
@@ -90,6 +93,7 @@ jobs:
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/test_tag_guard.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
           tests/test_secret_path_coverage.py
@@ -117,6 +121,8 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          tests/test_evals_public_names.py
+          scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Compile Python sources
@@ -129,6 +135,7 @@ jobs:
           tests/test_powershell_block_scan.py tests/test_probe_binary.py
           tests/test_prefix_wrapper_crossproduct.py tests/test_push_config_force.py
           tests/test_push_guard_review_gaps.py tests/test_sensitive_push_narrowing.py
+          tests/test_tag_guard.py
           tests/floor_environment.py
           tests/test_floor_environment.py tests/test_floor_posture.py
           tests/test_secret_path_coverage.py
@@ -156,6 +163,8 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          tests/test_evals_public_names.py
+          scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
 
       - name: Run unit tests

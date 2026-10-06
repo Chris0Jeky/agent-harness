@@ -33,10 +33,23 @@ Permissions differ by platform, because a renamed file keeps its own access cont
   written, the created DACL is read back and compared with the requested one; a host that
   merged parent entries or dropped protection is refused, not published. The file is
   opened without sharing until replacement, so no reader can be admitted under broader
-  access. The read-only attribute is set at creation. Only the DACL is carried over: the
-  replacement is owned by the writing token's default owner (an elevated token may make
-  that the Administrators group), and mandatory integrity labels and other SACL entries
-  of the old file are not copied. Measured on NTFS: a
+  access. The read-only attribute is set at creation. An existing destination also lends
+  its owner: the staging file requests it at creation and the owner is read back. When
+  Windows refuses that owner (`ERROR_INVALID_OWNER`, for example a user-owned file
+  rewritten under an elevated token) or the read-back differs, the replacement falls back
+  to the token's default owner (the staging file is recreated without an owner and its
+  owner must read back as the token's TokenOwner, or publication is refused) and one note
+  naming the file is printed to stderr. ERROR_INVALID_OWNER means only that the caller
+  cannot assign that SID as owner. A
+  mandatory integrity label on the destination is applied to the staging file before any
+  byte is written and read back (label SID and mask); if it cannot be applied or does not
+  read back identically, publication is refused, the destination is left untouched, and
+  the staging sibling is removed. Applying a label needs WRITE_OWNER under the
+  destination's DACL and cannot raise a label above the writer's own integrity level, so
+  such destinations refuse rather than lose their label. An unlabelled destination whose
+  staging file inherited a label from its parent directory is refused too, never
+  relabelled. Other SACL entries (audit ACEs)
+  are not copied. Measured on NTFS: a
   destination that another process holds open without delete sharing, or that is
   read-only, refuses replacement; the live bytes, attribute and DACL stay unchanged and
   the staging sibling is removed. A read-only source mode therefore publishes a read-only
