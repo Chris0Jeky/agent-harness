@@ -272,6 +272,8 @@ INLINE_LINK = re.compile(
     r"((?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'))?)\s*\)"
 )
 REF_DEF = re.compile(r"^( {0,3}\[[^\]\n]+\]:[ \t]*)(<[^>\n]*>|\S+)")
+REF_DEF_START = re.compile(r"^ {0,3}\[[^\]\n]+\]:[ \t]*$")
+REF_DEST = re.compile(r"^([ \t]*)(<[^>\n]*>|\S+)")
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 ENDRAW = re.compile(r"\{%(?=-?\s*endraw\b)")
 
@@ -335,7 +337,7 @@ def scan_blocks(lines):
     content begins after those containers' prefixes. Fenced code (inside
     blockquotes and list items too), indented code and blank lines are left out:
     that is how callers know where code is. A simplified CommonMark pass: no
-    HTML blocks, no link reference definitions spanning lines.
+    HTML blocks. Reference destinations may continue on the next paragraph line.
     """
     blocks = []
     containers = (
@@ -568,14 +570,20 @@ def rewrite_block(contents, src_rel, root, staged):
     """Rewrite the links of one paragraph (its lines' own content, without prefixes)."""
     out = list(contents)
     defs = 0
-    for k, text in enumerate(contents):  # definitions only open a paragraph
+    while defs < len(contents):  # definitions only open a paragraph
+        k = defs
+        text = contents[k]
         ref = REF_DEF.match(text)
+        if ref is None and REF_DEF_START.fullmatch(text) and k + 1 < len(contents):
+            k += 1
+            text = contents[k]
+            ref = REF_DEST.match(text)
         if not ref:
             break
         new = link_target(ref.group(2), src_rel, root, staged, False)
         if new is not None:
             out[k] = ref.group(1) + new + text[ref.end() :]
-        defs += 1
+        defs = k + 1
     rest = out[defs:]
     virtual = "\n".join(rest)
     starts = []
@@ -770,7 +778,7 @@ def build(out, root=REPO_ROOT):
 
 
 class LinkCollector(HTMLParser):
-    """Collect the targets of `<a href>` and `<img src>` in one rendered page."""
+    """Collect page, image and `<link href>` resource targets in rendered HTML."""
 
     def __init__(self):
         super().__init__()
@@ -778,7 +786,11 @@ class LinkCollector(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         for name, value in attrs:
-            if value and (tag, name) in (("a", "href"), ("img", "src")):
+            if value and (tag, name) in (
+                ("a", "href"),
+                ("img", "src"),
+                ("link", "href"),
+            ):
                 self.links.append(value)
 
 
