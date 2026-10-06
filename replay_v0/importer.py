@@ -1151,19 +1151,21 @@ def write_corpus(
         **files,
         "corpus-manifest.json": (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(tempfile.mkdtemp(prefix=".corpus-output-", dir=output.parent))
+    output.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".corpus-output-", dir=output))
     staged = staging_root / "staged"
     previous = staging_root / "previous"
     preserve_staging = False
     try:
+        if not output_is_private(staged) or not output_is_private(previous):
+            raise OSError("corpus staging and recovery paths must be private")
         staged.mkdir()
         previous.mkdir()
         for name, content in payloads.items():
             (staged / name).write_bytes(content)
-        output.mkdir(exist_ok=True)
         moved_previous: list[str] = []
         published: list[str] = []
+        preserve_staging = True
         try:
             for name in payloads:
                 target = output / name
@@ -1175,7 +1177,7 @@ def write_corpus(
             for name in payloads:
                 (staged / name).replace(output / name)
                 published.append(name)
-        except OSError as publish_error:
+        except BaseException as publish_error:
             rollback_errors: list[OSError] = []
             for name in reversed(published):
                 try:
@@ -1195,7 +1197,9 @@ def write_corpus(
                     "corpus publication failed and rollback was incomplete; "
                     "recovery files were retained"
                 ) from publish_error
+            preserve_staging = False
             raise
+        preserve_staging = False
     finally:
         if not preserve_staging:
             shutil.rmtree(staging_root, ignore_errors=True)

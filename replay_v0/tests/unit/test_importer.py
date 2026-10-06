@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from replay_v0 import cli as kernel
 from replay_v0.importer import (
@@ -775,6 +776,50 @@ class ExtractionTests(unittest.TestCase):
 
 
 class WriteCorpusAtomicityTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_GIT, "git is not installed")
+    def test_file_only_ignore_rules_refuse_unignored_staging(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / ".gitignore").write_text(
+            "/corpus/events.jsonl\n/corpus/cases.jsonl\n/corpus/corpus-manifest.json\n",
+            encoding="utf-8",
+        )
+        output = self.root / "corpus"
+        self.assertTrue(output_is_private(output))
+        with self.assertRaisesRegex(OSError, "must be private"):
+            write_corpus(output, *self._events_cases("private"))
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_staging_stays_within_private_output(self) -> None:
+        output = self.root / "private-corpus"
+        real_mkdtemp = tempfile.mkdtemp
+
+        def check_staging(*args, **kwargs):
+            self.assertEqual(Path(kwargs["dir"]), output)
+            return real_mkdtemp(*args, **kwargs)
+
+        with mock.patch(
+            "replay_v0.importer.tempfile.mkdtemp", side_effect=check_staging
+        ):
+            write_corpus(output, *self._events_cases("private"))
+        self.assertFalse(list(output.glob(".corpus-output-*")))
+
+    def test_interrupt_restores_previous_corpus(self) -> None:
+        output = self.root / "corpus"
+        write_corpus(output, *self._events_cases("old"))
+        before = {p.name: p.read_bytes() for p in output.iterdir()}
+        real_replace = Path.replace
+
+        def interrupt_publish(path, target):
+            if path.parent.name == "staged":
+                raise KeyboardInterrupt("synthetic cancellation")
+            return real_replace(path, target)
+
+        with mock.patch.object(Path, "replace", interrupt_publish):
+            with self.assertRaises(KeyboardInterrupt):
+                write_corpus(output, *self._events_cases("new"))
+        self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
+        self.assertFalse(list(output.glob(".corpus-output-*")))
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
