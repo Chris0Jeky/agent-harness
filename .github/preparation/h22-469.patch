@@ -1,0 +1,48 @@
+--- a/HUMAN_TODO.md
++++ b/HUMAN_TODO.md
+@@ -89,7 +89,7 @@
+   freeze-candidate baseline, and the replay-only 35-file extraction allowlist. This approves the
+   manifest as internal reproducibility/privacy evidence. Clean-repository creation, name, licence,
+   and release are deferred to AH-10 and are not the next owner question.
+-- [x] **H-14** — **Superseded 2026-10-04 by H-22.** You chose to roll floor 1.8.0 out now (guided walkthrough, H-22), and that choice makes each re-pinned root's 1.8.0 re-trust and canaries replace the 1.7.2 ones this item owed. The 1.7.2 banner can no longer be recorded, because the consumers' markers now name 1.8.0. Your remaining runtime steps live in H-22. Original item: **Prove floor 1.6.27 at runtime.** **Re-scoped 2026-09-07 (owner decision:
++- [x] **H-14** — **Superseded 2026-10-04 by H-22.** You chose to roll floor 1.8.0 out now (guided walkthrough, H-22), and that choice makes each re-pinned root's 1.8.0 re-trust and canaries replace the 1.7.2 ones this item owed. Superseded does not record completed runtime proof. The remaining adapter prerequisite and your runtime steps live in H-22. Original item: **Prove floor 1.6.27 at runtime.** **Re-scoped 2026-09-07 (owner decision:
+   agent-harness and claude-config are floorless, claude-config HUMAN_TODO q-22):** steps 1 and 2
+   below are void — the producer carries no adapter any more (`.codex/hooks.json` retired to
+   `templates/codex/hooks.json`) and the global Claude floor is unwired on the owner's host. Only
+@@ -266,13 +266,14 @@
+ 
+ - [x] **H-21**: **Decide how the public replay extraction manifest is pinned (issue #395).** The manifest pins a sha256 for every replay file, so every replay change re-pins digests (19 manifest commits since 2026-09-20) without adding review signal. Options and a recommendation (pin paths, keep the replay-only and no-private-path checks) are in the owner inbox decision `ah-395-replay-manifest-pin`. Nothing changes until you answer; close when the answer is recorded in the manifest's `amendments`, or when you decline. **Closed 2026-10-04:** you answered option (a), "Pin paths only (Recommended)", in the owner inbox; the agreement is recorded as the manifest's 2026-10-04 amendment by the PR that drops the digests (#395).
+ 
+-- [ ] **H-22**: **Floor history-check deletion (issue #356 step 2). Answered 2026-10-04, being carried out.** You chose option (a), "Delete the checks", with these design choices: scope everywhere including `sensitive_data` repositories (the public-remote privacy guard stays); keep a narrow tag guard (force-push or deletion of `refs/tags/*` and `--mirror` stay blocked, since the server ruleset protects `main` only); roll out now (re-pin PRs in the 5 Codex consumer repositories); move the other workstation's user-scope floor at the next canary. This is an owner-ratified exception to BLUEPRINT's FEATURE-FROZEN rule (it is not a false-positive fix, a #21 slice or a §6 repair); the implementation PR records it there, as the Developer Lens contract is recorded, before `dispatch.py` changes. You were also offered rolling out later, folded into H-14, and chose rolling out now: that is an owner exception to the rule that no new version is deployed until the deployed one is canaried. For each re-pinned root, the 1.8.0 re-trust and canaries replace H-14's 1.7.2 canary there; H-14 is re-pointed when the re-pin PRs open. **Agent side done 2026-10-05.**
++- [ ] **H-22**: **Floor history-check deletion (issue #356 step 2). Answered 2026-10-04, being carried out.** You chose option (a), "Delete the checks", with these design choices: scope everywhere including `sensitive_data` repositories (the public-remote privacy guard stays); keep a narrow tag guard (force-push or deletion of `refs/tags/*` and `--mirror` stay blocked, since the server ruleset protects `main` only); roll out now (re-pin PRs in the 5 Codex consumer repositories); move the other workstation's user-scope floor at the next canary. This is an owner-ratified exception to BLUEPRINT's FEATURE-FROZEN rule (it is not a false-positive fix, a #21 slice or a §6 repair); the implementation PR records it there, as the Developer Lens contract is recorded, before `dispatch.py` changes. You were also offered rolling out later, folded into H-14, and chose rolling out now: that is an owner exception to the rule that no new version is deployed until the deployed one is canaried. For each re-pinned root, the 1.8.0 re-trust and canaries replace H-14's 1.7.2 canary there; H-14 is re-pointed when the re-pin PRs open. **Rollout progress recorded 2026-10-05; extract-api adapter proof remains open.**
+   - Floor 1.8.0 merged as #466 (`0580544`, marker `21a4110e…`), after two review rounds; residuals are tracked in #467 and #468.
+   - The shared bytes are vendored in claude-config#713 (merged). This workstation's `~/.claude` was fast-forwarded on 2026-10-05: `hooks/dispatch.py` is 1.8.0, and doctor reports canonical == deployed.
+   - Marker PRs merged: SwarmingLilMen#101, collaborative-hill-lab#25, Pulseboard#199 and EvidenceDeck#41. EvidenceDeck#41 replaces the unmerged 1.7.2 refresh #35.
+-  - The extract-api Codex root carries no marker (its wrapper calls the shared dispatcher directly), so it needs no PR. Its bytes still change, so its canary is owed too.
+-
+-  **What is yours, per Codex root (ready now on this workstation):**
++  - **Outstanding agent prerequisite: #476.** The extract-api wrapper is not exempt from SPECS §5: both POSIX and Windows commands must declare the current normalized dispatcher hash marker and invoke the dispatcher or a wrapper binding `--event pre --runtime codex`. An agent must inspect that root, refresh missing or stale markers through its normal reviewed change lane, and record the adapter-contract result from `harness.py doctor --repo <extract-api-root>`. This repository-only correction does not claim that the native adapter has been inspected or changed. The audit marker is not runtime pin enforcement.
++  - Do not start extract-api's re-trust/canary steps until #476 records that adapter prerequisite as verified. Other roots may proceed once their own prerequisite is verified.
++
++  **What is yours, per Codex root after its adapter prerequisite is verified:**
+   1. Open a new normal Codex session whose cwd is that repository's root. A reused session, a worktree or a subfolder does not count.
+   2. Run `/hooks`. Review the single PreToolUse handler (matcher `^Bash$`, `--event pre --runtime codex`, five-second timeout, marker `21a4110e…`), then trust it individually and confirm it is enabled.
+   3. Allow canary: `git status --short --branch` must execute.
+@@ -282,13 +283,13 @@
+ 
+   The roots are SwarmingLilMen, collaborative-hill-lab, EvidenceDeck and the extract-api Codex checkout on this workstation. Pulseboard's live checkout is on the other workstation, so its canary runs there.
+ 
+-  **The other workstation (owner inbox action, at your next canary session):** fast-forward its `~/.claude` checkout to claude-config `main` (claude-config#713 is merged), then run the same three canaries in a fresh session. Its user-scope floor moves to 1.8.0 only then.
+-
+-  Close when every root above has recorded results.
++  **The other workstation (owner inbox action, at your next canary session):** fast-forward its `~/.claude` checkout to claude-config `main` (claude-config#713 is merged), then confirm that root's adapter prerequisite and run the same three canaries in a fresh session. Its user-scope floor moves to 1.8.0 only then.
++
++  Close only when every required root, including extract-api, has recorded adapter-marker/contract proof and the owner has recorded the fresh-session review, individual trust, enabled state and all three canary results. Canary results alone do not waive a missing or stale marker.
+ 
+ ## Changelog
+ 
+-- 2026-10-05: **H-22 agent side done; H-14 superseded.** Floor 1.8.0 merged (#466) and deployed on this workstation; claude-config#713 and four consumer marker PRs merged; your per-root re-trust and canary steps added to H-22.
++- 2026-10-05: **H-22 rollout progress; H-14 superseded.** Floor 1.8.0 merged (#466) and deployed on this workstation; claude-config#713 and four consumer marker PRs merged; per-root re-trust and canary steps added to H-22. The extract-api adapter prerequisite remains outstanding in #476.
+ - 2026-10-04: **guided walkthrough.** H-20 closed (the `test` ruleset was deleted; 25/25). H-22 answered (delete the history checks; design choices recorded on the item).
+ - 2026-10-04: **H-22 added** (floor history-check deletion, #356 step 2, posed in the owner inbox); **H-20 re-measured** (25/25 protected; one stacked pre-existing ruleset keeps the literal close condition open).
+ - 2026-10-04: **H-21 closed** (you chose to pin paths only; the manifest amendment records it, #395).

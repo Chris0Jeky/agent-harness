@@ -1,0 +1,115 @@
+name: Prepare reviewed maintenance patches
+on:
+  push:
+    branches: [prepare/maintenance-20261007]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [docs, h22]
+    env:
+      KIND: ${{ matrix.kind }}
+      BASE: d7d49f81bd0c47eab811221fac1ca1f5c5478486
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Apply pinned patch in an isolated product worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = 6290de58db849076b699a0d3363f33a2ea1bd695
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          work="$RUNNER_TEMP/maintenance-$KIND"
+          git worktree add --detach "$work" "$BASE"
+          if [ "$KIND" = docs ]; then
+            echo 'c8101e7d2b5be07e4fc04c0809154a1201b01ff45decec578bde2da878547743  .github/preparation/docs-464.patch' | sha256sum -c -
+            cp .github/preparation/docs-464.patch "$RUNNER_TEMP/maintenance.patch"
+            cd "$work"
+            git apply --check "$RUNNER_TEMP/maintenance.patch"
+            git apply --include=tests/test_build_docs_site.py "$RUNNER_TEMP/maintenance.patch"
+            if python -m unittest tests.test_build_docs_site -q > "$RUNNER_TEMP/docs-red.log" 2>&1; then
+              echo 'Regression control unexpectedly passed'; exit 1
+            fi
+            tail -12 "$RUNNER_TEMP/docs-red.log"
+            git apply --include=scripts/build_docs_site.py "$RUNNER_TEMP/maintenance.patch"
+          else
+            echo '777fbe4f4ae5744c5a87dcc0b532f5de9a86a30b4c7444b16f1a7f3229ef1bbb  .github/preparation/h22-469.patch' | sha256sum -c -
+            cp .github/preparation/h22-469.patch "$RUNNER_TEMP/maintenance.patch"
+            cd "$work"
+            git merge --no-commit --no-ff 46e686746dc782f90a0cbdfc64fd0ce8bfe3b667
+            test "$(git hash-object HUMAN_TODO.md)" = e76db235d300cb863440c2f67dc2c204f2cea1c5
+            git apply --check "$RUNNER_TEMP/maintenance.patch"
+            git apply "$RUNNER_TEMP/maintenance.patch"
+            test "$(git hash-object HUMAN_TODO.md)" = 22ff480d07a6fcf5023c749828e57418293586fa
+          fi
+          git diff --check
+      - name: Format and verify docs without semantic changes
+        if: matrix.kind == 'docs'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/maintenance-docs"
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -c 'import ast,json,pathlib; files=["scripts/build_docs_site.py","tests/test_build_docs_site.py"]; pathlib.Path("/tmp/maintenance-ast.json").write_text(json.dumps({p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in files}))'
+          python -m black scripts/build_docs_site.py tests/test_build_docs_site.py
+          python -c 'import ast,json,pathlib; before=json.loads(pathlib.Path("/tmp/maintenance-ast.json").read_text()); assert before=={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in before}'
+          python -m ruff check scripts/build_docs_site.py tests/test_build_docs_site.py
+          python -m black --check scripts/build_docs_site.py tests/test_build_docs_site.py
+          python -m unittest tests.test_build_docs_site -v
+          python scripts/build_docs_site.py --out _site_src
+          python -m py_compile scripts/build_docs_site.py tests/test_build_docs_site.py
+          git diff --check
+      - name: Verify marker prerequisite and unchanged owner canaries
+        if: matrix.kind == 'h22'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/maintenance-h22"
+          python - <<'PY'
+          import pathlib, subprocess
+          text=pathlib.Path('HUMAN_TODO.md').read_text()
+          section=text[text.index('- [ ] **H-22**:'):text.index('\n\n## Changelog')]
+          for required in ('both POSIX and Windows commands', '#476', 'after its adapter prerequisite is verified', 'only when every required root', 'audit marker is not runtime pin enforcement', 'Never re-run it with the key'):
+              assert required in section, required
+          assert 'so it needs no PR' not in section
+          before=subprocess.check_output(['git','show','46e686746dc782f90a0cbdfc64fd0ce8bfe3b667:HUMAN_TODO.md'], text=True)
+          for line in before.splitlines():
+              if line.startswith(('  1.', '  2.', '  3.', '  4.', '  5.', '  6.')):
+                  assert line in text, line
+          print('Marker prerequisite and closure checks pass; native adapter and owner runtime evidence NOT claimed.')
+          PY
+      - name: Publish only prepared product objects to temporary branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/maintenance-$KIND"
+          if [ "$KIND" = docs ]; then
+            expected=$'scripts/build_docs_site.py\ntests/test_build_docs_site.py'
+            git add scripts/build_docs_site.py tests/test_build_docs_site.py
+          else
+            expected=HUMAN_TODO.md
+            git add HUMAN_TODO.md
+          fi
+          test "$(git diff --name-only "$BASE" | sort)" = "$expected"
+          git diff --cached --check
+          git commit -m "Prepare $KIND maintenance patch on current main"
+          test "$(git diff --name-only "$BASE" HEAD | sort)" = "$expected"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/prepared/$KIND-20261007"
+          printf 'Prepared %s commit %s tree %s on base %s\n' "$KIND" "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" "$BASE" | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff --stat "$BASE" HEAD | tee -a "$GITHUB_STEP_SUMMARY"
