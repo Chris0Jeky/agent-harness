@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+import argparse
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import shutil
@@ -10,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from replay_v0 import cli as kernel
 from replay_v0.importer import (
@@ -18,6 +22,7 @@ from replay_v0.importer import (
     claude_commands,
     codex_commands,
     output_is_private,
+    run_import,
     write_corpus,
 )
 
@@ -814,6 +819,48 @@ class GitBoundaryTests(unittest.TestCase):
             check=True,
         ).stdout.split()
         self.assertFalse([path for path in paths if "private-corpus/" in path])
+
+
+class RunImportRedactTermsTests(unittest.TestCase):
+    @staticmethod
+    def _args(output: Path, redact_terms: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            output=str(output),
+            redact_terms=str(redact_terms),
+            claude_root="none",
+            codex_root="none",
+            keep_duplicates=False,
+            limit=0,
+            sample=0,
+            seed=0,
+        )
+
+    def test_run_import_bad_redact_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            missing = tmpdir / "does-not-exist.txt"
+            directory = tmpdir / "terms-dir"
+            directory.mkdir()
+            invalid = tmpdir / "invalid.txt"
+            invalid.write_bytes(b"\xff\xfe\x00not-utf8")
+            for label, bad in (
+                ("missing", missing),
+                ("directory", directory),
+                ("invalid-utf8", invalid),
+            ):
+                with self.subTest(case=label):
+                    diagnostic = io.StringIO()
+                    with (
+                        mock.patch(
+                            "replay_v0.importer.output_is_private",
+                            return_value=True,
+                        ),
+                        redirect_stdout(diagnostic),
+                    ):
+                        self.assertEqual(
+                            2, run_import(self._args(tmpdir / "corpus", bad))
+                        )
+                    self.assertIn("import:", diagnostic.getvalue())
 
 
 if __name__ == "__main__":
