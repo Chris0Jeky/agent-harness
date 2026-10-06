@@ -20,8 +20,10 @@ import os
 import random
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 from typing import Any, Callable, Iterator
 
 from replay_v0.corpus import (
@@ -1134,10 +1136,8 @@ def _jsonl_bytes(records: list[dict[str, Any]]) -> bytes:
 def write_corpus(
     output: Path, events: list[dict[str, Any]], cases: list[dict[str, Any]]
 ) -> None:
-    output.mkdir(parents=True, exist_ok=True)
+    """Stage the corpus and transactionally replace the three corpus artifacts."""
     files = {"events.jsonl": _jsonl_bytes(events), "cases.jsonl": _jsonl_bytes(cases)}
-    for name, content in files.items():
-        (output / name).write_bytes(content)
     manifest = {
         "schema_version": "corpus-manifest.v1",
         "corpus_id": CORPUS_ID,
@@ -1147,9 +1147,58 @@ def write_corpus(
             for name, content in files.items()
         ],
     }
-    (output / "corpus-manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
-    )
+    payloads = {
+        **files,
+        "corpus-manifest.json": (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".corpus-output-", dir=output.parent))
+    staged = staging_root / "staged"
+    previous = staging_root / "previous"
+    preserve_staging = False
+    try:
+        staged.mkdir()
+        previous.mkdir()
+        for name, content in payloads.items():
+            (staged / name).write_bytes(content)
+        output.mkdir(exist_ok=True)
+        moved_previous: list[str] = []
+        published: list[str] = []
+        try:
+            for name in payloads:
+                target = output / name
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise OSError(f"corpus output {name!r} is not a regular file")
+                if target.exists():
+                    target.replace(previous / name)
+                    moved_previous.append(name)
+            for name in payloads:
+                (staged / name).replace(output / name)
+                published.append(name)
+        except OSError as publish_error:
+            rollback_errors: list[OSError] = []
+            for name in reversed(published):
+                try:
+                    (output / name).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            for name in reversed(moved_previous):
+                try:
+                    (previous / name).replace(output / name)
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            if rollback_errors:
+                preserve_staging = True
+                raise OSError(
+                    "corpus publication failed and rollback was incomplete; "
+                    "recovery files were retained"
+                ) from publish_error
+            raise
+    finally:
+        if not preserve_staging:
+            shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def _root(value: str | None, *default: str) -> Path | None:

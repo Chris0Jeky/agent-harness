@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -771,6 +772,94 @@ class ExtractionTests(unittest.TestCase):
             self.assertIn("<owner>/<repo>", event["command"])
             self.assertNotIn("acme-private", event["command"])
             self.assertNotIn("secret-proj", event["command"])
+
+
+class WriteCorpusAtomicityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _events_cases(
+        self, marker: str
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        event_id = f"imp-claude-{marker}"
+        events = [
+            {
+                "schema_version": "command-event.v1",
+                "event_id": event_id,
+                "timestamp": "2026-01-01T00:00:00Z",
+                "command": f"git status {marker}",
+                "cwd": "project",
+                "source": "historical-redacted",
+            }
+        ]
+        cases = [
+            {
+                "schema_version": "charter-case.v1",
+                "event_id": event_id,
+                "case_class": "opaque",
+                "case_family": "claude-git",
+                "rationale": "Imported from a local transcript; not labelled.",
+                "provenance": "historical-redacted",
+            }
+        ]
+        return events, cases
+
+    def test_write_corpus_atomic_on_failure(self) -> None:
+        # Fresh output: a directory blocking cases.jsonl must leave no
+        # partial new files behind.
+        fresh = self.root / "fresh-corpus"
+        fresh.mkdir()
+        (fresh / "cases.jsonl").mkdir()
+        events, cases = self._events_cases("new")
+        with self.assertRaises(OSError):
+            write_corpus(fresh, events, cases)
+        self.assertFalse((fresh / "events.jsonl").is_file())
+        self.assertFalse((fresh / "corpus-manifest.json").is_file())
+        self.assertTrue((fresh / "cases.jsonl").is_dir())
+
+        # Existing corpus: the failed second write must leave the old
+        # events and manifest intact instead of replacing the first file
+        # and leaving a stale/missing manifest.
+        output = self.root / "corpus"
+        old_events, old_cases = self._events_cases("old")
+        write_corpus(output, old_events, old_cases)
+        old_event_bytes = (output / "events.jsonl").read_bytes()
+        old_manifest_bytes = (output / "corpus-manifest.json").read_bytes()
+        (output / "cases.jsonl").unlink()
+        (output / "cases.jsonl").mkdir()
+        new_events, new_cases = self._events_cases("new")
+        with self.assertRaises(OSError):
+            write_corpus(output, new_events, new_cases)
+        self.assertEqual((output / "events.jsonl").read_bytes(), old_event_bytes)
+        self.assertNotIn(b"git status new", (output / "events.jsonl").read_bytes())
+        self.assertEqual(
+            (output / "corpus-manifest.json").read_bytes(), old_manifest_bytes
+        )
+        self.assertFalse(
+            list((output.parent).glob(".corpus-output-*")),
+            "staging directory was not cleaned up",
+        )
+
+    def test_write_corpus_manifest_shas(self) -> None:
+        output = self.root / "sha-corpus"
+        events, cases = self._events_cases("sha")
+        write_corpus(output, events, cases)
+        manifest = json.loads(
+            (output / "corpus-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["corpus_id"], "private-local")
+        self.assertEqual(manifest["event_count"], len(events))
+        entries = {entry["path"]: entry["sha256"] for entry in manifest["files"]}
+        self.assertEqual(set(entries), {"events.jsonl", "cases.jsonl"})
+        for name in ("events.jsonl", "cases.jsonl"):
+            digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
+            self.assertEqual(entries[name], digest)
+        loaded = kernel._load_charter_corpus(str(output))
+        self.assertEqual(loaded.event_count, len(events))
 
 
 @unittest.skipUnless(HAS_GIT, "git is not installed")
