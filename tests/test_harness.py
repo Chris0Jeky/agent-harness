@@ -13087,6 +13087,11 @@ class WorktreeCloseoutTests(unittest.TestCase):
         self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
 
+    def test_probe_search_directories_drops_relative_entries(self) -> None:
+        absolute = os.path.join(os.path.abspath(os.sep), "usr", "bin")
+        env = {"PATH": os.pathsep.join(["tools", absolute, "./bin", ""])}
+        self.assertEqual(harness.probe_search_directories(env), [absolute])
+
 
 if __name__ == "__main__":
     unittest.main()
