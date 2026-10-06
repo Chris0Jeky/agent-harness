@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
+import argparse
+from contextlib import redirect_stdout
+import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -10,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from replay_v0 import cli as kernel
 from replay_v0.importer import (
@@ -18,6 +23,7 @@ from replay_v0.importer import (
     claude_commands,
     codex_commands,
     output_is_private,
+    run_import,
     write_corpus,
 )
 
@@ -773,6 +779,138 @@ class ExtractionTests(unittest.TestCase):
             self.assertNotIn("secret-proj", event["command"])
 
 
+class WriteCorpusAtomicityTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_GIT, "git is not installed")
+    def test_file_only_ignore_rules_refuse_unignored_staging(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / ".gitignore").write_text(
+            "/corpus/events.jsonl\n/corpus/cases.jsonl\n/corpus/corpus-manifest.json\n",
+            encoding="utf-8",
+        )
+        output = self.root / "corpus"
+        self.assertTrue(output_is_private(output))
+        with self.assertRaisesRegex(OSError, "must be private"):
+            write_corpus(output, *self._events_cases("private"))
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_staging_stays_within_private_output(self) -> None:
+        output = self.root / "private-corpus"
+        real_mkdtemp = tempfile.mkdtemp
+
+        def check_staging(*args, **kwargs):
+            self.assertEqual(Path(kwargs["dir"]), output)
+            return real_mkdtemp(*args, **kwargs)
+
+        with mock.patch(
+            "replay_v0.importer.tempfile.mkdtemp", side_effect=check_staging
+        ):
+            write_corpus(output, *self._events_cases("private"))
+        self.assertFalse(list(output.glob(".corpus-output-*")))
+
+    def test_interrupt_restores_previous_corpus(self) -> None:
+        output = self.root / "corpus"
+        write_corpus(output, *self._events_cases("old"))
+        before = {p.name: p.read_bytes() for p in output.iterdir()}
+        real_replace = Path.replace
+
+        def interrupt_publish(path, target):
+            if path.parent.name == "staged":
+                raise KeyboardInterrupt("synthetic cancellation")
+            return real_replace(path, target)
+
+        with mock.patch.object(Path, "replace", interrupt_publish):
+            with self.assertRaises(KeyboardInterrupt):
+                write_corpus(output, *self._events_cases("new"))
+        self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
+        self.assertFalse(list(output.glob(".corpus-output-*")))
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _events_cases(
+        self, marker: str
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        event_id = f"imp-claude-{marker}"
+        events = [
+            {
+                "schema_version": "command-event.v1",
+                "event_id": event_id,
+                "timestamp": "2026-01-01T00:00:00Z",
+                "command": f"git status {marker}",
+                "cwd": "project",
+                "source": "historical-redacted",
+            }
+        ]
+        cases = [
+            {
+                "schema_version": "charter-case.v1",
+                "event_id": event_id,
+                "case_class": "opaque",
+                "case_family": "claude-git",
+                "rationale": "Imported from a local transcript; not labelled.",
+                "provenance": "historical-redacted",
+            }
+        ]
+        return events, cases
+
+    def test_write_corpus_atomic_on_failure(self) -> None:
+        # Fresh output: a directory blocking cases.jsonl must leave no
+        # partial new files behind.
+        fresh = self.root / "fresh-corpus"
+        fresh.mkdir()
+        (fresh / "cases.jsonl").mkdir()
+        events, cases = self._events_cases("new")
+        with self.assertRaises(OSError):
+            write_corpus(fresh, events, cases)
+        self.assertFalse((fresh / "events.jsonl").is_file())
+        self.assertFalse((fresh / "corpus-manifest.json").is_file())
+        self.assertTrue((fresh / "cases.jsonl").is_dir())
+
+        # Existing corpus: the failed second write must leave the old
+        # events and manifest intact instead of replacing the first file
+        # and leaving a stale/missing manifest.
+        output = self.root / "corpus"
+        old_events, old_cases = self._events_cases("old")
+        write_corpus(output, old_events, old_cases)
+        old_event_bytes = (output / "events.jsonl").read_bytes()
+        old_manifest_bytes = (output / "corpus-manifest.json").read_bytes()
+        (output / "cases.jsonl").unlink()
+        (output / "cases.jsonl").mkdir()
+        new_events, new_cases = self._events_cases("new")
+        with self.assertRaises(OSError):
+            write_corpus(output, new_events, new_cases)
+        self.assertEqual((output / "events.jsonl").read_bytes(), old_event_bytes)
+        self.assertNotIn(b"git status new", (output / "events.jsonl").read_bytes())
+        self.assertEqual(
+            (output / "corpus-manifest.json").read_bytes(), old_manifest_bytes
+        )
+        self.assertFalse(
+            list((output.parent).glob(".corpus-output-*")),
+            "staging directory was not cleaned up",
+        )
+
+    def test_write_corpus_manifest_shas(self) -> None:
+        output = self.root / "sha-corpus"
+        events, cases = self._events_cases("sha")
+        write_corpus(output, events, cases)
+        manifest = json.loads(
+            (output / "corpus-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["corpus_id"], "private-local")
+        self.assertEqual(manifest["event_count"], len(events))
+        entries = {entry["path"]: entry["sha256"] for entry in manifest["files"]}
+        self.assertEqual(set(entries), {"events.jsonl", "cases.jsonl"})
+        for name in ("events.jsonl", "cases.jsonl"):
+            digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
+            self.assertEqual(entries[name], digest)
+        loaded = kernel._load_charter_corpus(str(output))
+        self.assertEqual(loaded.event_count, len(events))
+
+
 @unittest.skipUnless(HAS_GIT, "git is not installed")
 class GitBoundaryTests(unittest.TestCase):
     def test_output_inside_an_unignored_work_tree_is_refused(self) -> None:
@@ -814,6 +952,48 @@ class GitBoundaryTests(unittest.TestCase):
             check=True,
         ).stdout.split()
         self.assertFalse([path for path in paths if "private-corpus/" in path])
+
+
+class RunImportRedactTermsTests(unittest.TestCase):
+    @staticmethod
+    def _args(output: Path, redact_terms: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            output=str(output),
+            redact_terms=str(redact_terms),
+            claude_root="none",
+            codex_root="none",
+            keep_duplicates=False,
+            limit=0,
+            sample=0,
+            seed=0,
+        )
+
+    def test_run_import_bad_redact_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            missing = tmpdir / "does-not-exist.txt"
+            directory = tmpdir / "terms-dir"
+            directory.mkdir()
+            invalid = tmpdir / "invalid.txt"
+            invalid.write_bytes(b"\xff\xfe\x00not-utf8")
+            for label, bad in (
+                ("missing", missing),
+                ("directory", directory),
+                ("invalid-utf8", invalid),
+            ):
+                with self.subTest(case=label):
+                    diagnostic = io.StringIO()
+                    with (
+                        mock.patch(
+                            "replay_v0.importer.output_is_private",
+                            return_value=True,
+                        ),
+                        redirect_stdout(diagnostic),
+                    ):
+                        self.assertEqual(
+                            2, run_import(self._args(tmpdir / "corpus", bad))
+                        )
+                    self.assertIn("import:", diagnostic.getvalue())
 
 
 if __name__ == "__main__":
