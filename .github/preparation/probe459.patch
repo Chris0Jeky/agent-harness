@@ -1,0 +1,166 @@
+diff --git a/harness.py b/harness.py
+index b982df8..d0d8ea7 100644
+--- a/harness.py
++++ b/harness.py
+@@ -7391,7 +7391,13 @@ def skill_name_chains_alias(
+             return True
+         finally:
+             for path in reversed(created):
+-                path.rmdir()
++                try:
++                    path.rmdir()
++                except OSError as exc:
++                    raise HarnessError(
++                        f"cannot clean up skill name probe: {path}: {exc}; "
++                        f"probe directory may remain: {created[0]}"
++                    ) from exc
+     except OSError as exc:
+         raise HarnessError(
+             f"cannot preflight selected skill roots: {anchor}: {exc}"
+diff --git a/tests/test_skill_tree_mode_digest.py b/tests/test_skill_tree_mode_digest.py
+index 65ace64..8fba841 100644
+--- a/tests/test_skill_tree_mode_digest.py
++++ b/tests/test_skill_tree_mode_digest.py
+@@ -878,6 +878,87 @@ class UnifiedSkillPreflightTests(unittest.TestCase):
+                 self.assertEqual(before, harness.tree_digest(root))
+ 
+ 
++
++class SkillNameProbeCleanupTests(unittest.TestCase):
++    def test_probe_creation_and_removal_are_observed(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            anchor = Path(tmp).resolve()
++            made, removed = [], []
++            real_make, real_remove = tempfile.mkdtemp, Path.rmdir
++
++            def create(*args, **kwargs):
++                result = Path(real_make(*args, **kwargs))
++                self.assertTrue(result.is_dir())
++                made.append(result)
++                return str(result)
++
++            def remove(path):
++                self.assertTrue(path.is_dir())
++                real_remove(path)
++                self.assertFalse(path.exists())
++                removed.append(path)
++
++            with mock.patch.object(harness.tempfile, "mkdtemp", create), mock.patch.object(
++                Path, "rmdir", remove
++            ):
++                self.assertFalse(
++                    harness.skill_name_chains_alias(
++                        anchor, ("left", "nested"), ("right", "nested")
++                    )
++                )
++            self.assertEqual(len(made), 1)
++            self.assertEqual(made[0].parent, anchor)
++            self.assertEqual(
++                removed, [made[0] / "left/nested", made[0] / "left", made[0]]
++            )
++            self.assertEqual(list(anchor.iterdir()), [])
++
++    def test_failed_cleanup_names_the_retained_probe(self):
++        for fail_at in ("child", "scratch"):
++            with self.subTest(fail_at=fail_at), tempfile.TemporaryDirectory() as tmp:
++                anchor = Path(tmp).resolve()
++                made, failed = [], []
++                real_make, real_remove = tempfile.mkdtemp, Path.rmdir
++
++                def create(*args, **kwargs):
++                    result = Path(real_make(*args, **kwargs))
++                    made.append(result)
++                    return str(result)
++
++                def remove(path):
++                    target = made[0] / "left" if fail_at == "child" else made[0]
++                    if path == target:
++                        failed.append(path)
++                        raise PermissionError("fixture cleanup denied")
++                    real_remove(path)
++
++                with mock.patch.object(
++                    harness.tempfile, "mkdtemp", create
++                ), mock.patch.object(Path, "rmdir", remove):
++                    with self.assertRaises(harness.HarnessError) as caught:
++                        harness.skill_name_chains_alias(anchor, ("left",), ("right",))
++                self.assertEqual(len(made), 1)
++                self.assertEqual(len(failed), 1)
++                self.assertTrue(made[0].is_dir())
++                self.assertIn("probe directory may remain", str(caught.exception))
++                self.assertIn(str(made[0]), str(caught.exception))
++                self.assertIn(str(failed[0]), str(caught.exception))
++                self.assertIsInstance(caught.exception.__cause__, PermissionError)
++
++    def test_creation_failure_does_not_claim_a_retained_probe(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            anchor = Path(tmp).resolve()
++            with mock.patch.object(
++                harness.tempfile, "mkdtemp", side_effect=PermissionError("fixture create denied")
++            ):
++                with self.assertRaisesRegex(
++                    harness.HarnessError, "cannot preflight selected skill roots"
++                ) as caught:
++                    harness.skill_name_chains_alias(anchor, ("left",), ("right",))
++            self.assertNotIn("probe directory may remain", str(caught.exception))
++            self.assertEqual(list(anchor.iterdir()), [])
++
++
+ class SkillDestinationOverlapTests(unittest.TestCase):
+     """Cross-family destination overlap and absent-parent aliases (#444)."""
+ 
+@@ -940,6 +1021,8 @@ class SkillDestinationOverlapTests(unittest.TestCase):
+         return args
+ 
+     def test_nested_cross_family_destinations_refuse_before_mutation(self):
++        # State 2 was already refused for unknown paths before overlap preflight.
++        # It is a diagnostic control, not proof of an earlier partial-write bug.
+         for order in ("codex-in-claude", "claude-in-codex"):
+             for state in (0, 1, 2):
+                 for apply in (False, True):
+@@ -953,6 +1036,45 @@ class SkillDestinationOverlapTests(unittest.TestCase):
+                             args, root, "selected skill destinations overlap"
+                         )
+ 
++    def test_dry_run_cleanup_failure_names_probe_without_installing(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp).resolve()
++            claude_home = root / "claude-home"
++            claude_home.mkdir()
++            args = self.build(root, "sample", "sample", claude_home / "Skills", claude_home)
++            before = set(root.rglob("*"))
++            made = []
++            real_make, real_remove = tempfile.mkdtemp, Path.rmdir
++
++            def create(*args, **kwargs):
++                result = Path(real_make(*args, **kwargs))
++                made.append(result)
++                return str(result)
++
++            def remove(path):
++                if made and path == made[0]:
++                    raise PermissionError("fixture cleanup denied")
++                real_remove(path)
++
++            with mock.patch.object(harness.tempfile, "mkdtemp", create), mock.patch.object(
++                Path, "rmdir", remove
++            ), mock.patch.object(
++                harness, "reserve_backup_root", wraps=harness.reserve_backup_root
++            ) as reserve, mock.patch.object(
++                harness.shutil, "copytree", wraps=shutil.copytree
++            ) as copy, redirect_stdout(io.StringIO()):
++                with self.assertRaises(harness.HarnessError) as caught:
++                    harness.sync_global(args)
++                reserve.assert_not_called()
++                copy.assert_not_called()
++            self.assertEqual(len(made), 1)
++            self.assertTrue(made[0].is_dir())
++            self.assertIn("probe directory may remain", str(caught.exception))
++            self.assertIn(str(made[0]), str(caught.exception))
++            self.assertEqual(set(root.rglob("*")), before | {made[0]})
++            self.assertFalse((claude_home / "Skills/sample").exists())
++            self.assertFalse((claude_home / "skills/sample").exists())
++
+     def test_sibling_and_distinct_targets_are_not_overlap(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             root = Path(tmp).resolve()
