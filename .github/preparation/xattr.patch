@@ -1,0 +1,403 @@
+diff --git a/replay_v0/README.md b/replay_v0/README.md
+index 0623ed6..bd9f987 100644
+--- a/replay_v0/README.md
++++ b/replay_v0/README.md
+@@ -192,7 +192,7 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
+ startup captures every corpus file and both recorded-source files once, validates those captured
+ bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
+ later therefore cannot change a result under the earlier manifest or policy identity. Process
+-identity v9 includes the executable's lexical invocation basename, the resolved executable target's
++identity v10 includes the executable's lexical invocation basename, the resolved executable target's
+ bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
+ regular-file bytes, and permission modes for the policy-parent root and entries, configured
+ timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
+@@ -201,8 +201,8 @@ snapshot parent without writing that absolute path to the run manifest. Process
+ therefore conservatively host/path-sensitive when policy-visible temporary roots differ. The digest
+ is machine-derived data and can confirm an offline guess of a common temporary path; it avoids
+ plaintext disclosure but is not a secrecy boundary. Process-source run IDs are host-context
+-evidence, not portable cross-host correlation keys. V9 also
+-binds the snapshot-mtime contract: every copied file and directory has modification time
++evidence, not portable cross-host correlation keys. V10 retains the v9 snapshot-mtime contract:
++every copied file and directory has modification time
+ `946684800000000000` ns (2000-01-01T00:00:00Z). An
+ executable alias and its target have distinct identities when their invocation names differ, while
+ the snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
+@@ -236,8 +236,21 @@ A generic executable must be
+ relocatable enough to run from the snapshot; adjacent loader libraries are copied as unbound
+ runtime dependencies, and Python uses its host base prefix for its unbound standard library. If the
+ captured executable cannot start, replay fails closed instead of falling back to the original path.
++Process identity v10 also binds the snapshot extended-attribute contract. On Linux,
++`linux-user-strip-v1` removes `user.*` attributes from every copied file and directory,
++including the executable and runner-owned directories, before launch. Only attribute names are
++inspected; values are neither read into the identity nor logged. Read-only copies temporarily gain
++owner-write permission only when removal needs it, and their original permission bits are restored.
++The original inputs are not changed. Enumeration/removal failures make the source indeterminate;
++pre/post checks reject any remaining or newly added `user.*` attribute and cleanup still runs.
++A filesystem that cannot supply the required operations fails closed rather than claiming they ran.
++On other operating systems the identity records `not-normalized-v1`; no extended-attribute
++normalization is claimed there. The version change deliberately separates these runs from v9.
++This is a bounded Linux namespace rule, not universal ACL, security-label, alternate-data-stream
++or metadata portability. A same-user modify-and-restore race remains outside the snapshot guarantee.
++
+ External installed dependencies, files outside the policy tree, network responses, and other host
+-metadata remain outside the identity; access/change/birth times and filesystem object identities
++metadata (including extended attributes outside Linux `user.*`) remain outside the identity; access/change/birth times and filesystem object identities
+ are not normalized. Callers that depend on them must isolate and record that environment.
+ 
+ Policy standard streams are backed by temporary files, so waiting for inherited pipe EOF cannot
+ diff --git a/replay_v0/cli.py b/replay_v0/cli.py
+index 5c7c48e..df7ae59 100644
+--- a/replay_v0/cli.py
++++ b/replay_v0/cli.py
+@@ -40,6 +40,7 @@ from replay_v0.policy_sources import (
+     ProcessDecisionSource,
+     RecordedDecisionSource,
+     SNAPSHOT_MTIME_NS,
++    SNAPSHOT_XATTR_CONTRACT,
+     validate_recorded_manifest,
+ )
+ from replay_v0.reports import (
+@@ -56,7 +57,7 @@ DIAGNOSTIC_LINES = 20
+ DIAGNOSTIC_CHARS = 300
+ 
+ DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
+-PROCESS_IDENTITY_VERSION = "process-policy-identity.v9"
++PROCESS_IDENTITY_VERSION = "process-policy-identity.v10"
+ PROCESS_ENVIRONMENT = {
+     "PYTHONDONTWRITEBYTECODE": "1",
+     "PYTHONHASHSEED": "0",
+@@ -327,6 +328,7 @@ def _load_process_source(
+         "execution_inputs": "private-validated-identity-path-snapshot",
+         "runner_directory_permission_bits": "0700",
+         "snapshot_mtime_ns": SNAPSHOT_MTIME_NS,
++        "snapshot_xattrs": SNAPSHOT_XATTR_CONTRACT,
+         "snapshot_parent_sha256": sha256_bytes(os.fsencode(snapshot_parent)),
+         "working_directory": "identity-bound-parent-and-derived-snapshot-policy-parent",
+     }
+ diff --git a/replay_v0/policy_sources.py b/replay_v0/policy_sources.py
+index 4fd92f4..abd0344 100644
+--- a/replay_v0/policy_sources.py
++++ b/replay_v0/policy_sources.py
+@@ -2,7 +2,7 @@
+ 
+ from __future__ import annotations
+ 
+-from collections.abc import Mapping, Sequence
++from collections.abc import Iterator, Mapping, Sequence
+ from dataclasses import dataclass
+ import hashlib
+ import json
+@@ -33,6 +33,9 @@ _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+ _PROCESS_CLEANUP_GRACE_SECONDS = 1.0
+ _RUNNER_DIRECTORY_MODE = 0o700
+ SNAPSHOT_MTIME_NS = 946684800_000_000_000
++SNAPSHOT_XATTR_CONTRACT = (
++    "linux-user-strip-v1" if sys.platform == "linux" else "not-normalized-v1"
++)
+ _WINDOWS_EXEC_FAILURE_PREFIX = b"replay-wrapper-exec-failed:"
+ _WINDOWS_POLICY_WRAPPER = r"""
+ import ctypes
+@@ -474,6 +477,51 @@ def _normalize_snapshot_mtimes(root: Path) -> None:
+     )
+ 
+ 
++def _snapshot_user_xattrs(root: Path) -> Iterator[tuple[Path, list[str]]]:
++    """Inspect names only, never values, in the bounded Linux user namespace."""
++    if SNAPSHOT_XATTR_CONTRACT != "linux-user-strip-v1":
++        return
++    if not all(hasattr(os, name) for name in ("listxattr", "removexattr")):
++        raise OSError("Linux snapshot xattr operations are unavailable")
++
++    def entries() -> Iterator[Path]:
++        yield root
++        for directory, directories, files in os.walk(root, onerror=_raise_walk_error):
++            for name in (*directories, *files):
++                yield Path(directory) / name
++
++    for path in entries():
++        mode = path.lstat().st_mode
++        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
++            raise OSError("snapshot metadata inspection requires ordinary entries")
++        yield path, [
++            name
++            for name in os.listxattr(path, follow_symlinks=False)
++            if name.startswith("user.")
++        ]
++
++
++def _normalize_snapshot_user_xattrs(root: Path) -> None:
++    """Strip copied Linux user attributes, preserving source-bound modes."""
++    for path, names in _snapshot_user_xattrs(root):
++        if not names:
++            continue
++        mode = stat.S_IMODE(path.lstat().st_mode)
++        writable = mode | stat.S_IWUSR
++        if writable != mode:
++            os.chmod(path, writable, follow_symlinks=False)
++        try:
++            for name in names:
++                os.removexattr(path, name, follow_symlinks=False)
++        finally:
++            if writable != mode:
++                os.chmod(path, mode, follow_symlinks=False)
++
++
++def _snapshot_user_xattrs_are_normalized(root: Path) -> bool:
++    return all(not names for _path, names in _snapshot_user_xattrs(root))
++
++
+ def _snapshot_mtimes_are_normalized(root: Path) -> bool:
+     """Return whether the root and every copied entry retain the fixed mtime."""
+ 
+@@ -511,6 +559,7 @@ class _ProcessInputSnapshot:
+             actual_policy = sha256_file(policy)
+             actual_tree = sha256_tree(policy_tree)
+             mtimes_are_normalized = _snapshot_mtimes_are_normalized(self.root)
++            xattrs_are_normalized = _snapshot_user_xattrs_are_normalized(self.root)
+         except OSError:
+             return SourceFailure(
+                 "process-snapshot-changed",
+@@ -522,6 +571,7 @@ class _ProcessInputSnapshot:
+             or actual_policy != self.policy_sha256
+             or actual_tree != self.policy_tree_sha256
+             or not mtimes_are_normalized
++            or not xattrs_are_normalized
+         ):
+             return SourceFailure(
+                 "process-snapshot-changed",
+@@ -1087,6 +1137,7 @@ class ProcessDecisionSource:
+                 snapshot_root=snapshot_root,
+             )
+         try:
++            _normalize_snapshot_user_xattrs(snapshot_root)
+             _normalize_snapshot_mtimes(snapshot_root)
+         except (OSError, NotImplementedError):
+             return self._snapshot_failure(
+ diff --git a/replay_v0/tests/contract/test_cli.py b/replay_v0/tests/contract/test_cli.py
+index 3416c3c..a9f116f 100644
+--- a/replay_v0/tests/contract/test_cli.py
++++ b/replay_v0/tests/contract/test_cli.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from contextlib import contextmanager, redirect_stderr
++import errno
+ import hashlib
+ import io
+ import json
+@@ -1176,6 +1177,215 @@ for index, event in enumerate(events):
+             [decision["effect"] for decision in result.decisions],
+         )
+ 
++    def require_user_xattrs(self, path: Path) -> None:
++        if not all(hasattr(os, name) for name in ("setxattr", "getxattr", "listxattr", "removexattr")):
++            self.skipTest("Python does not expose Linux user xattr operations")
++        try:
++            os.setxattr(path, "user.replaytest", b"probe")
++            os.removexattr(path, "user.replaytest")
++        except OSError as error:
++            if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
++                self.skipTest("fixture filesystem does not support user xattrs")
++            raise
++
++    def test_process_snapshot_strips_user_xattrs_without_changing_originals(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            source, snapshots = root / "source", root / "snapshots"
++            source.mkdir()
++            snapshots.mkdir()
++            self.require_user_xattrs(source)
++            nested = source / "nested"
++            nested.mkdir()
++            helper = nested / "helper.txt"
++            helper.write_bytes(b"same bytes")
++            policy = source / "policy.py"
++            policy.write_text(
++                "import errno, json, os, sys\n"
++                "from pathlib import Path\n"
++                "paths = [Path(__file__), Path('nested/helper.txt'), Path('nested'), Path.cwd()]\n"
++                "values = []\n"
++                "for path in paths:\n"
++                "    try: values.append(os.getxattr(path, 'user.replaytest'))\n"
++                "    except OSError as e:\n"
++                "        if e.errno != errno.ENODATA: raise\n"
++                "effect = 'deny' if b'deny' in values else 'allow'\n"
++                "for event in map(json.loads, sys.stdin):\n"
++                "    print(json.dumps({'schema_version':'policy-decision.v1', 'event_id':event['event_id'],"
++                "'effect':effect, 'reason':'Synthetic xattr decision.'}))\n",
++                encoding="utf-8", newline="\n",
++            )
++            observed = []
++            for value in (b"allow", b"deny"):
++                for path in (source, nested, helper, policy):
++                    os.setxattr(path, "user.replaytest", value)
++                with mock.patch("replay_v0.cli.tempfile.gettempdir", return_value=str(snapshots)):
++                    loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++                result = loaded.source.evaluate(EVENTS)
++                observed.append((loaded.identity, result))
++                for path in (source, nested, helper, policy):
++                    self.assertEqual(value, os.getxattr(path, "user.replaytest"))
++                self.assertEqual([], list(snapshots.iterdir()))
++            self.assertEqual(observed[0][0], observed[1][0])
++            for identity, result in observed:
++                self.assertEqual((), result.failures)
++                self.assertEqual(["allow", "allow"], [d["effect"] for d in result.decisions])
++
++    def test_process_snapshot_xattr_removal_failure_prevents_launch(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            self.require_user_xattrs(root)
++            policy = root / "policy.py"
++            policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++            os.setxattr(policy, "user.replaytest", b"original")
++            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            snapshot_root = loaded.source.snapshot_parent / f"replay-process-inputs-{loaded.identity['sha256']}"
++            with mock.patch.object(os, "removexattr", side_effect=PermissionError("synthetic removal failure")), mock.patch.object(
++                loaded.source, "_evaluate_runtime", return_value=PolicySourceResult(())
++            ) as run:
++                result = loaded.source.evaluate(EVENTS)
++            run.assert_not_called()
++            self.assertEqual(["process-snapshot-unavailable"], [f.code for f in result.failures])
++            self.assertEqual(["indeterminate", "indeterminate"], [d["effect"] for d in result.decisions])
++            self.assertEqual(b"original", os.getxattr(policy, "user.replaytest"))
++            self.assertFalse(snapshot_root.exists())
++
++    def test_process_snapshot_late_user_xattr_invalidates_decisions(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            self.require_user_xattrs(root)
++            policy = root / "policy.py"
++            policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            original_run = loaded.source._evaluate_runtime
++
++            def mutate_then_run(events, *, argv, cwd):
++                os.setxattr(Path(cwd) / policy.name, "user.replaytest", b"late")
++                return original_run(events, argv=argv, cwd=cwd)
++
++            with mock.patch.object(loaded.source, "_evaluate_runtime", side_effect=mutate_then_run):
++                result = loaded.source.evaluate(EVENTS)
++            self.assertEqual(["process-snapshot-changed"], [f.code for f in result.failures])
++            self.assertEqual(["indeterminate", "indeterminate"], [d["effect"] for d in result.decisions])
++            self.assertNotIn("user.replaytest", os.listxattr(policy))
++
++    def test_process_snapshot_strips_readonly_file_xattrs_and_preserves_modes(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            self.require_user_xattrs(root)
++            policy = root / "policy.py"
++            policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++            helper = root / "readonly.txt"
++            helper.write_bytes(b"readonly helper")
++            os.setxattr(helper, "user.replaytest", b"original")
++            helper.chmod(0o444)
++            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            snapshot = loaded.source._prepare_input_snapshot(EVENTS)
++            self.assertNotIsInstance(snapshot, PolicySourceResult)
++            try:
++                self.assertEqual([], [name for name in os.listxattr(Path(snapshot.cwd) / helper.name) if name.startswith("user.")])
++                self.assertEqual(0o444, (Path(snapshot.cwd) / helper.name).stat().st_mode & 0o777)
++                self.assertEqual(b"original", os.getxattr(helper, "user.replaytest"))
++                self.assertEqual(0o444, helper.stat().st_mode & 0o777)
++                self.assertIsNone(snapshot.verification_failure())
++            finally:
++                self.assertIsNone(snapshot.cleanup())
++                helper.chmod(0o644)
++
++    def test_process_snapshot_strips_user_xattrs_from_runner_and_executable(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            self.require_user_xattrs(root)
++            policy = root / "policy.py"
++            policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            original_copytree = shutil.copytree
++
++            def copy_then_tag(source, destination, *args, **kwargs):
++                result = original_copytree(source, destination, *args, **kwargs)
++                copied_root = Path(destination).parent
++                for path in (copied_root, copied_root / "executable", *list((copied_root / "executable").iterdir())):
++                    os.setxattr(path, "user.replaytest", b"copied fixture")
++                return result
++
++            with mock.patch.object(shutil, "copytree", side_effect=copy_then_tag):
++                snapshot = loaded.source._prepare_input_snapshot(EVENTS)
++            self.assertNotIsInstance(snapshot, PolicySourceResult)
++            try:
++                for path in (snapshot.root, snapshot.root / "executable", Path(snapshot.argv[0])):
++                    self.assertNotIn("user.replaytest", os.listxattr(path))
++                self.assertIsNone(snapshot.verification_failure())
++            finally:
++                self.assertIsNone(snapshot.cleanup())
++
++    def test_snapshot_xattr_inspection_errors_fail_closed(self) -> None:
++        for phase in ("prepare", "verify"):
++            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
++                root = Path(raw)
++                self.require_user_xattrs(root)
++                policy = root / "policy.py"
++                policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++                loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
++                snapshot_root = loaded.source.snapshot_parent / f"replay-process-inputs-{loaded.identity['sha256']}"
++                original_list = os.listxattr
++                original_run = loaded.source._evaluate_runtime
++                ran = False
++
++                def unavailable(path, *args, **kwargs):
++                    if Path(path) == snapshot_root and (phase == "prepare" or ran):
++                        raise PermissionError("synthetic enumeration failure")
++                    return original_list(path, *args, **kwargs)
++
++                def run(events, *, argv, cwd):
++                    nonlocal ran
++                    result = original_run(events, argv=argv, cwd=cwd)
++                    ran = True
++                    return result
++
++                with mock.patch.object(os, "listxattr", side_effect=unavailable), mock.patch.object(
++                    loaded.source, "_evaluate_runtime", side_effect=run
++                ) as launch:
++                    result = loaded.source.evaluate(EVENTS)
++                self.assertEqual(phase == "verify", launch.called)
++                code = "process-snapshot-unavailable" if phase == "prepare" else "process-snapshot-changed"
++                self.assertEqual([code], [f.code for f in result.failures])
++                self.assertEqual(["indeterminate", "indeterminate"], [d["effect"] for d in result.decisions])
++                self.assertFalse(snapshot_root.exists())
++
++    def test_snapshot_xattr_normalization_keeps_other_namespaces(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            with mock.patch.object(policy_sources, "SNAPSHOT_XATTR_CONTRACT", "linux-user-strip-v1"), mock.patch.object(
++                os, "listxattr", return_value=["user.test", "security.test", "trusted.test", "system.test"], create=True
++            ) as names, mock.patch.object(os, "removexattr", create=True) as remove:
++                policy_sources._normalize_snapshot_user_xattrs(root)
++                names.assert_called_once_with(root, follow_symlinks=False)
++                remove.assert_called_once_with(root, "user.test", follow_symlinks=False)
++
++    def test_snapshot_xattr_unsupported_platform_makes_no_normalization_claim(self) -> None:
++        with tempfile.TemporaryDirectory() as raw:
++            root = Path(raw)
++            with mock.patch.object(policy_sources, "SNAPSHOT_XATTR_CONTRACT", "not-normalized-v1"), mock.patch.object(
++                os, "listxattr", create=True
++            ) as names, mock.patch.object(os, "removexattr", create=True) as remove:
++                policy_sources._normalize_snapshot_user_xattrs(root)
++                self.assertTrue(policy_sources._snapshot_user_xattrs_are_normalized(root))
++                names.assert_not_called()
++                remove.assert_not_called()
++
++    def test_process_identity_versions_xattr_normalization(self) -> None:
++        import replay_v0.cli as cli
++
++        self.assertEqual("process-policy-identity.v10", cli.PROCESS_IDENTITY_VERSION)
++        with tempfile.TemporaryDirectory() as raw:
++            policy = Path(raw) / "policy.py"
++            policy.write_text(self.policy_script("same"), encoding="utf-8", newline="\n")
++            with mock.patch.object(cli, "SNAPSHOT_XATTR_CONTRACT", "linux-user-strip-v1", create=True):
++                normalized = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            with mock.patch.object(cli, "SNAPSHOT_XATTR_CONTRACT", "not-normalized-v1", create=True):
++                unsupported = _load_process_source(f"{sys.executable},{policy}", 5.0)
++            self.assertNotEqual(normalized.identity, unsupported.identity)
++
+     def test_process_snapshot_normalizes_policy_and_runner_mtimes(self) -> None:
+         with tempfile.TemporaryDirectory() as raw_directory:
+             directory = Path(raw_directory)

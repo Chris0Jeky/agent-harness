@@ -1,0 +1,93 @@
+name: Prepare bounded snapshot metadata normalization
+on:
+  push:
+    branches: [prepare/xattr-157-20261007]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      BASE: e251626096a59a2f65b319494b41f694f679e5c3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Verify pinned red-green controls and full replay suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          python - <<'PY'
+          import ast, hashlib, json, os, pathlib, subprocess, sys
+          base=os.environ['BASE']
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          assert git('rev-parse',base+'^{tree}') == '8ac9d803b7d40c49beb0c2ed94b617404edfe5f0'
+          # Normalize only transport line endings and accidental diff-header indentation.
+          payload=pathlib.Path('.github/preparation/xattr.patch').read_bytes().replace(b'\r\n',b'\n').replace(b'\n diff --git ',b'\ndiff --git ')
+          assert hashlib.sha256(payload).hexdigest() == 'c7ce027244a5c2f30e0763cc093ff1906c8f80ef521d54b6d5bcee2064abe3c2'
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'xattr-evidence'); evidence.mkdir()
+          patch=evidence/'input.patch'; patch.write_bytes(payload)
+          work=pathlib.Path(os.environ['RUNNER_TEMP'],'xattr-product')
+          subprocess.run(['git','worktree','add','--detach',str(work),base],check=True)
+          os.chdir(work)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          tests='replay_v0/tests/contract/test_cli.py'
+          subprocess.run(['git','apply','--include='+tests,str(patch)],check=True)
+          names=['test_process_snapshot_strips_user_xattrs_without_changing_originals','test_process_snapshot_xattr_removal_failure_prevents_launch','test_process_snapshot_late_user_xattr_invalidates_decisions','test_process_snapshot_strips_readonly_file_xattrs_and_preserves_modes','test_process_identity_versions_xattr_normalization']
+          red=subprocess.run([sys.executable,'-m','unittest',*['replay_v0.tests.contract.test_cli.CliTests.'+name for name in names],'-v'],capture_output=True,text=True)
+          (evidence/'red.log').write_text(red.stdout+red.stderr)
+          print(red.stdout,red.stderr,flush=True)
+          failures=5 if sys.platform=='linux' else 1
+          assert red.returncode==1 and f'failures={failures}' in red.stderr and 'errors=' not in red.stderr
+          subprocess.run(['git','apply','--exclude='+tests,str(patch)],check=True)
+          files=['replay_v0/README.md','replay_v0/cli.py','replay_v0/policy_sources.py',tests]
+          python_files=files[1:]
+          subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','-r','requirements-dev.txt'],check=True)
+          before={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in python_files}
+          subprocess.run([sys.executable,'-m','black',*python_files],check=True)
+          assert before=={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in python_files}
+          for argv in ([sys.executable,'-m','ruff','check',*python_files],[sys.executable,'-m','black','--check',*python_files],[sys.executable,'-m','py_compile',*python_files],['git','diff','--check']): subprocess.run(argv,check=True)
+          green=subprocess.run([sys.executable,'-m','unittest','discover','-s','replay_v0/tests','-v'],capture_output=True,text=True,timeout=600)
+          (evidence/'replay.log').write_text(green.stdout+green.stderr)
+          print(green.stdout,green.stderr,flush=True)
+          assert green.returncode==0
+          assert set(git('diff','--name-only').splitlines())==set(files)
+          subprocess.run(['git','add',*files],check=True)
+          identity={'base':base,'tree':git('write-tree'),'files':{p:git('rev-parse',':'+p) for p in files}}
+          (evidence/'identity.json').write_text(json.dumps(identity,indent=2))
+          (evidence/'product.patch').write_bytes(subprocess.check_output(['git','diff','--cached','--binary',base]))
+          print(json.dumps(identity,indent=2),flush=True)
+          PY
+      - name: Preserve verified product objects
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/xattr-product"
+          git commit -m 'Prepare bounded Linux snapshot metadata normalization'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/prepared/xattr-157-20261007
+          cat "$RUNNER_TEMP/xattr-evidence/identity.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: xattr-${{ matrix.os }}
+          path: ${{ runner.temp }}/xattr-evidence/
+          retention-days: 7
+          if-no-files-found: warn
