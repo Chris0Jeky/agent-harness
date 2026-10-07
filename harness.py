@@ -4292,7 +4292,7 @@ def logical_root_subpath(logical_root: Path, checkout: Path) -> Path:
 def read_tier_file(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise HarnessError(f"invalid tier file {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise HarnessError(f"tier file must contain an object: {path}")
