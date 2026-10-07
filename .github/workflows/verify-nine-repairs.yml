@@ -48,6 +48,7 @@ jobs:
           hooks=json.loads(pathlib.Path('templates/codex/hooks.json').read_text())['hooks']['PreToolUse'][0]['hooks'][0]
           assert all(digest in hooks[k] for k in ('command','commandWindows'))
           identity={'base':os.environ['BASE'],'tree':git('rev-parse','HEAD^{tree}'),'marker':digest,'files':{p:git('rev-parse','HEAD:'+p) for p in sorted(expected)}}
+          assert identity['tree']=='5cf5d56110763c8fb3765ef40c5a53195bd4c9f5'
           evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence')
           (evidence/'identity.json').write_text(json.dumps(identity,indent=2));print(json.dumps(identity,indent=2))
           (evidence/'integration.patch').write_bytes(subprocess.check_output(['git','diff','--binary',os.environ['BASE'],'HEAD']))
@@ -60,15 +61,39 @@ jobs:
           cd "$RUNNER_TEMP/integration"
           python -m pip install --disable-pip-version-check -r requirements-dev.txt
           python - <<'PY'
-          import os,pathlib,subprocess,sys
+          import os,pathlib,subprocess,sys,re,shlex,json
           evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence')
+          base=os.environ['BASE']
+          # The first run broadened Black to all tests, unlike canonical CI.
+          # Prove its six failures on unchanged base bytes before using the exact
+          # declared command. Do not rewrite a historical fixture to satisfy a
+          # temporary verification workflow. The original failed run is retained.
+          ci=pathlib.Path('.github/workflows/ci.yml').read_text()
+          assert ci==subprocess.check_output(['git','show',base+':.github/workflows/ci.yml'],text=True)
+          match=re.search(r'^      - name: Check Black formatting\n        run: >-\n((?:          [^\n]*\n)+)',ci,re.M)
+          assert match
+          black=shlex.split(' '.join(line.strip() for line in match.group(1).splitlines()))
+          assert black[:4]==['python','-m','black','--check']
+          black[0]=sys.executable
+          baseline_files=['tests/fixtures/floor_1_2_0_dispatch.py','tests/test_observation_identity.py','tests/test_ux_scenarios.py','tests/test_workspace_handoff_profile.py','tests/test_ux_evidence.py','tests/test_workspace_receipt_lab.py']
+          for path in baseline_files:
+              assert path not in black and 'tests' not in black
+              assert subprocess.check_output(['git','rev-parse',base+':'+path])==subprocess.check_output(['git','rev-parse','HEAD:'+path])
+          baseline=pathlib.Path(os.environ['RUNNER_TEMP'],'baseline')
+          subprocess.run(['git','worktree','add','--detach',str(baseline),base],check=True)
+          control=subprocess.run([sys.executable,'-m','black','--check',*baseline_files],cwd=baseline,capture_output=True,text=True,timeout=120)
+          text=control.stdout+control.stderr
+          (evidence/'baseline-formatting-control.log').write_text(text)
+          assert control.returncode==1 and '6 files would be reformatted' in text and all(pathlib.Path(p).name in text for p in baseline_files)
+          (evidence/'formatting-scope.json').write_text(json.dumps({'original_failed_run':37689293163,'baseline':base,'unchanged_files':baseline_files,'canonical_black_argv':black},indent=2))
+          print('All six broad-scan formatting failures reproduce on unchanged baseline bytes.',flush=True)
           checks={
               'root-seams':[sys.executable,'-m','unittest','tests.test_build_docs_site','tests.test_skill_tree_mode_digest','tests.test_managed_agent_atomic','tests.test_tag_guard','tests.test_floor_posture','-v'],
               'diagnostics':[sys.executable,'-m','unittest','tests.test_harness','-k','tier','-k','lease','-v'],
               'replay':[sys.executable,'-m','unittest','discover','-s','replay_v0/tests','-v'],
               'bundle':[sys.executable,'-m','unittest','discover','-s','tests','-p','test_bundle*.py','-v'],
               'ruff':[sys.executable,'-m','ruff','check','harness.py','scripts/build_docs_site.py','tests','replay_v0'],
-              'black':[sys.executable,'-m','black','--check','harness.py','scripts/build_docs_site.py','tests','replay_v0'],
+              'black':black,
               'docs':[sys.executable,'scripts/build_docs_site.py','--out','_site_src'],
           }
           for name,argv in checks.items():
