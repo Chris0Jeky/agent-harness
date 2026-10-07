@@ -1,0 +1,93 @@
+name: Verify and prepare recovery repairs
+on:
+  push:
+    branches: [prepare/repairs-20261007-r2]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        kind: [managed, importer]
+    env:
+      KIND: ${{ matrix.kind }}
+      BASE: e251626096a59a2f65b319494b41f694f679e5c3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Reproduce regression and verify repaired product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          python - <<'PY'
+          import ast, hashlib, io, json, os, pathlib, subprocess, sys, unittest
+          kind = os.environ['KIND']
+          base = os.environ['BASE']
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          assert git('rev-parse', base+'^{tree}') == '8ac9d803b7d40c49beb0c2ed94b617404edfe5f0'
+          patch = pathlib.Path('.github/preparation', kind+'.patch').resolve()
+          hashes = {'managed': '83cb2d66f68ce20e59e690c0d8dd9266671158e3c6d39ce51461629cacae3f07', 'importer': '94befc7b170f59e424884e6c184edbeb64af07f08ad15e76dc32e88e0ef4e66f'}
+          assert hashlib.sha256(patch.read_bytes().replace(b'\r\n', b'\n')).hexdigest() == hashes[kind]
+          patch_copy = pathlib.Path(os.environ['RUNNER_TEMP'], kind+'.patch')
+          patch_copy.write_bytes(patch.read_bytes().replace(b'\r\n', b'\n'))
+          work = pathlib.Path(os.environ['RUNNER_TEMP'], 'repair-'+kind)
+          subprocess.run(['git','worktree','add','--detach',str(work),base], check=True)
+          os.chdir(work)
+          files = ['harness.py','tests/test_managed_agent_atomic.py'] if kind=='managed' else ['replay_v0/importer.py','replay_v0/tests/unit/test_importer.py']
+          module = 'tests.test_managed_agent_atomic' if kind=='managed' else 'replay_v0.tests.unit.test_importer'
+          subprocess.run(['git','apply','--check',str(patch_copy)], check=True)
+          subprocess.run(['git','apply','--include='+files[1],str(patch_copy)], check=True)
+          # A separate interpreter avoids retaining the baseline implementation for green.
+          red = subprocess.run([sys.executable,'-m','unittest',module,'-q'], capture_output=True, text=True)
+          print(red.stdout, red.stderr, flush=True)
+          expected_failures = 1 if kind=='managed' else 7
+          assert red.returncode == 1 and f'failures={expected_failures}' in red.stderr and 'errors=' not in red.stderr
+          subprocess.run(['git','apply','--include='+files[0],str(patch_copy)], check=True)
+          subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','-r','requirements-dev.txt'], check=True)
+          before = {p: ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in files}
+          subprocess.run([sys.executable,'-m','black',*files], check=True)
+          assert before == {p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in files}
+          for argv in ([sys.executable,'-m','ruff','check',*files], [sys.executable,'-m','black','--check',*files], [sys.executable,'-m','unittest',module,'-v'], [sys.executable,'-m','py_compile',*files], ['git','diff','--check']):
+              subprocess.run(argv, check=True)
+          assert set(git('diff','--name-only',base).splitlines()) == set(files)
+          subprocess.run(['git','add',*files], check=True)
+          tree=git('write-tree')
+          print('VERIFIED',kind,'BASE',base,'TREE',tree, flush=True)
+          for p in files:
+              print('BLOB',p,git('rev-parse', ':'+p),flush=True)
+          pathlib.Path(os.environ['RUNNER_TEMP'],kind+'-identity.json').write_text(json.dumps({'kind':kind,'base':base,'tree':tree,'files':{p:git('rev-parse', ':'+p) for p in files}},indent=2))
+          PY
+      - name: Retain verified product objects
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/repair-$KIND"
+          git diff --cached --check
+          git commit -m "Prepare $KIND recovery repair"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/prepared/$KIND-repair-20261007-r2"
+          cat "$RUNNER_TEMP/$KIND-identity.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain product identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repair-${{ matrix.kind }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/${{ matrix.kind }}-identity.json
+          retention-days: 7
