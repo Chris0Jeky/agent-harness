@@ -11636,6 +11636,48 @@ class WorktreeCloseoutTests(unittest.TestCase):
         mismatched = self.candidate(self.plan(), worktree)
         self.assertIn("cooperative_lease_identity_mismatch", mismatched["reasons"])
 
+    def test_lease_lock_mkdir_permission_error_is_harness_error(self) -> None:
+        worktree = self.add_worktree("lease-lock-error", lease=False)
+        original_mkdir = Path.mkdir
+
+        def failing_mkdir(self: Path, *args: object, **kwargs: object) -> object:
+            if self.name == harness.WORKTREE_OWNERSHIP_LOCK_DIRECTORY:
+                raise PermissionError("read-only git dir")
+            return original_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "mkdir", failing_mkdir):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "cannot create lease lock"
+            ):
+                harness.mutate_worktree_lease(
+                    worktree, action="acquire", claimant=self.claimant
+                )
+
+    def test_lease_release_missing_file_is_harness_error(self) -> None:
+        worktree = self.add_worktree("lease-release-race")
+        original_unlink = Path.unlink
+
+        def failing_unlink(self: Path, *args: object, **kwargs: object) -> object:
+            if self.name == harness.WORKTREE_OWNERSHIP_LEASE_FILENAME:
+                raise FileNotFoundError("lease deleted between inspect and unlink")
+            return original_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "unlink", failing_unlink):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "cannot release worktree lease"
+            ):
+                harness.mutate_worktree_lease(
+                    worktree, action="release", claimant=self.claimant
+                )
+
+    def test_write_worktree_lease_unwritable_is_harness_error(self) -> None:
+        target = Path(self.temp.name) / "unwritable-lease.json"
+        with mock.patch.object(Path, "open", side_effect=OSError("unwritable git dir")):
+            with self.assertRaisesRegex(
+                harness.HarnessError, "cannot write worktree lease"
+            ):
+                harness.write_worktree_lease(target, {"schema_version": 1})
+
     def test_out_of_range_lease_timestamps_retain_the_worktree(self) -> None:
         worktree = self.add_worktree("overflow-lease")
         original = self.candidate(self.plan(), worktree)["lease"]

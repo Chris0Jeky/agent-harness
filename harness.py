@@ -1132,16 +1132,19 @@ def worktree_lease_target(repo: Path, command_runner: Any) -> tuple[Path, Path, 
 def write_worktree_lease(path: Path, record: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(record, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+                json.dump(record, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            raise HarnessError(f"cannot write worktree lease {path}: {exc}") from exc
     finally:
         try:
-            temporary.unlink()
-        except FileNotFoundError:
+            temporary.unlink(missing_ok=True)
+        except OSError:
             pass
 
 
@@ -1204,6 +1207,8 @@ def mutate_worktree_lease(
         raise HarnessError(
             "lease mutation lock already exists; inspect it before any manual recovery"
         ) from exc
+    except OSError as exc:
+        raise HarnessError(f"cannot create lease lock {lock_directory}: {exc}") from exc
     try:
         info, reason, complete = inspect_worktree_lease(
             lease_path,
@@ -1259,7 +1264,12 @@ def mutate_worktree_lease(
                 "cooperative_lease_expires_too_soon",
             }:
                 raise HarnessError(f"lease release refused: {reason}")
-            lease_path.unlink()
+            try:
+                lease_path.unlink()
+            except OSError as exc:
+                raise HarnessError(
+                    f"cannot release worktree lease {lease_path}: {exc}"
+                ) from exc
             return {
                 "action": action,
                 "ok": True,
