@@ -1,0 +1,148 @@
+diff --git a/templates/codex/hooks.json b/templates/codex/hooks.json
+index b460b02..d1c2c1c 100644
+--- a/templates/codex/hooks.json
++++ b/templates/codex/hooks.json
+@@ -6,8 +6,8 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "expected=21a4110e3aecc81cd91ad37d677351427fac83bad26c7a26840a40202e2c497b; python3 \"$HOME/.claude/hooks/dispatch.py\" --event pre --runtime codex",
+-            "commandWindows": "$expected='21a4110e3aecc81cd91ad37d677351427fac83bad26c7a26840a40202e2c497b'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex",
++            "command": "expected=2d1bef1309e6d30f1c7551b9834e039caf52484f6331aae0f407a0ac34d9bd7c; python3 \"$HOME/.claude/hooks/dispatch.py\" --event pre --runtime codex",
++            "commandWindows": "$expected='2d1bef1309e6d30f1c7551b9834e039caf52484f6331aae0f407a0ac34d9bd7c'; py -3 $env:USERPROFILE/.claude/hooks/dispatch.py --event pre --runtime codex",
+             "timeout": 5,
+             "statusMessage": "Checking irreversible-command policy"
+           }
+diff --git a/templates/hooks/dispatch.py b/templates/hooks/dispatch.py
+index d90ccc0..7bce24b 100644
+--- a/templates/hooks/dispatch.py
++++ b/templates/hooks/dispatch.py
+@@ -73,7 +73,7 @@ import sys
+ import tempfile
+ import time
+ 
+-FLOOR_VERSION = "1.8.0 (2026-10-04)"
++FLOOR_VERSION = "1.8.1 (2026-10-07)"
+ 
+ # --- helpers ---------------------------------------------------------------
+ 
+@@ -11846,17 +11846,17 @@ def check(
+                 )
+ 
+             if sub == "push":
++                # Inspect normalized argv before the receive-pack refusal too:
++                # a line continuation can hide --mirror from the raw core hint.
++                # The option walk still excludes values and negated flags (#485).
++                push_history_flags = git_push_history_flags(args)
++                if "--mirror" in push_history_flags:
++                    return "deny", _TAG_GUARD_MIRROR
+                 if git_push_receiver_override_requested(args):
+                     return (
+                         "deny",
+                         "A custom git receive-pack program can execute commands outside floor inspection.",
+                     )
+-                # A literal --mirror is guarded before the opacity checks, so a
+-                # dynamic token elsewhere in the push cannot render it as mere
+-                # parser uncertainty under the core posture (floor 1.8.0).
+-                push_history_flags = git_push_history_flags(args)
+-                if "--mirror" in push_history_flags:
+-                    return "deny", _TAG_GUARD_MIRROR
+                 if not quote_aware and any(
+                     re.search(r"[*?\[]", token) for token in raw_args
+                 ):
+diff --git a/templates/hooks/smoke_test.py b/templates/hooks/smoke_test.py
+index 453f71f..5fb9b29 100644
+--- a/templates/hooks/smoke_test.py
++++ b/templates/hooks/smoke_test.py
+@@ -5317,6 +5317,8 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
+         "git push origin :refs/tags/v1",
+         "git push --mirror origin",
+         "git push origin $REF --mirror",
++        # 1.8.1 (#485): mirror classification precedes receive-pack refusal.
++        "git push --receive-pack=git-receive-pack \\\n--mirror origin",
+     ):
+         first = run_case(command, 3, dict(default))
+         key = key_from_last_reason()
+diff --git a/tests/test_floor_posture.py b/tests/test_floor_posture.py
+index 071d329..517ab41 100644
+--- a/tests/test_floor_posture.py
++++ b/tests/test_floor_posture.py
+@@ -856,6 +856,30 @@ class HookRoundTripTests(unittest.TestCase):
+             self.invoke(f"rm -rf {OUTSIDE}-two # FLOOR_ACK={key}")[0], "deny"
+         )
+ 
++    def test_continued_mirror_with_receiver_round_trips_in_both_runtimes(self):
++        command = "git push --receive-pack=git-receive-pack \\\n--mirror origin"
++        for runtime in ("claude", "codex"):
++            with self.subTest(runtime=runtime):
++                self.declare(2)
++                decision, reason = self.invoke(command, runtime)
++                self.assertEqual(decision, "deny", reason)
++                self.assertIn("[tag-guard]", reason)
++                key = self.key_in(reason)
++                self.assertIsNotNone(key, reason)
++                self.assertEqual(
++                    self.invoke(f"{command} # FLOOR_ACK={key}", runtime),
++                    ("allow", ""),
++                )
++                self.assertEqual(
++                    self.invoke(f"{command} # FLOOR_ACK=0000000000", runtime)[0],
++                    "deny",
++                )
++                self.declare(4)
++                decision, reason = self.invoke(f"{command} # FLOOR_ACK={key}", runtime)
++                self.assertEqual(decision, "deny", reason)
++                self.assertIn("[tag-guard]", reason)
++                self.assertNotIn("DOUBLE-CHECK", reason)
++
+     def test_walls_ignore_acknowledgements(self):
+         self.declare(1)
+         key = self.key_in(self.invoke(RM_OUTSIDE)[1])
+diff --git a/tests/test_tag_guard.py b/tests/test_tag_guard.py
+index b085851..455e697 100644
+--- a/tests/test_tag_guard.py
++++ b/tests/test_tag_guard.py
+@@ -403,6 +403,43 @@ class ReviewRoundOneTests(unittest.TestCase):
+             ]
+         )
+ 
++    def test_literal_mirror_is_classified_before_receiver_override(self):
++        repo = self.repo()
++        for receiver in ("--receive-pack=rp", "--exec=rp", "--receive-pack rp"):
++            for separator in (" ", " \\\n", " \\\r\n"):
++                for mirror in ("--mirror", "--mirr", "--m"):
++                    command = f"git push {receiver}{separator}{mirror} origin"
++                    with self.subTest(command=command):
++                        decision, reason = floor_environment.hermetic_check(
++                            dispatch, command, self.WALL, repo,
++                            remote_resolver=_private,
++                        )
++                        self.assertEqual(decision, "deny", reason)
++                        self.assertEqual(reason, dispatch._TAG_GUARD_MIRROR)
++                        self.assertEqual(self.render(command, repo, self.CORE), "double-check")
++
++    def test_receiver_override_keeps_mirror_values_and_negations_non_flags(self):
++        repo = self.repo()
++        for command in (
++            "git push --receive-pack=rp -o --mirror origin main",
++            "git push --receive-pack=rp --push-option --mirror origin main",
++            "git push --receive-pack=rp --mirror --no-mirror origin main",
++            "git push --receive-pack=rp -- --mirror main",
++            "git push --receive-pack --mirror origin main",
++            "git push --receive-pack=rp origin main",
++        ):
++            with self.subTest(command=command):
++                decision, reason = floor_environment.hermetic_check(
++                    dispatch, command, self.WALL, repo, remote_resolver=_private,
++                )
++                self.assertEqual(decision, "deny", reason)
++                self.assertIn("custom git receive-pack", reason)
++                self.assertNotIn("[tag-guard]", reason)
++        self.assertEqual(
++            self.render("git push --receive-pack=rp origin main", repo, self.CORE),
++            "allow",
++        )
++
+     def test_option_values_and_cancelled_flags_are_not_tag_guard_verdicts(self):
+         wall = self.WALL
+         self.check_cases(

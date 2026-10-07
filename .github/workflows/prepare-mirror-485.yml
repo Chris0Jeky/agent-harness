@@ -1,0 +1,96 @@
+name: Prepare mirror ordering repair
+on:
+  push:
+    branches: [prepare/mirror-485-20261007]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      BASE: e251626096a59a2f65b319494b41f694f679e5c3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Reproduce baseline defect and prepare product
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          python - <<'PY'
+          import ast, hashlib, json, os, pathlib, subprocess, sys
+          base=os.environ['BASE']
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          assert git('rev-parse',base+'^{tree}')=='8ac9d803b7d40c49beb0c2ed94b617404edfe5f0'
+          data=pathlib.Path('.github/preparation/mirror-485.patch').read_bytes().replace(b'\r\n',b'\n')
+          assert hashlib.sha256(data).hexdigest()=='0770d19b6e2c8ecc0a0372f2c4a34ce61654ca8a64bfff80b148ed1354b2ea56'
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence');evidence.mkdir()
+          patch=evidence/'input.patch';patch.write_bytes(data)
+          work=pathlib.Path(os.environ['RUNNER_TEMP'],'product')
+          subprocess.run(['git','worktree','add','--detach',str(work),base],check=True)
+          os.chdir(work)
+          subprocess.run(['git','switch','-c','prepared-mirror'],check=True)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          tests=['tests/test_tag_guard.py','tests/test_floor_posture.py']
+          products=['templates/hooks/dispatch.py','templates/hooks/smoke_test.py','templates/codex/hooks.json']
+          subprocess.run(['git','apply',*['--include='+p for p in tests],str(patch)],check=True)
+          cases=['tests.test_tag_guard.ReviewRoundOneTests.test_literal_mirror_is_classified_before_receiver_override','tests.test_tag_guard.ReviewRoundOneTests.test_receiver_override_keeps_mirror_values_and_negations_non_flags','tests.test_floor_posture.HookRoundTripTests.test_continued_mirror_with_receiver_round_trips_in_both_runtimes']
+          red=subprocess.run([sys.executable,'-m','unittest',*cases,'-v'],capture_output=True,text=True,timeout=120)
+          (evidence/'red.log').write_text(red.stdout+red.stderr)
+          print(red.stderr[-1000:],flush=True)
+          assert red.returncode==1 and 'failures=29' in red.stderr and 'errors=' not in red.stderr
+          subprocess.run(['git','apply',*['--include='+p for p in products],str(patch)],check=True)
+          subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','-r','requirements-dev.txt'],check=True)
+          before={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in tests}
+          subprocess.run([sys.executable,'-m','black',*tests],check=True)
+          assert before=={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in tests}
+          for label,argv in [('ruff',[sys.executable,'-m','ruff','check',*tests]),('black',[sys.executable,'-m','black','--check',*tests]),('focused',[sys.executable,'-m','unittest',*cases,'-v']),('modules',[sys.executable,'-m','unittest','tests.test_tag_guard','tests.test_floor_posture','-v']),('compile',[sys.executable,'-m','py_compile',*tests,*products[:2]])]:
+              result=subprocess.run(argv,capture_output=True,text=True,timeout=600)
+              (evidence/(label+'.log')).write_text(result.stdout+result.stderr)
+              print(label,result.returncode,(result.stdout+result.stderr)[-700:],flush=True)
+              assert result.returncode==0,label
+          digest=hashlib.sha256(pathlib.Path(products[0]).read_bytes().replace(b'\r\n',b'\n')).hexdigest()
+          assert digest=='2d1bef1309e6d30f1c7551b9834e039caf52484f6331aae0f407a0ac34d9bd7c'
+          hooks=json.loads(pathlib.Path(products[2]).read_text())['hooks']['PreToolUse'][0]['hooks'][0]
+          assert all(digest in hooks[k] for k in ['command','commandWindows'])
+          subprocess.run(['git','diff','--check'],check=True)
+          files=tests+products
+          assert set(git('diff','--name-only').splitlines())==set(files)
+          (evidence/'product.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+          subprocess.run(['git','add',*files],check=True)
+          identity={'base':base,'tree':git('write-tree'),'marker':digest,'files':{p:git('rev-parse',':'+p) for p in files}}
+          (evidence/'identity.json').write_text(json.dumps(identity,indent=2))
+          print(json.dumps(identity,indent=2),flush=True)
+          PY
+      - name: Preserve verified product objects
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/product"
+          git commit -m 'Prepare normalized-argv mirror ordering repair'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/prepared/mirror-485-20261007
+          cat "$RUNNER_TEMP/evidence/identity.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: mirror-485-${{ matrix.os }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
