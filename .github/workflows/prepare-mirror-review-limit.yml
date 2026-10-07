@@ -1,0 +1,109 @@
+name: Verify mirror review residual
+on:
+  push:
+    branches: [prepare/mirror-review-limit-20261007]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      BASE: d62f2835206787c9b8e84fba38fbbe667abada93
+      HEAD: f7f53999ec4c4034efc2dc577a462e8624894b2e
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Prepare documentation and measure native argv without executing Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          git worktree add --detach "$RUNNER_TEMP/product" "$HEAD"
+          cd "$RUNNER_TEMP/product"
+          git switch -c prepared-review-limit
+          git merge --no-edit --no-ff "$BASE"
+          python - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,sys
+          from unittest import mock
+          from tests import test_floor_posture as tests
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          assert git('rev-parse',os.environ['BASE']+'^{tree}')=='9518325fb8f8ac08286da253b5cc0a12c8ffa2cb'
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence');evidence.mkdir()
+          baseline=evidence/'baseline_dispatch.py'
+          baseline.write_bytes(subprocess.check_output(['git','show','e251626096a59a2f65b319494b41f694f679e5c3:templates/hooks/dispatch.py']))
+          candidate=pathlib.Path('templates/hooks/dispatch.py').resolve()
+          assert hashlib.sha256(baseline.read_bytes().replace(b'\r\n',b'\n')).hexdigest()=='21a4110e3aecc81cd91ad37d677351427fac83bad26c7a26840a40202e2c497b'
+          assert hashlib.sha256(candidate.read_bytes().replace(b'\r\n',b'\n')).hexdigest()=='2d1bef1309e6d30f1c7551b9834e039caf52484f6331aae0f407a0ac34d9bd7c'
+          native=[]
+          for separator in ('`\n','`\r\n'):
+              script=evidence/'capture.ps1'
+              script.write_bytes(('function git { ConvertTo-Json -Compress -InputObject @($args) }\ngit push --receive-pack=rp '+separator+'--mirror origin\n').encode())
+              result=subprocess.run(['pwsh','-NoProfile','-NonInteractive','-File',str(script)],capture_output=True,text=True,timeout=30)
+              assert result.returncode==0,result.stderr
+              argv=json.loads(result.stdout);assert argv==['push','--receive-pack=rp','--mirror','origin'],argv
+              native.append({'separator':repr(separator),'argv':argv,'function_stub_only':True})
+          (evidence/'native-powershell-argv.json').write_text(json.dumps(native,indent=2))
+          records=[]
+          for label,path in [('baseline',baseline),('candidate',candidate)]:
+              for runtime in ('claude','codex'):
+                  for tier in (2,4):
+                      for separator,name in [('`\n','PowerShell LF'),('`\r\n','PowerShell CRLF'),('\\\n','POSIX LF')]:
+                          command='git push --receive-pack=rp '+separator+'--mirror origin'
+                          case=tests.HookRoundTripTests();case.setUp()
+                          try:
+                              case.declare(tier)
+                              with mock.patch.object(tests,'DISPATCH_PATH',path):
+                                  decision,reason=case.invoke(command,runtime)
+                              expected='deny' if tier==4 or (label=='candidate' and name=='POSIX LF') else 'allow'
+                              assert decision==expected,(label,runtime,tier,name,decision,reason)
+                              records.append({'source':label,'runtime':runtime,'tier':tier,'form':name,'decision':decision,'reason':reason})
+                          finally:case.tearDown()
+          (evidence/'hook-comparison.json').write_text(json.dumps(records,indent=2))
+          path=pathlib.Path('FLOOR_LIMITATIONS.md');text=path.read_text();anchor='## Shell-shape gaps in modelled rules\n\n'
+          entry='- **PowerShell continuation before a mirror option** — a backtick followed by LF or CRLF between `git push --receive-pack=rp` and `--mirror origin` remains unclassified in the existing option walk. Both 1.8.0 and 1.8.1 render this receiver refusal as allow under default T2 core; T4 still denies. Native PowerShell argv capture and both runtime hook entry points are measured in #491. The 1.8.1 POSIX backslash-continuation repair does not fix this separate token-provenance boundary.\n'
+          assert text.count(anchor)==1 and 'PowerShell continuation before a mirror option' not in text
+          path.write_text(text.replace(anchor,anchor+entry));assert len(path.read_text().splitlines())<=120
+          assert set(git('diff','--name-only').splitlines())=={'FLOOR_LIMITATIONS.md'}
+          (evidence/'review-fix.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+          baseline.unlink();script.unlink()
+          print('Native PowerShell function-stub argv and 24 non-executing hook observations verified.',flush=True)
+          PY
+          python -m unittest tests.test_build_docs_site -q
+          python scripts/build_docs_site.py --out _site_src
+          git diff --check
+          git add FLOOR_LIMITATIONS.md
+          python - <<'PY'
+          import json,os,pathlib,subprocess
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          expected={'templates/hooks/dispatch.py','templates/hooks/smoke_test.py','templates/codex/hooks.json','tests/test_tag_guard.py','tests/test_floor_posture.py','FLOOR_LIMITATIONS.md'}
+          assert set(git('diff','--cached','--name-only',os.environ['BASE']).splitlines())==expected
+          data={'base':os.environ['BASE'],'parent':os.environ['HEAD'],'tree':git('write-tree'),'files':{p:git('rev-parse',':'+p) for p in sorted(expected)}}
+          pathlib.Path(os.environ['RUNNER_TEMP'],'evidence','identity.json').write_text(json.dumps(data,indent=2));print(json.dumps(data,indent=2))
+          PY
+      - name: Retain only prepared product objects
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/product"
+          git commit -m 'Record the independently reported PowerShell continuation residual'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/prepared/mirror-review-limit-20261007
+          cat "$RUNNER_TEMP/evidence/identity.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: mirror-review-limit
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
