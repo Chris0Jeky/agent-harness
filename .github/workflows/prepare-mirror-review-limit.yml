@@ -69,10 +69,11 @@ jobs:
                               records.append({'source':label,'runtime':runtime,'tier':tier,'form':name,'decision':decision,'reason':reason})
                           finally:case.tearDown()
           (evidence/'hook-comparison.json').write_text(json.dumps(records,indent=2))
-          path=pathlib.Path('FLOOR_LIMITATIONS.md');text=path.read_text();anchor='## Shell-shape gaps in modelled rules\n\n'
+          path=pathlib.Path('FLOOR_LIMITATIONS.md');text=path.read_text(encoding='utf-8');anchor='## Shell-shape gaps in modelled rules\n\n'
           entry='- **PowerShell continuation before a mirror option** — a backtick followed by LF or CRLF between `git push --receive-pack=rp` and `--mirror origin` remains unclassified in the existing option walk. Both 1.8.0 and 1.8.1 render this receiver refusal as allow under default T2 core; T4 still denies. Native PowerShell argv capture and both runtime hook entry points are measured in #491. The 1.8.1 POSIX backslash-continuation repair does not fix this separate token-provenance boundary.\n'
           assert text.count(anchor)==1 and 'PowerShell continuation before a mirror option' not in text
-          path.write_text(text.replace(anchor,anchor+entry));assert len(path.read_text().splitlines())<=120
+          path.write_bytes(text.replace(anchor,anchor+entry).encode('utf-8'));assert len(path.read_text(encoding='utf-8').splitlines())<=120
+          assert b'\r\n' not in path.read_bytes()
           assert set(git('diff','--name-only').splitlines())=={'FLOOR_LIMITATIONS.md'}
           (evidence/'review-fix.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
           baseline.unlink();script.unlink()
