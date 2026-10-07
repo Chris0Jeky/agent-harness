@@ -1,0 +1,207 @@
+name: Verify maintenance follow-ups
+on:
+  push:
+    branches: [prepare/followups-20261007]
+permissions:
+  contents: read
+env:
+  BASE: 854569c5139d621c0913e56ae1b26129559ae90f
+jobs:
+  cleanup:
+    name: Probe cleanup (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Reproduce and repair cleanup refusal on pinned main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = d608213231bbc14af7e73d3dc041f34a038959f0
+          git show HEAD:.github/preparation/probe459.patch > "$RUNNER_TEMP/probe459.patch"
+          python -c 'import hashlib,os,pathlib; assert hashlib.sha256(pathlib.Path(os.environ["RUNNER_TEMP"],"probe459.patch").read_bytes()).hexdigest()=="6fbd82258551c718827cc590ee0a02e81dcbd9053cf0ba14f843cd5bf0b9b1fc"'
+          git worktree add --detach "$RUNNER_TEMP/probe459" "$BASE"
+          cd "$RUNNER_TEMP/probe459"
+          git apply --check "$RUNNER_TEMP/probe459.patch"
+          git apply --include=tests/test_skill_tree_mode_digest.py "$RUNNER_TEMP/probe459.patch"
+          python - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_skill_tree_mode_digest')
+          result = unittest.TextTestRunner(verbosity=1).run(suite)
+          assert result.testsRun == 41 and len(result.failures) == 3 and not result.errors, result.__dict__
+          PY
+          git apply --include=harness.py "$RUNNER_TEMP/probe459.patch"
+          python -m unittest tests.test_skill_tree_mode_digest -v
+          python -m unittest discover -s tests -p 'test_bundle*.py' -q
+          python -m py_compile harness.py tests/test_skill_tree_mode_digest.py
+          git diff --check
+          printf 'Cleanup red/green verified on base %s, platform %s\n' "$BASE" "${{ matrix.os }}" | tee -a "$GITHUB_STEP_SUMMARY"
+  remaining-seams:
+    name: Current-main PR ${{ matrix.pr }} seam
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 469
+            head: 77cb214701fac7e2827c9113626b89fbafceba6e
+          - pr: 475
+            head: b7406f52d54196f721607c640ab02b513e9603bf
+          - pr: 477
+            head: 95ebca43b5de8e63a7d5816fd23015f0516841f2
+    env:
+      PR: ${{ matrix.pr }}
+      PR_HEAD: ${{ matrix.head }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Verify current-base merge and the affected contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = d608213231bbc14af7e73d3dc041f34a038959f0
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          git worktree add --detach "$RUNNER_TEMP/pr-seam" "$PR_HEAD"
+          cd "$RUNNER_TEMP/pr-seam"
+          git merge --no-commit --no-ff "$BASE"
+          if [ "$PR" = 475 ]; then
+            python - <<'PY'
+          import ast, pathlib, subprocess, os
+          before = ast.parse(subprocess.check_output(['git','show',os.environ['PR_HEAD']+':harness.py'], text=True))
+          after = ast.parse(pathlib.Path('harness.py').read_text())
+          def probes(tree):
+              return {n.name:ast.dump(n) for n in tree.body if isinstance(n,ast.FunctionDef) and (n.name.startswith('probe_') or n.name=='resolve_probe_binary')}
+          assert probes(before) and probes(before)==probes(after)
+          PY
+            python -m unittest tests.test_harness -k probe -v
+          elif [ "$PR" = 469 ]; then
+            test "$(git hash-object HUMAN_TODO.md)" = 22ff480d07a6fcf5023c749828e57418293586fa
+            python - <<'PY'
+          import pathlib
+          text=pathlib.Path('HUMAN_TODO.md').read_text()
+          section=text[text.index('- [ ] **H-22**:'):text.index('\n\n## Changelog')]
+          for phrase in ('both POSIX and Windows commands','#476','after its adapter prerequisite is verified','only when every required root','audit marker is not runtime pin enforcement','Never re-run it with the key'):
+              assert phrase in section, phrase
+          assert 'so it needs no PR' not in section
+          print('The corrected marker prerequisite and owner-canary boundaries are intact.')
+          PY
+            python -m unittest tests.test_build_docs_site -q
+            python scripts/build_docs_site.py --out _site_src
+          else
+            python -m unittest tests.test_build_docs_site -v
+            python scripts/build_docs_site.py --out _site_src
+          fi
+          git diff --check
+          git diff --cached --check
+          printf 'PR %s head %s with base %s; integration tree %s\n' "$PR" "$PR_HEAD" "$BASE" "$(git write-tree)" | tee -a "$GITHUB_STEP_SUMMARY"
+  prepare:
+    name: Prepare verified product follow-ups
+    needs: cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Prepare cleanup and documentation in separate product worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$BASE^{tree}")" = d608213231bbc14af7e73d3dc041f34a038959f0
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          git show HEAD:.github/preparation/probe459.patch > "$RUNNER_TEMP/probe459.patch"
+          python -c 'import hashlib,os,pathlib; assert hashlib.sha256(pathlib.Path(os.environ["RUNNER_TEMP"],"probe459.patch").read_bytes()).hexdigest()=="6fbd82258551c718827cc590ee0a02e81dcbd9053cf0ba14f843cd5bf0b9b1fc"'
+          git worktree add --detach "$RUNNER_TEMP/followup-cleanup" "$BASE"
+          git worktree add --detach "$RUNNER_TEMP/followup-readme" "$BASE"
+          cd "$RUNNER_TEMP/followup-cleanup"
+          git apply --check "$RUNNER_TEMP/probe459.patch"
+          git apply "$RUNNER_TEMP/probe459.patch"
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -c 'import ast,json,os,pathlib; paths=["harness.py","tests/test_skill_tree_mode_digest.py"]; pathlib.Path(os.environ["RUNNER_TEMP"],"cleanup-ast.json").write_text(json.dumps({p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in paths}))'
+          python -m black harness.py tests/test_skill_tree_mode_digest.py
+          python -c 'import ast,json,os,pathlib; before=json.loads(pathlib.Path(os.environ["RUNNER_TEMP"],"cleanup-ast.json").read_text()); assert before=={p:ast.dump(ast.parse(pathlib.Path(p).read_text())) for p in before}'
+          python -m ruff check harness.py tests/test_skill_tree_mode_digest.py
+          python -m black --check harness.py tests/test_skill_tree_mode_digest.py
+          python -m unittest tests.test_skill_tree_mode_digest -q
+          test "$(git diff --name-only | sort)" = $'harness.py\ntests/test_skill_tree_mode_digest.py'
+          git add harness.py tests/test_skill_tree_mode_digest.py
+          git diff --cached --check
+          git commit -m 'Report retained skill-name probes when cleanup fails'
+          cd "$RUNNER_TEMP/followup-readme"
+          test "$(git hash-object README.md)" = 482d4d9a1d679e24152af1c149930a542b8e88ae
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('README.md')
+          text=path.read_text()
+          old='''`claude-home` or `user-bin-home` roots. Absolute, traversal, aliased, colliding, or overlapping
+          paths and unsupported filesystem entries fail before live writes. The selector cannot be mixed
+          with other sync components and omitting it leaves the established default sync set unchanged.'''
+          new='''`claude-home` or `user-bin-home` roots. Planning rejects observed absolute, traversal, aliased,
+          colliding or overlapping paths and unsupported filesystem entries. Apply revalidates sources
+          and targets, but these checks do not exclude later filesystem changes. The selector cannot be
+          mixed with other sync components; omitting it leaves the established default sync set unchanged.'''
+          assert text.count(old)==1
+          text=text.replace(old,new)
+          marker='''no runtime or canary claim.
+          For a dispatcher or adapter-marker candidate'''
+          replacement='''no runtime or canary claim.
+
+          Install and rollback preflight the existing rename operation's same-filesystem requirement
+          against recovery storage. Device equality is necessary, not a guarantee that a later rename
+          will succeed. If post-promotion inspection fails, recovery attempts to quarantine unverified
+          bytes and restore prior state. Recovery can itself fail: preserve the reported backup and
+          quarantine locations, and inspect the reported live state before retrying. The lane does not
+          promise crash-atomic multi-component writes or concurrent-writer exclusion. Remaining fault
+          and platform qualifications are tracked in [#278](https://github.com/Chris0Jeky/agent-harness/issues/278).
+
+          For a dispatcher or adapter-marker candidate'''
+          assert text.count(marker)==1
+          path.write_text(text.replace(marker,replacement))
+          assert 'entries fail before live writes' not in path.read_text()
+          for phrase in ('checks do not exclude later filesystem changes','Recovery can itself fail','Device equality is necessary','concurrent-writer exclusion'):
+              assert phrase in path.read_text(), phrase
+          PY
+          python -m unittest tests.test_build_docs_site -q
+          python scripts/build_docs_site.py --out _site_src
+          test "$(git diff --name-only)" = README.md
+          git add README.md
+          git diff --cached --check
+          git commit -m 'Clarify bundle preflight and recovery guarantees'
+      - name: Publish only product objects to temporary branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          for kind in cleanup readme; do
+            cd "$RUNNER_TEMP/followup-$kind"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/prepared/$kind-followup-20261007"
+            printf '%s prepared commit %s tree %s on base %s\n' "$kind" "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" "$BASE" | tee -a "$GITHUB_STEP_SUMMARY"
+            git diff --stat "$BASE" HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          done
