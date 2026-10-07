@@ -1,0 +1,82 @@
+name: Prepare temporal link limitation
+on:
+  push:
+    branches: [prepare/link-limit-486-20261007]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Prepare canonical limitation and verify its narrow claim
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          git worktree add --detach "$RUNNER_TEMP/limit-product" e251626096a59a2f65b319494b41f694f679e5c3
+          cd "$RUNNER_TEMP/limit-product"
+          git switch -c prepared-link-limit
+          python - <<'PY'
+          import json, os, pathlib, subprocess, tempfile
+          from tests.test_tag_guard import dispatch, floor_environment
+          assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()=='8ac9d803b7d40c49beb0c2ed94b617404edfe5f0'
+          records=[]
+          with tempfile.TemporaryDirectory() as root:
+              outside='/critical/floor-486-outside'
+              for command in (f'ln -s {outside} ./link && rm -rf ./link/',f'rm -rf {outside}','rm -rf ./link/'):
+                  verdict=floor_environment.hermetic_check(dispatch,command,{'tier':2,'flags':{}},root)
+                  records.append({'stage':'link absent','command':command,'decision':verdict[0],'reason':verdict[1]})
+              (pathlib.Path(root)/'link').symlink_to(outside,target_is_directory=True)
+              verdict=floor_environment.hermetic_check(dispatch,'rm -rf ./link/',{'tier':2,'flags':{}},root)
+              records.append({'stage':'preexisting symlink','command':'rm -rf ./link/','decision':verdict[0],'reason':verdict[1]})
+          assert [row['decision'] for row in records]==['allow','deny','allow','deny']
+          path=pathlib.Path('FLOOR_LIMITATIONS.md');text=path.read_text()
+          anchor='## Scope limits of modelled rules\n'
+          entry='- **Links created earlier in the same command** — delete containment inspects the filesystem at hook time, not the effects of earlier command segments. `ln -s /outside ./link && rm -rf ./link/`, or a Windows `mklink /J` chain, can pass while the link is absent even though the later recursive delete can traverse outside the project. Pre-existing link targets are still checked; the Windows Git Bash junction-deletion effect is measured in #486. This is an unmodelled temporal filesystem boundary, not a claim that every shell follows symlinks identically.\n\n'
+          assert text.count(anchor)==1 and 'Links created earlier in the same command' not in text
+          path.write_text(text.replace(anchor,entry+anchor))
+          assert len(path.read_text().splitlines())<=120
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'limit-evidence');evidence.mkdir()
+          (evidence/'classification.json').write_text(json.dumps(records,indent=2))
+          (evidence/'product.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+          print(json.dumps(records,indent=2))
+          PY
+          python -m unittest tests.test_build_docs_site -q
+          python scripts/build_docs_site.py --out _site_src
+          git diff --check
+          test "$(git diff --name-only)" = FLOOR_LIMITATIONS.md
+          git add FLOOR_LIMITATIONS.md
+          python - <<'PY'
+          import json,os,pathlib,subprocess
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          data={'base':git('rev-parse','HEAD'),'tree':git('write-tree'),'blob':git('rev-parse',':FLOOR_LIMITATIONS.md')}
+          pathlib.Path(os.environ['RUNNER_TEMP'],'limit-evidence','identity.json').write_text(json.dumps(data,indent=2))
+          print(json.dumps(data,indent=2))
+          PY
+      - name: Preserve only product objects
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/limit-product"
+          git commit -m 'Record link-creation temporal filesystem limitation'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/prepared/link-limit-486-20261007
+          cat "$RUNNER_TEMP/limit-evidence/identity.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: link-limit-486
+          path: ${{ runner.temp }}/limit-evidence/
+          retention-days: 7
