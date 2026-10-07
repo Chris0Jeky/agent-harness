@@ -8475,8 +8475,11 @@ def write_managed_codex_file(
                     # The requested owner did not stick: start over without one.
                     owner_fallback = True
                     old_descriptor, old_temporary = descriptor, temporary
-                    temporary = None
+                    # Discard consumes the descriptor even if unlink fails. Keep
+                    # the path for outer cleanup until removal actually succeeds.
+                    descriptor = None
                     windows_discard_staging_file(old_descriptor, old_temporary)
+                    temporary = None
                     descriptor, temporary = windows_create_staging_file(
                         path.parent, ".harness-agent-", fallback, read_only
                     )
@@ -8522,7 +8525,7 @@ def write_managed_codex_file(
                             f"destination's; refusing publication: {path}"
                         )
             except BaseException:
-                if temporary is not None:
+                if descriptor is not None:
                     os.close(descriptor)
                 raise
             if owner_fallback:
