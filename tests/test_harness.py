@@ -2707,6 +2707,23 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(harness.HarnessError, r"invalid Codex config .*"):
             harness.toml_config(config)
 
+    def test_read_tier_file_invalid_utf8_raises_harness_error(self) -> None:
+        path = Path(self.temp.name) / "tier.json"
+        path.write_bytes(b"{\xff}")
+        with self.assertRaisesRegex(harness.HarnessError, r"invalid tier file"):
+            harness.read_tier_file(path)
+
+    def test_read_tier_file_deep_nesting_raises_harness_error(self) -> None:
+        path = Path(self.temp.name) / "tier.json"
+        path.write_text("[" * 10000 + "]" * 10000, encoding="utf-8")
+        # Some Python JSON decoders accept this depth; exercise the error
+        # boundary deterministically across supported interpreter versions.
+        with mock.patch.object(
+            harness.json, "loads", side_effect=RecursionError("nested JSON")
+        ):
+            with self.assertRaisesRegex(harness.HarnessError, r"invalid tier file"):
+                harness.read_tier_file(path)
+
     def test_toml_config_handles_deep_post_parse_validation(self) -> None:
         config = Path(self.temp.name) / "config.toml"
         config.write_text("ignored = 0", encoding="utf-8")
