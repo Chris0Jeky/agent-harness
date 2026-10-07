@@ -272,6 +272,60 @@ class ManagedAgentAtomicTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [outside / "luna.toml"])
         self.assertEqual(list(self.targets.glob(".harness-agent-*")), [])
 
+    def test_failed_windows_discard_retries_cleanup_without_double_close(self):
+        self.target.write_bytes(b"previous agent")
+        real_unlink = Path.unlink
+        descriptor, name = tempfile.mkstemp(prefix=".harness-agent-", dir=self.targets)
+        temporary = Path(name)
+        attempts = []
+
+        def fail_first_unlink(path, *args, **kwargs):
+            if path == temporary:
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise OSError("synthetic discard failure")
+            return real_unlink(path, *args, **kwargs)
+
+        # Exercise Windows control flow on every host, using a real reserved file
+        # and descriptor. Native security descriptor behavior has separate tests.
+        with (
+            mock.patch.object(harness, "os", wraps=os) as operating_system,
+            mock.patch.object(
+                harness,
+                "windows_create_staging_file",
+                return_value=(descriptor, temporary),
+            ) as create,
+            mock.patch.object(
+                harness,
+                "windows_file_security_descriptor",
+                side_effect=lambda path, info: (
+                    b"expected" if path == self.target else b"different"
+                ),
+            ),
+            mock.patch.object(
+                harness, "windows_file_dacl_descriptor", return_value=b"dacl"
+            ),
+            mock.patch.object(harness, "windows_dacl_signature", return_value="same"),
+            mock.patch.object(
+                harness, "windows_descriptor_owner", side_effect=lambda value: value
+            ),
+            mock.patch.object(Path, "unlink", fail_first_unlink),
+        ):
+            operating_system.name = "nt"
+            with self.assertRaisesRegex(
+                harness.HarnessError, "synthetic discard failure"
+            ):
+                harness.write_managed_codex_file(self.target, b"new agent", 0o644)
+            create.assert_called_once()
+            operating_system.close.assert_called_once_with(descriptor)
+            operating_system.fdopen.assert_not_called()
+            operating_system.replace.assert_not_called()
+        self.assertEqual(self.target.read_bytes(), b"previous agent")
+        self.assertEqual(attempts, [temporary, temporary])
+        self.assertFalse(temporary.exists())
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
     def test_ownership_record_bytes_are_canonical(self):
         harness.write_managed_codex_agents_state(
             self.state, {"zeta.toml": "b" * 64, "luna.toml": "a" * 64}
