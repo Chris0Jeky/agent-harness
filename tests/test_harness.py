@@ -13123,6 +13123,14 @@ class WorktreeCloseoutTests(unittest.TestCase):
         ]
         self.assertNotEqual(candidates, inverted)
 
+    def test_probe_shim_hazard_refuses_metachar_argument(self) -> None:
+        shim = "gh.cmd"
+        metachar = harness.probe_shim_hazard([shim, "--ref", "HEAD^{commit}"])
+        self.assertTrue(metachar)
+        self.assertNotEqual(metachar, "")
+        safe = harness.probe_shim_hazard([shim, "--ref", "HEAD"])
+        self.assertEqual(safe, "")
+
 
 if __name__ == "__main__":
     unittest.main()
