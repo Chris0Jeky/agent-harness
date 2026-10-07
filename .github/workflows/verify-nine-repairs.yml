@@ -1,0 +1,85 @@
+name: Verify nine repairs on merged diagnostics
+on:
+  push:
+    branches: [verify/nine-repairs-20261007]
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      BASE: d62f2835206787c9b8e84fba38fbbe667abada93
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: d62f2835206787c9b8e84fba38fbbe667abada93
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Integrate exact product heads without publishing any merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false
+          git config user.name 'Repository maintenance'
+          git config user.email 'noreply@openai.com'
+          test "$(git rev-parse "$BASE^{tree}")" = 9518325fb8f8ac08286da253b5cc0a12c8ffa2cb
+          git worktree add --detach "$RUNNER_TEMP/integration" "$BASE"
+          cd "$RUNNER_TEMP/integration"
+          git switch -c integration-only
+          for head in 95ebca43b5de8e63a7d5816fd23015f0516841f2 250e36713fa6980725a4eab7c737feb09d9dadd2 5832951d1c04f31ad8d0e0354d9f6eb9cb8898e0 501425ad6720f4396647fe48c4676b7c50977eea 26d827e4b09f7b13b7132eda470ba50f9baeae4c 5299da2777fc5f7bc23b784724b8d37c9b92e9ef dac7750c0ea175a7ad47f2c8e82e0271ef2a6138 f7f53999ec4c4034efc2dc577a462e8624894b2e e7f6f032e54b1c8af912b9c0b057d6a5aa20455d; do
+            git merge --no-edit --no-ff "$head"
+          done
+          mkdir -p "$RUNNER_TEMP/evidence"
+          python - <<'PY'
+          import json,os,pathlib,subprocess,hashlib
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          expected={'FLOOR_LIMITATIONS.md','README.md','harness.py','scripts/build_docs_site.py','tests/test_build_docs_site.py','tests/test_skill_tree_mode_digest.py','tests/test_managed_agent_atomic.py','replay_v0/importer.py','replay_v0/tests/unit/test_importer.py','replay_v0/README.md','replay_v0/cli.py','replay_v0/policy_sources.py','replay_v0/tests/contract/test_cli.py','templates/hooks/dispatch.py','templates/hooks/smoke_test.py','templates/codex/hooks.json','tests/test_floor_posture.py','tests/test_tag_guard.py'}
+          assert set(git('diff','--name-only',os.environ['BASE'],'HEAD').splitlines())==expected
+          digest=hashlib.sha256(pathlib.Path('templates/hooks/dispatch.py').read_bytes().replace(b'\r\n',b'\n')).hexdigest()
+          assert digest=='2d1bef1309e6d30f1c7551b9834e039caf52484f6331aae0f407a0ac34d9bd7c'
+          hooks=json.loads(pathlib.Path('templates/codex/hooks.json').read_text())['hooks']['PreToolUse'][0]['hooks'][0]
+          assert all(digest in hooks[k] for k in ('command','commandWindows'))
+          identity={'base':os.environ['BASE'],'tree':git('rev-parse','HEAD^{tree}'),'marker':digest,'files':{p:git('rev-parse','HEAD:'+p) for p in sorted(expected)}}
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence')
+          (evidence/'identity.json').write_text(json.dumps(identity,indent=2));print(json.dumps(identity,indent=2))
+          (evidence/'integration.patch').write_bytes(subprocess.check_output(['git','diff','--binary',os.environ['BASE'],'HEAD']))
+          PY
+          git diff --check "$BASE" HEAD
+      - name: Verify changed code, replay, and unchanged diagnostic interactions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/integration"
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python - <<'PY'
+          import os,pathlib,subprocess,sys
+          evidence=pathlib.Path(os.environ['RUNNER_TEMP'],'evidence')
+          checks={
+              'root-seams':[sys.executable,'-m','unittest','tests.test_build_docs_site','tests.test_skill_tree_mode_digest','tests.test_managed_agent_atomic','tests.test_tag_guard','tests.test_floor_posture','-v'],
+              'diagnostics':[sys.executable,'-m','unittest','tests.test_harness','-k','tier','-k','lease','-v'],
+              'replay':[sys.executable,'-m','unittest','discover','-s','replay_v0/tests','-v'],
+              'bundle':[sys.executable,'-m','unittest','discover','-s','tests','-p','test_bundle*.py','-v'],
+              'ruff':[sys.executable,'-m','ruff','check','harness.py','scripts/build_docs_site.py','tests','replay_v0'],
+              'black':[sys.executable,'-m','black','--check','harness.py','scripts/build_docs_site.py','tests','replay_v0'],
+              'docs':[sys.executable,'scripts/build_docs_site.py','--out','_site_src'],
+          }
+          for name,argv in checks.items():
+              result=subprocess.run(argv,capture_output=True,text=True,timeout=600)
+              (evidence/(name+'.log')).write_text(result.stdout+result.stderr)
+              print(name,result.returncode,(result.stdout+result.stderr)[-800:],flush=True)
+              assert result.returncode==0,name
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: nine-repairs-${{ matrix.os }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
