@@ -208,9 +208,10 @@ existing default sync set and does not add Claude-native skills.
 `--only bundle:muse-runtime` is a second isolated opt-in lane. It reads schema 1 from
 `<config-root>/.agent-harness/sync-global.json`, selects only `bundles.muse-runtime.components`,
 and maps canonical relative `file` or `tree` sources to canonical relative paths under the logical
-`claude-home` or `user-bin-home` roots. Absolute, traversal, aliased, colliding, or overlapping
-paths and unsupported filesystem entries fail before live writes. The selector cannot be mixed
-with other sync components and omitting it leaves the established default sync set unchanged.
+`claude-home` or `user-bin-home` roots. Planning rejects observed absolute, traversal, aliased,
+colliding or overlapping paths and unsupported filesystem entries. Apply revalidates sources
+and targets, but these checks do not exclude later filesystem changes. The selector cannot be
+mixed with other sync components; omitting it leaves the established default sync set unchanged.
 
 Apply stages every component and revalidates every source and target before moving the first live
 target. Replaced targets move to complete recovery backups; a versioned receipt is then published
@@ -222,6 +223,15 @@ recovery directory. This lane deploys only the files the reviewed consumer manif
 Muse manifest contract excludes vendor executables, settings, credentials, policy, repository
 declarations, and noncanonical launchers; manifest review remains the scope gate. Deployment makes
 no runtime or canary claim.
+
+Install and rollback preflight the existing rename operation's same-filesystem requirement
+against recovery storage. Device equality is necessary, not a guarantee that a later rename
+will succeed. If post-promotion inspection fails, recovery attempts to quarantine unverified
+bytes and restore prior state. Recovery can itself fail: preserve the reported backup and
+quarantine locations, and inspect the reported live state before retrying. The lane does not
+promise crash-atomic multi-component writes or concurrent-writer exclusion. Remaining fault
+and platform qualifications are tracked in [#278](https://github.com/Chris0Jeky/agent-harness/issues/278).
+
 For a dispatcher or adapter-marker candidate made in a linked worktree, see
 [safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
 the candidate as installed or live.
