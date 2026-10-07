@@ -1,0 +1,30 @@
+name: Recover pinned maintenance source
+on:
+  push:
+    branches: [prepare/recovery-20261007-r2]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: e251626096a59a2f65b319494b41f694f679e5c3
+          persist-credentials: false
+      - name: Export tracked source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recovered"
+          test "$(git rev-parse HEAD)" = e251626096a59a2f65b319494b41f694f679e5c3
+          git archive --format=tar HEAD > "$RUNNER_TEMP/recovered/source.tar"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/recovered/identity.txt"
+          sha256sum "$RUNNER_TEMP/recovered/source.tar" >> "$RUNNER_TEMP/recovered/identity.txt"
+          cat "$RUNNER_TEMP/recovered/identity.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pinned-source-e251626
+          path: ${{ runner.temp }}/recovered/
+          retention-days: 7
