@@ -73,7 +73,7 @@ import sys
 import tempfile
 import time
 
-FLOOR_VERSION = "1.8.0 (2026-10-04)"
+FLOOR_VERSION = "1.8.1 (2026-10-07)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -11846,17 +11846,17 @@ def check(
                 )
 
             if sub == "push":
+                # Inspect normalized argv before the receive-pack refusal too:
+                # a line continuation can hide --mirror from the raw core hint.
+                # The option walk still excludes values and negated flags (#485).
+                push_history_flags = git_push_history_flags(args)
+                if "--mirror" in push_history_flags:
+                    return "deny", _TAG_GUARD_MIRROR
                 if git_push_receiver_override_requested(args):
                     return (
                         "deny",
                         "A custom git receive-pack program can execute commands outside floor inspection.",
                     )
-                # A literal --mirror is guarded before the opacity checks, so a
-                # dynamic token elsewhere in the push cannot render it as mere
-                # parser uncertainty under the core posture (floor 1.8.0).
-                push_history_flags = git_push_history_flags(args)
-                if "--mirror" in push_history_flags:
-                    return "deny", _TAG_GUARD_MIRROR
                 if not quote_aware and any(
                     re.search(r"[*?\[]", token) for token in raw_args
                 ):
