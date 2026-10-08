@@ -666,6 +666,16 @@ class LoadingTests(unittest.TestCase):
         self.assertIn("missing required", records["problems"][0]["error"])
         self.assertEqual(len(lm.learning_metrics(records)["problems"]), 4)
 
+    def test_an_observation_that_moves_the_split_is_a_problem(self):
+        exp = experience(side="dev")
+        moved = dict(exp, observed_at=AFTER, split_key=split_key("holdout"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.json"
+            path.write_text(json.dumps([exp, moved]), encoding="utf-8")
+            records = lm.load_learning([path])
+        self.assertEqual(records[lm.EXPERIENCE], [exp])
+        self.assertIn("split_key differs", records["problems"][0]["error"])
+
     def test_counts_include_all_five_schema_names(self):
         result = lm.learning_metrics(dataset())
         self.assertEqual(result["counts"], {name: 0 for name in lc.RECORD_SCHEMAS})

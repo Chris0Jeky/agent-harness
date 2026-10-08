@@ -57,8 +57,12 @@ def load_learning(paths):
                     )
                 else:
                     result[record["schema"]].append(record)
-    for name in (EXPERIENCE, MEMORY_USE):
-        result[name] = _latest(result[name])
+    # Experiences fold through the contract, which also refuses a later
+    # observation that moves a run across the split.
+    folded, errors = contracts.fold_experiences(result[EXPERIENCE])
+    result["problems"] += [{"file": None, "index": None, "error": e} for e in errors]
+    result[EXPERIENCE] = list(folded.values())
+    result[MEMORY_USE] = _latest(result[MEMORY_USE])
     return result
 
 
