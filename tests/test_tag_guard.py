@@ -403,6 +403,52 @@ class ReviewRoundOneTests(unittest.TestCase):
             ]
         )
 
+    def test_literal_mirror_is_classified_before_receiver_override(self):
+        repo = self.repo()
+        for receiver in ("--receive-pack=rp", "--exec=rp", "--receive-pack rp"):
+            for separator in (" ", " \\\n", " \\\r\n"):
+                for mirror in ("--mirror", "--mirr", "--m"):
+                    command = f"git push {receiver}{separator}{mirror} origin"
+                    with self.subTest(command=command):
+                        decision, reason = floor_environment.hermetic_check(
+                            dispatch,
+                            command,
+                            self.WALL,
+                            repo,
+                            remote_resolver=_private,
+                        )
+                        self.assertEqual(decision, "deny", reason)
+                        self.assertEqual(reason, dispatch._TAG_GUARD_MIRROR)
+                        self.assertEqual(
+                            self.render(command, repo, self.CORE), "double-check"
+                        )
+
+    def test_receiver_override_keeps_mirror_values_and_negations_non_flags(self):
+        repo = self.repo()
+        for command in (
+            "git push --receive-pack=rp -o --mirror origin main",
+            "git push --receive-pack=rp --push-option --mirror origin main",
+            "git push --receive-pack=rp --mirror --no-mirror origin main",
+            "git push --receive-pack=rp -- --mirror main",
+            "git push --receive-pack --mirror origin main",
+            "git push --receive-pack=rp origin main",
+        ):
+            with self.subTest(command=command):
+                decision, reason = floor_environment.hermetic_check(
+                    dispatch,
+                    command,
+                    self.WALL,
+                    repo,
+                    remote_resolver=_private,
+                )
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("custom git receive-pack", reason)
+                self.assertNotIn("[tag-guard]", reason)
+        self.assertEqual(
+            self.render("git push --receive-pack=rp origin main", repo, self.CORE),
+            "allow",
+        )
+
     def test_option_values_and_cancelled_flags_are_not_tag_guard_verdicts(self):
         wall = self.WALL
         self.check_cases(
