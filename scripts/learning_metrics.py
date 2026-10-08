@@ -29,28 +29,67 @@ def _latest(records):
     return list(latest.values())
 
 
+class _Unreadable:
+    """One JSONL line that did not decode; it is a problem, not the file's."""
+
+    def __init__(self, error):
+        self.error = error
+
+
+def _read(path):
+    """Records of a file; a JSONL ledger decodes line by line."""
+    if path.suffix != ".jsonl":
+        return contracts.read_records(path)
+    raw = path.read_bytes()
+    if len(raw) > contracts.MAX_FILE_BYTES:
+        raise ValueError(f"{path}: exceeds the size bound")
+    records = []
+    # Decode per line, so neither a bad byte nor bad JSON costs the rest.
+    for line in raw.removeprefix(b"\xef\xbb\xbf").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(contracts.loads(line.decode("utf-8")))
+        except (ValueError, RecursionError) as exc:
+            records.append(_Unreadable(f"undecodable line: {exc}"))
+    return records
+
+
 def load_learning(paths):
     """Load sorted files, reporting invalid records without aborting the dataset."""
     result = {name: [] for name in contracts.RECORD_SCHEMAS}
     result["problems"] = []
     for source in paths:
         source = Path(source)
+        if not source.exists():
+            # A missing dataset is not an empty baseline.
+            result["problems"].append(
+                {
+                    "file": str(source),
+                    "index": None,
+                    "error": "no such file or directory",
+                }
+            )
+            continue
         files = sorted(source.rglob("*")) if source.is_dir() else [source]
         for path in files:
             if path.is_dir() or path.suffix not in (".json", ".jsonl"):
                 continue
             try:
-                records = contracts.read_records(path)
+                records = _read(path)
             except (OSError, ValueError, RecursionError) as exc:
                 result["problems"].append(
                     {"file": str(path), "index": None, "error": str(exc)}
                 )
                 continue
             for index, record in enumerate(records):
-                try:
-                    errors = contracts.validate_record(record)
-                except (TypeError, ValueError, RecursionError) as exc:
-                    errors = [str(exc)]
+                if isinstance(record, _Unreadable):
+                    errors = [record.error]
+                else:
+                    try:
+                        errors = contracts.validate_record(record)
+                    except (TypeError, ValueError, RecursionError) as exc:
+                        errors = [str(exc)]
                 if errors:
                     result["problems"].append(
                         {"file": str(path), "index": index, "error": errors[0]}
@@ -229,7 +268,8 @@ def learning_metrics(records, split="dev", as_of=None):
         uses = [
             exp
             for exp in experiences
-            if contracts.parse_time(exp["at"]) > activation_at
+            # A run that began before activation was not supplied the lesson.
+            if contracts.parse_time(exp.get("started_at") or exp["at"]) > activation_at
             and landed in _supplied_refs(exp, memory_use)
         ]
         reuse_counts.append(len(uses))

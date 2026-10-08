@@ -98,10 +98,14 @@ def target_state(candidate, state, gates):
     probation, because an evaluation gate cannot be recorded again later.
     """
     names = {g["gate"] for g in gates if contracts._counts(g, candidate)}
-    judged = [g for g in gates if g["gate"] not in STAY_GATES and g["gate"] != "owner"]
+    evaluation = _evaluation_gates(candidate)
+    # Only the counted, required evaluation passes can vouch for independence.
+    judged = [
+        g for g in gates if g["gate"] in evaluation and contracts._counts(g, candidate)
+    ]
     independent = contracts.classes()["evaluators"]["independent"]
     if any(g["result"] == "fail" for g in gates):
-        if state in ("evaluating", "canary", "probation"):
+        if state in ("candidate", "evaluating", "canary", "probation"):
             return "rejected"
         raise PromotionRefusal(
             f"a failed gate leaving {state} needs a steward's decision"

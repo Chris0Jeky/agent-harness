@@ -101,6 +101,27 @@ class GeneratorTests(unittest.TestCase):
             lp.next_record(cand, records, [], PRODUCER, "2026-09-08T12:01:00Z")
         self.assertIn("awaits a counted pass of offline_eval", str(caught.exception))
 
+    def test_a_failure_while_still_a_candidate_rejects(self):
+        cand = candidate(kind="semantic", promotion_class="P1", protected=True)
+        refusal = [
+            gate("owner", "2026-09-08T11:05:00Z", result="fail", evaluator=OWNER)
+        ]
+        _, r = advance(cand, [], refusal, "2026-09-08T11:10:00Z")
+        self.assertEqual((r["from"], r["to"]), ("candidate", "rejected"))
+
+    def test_an_uncounted_extra_gate_cannot_vouch_for_a_judge(self):
+        cand = candidate()  # P4: offline_eval is its only evaluation gate
+        records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
+        judge = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "j"}
+        learner = dict(ORACLE, session=cand["producer"]["session"])
+        mixed = [
+            gate("offline_eval", "2026-09-08T12:00:00Z", evaluator=judge),
+            gate("tests", "2026-09-08T12:00:00Z", evaluator=learner),
+        ]
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.next_record(cand, records, mixed, PRODUCER, "2026-09-08T12:01:00Z")
+        self.assertIn("not only an LLM judge", str(caught.exception))
+
     def test_the_fold_has_the_last_word(self):
         cand = candidate()
         records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")

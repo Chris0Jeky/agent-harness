@@ -710,6 +710,58 @@ class LoadingTests(unittest.TestCase):
         self.assertEqual(records[lm.EXPERIENCE], [exp])
         self.assertIn("split_key differs", records["problems"][0]["error"])
 
+    def test_a_missing_path_is_a_problem_not_an_empty_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = lm.load_learning([Path(tmp) / "no-such-ledger"])
+        self.assertEqual(records["problems"][0]["error"], "no such file or directory")
+
+    def test_one_bad_jsonl_line_keeps_the_rest(self):
+        first, second = experience("one"), experience("two")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            path.write_text(
+                "\n".join([json.dumps(first), "{broken", json.dumps(second)]) + "\n",
+                encoding="utf-8",
+            )
+            records = lm.load_learning([path])
+        self.assertEqual(len(records[lm.EXPERIENCE]), 2)
+        self.assertEqual(records["problems"][0]["index"], 1)
+        self.assertIn("undecodable line", records["problems"][0]["error"])
+
+    def test_jsonl_keeps_the_strict_reader_bounds_and_survives_a_bad_byte(self):
+        first, second = experience("one"), experience("two")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            path.write_bytes(
+                b"\xef\xbb\xbf"
+                + json.dumps(first).encode("utf-8")
+                + b"\n\xff\xfe torn write\n"
+                + json.dumps(second).encode("utf-8")
+                + b"\n"
+            )
+            records = lm.load_learning([path])
+            self.assertEqual(len(records[lm.EXPERIENCE]), 2)
+            self.assertEqual(records["problems"][0]["index"], 1)
+            bound = lc.MAX_FILE_BYTES
+            lc.MAX_FILE_BYTES = 10
+            try:
+                records = lm.load_learning([path])
+            finally:
+                lc.MAX_FILE_BYTES = bound
+            self.assertEqual(records[lm.EXPERIENCE], [])
+            self.assertIn("size bound", records["problems"][0]["error"])
+
+    def test_a_run_started_before_activation_is_not_reuse(self):
+        cand = candidate()
+        straddling = experience(
+            "straddling",
+            at=AFTER,
+            started_at=AT,
+            memory_used=["memory:synthetic/lesson.md"],
+        )
+        result = aggregate(cand, *activation(cand), straddling)["lesson_reuse"]
+        self.assertEqual(result["uses"], 0)
+
     def test_counts_include_all_five_schema_names(self):
         result = lm.learning_metrics(dataset())
         self.assertEqual(result["counts"], {name: 0 for name in lc.RECORD_SCHEMAS})
