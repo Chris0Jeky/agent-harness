@@ -684,8 +684,13 @@ def _outcome_event_rules(record):
         errors.append(f"$.id: must be {expected}")
     if record["experience"] != experience_id(run["kind"], run["key"]):
         errors.append("$.experience: must match the run's experience id")
-    if (record["version"] == 1) != (record["supersedes"] is None):
-        errors.append("$.supersedes: null exactly when version is 1")
+    if record["version"] == 1:
+        if record["supersedes"] is not None:
+            errors.append("$.supersedes: null exactly when version is 1")
+    else:
+        prev = "oev_" + _digest16(f"{run['kind']}|{run['key']}|{record['version'] - 1}")
+        if record["supersedes"] != prev:
+            errors.append(f"$.supersedes: must be the run's previous version {prev}")
     if record["success"] != experience_succeeded({"outcome": record["outcome"]}):
         errors.append("$.success: must match experience_succeeded")
     return errors

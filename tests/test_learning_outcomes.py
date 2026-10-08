@@ -171,6 +171,7 @@ class OutcomeTests(unittest.TestCase):
             {"experience": "exp_" + "0" * 16},
             {"success": False},
             {"supersedes": None},
+            {"supersedes": "oev_" + "0" * 16},  # not this run's previous version
             {"observed_at": "2026-08-01T00:00:00Z"},
             {"observed_at": "2026-02-30T00:00:00Z"},
             {"unexpected": True},

@@ -1184,6 +1184,11 @@ corrections; `recurrences` finds correction or failure keys shared by more than 
 reversion replaces the earlier clean merge contribution in every consumer, rather than counting
 the run twice. `project <experiences...> [--out FILE]` writes JSONL (stdout by default), and
 `posterior --events FILE --repo R --recipe X` reads it; a refusal exits 2 with a JSON error on stderr.
+Projection is whole-history, and `observed_at` is the producer's clock, not an ingestion offset: an
+observation that arrives later with an earlier `observed_at` renumbers the run's later versions on
+the next projection, and an incremental reader whose cursor is past it never sees it. Until the
+stream gains a log offset (#511), a consumer re-reads the whole stream (the reducers are cheap and
+deterministic) rather than trusting a cursor across a re-projection.
 
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
