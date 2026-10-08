@@ -7,7 +7,8 @@ The local swarm produces a JSON receipt per job and a coordinator item table per
 answers "which recipe finds real defects", "which effort level wastes turns" or "did the PR stick".
 The coordinator also prunes decided items after 30 days and keeps only its last 200 turns, so
 its own history is lossy. The ledger is the durable, normalised record the swarm's learning
-(Thompson-sampling posteriors per repo x recipe x runtime, later GEPA prompt optimisation) is
+(a Thompson-sampling posterior keyed repo x recipe, with runtime and model only as per-model
+sub-counts in its score, later GEPA prompt optimisation) is
 judged against. It lives outside both producers so neither can grade itself.
 
 ## Contract
