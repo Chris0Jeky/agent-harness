@@ -33,6 +33,7 @@ import sys
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas" / "learning"
 RECORD_SCHEMAS = {
     "estate-experience/v1": "estate-experience.schema.json",
+    "outcome-event/v1": "outcome-event.schema.json",
     "memory-use/v1": "memory-use.schema.json",
     "learning-candidate/v1": "learning-candidate.schema.json",
     "candidate-genome/v1": "candidate-genome.schema.json",
@@ -672,8 +673,32 @@ def _system_rules(record):
     return errors
 
 
+def _outcome_event_rules(record):
+    errors = _time_errors(record, ("at", "observed_at"))
+    errors += _ordered(record, "at", "observed_at")
+    run = record["run"]
+    expected = "oev_" + _digest16(
+        f"{run['kind']}|{run['key']}|{int(record['version'])}"
+    )
+    if record["id"] != expected:
+        errors.append(f"$.id: must be {expected}")
+    if record["experience"] != experience_id(run["kind"], run["key"]):
+        errors.append("$.experience: must match the run's experience id")
+    if record["version"] == 1:
+        if record["supersedes"] is not None:
+            errors.append("$.supersedes: null exactly when version is 1")
+    else:
+        prev = "oev_" + _digest16(f"{run['kind']}|{run['key']}|{record['version'] - 1}")
+        if record["supersedes"] != prev:
+            errors.append(f"$.supersedes: must be the run's previous version {prev}")
+    if record["success"] != experience_succeeded({"outcome": record["outcome"]}):
+        errors.append("$.success: must match experience_succeeded")
+    return errors
+
+
 SEMANTIC_RULES = {
     "estate-experience/v1": _experience_rules,
+    "outcome-event/v1": _outcome_event_rules,
     "memory-use/v1": _memory_use_rules,
     "learning-candidate/v1": _candidate_rules,
     "candidate-genome/v1": _genome_rules,
