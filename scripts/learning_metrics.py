@@ -40,12 +40,16 @@ def _read(path):
     """Records of a file; a JSONL ledger decodes line by line."""
     if path.suffix != ".jsonl":
         return contracts.read_records(path)
+    raw = path.read_bytes()
+    if len(raw) > contracts.MAX_FILE_BYTES:
+        raise ValueError(f"{path}: exceeds the size bound")
     records = []
-    for line in path.read_text("utf-8-sig").splitlines():
+    # Decode per line, so neither a bad byte nor bad JSON costs the rest.
+    for line in raw.removeprefix(b"\xef\xbb\xbf").splitlines():
         if not line.strip():
             continue
         try:
-            records.append(contracts.loads(line))
+            records.append(contracts.loads(line.decode("utf-8")))
         except (ValueError, RecursionError) as exc:
             records.append(_Unreadable(f"undecodable line: {exc}"))
     return records

@@ -561,6 +561,13 @@ class ProceduralTests(unittest.TestCase):
         block = run(inputs, gate="offline_eval")["results"]["procedural"]
         self.assertEqual(block["candidate"]["recovery_rate"], 1.0)
 
+    def test_no_case_requiring_recovery_means_no_recovery_rate(self):
+        inputs = self.suite()
+        for case in inputs["cases"]:
+            case["oracle"].pop("require_recovery", None)
+        block = run(inputs, gate="offline_eval")["results"]["procedural"]
+        self.assertIsNone(block["candidate"]["recovery_rate"])
+
     def test_no_procedural_cases_no_block(self):
         self.assertIsNone(run()["results"]["procedural"])
 

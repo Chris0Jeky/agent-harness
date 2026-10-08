@@ -1054,6 +1054,7 @@ refuses times after now and returns a record only after folding the chain with i
 
 ```powershell
 py -3 scripts\learning_promote.py --candidate <lc.json> --records <promotion records.jsonl> --gates <gate or eval-run json>... --lane <lane> --session <session>
+```
 
 **Variant archive** (`scripts/learning_archive.py`, W3). Every `candidate-genome/v1` stays in the
 archive, linked by `parent_genome` into a tree (orphans become roots and cycles are reported, never
@@ -1068,6 +1069,7 @@ roots, the frontier, the unmeasured genomes, the best genome per objective and t
 
 ```powershell
 py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctness,cost] [--parents 4]
+```
 
 **Procedural and system evals** (W2). A procedural case (`layer: procedural`, oracle
 `procedure`) replays a proposed skill on a historical task it was not generated from: the
