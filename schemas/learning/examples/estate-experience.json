@@ -1,0 +1,58 @@
+{
+  "schema": "estate-experience/v1",
+  "id": "exp_4655f2b5185f528e",
+  "at": "2026-10-01T10:20:00Z",
+  "observed_at": "2026-10-08T10:00:00Z",
+  "started_at": "2026-10-01T10:00:00Z",
+  "producer": {
+    "lane": "example-swarm",
+    "runtime": "muse",
+    "model": "example-model",
+    "session": "session-worker-1"
+  },
+  "source": {
+    "kind": "muse-job",
+    "key": "example-lane/007/example-repo--test-gaps-1"
+  },
+  "repo": "example-repo",
+  "task_kind": "lens",
+  "recipe": "test-gaps",
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "result_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "trajectory_ref": "muse-job:example-lane/007/example-repo--test-gaps-1",
+  "joins": [
+    "ledger:example-lane/007/example-repo--test-gaps-1",
+    "pr:https://github.com/example/example-repo/pull/12"
+  ],
+  "outcome": {
+    "immediate": "merged",
+    "matured": "clean",
+    "regression": false
+  },
+  "feedback": [
+    {
+      "kind": "triage_verdict",
+      "ref": "coordinator-item:f-0123456789",
+      "signal": "refuted",
+      "key": "test-gaps-flags-generated-code"
+    }
+  ],
+  "failure_keys": [
+    "test-gaps-flags-generated-code"
+  ],
+  "memory_used": [
+    "memory:example-project/generated-code-is-excluded"
+  ],
+  "skills_used": [
+    "skill:delegate-to-muse"
+  ],
+  "cost": {
+    "tokens": {
+      "input": 12000,
+      "output": 1800,
+      "cached": 9000
+    },
+    "seconds": 1200,
+    "usd": null
+  }
+}

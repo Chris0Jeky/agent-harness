@@ -1,0 +1,44 @@
+{
+  "schema": "memory-use/v1",
+  "id": "mu_4655f2b5185f528e",
+  "at": "2026-10-01T10:20:00Z",
+  "observed_at": "2026-10-08T10:00:00Z",
+  "producer": {
+    "lane": "example-swarm",
+    "runtime": "muse",
+    "model": "example-model",
+    "session": "session-worker-1"
+  },
+  "experience": "exp_4655f2b5185f528e",
+  "memories": [
+    {
+      "ref": "memory:example-project/generated-code-is-excluded",
+      "supplied": true,
+      "read": false,
+      "cited": false,
+      "bytes": 412,
+      "effect": {
+        "verdict": "neutral",
+        "evaluator": {
+          "kind": "oracle",
+          "runtime": "tool",
+          "model": null,
+          "session": "replay-evaluator-run-1"
+        },
+        "ref": "ledger:example-lane/007/example-repo--test-gaps-1"
+      }
+    }
+  ],
+  "skills": [
+    {
+      "ref": "skill:delegate-to-muse",
+      "invoked_by": "model",
+      "completed": true
+    }
+  ],
+  "method": {
+    "supplied": "index-loaded",
+    "read": "tool-read",
+    "cited": "name-mention"
+  }
+}

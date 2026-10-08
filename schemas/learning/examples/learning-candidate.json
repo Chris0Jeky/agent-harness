@@ -1,0 +1,41 @@
+{
+  "schema": "learning-candidate/v1",
+  "id": "lc_example-0001",
+  "at": "2026-10-08T11:00:00Z",
+  "producer": {
+    "lane": "example-steward",
+    "runtime": "claude",
+    "model": "example-model",
+    "session": "session-steward-1"
+  },
+  "kind": "recipe",
+  "trigger": "repeated_failure",
+  "claim": "The test-gaps recipe reports files under generated/ as untested; every such finding was refuted.",
+  "evidence": [
+    "exp_4655f2b5185f528e",
+    "exp_a4d8694eaa84d69a"
+  ],
+  "future_decision": "Whether the test-gaps recipe scans files under generated/ in example-repo.",
+  "confidence": "medium",
+  "scope": {
+    "repos": [
+      "example-repo"
+    ],
+    "runtimes": [
+      "muse"
+    ],
+    "task_kinds": [
+      "lens"
+    ]
+  },
+  "destination": {
+    "repo": "example-config",
+    "path": "recipes/test-gaps.json"
+  },
+  "promotion_class": "P4",
+  "supersedes": [],
+  "contradicts": [],
+  "genome": "gen_example-0001",
+  "valid_from": "2026-10-08T11:00:00Z",
+  "valid_until": null
+}
