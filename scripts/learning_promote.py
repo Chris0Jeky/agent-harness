@@ -90,18 +90,20 @@ def _evaluation_gates(candidate):
     ]
 
 
-def target_state(candidate, state, gates):
+def target_state(candidate, state, gates, resolve=None):
     """The next state along the class's path, or a refusal naming what is missing.
 
     Only a pass the fold would count moves the candidate forward: a gate judged
     by the learner, by itself or by nobody independent would strand it in
     probation, because an evaluation gate cannot be recorded again later.
     """
-    names = {g["gate"] for g in gates if contracts._counts(g, candidate)}
+    names = {g["gate"] for g in gates if contracts._counts(g, candidate, resolve)}
     evaluation = _evaluation_gates(candidate)
     # Only the counted, required evaluation passes can vouch for independence.
     judged = [
-        g for g in gates if g["gate"] in evaluation and contracts._counts(g, candidate)
+        g
+        for g in gates
+        if g["gate"] in evaluation and contracts._counts(g, candidate, resolve)
     ]
     independent = contracts.classes()["evaluators"]["independent"]
     if any(g["result"] == "fail" for g in gates):
@@ -142,7 +144,9 @@ def target_state(candidate, state, gates):
     )
 
 
-def next_record(candidate, records, gates, producer, at, reason=None, as_of=None):
+def next_record(
+    candidate, records, gates, producer, at, reason=None, as_of=None, resolve=None
+):
     """The next promotion-record/v1 for this candidate, already proven to fold.
 
     ``as_of`` (default now) bounds every timestamp, as the fold CLI does, so a
@@ -153,12 +157,12 @@ def next_record(candidate, records, gates, producer, at, reason=None, as_of=None
     if instant is None or instant > as_of:
         raise PromotionRefusal(f"the record's time {at} is not a past contract instant")
     gates = sorted(gate_results(gates, candidate), key=lambda g: g["gate"])
-    current = contracts.fold(candidate, records, as_of=as_of)
+    current = contracts.fold(candidate, records, as_of=as_of, resolve=resolve)
     if current.errors:
         raise PromotionRefusal(f"the chain does not fold cleanly: {current.errors[0]}")
     if current.effect == "live":
         raise PromotionRefusal("a live candidate moves only by its owner's records")
-    target = target_state(candidate, current.state, gates)
+    target = target_state(candidate, current.state, gates, resolve)
     prev = current.chain[-1] if current.chain else None
     basis = json.dumps(
         [
@@ -184,7 +188,9 @@ def next_record(candidate, records, gates, producer, at, reason=None, as_of=None
     }
     if candidate.get("genome"):
         record["genome"] = candidate["genome"]
-    after = contracts.fold(candidate, list(records) + [record], as_of=as_of)
+    after = contracts.fold(
+        candidate, list(records) + [record], as_of=as_of, resolve=resolve
+    )
     if after.errors or after.state != target:
         problem = after.errors[0] if after.errors else f"folded to {after.state}"
         raise PromotionRefusal(f"the fold refuses the move to {target}: {problem}")
@@ -216,6 +222,11 @@ def main(argv=None):
     parser.add_argument("--session", required=True, help="producer session")
     parser.add_argument("--at", help="record timestamp (default: now)")
     parser.add_argument("--reason")
+    parser.add_argument(
+        "--resolutions",
+        type=Path,
+        help="decision-resolution/v1 records read from agent-hq origin/main (owner gates count only through these)",
+    )
     args = parser.parse_args(argv)
     try:
         candidates = contracts.read_records(args.candidate)
@@ -232,7 +243,14 @@ def main(argv=None):
             "model": None,
             "session": args.session,
         }
-        record = next_record(candidates[0], records, gates, producer, at, args.reason)
+        resolve = (
+            contracts.resolver_from(contracts.read_records(args.resolutions))
+            if args.resolutions
+            else None
+        )
+        record = next_record(
+            candidates[0], records, gates, producer, at, args.reason, resolve=resolve
+        )
     except (
         PromotionRefusal,
         contracts.ContractError,
