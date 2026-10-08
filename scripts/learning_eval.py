@@ -45,7 +45,13 @@ _SPEC.loader.exec_module(contracts)
 RUN_SCHEMA = "eval-run/v1"
 TOOL = "agent-harness:scripts/learning_eval.py@1"
 GATES = ("offline_eval", "replay", "retrieval_regression")
-DEFAULT_POLICY = {"min_cases": 10, "min_delta": 0.0, "max_losses": 0}
+
+
+def default_policy(gate):
+    """The pinned minima for this gate (promotion-classes.json eval_minima)."""
+    pinned = contracts.classes()["eval_minima"][gate]
+    return {k: pinned[k] for k in ("min_cases", "min_delta", "max_losses")}
+
 
 
 class EvalRefusal(Exception):
@@ -357,7 +363,9 @@ def evaluate(
     at=None,
 ):
     """Judge a candidate against the baseline; returns an eval-run/v1 report."""
-    policy = {**DEFAULT_POLICY, **(policy or {})}
+    if gate not in GATES:
+        raise EvalRefusal(f"gate must be one of {GATES}")
+    policy = {**default_policy(gate), **(policy or {})}
     if policy["min_cases"] < 1 or policy["max_losses"] < 0:
         raise EvalRefusal("min_cases is at least 1 and max_losses at least 0")
     if gate not in GATES:
@@ -520,6 +528,7 @@ def evaluate(
                 "wins": wins,
                 "losses": losses,
                 "cases": len(rows),
+                "anchored": sum(1 for c in chosen if c["experience"]),
                 "min_cases": policy["min_cases"],
                 "min_delta": policy["min_delta"],
                 "max_losses": policy["max_losses"],
@@ -576,9 +585,9 @@ def main(argv=None):
     parser.add_argument("--labels", type=Path, nargs="*", default=())
     parser.add_argument("--split", choices=("holdout", "dev"), default="holdout")
     parser.add_argument("--gate", choices=GATES, default="offline_eval")
-    parser.add_argument("--min-cases", type=int, default=DEFAULT_POLICY["min_cases"])
-    parser.add_argument("--min-delta", type=float, default=DEFAULT_POLICY["min_delta"])
-    parser.add_argument("--max-losses", type=int, default=DEFAULT_POLICY["max_losses"])
+    parser.add_argument("--min-cases", type=int, help="default: the gate's pinned minimum")
+    parser.add_argument("--min-delta", type=float, help="default: the gate's pinned minimum")
+    parser.add_argument("--max-losses", type=int, help="default: the gate's pinned minimum")
     parser.add_argument("--at", help="report timestamp (default: now)")
     args = parser.parse_args(argv)
     try:
@@ -595,9 +604,13 @@ def main(argv=None):
             split=args.split,
             gate=args.gate,
             policy={
-                "min_cases": args.min_cases,
-                "min_delta": args.min_delta,
-                "max_losses": args.max_losses,
+                k: v
+                for k, v in (
+                    ("min_cases", args.min_cases),
+                    ("min_delta", args.min_delta),
+                    ("max_losses", args.max_losses),
+                )
+                if v is not None
             },
             at=args.at,
         )

@@ -1112,6 +1112,38 @@ def resolver_from(resolutions):
     return by_ref.get
 
 
+def minima_errors(gate):
+    """Why a passing hold-out gate's own results fall short of the pinned minima."""
+    pinned = classes()["eval_minima"].get(gate["gate"])
+    if pinned is None or gate["result"] != "pass":
+        return []
+    metrics = gate.get("metrics") or {}
+    missing = [k for k in ("cases", "delta", "losses", "anchored") if k not in metrics]
+    if missing:
+        return [
+            f"{gate['gate']} does not report {', '.join(missing)} against the pinned minima"
+        ]
+    errors = []
+    if metrics["cases"] < pinned["min_cases"]:
+        errors.append(
+            f"{gate['gate']} judged {metrics['cases']} cases, under {pinned['min_cases']}"
+        )
+    if metrics["delta"] < pinned["min_delta"]:
+        errors.append(
+            f"{gate['gate']} delta {metrics['delta']} is under {pinned['min_delta']}"
+        )
+    if metrics["losses"] > pinned["max_losses"]:
+        errors.append(
+            f"{gate['gate']} lost {metrics['losses']} cases, over {pinned['max_losses']}"
+        )
+    share = metrics["anchored"] / metrics["cases"] if metrics["cases"] else 0.0
+    if share < pinned["min_anchored_share"]:
+        errors.append(
+            f"{gate['gate']} anchored {share:.2f} of its cases, under {pinned['min_anchored_share']}"
+        )
+    return errors
+
+
 def _counts(gate, candidate, resolve=None):
     """Whether a passing gate result is admissible evidence for this candidate."""
     evaluator = gate["evaluator"]
@@ -1343,6 +1375,7 @@ def fold(candidate, records, as_of=None, resolve=None, genome=None):
             problems += _gate_timing(gate, record, previous_at, at, life)
             if as_of and (parse_time(gate["at"]) or as_of) > as_of:
                 problems.append(f"{gate['gate']} is dated after the fold's as_of")
+            problems += minima_errors(gate)
             anchors = set(gate.get("anchors", ()))
             leaked = sorted(anchors & training)
             if leaked:

@@ -28,6 +28,10 @@
       "text": "Branch from master and run pytest.",
       "tokens": 900
     },
+    "case_static-state-recall-behave-2": {
+      "text": "Branch from master and run pytest.",
+      "tokens": 900
+    },
     "case_dynamic-state-tracking-extract": {
       "items": [
         "noise:x"
@@ -41,6 +45,10 @@
       ]
     },
     "case_dynamic-state-tracking-behave": {
+      "text": "CI runs Python 3.9.",
+      "tokens": 900
+    },
+    "case_dynamic-state-tracking-behave-2": {
       "text": "CI runs Python 3.9.",
       "tokens": 900
     },
@@ -61,6 +69,10 @@
       "text": "Edit the fixture by hand.",
       "tokens": 900
     },
+    "case_workflow-knowledge-behave-2": {
+      "text": "Edit the fixture by hand.",
+      "tokens": 900
+    },
     "case_environment-gotchas-extract": {
       "items": [
         "noise:x"
@@ -77,6 +89,10 @@
       "text": "Pipe the JSON through a shell heredoc.",
       "tokens": 900
     },
+    "case_environment-gotchas-behave-2": {
+      "text": "Pipe the JSON through a shell heredoc.",
+      "tokens": 900
+    },
     "case_false-premise-extract": {
       "items": [
         "noise:x"
@@ -90,6 +106,10 @@
       ]
     },
     "case_false-premise-behave": {
+      "text": "Run the deploy step after merging.",
+      "abstained": false
+    },
+    "case_false-premise-behave-2": {
       "text": "Run the deploy step after merging.",
       "abstained": false
     },

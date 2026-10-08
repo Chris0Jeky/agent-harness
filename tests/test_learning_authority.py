@@ -85,7 +85,12 @@ def candidate(kind="semantic", cls="P1", **extra):
 def gate(name, at, evaluator=ORACLE, **extra):
     item = {"gate": name, "result": "pass", "evaluator": evaluator, "at": at}
     if name in ("offline_eval", "replay", "retrieval_regression"):
-        item.update(holdout_digest="c" * 64, training_excluded=True, anchors=[])
+        item.update(
+            holdout_digest="c" * 64,
+            training_excluded=True,
+            anchors=[],
+            metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+        )
     item.update(extra)
     return item
 

@@ -108,7 +108,12 @@ def gate(name, at, evaluator=ORACLE, result="pass"):
     if name == "owner":
         item["ref"] = "decision:test-owner-1"
     if name in ("offline_eval", "replay", "retrieval_regression"):
-        item.update(holdout_digest=HOLDOUT, training_excluded=True, anchors=[])
+        item.update(
+            holdout_digest=HOLDOUT,
+            training_excluded=True,
+            anchors=[],
+            metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+        )
     return item
 
 
@@ -249,6 +254,47 @@ class ExampleTests(unittest.TestCase):
     def test_record_order_on_input_does_not_matter(self):
         result = lc.fold(candidate(), list(reversed(chain())))
         self.assertEqual((result.state, result.errors), ("active", []))
+
+
+class MinimaTests(unittest.TestCase):
+    """A passing hold-out gate's own results meet the pinned eval_minima (K3)."""
+
+    def fold_with(self, **metrics):
+        records = chain()
+        gate_ = records[1]["gates"][0]
+        gate_["metrics"].update(metrics)
+        for name in [k for k, v in metrics.items() if v is None]:
+            del gate_["metrics"][name]
+        return lc.fold(candidate(), records)
+
+    def test_every_hold_out_gate_has_pinned_minima(self):
+        minima = dict(lc.classes()["eval_minima"])
+        minima.pop("description")
+        self.assertEqual(
+            set(minima), {"offline_eval", "replay", "retrieval_regression"}
+        )
+        for pinned in minima.values():
+            self.assertGreaterEqual(pinned["min_cases"], 20)
+            self.assertEqual(pinned["max_losses"], 0)
+
+    def test_short_or_lossy_or_unanchored_gates_do_not_count(self):
+        for metrics, fragment in (
+            ({"cases": 19, "anchored": 19}, "under 20"),
+            ({"delta": -0.01}, "delta"),
+            ({"losses": 1}, "lost 1"),
+            ({"anchored": 5}, "anchored 0.21"),
+            ({"anchored": None}, "does not report anchored"),
+        ):
+            result = self.fold_with(**metrics)
+            self.assertEqual(result.state, "evaluating", metrics)
+            self.assertTrue(
+                any(fragment in e for e in result.errors), (metrics, result.errors)
+            )
+
+    def test_a_failed_gate_is_not_held_to_the_minima(self):
+        records = chain()
+        records[1]["gates"][0].update(result="fail", metrics={})
+        self.assertEqual(lc.minima_errors(records[1]["gates"][0]), [])
 
 
 class RecordRuleTests(unittest.TestCase):

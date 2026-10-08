@@ -54,7 +54,12 @@ def candidate(**changes):
 def gate(name, at, result="pass", evaluator=ORACLE):
     item = {"gate": name, "result": result, "evaluator": evaluator, "at": at}
     if name in ("offline_eval", "replay", "retrieval_regression"):
-        item.update(holdout_digest="f" * 64, training_excluded=True, anchors=[])
+        item.update(
+            holdout_digest="f" * 64,
+            training_excluded=True,
+            anchors=[],
+            metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+        )
     if name == "owner":
         item["ref"] = "decision:test-1"
     return item

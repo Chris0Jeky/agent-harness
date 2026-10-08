@@ -434,5 +434,26 @@
       "\\byou (must|should) now\\b",
       "\\bsystem prompt\\b"
     ]
+  },
+  "eval_minima": {
+    "description": "Pinned minima for a passing hold-out gate, checked by the fold against the gate's own results (metrics cases, delta, losses, anchored), whatever policy the evaluator ran with. Provisional until the statistics audit of the first evolved recipe; revised on the bus thread.",
+    "offline_eval": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_losses": 0,
+      "min_anchored_share": 0.5
+    },
+    "replay": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_losses": 0,
+      "min_anchored_share": 0.5
+    },
+    "retrieval_regression": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_losses": 0,
+      "min_anchored_share": 0.5
+    }
   }
 }

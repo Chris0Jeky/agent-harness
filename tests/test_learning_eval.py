@@ -79,7 +79,7 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(report["verdict"], "pass")
         self.assertEqual(report["tier"], "oracle")
         results = report["results"]
-        self.assertEqual((results["wins"], results["losses"]), (15, 0))
+        self.assertEqual((results["wins"], results["losses"]), (20, 0))
         self.assertLess(results["sign_test_p"], 0.001)
         self.assertEqual(results["retrieval"]["candidate"]["mrr"], 1.0)
         self.assertEqual(
@@ -486,7 +486,7 @@ class ProceduralTests(unittest.TestCase):
     def suite(self):
         inputs = load()
         procedural = []
-        for n in range(10):
+        for n in range(20):
             case = copy.deepcopy(
                 next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
             )
@@ -522,7 +522,7 @@ class ProceduralTests(unittest.TestCase):
         report = run(self.suite(), gate="offline_eval")
         self.assertEqual(report["verdict"], "pass")
         block = report["results"]["procedural"]
-        self.assertEqual(block["n"], 10)
+        self.assertEqual(block["n"], 20)
         self.assertEqual(block["baseline"]["completion_rate"], 0.5)
         self.assertEqual(block["candidate"]["completion_rate"], 1.0)
         self.assertEqual(
@@ -569,7 +569,7 @@ class ProceduralTests(unittest.TestCase):
             "error": "crashed",
         }
         block = run(inputs, gate="offline_eval")["results"]["procedural"]
-        self.assertEqual(block["candidate"]["completion_rate"], 0.9)
+        self.assertEqual(block["candidate"]["completion_rate"], 0.95)
         self.assertEqual(block["candidate"]["turns_mean"], 8)
 
     def test_recovery_rate_counts_only_cases_that_needed_recovery(self):
