@@ -1,0 +1,1 @@
+{"schema": "eval-labels/v1", "at": "2026-09-05T00:00:00Z", "suite": "memory-eval-example", "variant": "candidate", "evaluator": {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "judge-1"}, "labels": {"case_example01": "pass"}}

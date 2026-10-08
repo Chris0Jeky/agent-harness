@@ -1,0 +1,18 @@
+{
+  "schema": "decision-resolution/v1",
+  "decision": "test-owner-1",
+  "source": "agent-hq@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "open",
+  "option": "approve",
+  "answered_at": null,
+  "created": "2026-08-30T00:00:00Z",
+  "expires": null,
+  "subject": {
+    "candidate": "lc_example-0001"
+  },
+  "measures": {
+    "exit_bars": {},
+    "graduation": {}
+  },
+  "_expect": "open decision has no option"
+}
