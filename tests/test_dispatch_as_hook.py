@@ -323,6 +323,74 @@ class DispatchAsHookTests(unittest.TestCase):
         self.assertAllowed(completed)
         self.assertTrue(any(probe.startswith("gh repo view") for probe in probes))
 
+    def test_rule_evaluation_exception_fail_closes(self):
+        """A rule-evaluation exception through main() fails closed, unscaled.
+
+        dispatch.py guarantees that exceptions during RULE EVALUATION deny
+        fail-closed with a dispatcher-error reason that floor_posture never
+        scales. This drives the real main()/subprocess path — a fault-injected
+        copy of the real dispatcher whose tokenizer raises, so the failure
+        lands in main()'s fail-closed handler — under a guide-posture fixture
+        where a pure-opacity deny WOULD scale to allow. The command is benign
+        (`echo hi` allows when evaluation succeeds), so only the fail-closed
+        path can produce the asserted deny.
+        """
+        anchor = "def tokens(segment: str):\n    return segment.split()"
+        source = DISPATCH_PATH.read_text(encoding="utf-8")
+        self.assertIn(anchor, source)
+        workspace = Path(tempfile.mkdtemp(prefix="floor-rule-exception-"))
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        project = workspace / "project"
+        (project / ".agent-harness").mkdir(parents=True)
+        (project / ".agent-harness" / "tier.json").write_text(
+            json.dumps({"tier": 1, "floor_posture": "guide", "flags": {}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            dispatch.floor_posture({"tier": 1, "floor_posture": "guide", "flags": {}}),
+            "guide",
+        )
+        faulty = workspace / "faulty_dispatch.py"
+        faulty.write_text(
+            source.replace(
+                anchor,
+                "def tokens(segment: str):\n"
+                '    raise RuntimeError("injected rule-evaluation failure")',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        shims = workspace / "bin"
+        shims.mkdir()
+        self.write_shims(shims)
+        log = workspace / "probes.log"
+        payload = json.dumps(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi"},
+                "cwd": str(project),
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(faulty),
+                "--event",
+                "pre",
+                "--runtime",
+                "claude",
+            ],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(project),
+            env=self.hook_environment(shims, project, "rest-private", log),
+        )
+        reason = self.denyReason(completed)
+        self.assertIn("dispatcher error", reason.lower())
+        self.assertNotIn("DOUBLE-CHECK", reason)
+
 
 class ProbeBinaryResolutionTests(unittest.TestCase):
     """`resolve_probe_binary` searches PATH and nothing else."""
