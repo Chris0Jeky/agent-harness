@@ -328,5 +328,96 @@
     "allow": [
       "allow"
     ]
+  },
+  "destinations": {
+    "description": "Where each class may write. A destination's class is the lowest class whose allowlist admits it; a destination on no allowlist is P8. The fold is pure, so the applier also refuses a path with a symlink or junction on any segment, a path that resolves outside its repository, and any write the rendered bytes do not hash to.",
+    "default_class": "P8",
+    "allow": [
+      {
+        "class": "P1",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^projects/[a-z0-9][a-z0-9._-]{0,79}/memory/(?![Mm][Ee][Mm][Oo][Rr][Yy]\\.[Mm][Dd]$)[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.md$",
+        "what": "one curated memory note, never the auto-loaded MEMORY.md index"
+      },
+      {
+        "class": "P3",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^skills/[a-z0-9][a-z0-9._-]{0,79}/SKILL\\.md$",
+        "what": "one skill definition"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/recipes/(?![Rr][Ee][Aa][Dd][Mm][Ee]\\.)[a-z0-9][a-z0-9._-]{0,79}\\.(md|json)$",
+        "what": "one Muse recipe"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/(coordinator-brief|coordinator-turn)\\.md$",
+        "what": "a coordinator prompt"
+      },
+      {
+        "class": "P5",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/agent-routes\\.json$",
+        "what": "the routing table"
+      },
+      {
+        "class": "P6",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/muse_coordinator\\.py$",
+        "what": "the scheduler"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/[a-z0-9][a-z0-9_-]{0,79}[.](py|ps1)$",
+        "what": "one tool script (the scheduler itself is P6)"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?agent-harness$",
+        "path": "^scripts/[a-z0-9][a-z0-9_]{0,79}[.]py$",
+        "what": "one harness script (never the hook templates)"
+      }
+    ]
+  },
+  "content": {
+    "description": "Authority or permission language anywhere in a candidate's claim, future decision, context or destination makes it P8: it touches who may do what, so it is never automatic. Matched case-insensitively; an error in a pattern fails closed to P8.",
+    "class": "P8",
+    "patterns": [
+      "\\bpermissions?\\b",
+      "\\bauthori[sz](e|ed|es|ation|ing)\\b",
+      "\\bapprov(e|ed|es|al|ing)\\b",
+      "\\bbypass",
+      "\\boverrid(e|es|ing|den)\\b",
+      "\\bskip(s|ped|ping)? (the |a |any )?(review|gate|check|test|hook)s?\\b",
+      "--no-verify",
+      "--force\\b",
+      "\\bforce[- ]?push",
+      "\\bwithout (a |any )?(review|approval|asking|permission)\\b",
+      "\\b(merge|push)(es|ed|ing)? (it )?(straight|directly) to (main|master)\\b",
+      "\\b(review|merge|tier|deny) gate\\b",
+      "\\bdeny[- ]floor\\b",
+      "\\btier\\.json\\b",
+      "\\blaws?\\.md\\b",
+      "(^|[\\s/`'\\\"])rules/",
+      "\\bsettings(\\.local)?\\.json\\b",
+      "(^|[\\s/`'\\\"])hooks?/",
+      "\\ballow[- ]?list\\b",
+      "\\bsudo\\b",
+      "\\badministrator\\b",
+      "\\bsecrets?\\b",
+      "\\bcredentials?\\b",
+      "\\bapi[ _-]?keys?\\b",
+      "\\b(access|auth|bearer|session) tokens?\\b",
+      "\\bestop\\b",
+      "\\bkill[- ]?switch\\b",
+      "\\bignore (all |any )?(previous|prior|above|earlier) instructions\\b",
+      "\\bdisregard (all |any )?(previous|prior|above|earlier)? ?instructions\\b",
+      "\\byou (must|should) now\\b",
+      "\\bsystem prompt\\b"
+    ]
   }
 }
