@@ -55,6 +55,10 @@
       "sha256": "3441ff1507452cb84cca49b586a8657ab9ce2229765e82b1cae8c40606418e16"
     },
     {
+      "path": "schemas/learning/promotion-receipt.schema.json",
+      "sha256": "6f5ca9ed9155e47d4e5ae67090ede5dd259f0b255f168f351f7649a99a50cb6b"
+    },
+    {
       "path": "schemas/learning/promotion-record.schema.json",
       "sha256": "625b53e54e21b96993996fb944ca34a54f7682e79e285486909760cff7b05b2b"
     },
@@ -68,7 +72,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "fd8d2b3ce7d4309f7d81e09dbb8e52b08936be154a1ef366084f875effe8bd9c"
+      "sha256": "c61b10ecd5a2fa279e7fcf3f400facb77d5c1b635c237275b8ab9561a01db91e"
     }
   ],
   "record_schemas": [
@@ -82,8 +86,9 @@
     "learning-candidate/v1",
     "learning-would-apply/v1",
     "memory-use/v1",
+    "promotion-receipt/v1",
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "3b7e026bc6824a13ea4d2ab05ffb55c1b07f7569727431478d4fc6bb22a47857"
+  "digest": "1808b20a05cce9b21e5a00b655044fc8f1ced1e15e633c140ff2c10f4bf75cce"
 }
