@@ -323,6 +323,38 @@ class DispatchAsHookTests(unittest.TestCase):
         self.assertAllowed(completed)
         self.assertTrue(any(probe.startswith("gh repo view") for probe in probes))
 
+    def test_malformed_stdin_allows(self):
+        """Unparseable stdin allows: no command can be identified to deny."""
+        workspace = Path(tempfile.mkdtemp(prefix="floor-as-hook-"))
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        project = workspace / "project"
+        (project / ".agent-harness").mkdir(parents=True)
+        (project / ".agent-harness" / "tier.json").write_text(
+            json.dumps({"tier": 3, "flags": {"sensitive_data": True}}),
+            encoding="utf-8",
+        )
+        shims = workspace / "bin"
+        shims.mkdir()
+        self.write_shims(shims)
+        log = workspace / "probes.log"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(DISPATCH_PATH),
+                "--event",
+                "pre",
+                "--runtime",
+                "claude",
+            ],
+            input="{not json",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(project),
+            env=self.hook_environment(shims, project, "rest-private", log),
+        )
+        self.assertAllowed(completed)
+
 
 class ProbeBinaryResolutionTests(unittest.TestCase):
     """`resolve_probe_binary` searches PATH and nothing else."""
