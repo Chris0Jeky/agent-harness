@@ -82,6 +82,7 @@ jobs:
           scripts/learning_contracts.py tests/test_learning_contracts.py
           scripts/learning_metrics.py tests/test_learning_metrics.py
           scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -127,6 +128,7 @@ jobs:
           scripts/learning_contracts.py tests/test_learning_contracts.py
           scripts/learning_metrics.py tests/test_learning_metrics.py
           scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -172,6 +174,7 @@ jobs:
           scripts/learning_contracts.py tests/test_learning_contracts.py
           scripts/learning_metrics.py tests/test_learning_metrics.py
           scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py

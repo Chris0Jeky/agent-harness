@@ -1036,6 +1036,25 @@ py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> -
 
 Exit 0 pass, 1 fail, 3 insufficient, 2 refused.
 
+**Promotion-record generation** (`scripts/learning_promote.py`, W2). Given a candidate, its
+promotion records and the gate results of its current stay (raw gate results or `eval-run/v1`
+reports), it writes the record that moves the candidate to the next state on its class's path:
+`candidate` to `evaluating` (P0 straight to `active`); `evaluating` to `canary` or `probation`
+once every evaluation gate is present; `canary` to `probation` on its canary result; `probation`
+to `active` on maturity (and the owner's pass where the class needs it). Only passes the fold
+would count move a candidate forward (never the learner's, `self` or an LLM judge alone), since
+an evaluation gate recorded too early would strand the candidate in probation. A failed gate
+while evaluating, in canary or in probation moves to `rejected`. Every generated move is shadow;
+a live candidate, reverts, reinforcement, supersession and decay are never generated, since they
+need blame, judgment or the owner. Run reports are accepted only for this candidate (and the
+genome it names). Gates are stored sorted and the id is derived from the move, so a retry with
+the same `--at`, producer and reason is byte-identical and the fold counts it once. The generator
+refuses times after now and returns a record only after folding the chain with it appended.
+
+```powershell
+py -3 scripts\learning_promote.py --candidate <lc.json> --records <promotion records.jsonl> --gates <gate or eval-run json>... --lane <lane> --session <session>
+```
+
 **Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
 attestation the fold checks for consistency, not proof: evaluator identity is self-reported (the
 session rule stops accidental self-evaluation, not a dishonest writer), and the salt is public,
