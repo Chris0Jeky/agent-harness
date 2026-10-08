@@ -348,5 +348,14 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stderr)["status"], "refused")
 
 
+class StreamTests(unittest.TestCase):
+    def test_a_gapped_or_duplicated_stream_is_refused(self):
+        events, problems = outcomes.events_from_experiences(history())
+        self.assertEqual((problems, outcomes.stream_errors(events)), ([], []))
+        gapped = [e for e in events if e["version"] != 2]
+        self.assertIn("are not 1..", outcomes.stream_errors(gapped)[0])
+        self.assertIn("appears twice", outcomes.stream_errors(events + events[:1])[0])
+
+
 if __name__ == "__main__":
     unittest.main()

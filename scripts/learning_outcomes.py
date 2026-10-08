@@ -114,6 +114,25 @@ def events_from_experiences(records):
     return sorted(events, key=_event_order), problems
 
 
+def stream_errors(events):
+    """Why a stream is not whole: duplicate ids, or a run whose versions skip.
+
+    Each event is checked alone by validate_record; this checks them together.
+    A run's newest versions dropped from the end leave no gap, so a reader that
+    must not miss a revert re-projects from the experiences instead.
+    """
+    errors, seen, versions = [], set(), {}
+    for event in events:
+        if event["id"] in seen:
+            errors.append(f"{event['id']}: appears twice")
+        seen.add(event["id"])
+        versions.setdefault(_run_id(event), []).append(event["version"])
+    for run, found in sorted(versions.items()):
+        if sorted(found) != list(range(1, len(found) + 1)):
+            errors.append(f"{run}: versions {sorted(found)} are not 1..{len(found)}")
+    return errors
+
+
 def latest(events):
     """Newest version per run, keyed by run.kind|run.key."""
     by_run = {}
@@ -209,6 +228,9 @@ def main(argv=None):
                 problems = contracts.validate_record(event)
                 if problems or event["schema"] != "outcome-event/v1":
                     raise ValueError(f"invalid outcome event: {problems}")
+            broken = stream_errors(events)
+            if broken:
+                raise ValueError(f"broken outcome stream: {broken[0]}")
             alpha, beta = posterior(events, args.repo, args.recipe)
             print(json.dumps({"alpha": alpha, "beta": beta}, sort_keys=True))
     except (contracts.ContractError, OSError, ValueError) as exc:
