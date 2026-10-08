@@ -1107,11 +1107,11 @@ def class_option(cls, resolved):
 
 
 def _owner_gate_on(record, candidate, resolve):
-    at = parse_time(record["at"])
+    """An owner pass on this record, answered by the gate's own time (as _counts)."""
     return any(
         g["gate"] == "owner"
         and g["result"] == "pass"
-        and not approval_errors(g.get("ref"), candidate, at, resolve)
+        and not approval_errors(g.get("ref"), candidate, parse_time(g["at"]), resolve)
         for g in record["gates"]
     )
 
@@ -1124,6 +1124,22 @@ def _holds(measure, flag, at):
     return since is not None and since <= at and (until is None or at < until)
 
 
+def _same_repository(full, destination):
+    """Is owner/repo the destination repository, owner included?
+
+    An owner-qualified destination must match exactly (GitHub names fold case);
+    an unqualified one matches only an owner/repo its class's allowlist admits
+    for that path, so attacker/claude-config never stands in for the real one.
+    """
+    repo, path = destination.get("repo", ""), destination.get("path", "")
+    if "/" in repo:
+        return full.casefold() == repo.casefold()
+    return full.split("/")[-1] == repo and any(
+        _pattern_matches(rule["repo"], full) and _pattern_matches(rule["path"], path)
+        for rule in classes()["destinations"]["allow"]
+    )
+
+
 def _landing_errors(record, candidate, channel, cls):
     """An installed live record names where it landed, in its own repository."""
     landed = str(record.get("landed", ""))
@@ -1131,8 +1147,11 @@ def _landing_errors(record, candidate, channel, cls):
         match = re.fullmatch(
             r"pr:https://github[.]com/([^/]+)/([^/]+)/pull/[0-9]+", landed
         )
-        repo = (candidate["destination"] or {}).get("repo", "").split("/")[-1]
-        if not match or match.group(2) != repo:
+        destination = candidate["destination"] or {}
+        repo = destination.get("repo", "")
+        if not match or not _same_repository(
+            f"{match.group(1)}/{match.group(2)}", destination
+        ):
             return [
                 f"{cls} lands through a reviewed PR in {repo}: landed: pr:<that PR's url> is required"
             ]
