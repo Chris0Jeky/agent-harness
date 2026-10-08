@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/estate-experience.schema.json",
+  "title": "estate-experience/v1",
+  "description": "One meaningful run, normalised across runtimes (the Estate Trajectory Format). An experience is re-observed as its outcome advances; each observation is a new record with the same id and a later observed_at, and readers fold by id taking the latest. id is exp_ + sha256(source.kind|source.key)[:16]. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "observed_at", "producer", "source", "repo",
+    "task_kind", "outcome"
+  ],
+  "properties": {
+    "schema": {"const": "estate-experience/v1"},
+    "id": {"$ref": "common.schema.json#/$defs/exp_id"},
+    "at": {
+      "description": "When the run ended (or its terminal event).",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "observed_at": {
+      "description": "When this observation of the run was written.",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "source": {
+      "description": "The idempotence key: the producer-native identity of the run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "key"],
+      "properties": {
+        "kind": {"$ref": "common.schema.json#/$defs/slug"},
+        "key": {"type": "string", "minLength": 1, "maxLength": 400}
+      }
+    },
+    "repo": {"$ref": "common.schema.json#/$defs/repo"},
+    "task_kind": {"$ref": "common.schema.json#/$defs/slug"},
+    "recipe": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/slug"}, {"type": "null"}]
+    },
+    "base_sha": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/sha"}, {"type": "null"}]
+    },
+    "result_sha": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/sha"}, {"type": "null"}]
+    },
+    "trajectory_ref": {
+      "description": "A pointer to the trajectory, never the transcript.",
+      "anyOf": [{"$ref": "common.schema.json#/$defs/ref"}, {"type": "null"}]
+    },
+    "joins": {
+      "description": "Refs that join other ledgers, e.g. ledger:<outcome-ledger/v1 id>, pr:<url>, coordinator-item:<id>, claude-session:<id>.",
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/ref"}
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["immediate", "matured", "regression"],
+      "properties": {
+        "immediate": {
+          "type": "string",
+          "enum": [
+            "completed", "published", "merged", "closed_unmerged",
+            "failed", "timed_out", "abandoned", "refused"
+          ]
+        },
+        "matured": {
+          "description": "clean once a merge survived the 7-day window, reverted when it did not, null until known. Only a merged run matures.",
+          "enum": ["clean", "reverted", null]
+        },
+        "regression": {"type": ["boolean", "null"]}
+      }
+    },
+    "feedback": {
+      "description": "Signals about the run. No free text: prose lives only in candidates.",
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "signal"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "owner_correction", "owner_approval", "review_verdict",
+              "triage_verdict", "ci", "revert"
+            ]
+          },
+          "ref": {"$ref": "common.schema.json#/$defs/ref"},
+          "signal": {"$ref": "common.schema.json#/$defs/slug"},
+          "key": {
+            "description": "Stable class of the corrected behaviour, so recurrence can be counted.",
+            "$ref": "common.schema.json#/$defs/slug"
+          },
+          "at": {"$ref": "common.schema.json#/$defs/timestamp"}
+        }
+      }
+    },
+    "failure_keys": {
+      "description": "Stable classes of failures this run hit (same-failure recurrence).",
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/slug"}
+    },
+    "memory_used": {
+      "description": "Memories supplied to the run; detail and credit live in memory-use/v1.",
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/ref"}
+    },
+    "skills_used": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/ref"}
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokens", "seconds"],
+      "properties": {
+        "tokens": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["input", "output"],
+              "properties": {
+                "input": {"type": "integer", "minimum": 0},
+                "output": {"type": "integer", "minimum": 0},
+                "cached": {"type": ["integer", "null"], "minimum": 0}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "seconds": {"type": ["number", "null"], "minimum": 0},
+        "usd": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "split_key": {
+      "description": "The equivalence class that decides the sealed hold-out split (default source.kind|source.key). Runs that share a split_key land on the same side.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  }
+}

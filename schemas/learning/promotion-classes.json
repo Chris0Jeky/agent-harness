@@ -1,0 +1,117 @@
+{
+  "schema": "learning-promotion-classes/v1",
+  "description": "Promotion classes P0-P8 as data. activation_gates must each hold a latest result of pass, from an accepted evaluator, before a candidate enters an activating state; conditional_gates add gates when the candidate sets that flag. Until the owner answers the governance decisions, every effect above P0 is shadow (live needs an authority ref). P8 is never automatic: its owner pass must sit on the activating record itself. Contract: SPECS.md section 15.",
+  "kind_class": {
+    "episodic": "P0",
+    "semantic": "P1",
+    "consolidation": "P2",
+    "skill": "P3",
+    "prompt": "P4",
+    "recipe": "P4",
+    "routing": "P5",
+    "scheduler": "P6",
+    "harness": "P7",
+    "policy": "P8"
+  },
+  "evaluators": {
+    "never_satisfies": ["self"],
+    "independent": ["oracle", "owner", "independent_model"],
+    "owner_gate": ["owner"]
+  },
+  "live_requires_authority_above": "P0",
+  "classes": {
+    "P0": {
+      "label": "episodic",
+      "creation": "autonomous",
+      "offline_eval": "no",
+      "canary": "no",
+      "owner_approval": "no",
+      "activation_gates": [],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P1": {
+      "label": "semantic memory",
+      "creation": "autonomous",
+      "offline_eval": "provenance and contradiction checks",
+      "canary": "no",
+      "owner_approval": "protected categories only",
+      "activation_gates": ["provenance", "contradiction"],
+      "conditional_gates": {"protected": ["owner"]},
+      "owner_on_activation": false
+    },
+    "P2": {
+      "label": "consolidation",
+      "creation": "autonomous",
+      "offline_eval": "retrieval regression",
+      "canary": "optional",
+      "owner_approval": "no",
+      "activation_gates": ["retrieval_regression"],
+      "conditional_gates": {"protected": ["owner"]},
+      "owner_on_activation": false
+    },
+    "P3": {
+      "label": "skill",
+      "creation": "autonomous",
+      "offline_eval": "yes",
+      "canary": "consequential skills",
+      "owner_approval": "no",
+      "activation_gates": ["offline_eval"],
+      "conditional_gates": {
+        "consequential": ["canary", "maturity"],
+        "protected": ["owner"]
+      },
+      "owner_on_activation": false
+    },
+    "P4": {
+      "label": "prompt, recipe",
+      "creation": "autonomous",
+      "offline_eval": "yes",
+      "canary": "yes",
+      "owner_approval": "no",
+      "activation_gates": ["offline_eval", "canary", "maturity"],
+      "conditional_gates": {"protected": ["owner"]},
+      "owner_on_activation": false
+    },
+    "P5": {
+      "label": "routing",
+      "creation": "autonomous",
+      "offline_eval": "historical replay",
+      "canary": "yes",
+      "owner_approval": "no",
+      "activation_gates": ["replay", "canary", "maturity"],
+      "conditional_gates": {"protected": ["owner"]},
+      "owner_on_activation": false
+    },
+    "P6": {
+      "label": "scheduler",
+      "creation": "autonomous",
+      "offline_eval": "strong comparative",
+      "canary": "yes",
+      "owner_approval": "at first",
+      "activation_gates": ["offline_eval", "canary", "maturity", "owner"],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P7": {
+      "label": "harness, tool logic",
+      "creation": "sandbox_only",
+      "offline_eval": "strong",
+      "canary": "yes",
+      "owner_approval": "yes",
+      "activation_gates": ["offline_eval", "canary", "maturity", "owner"],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P8": {
+      "label": "security, authority, policy",
+      "creation": "proposal_only",
+      "offline_eval": "tests",
+      "canary": "never automatic",
+      "owner_approval": "always",
+      "activation_gates": ["tests", "owner"],
+      "conditional_gates": {},
+      "owner_on_activation": true
+    }
+  }
+}

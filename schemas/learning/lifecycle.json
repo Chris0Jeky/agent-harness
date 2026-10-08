@@ -1,0 +1,43 @@
+{
+  "schema": "learning-lifecycle/v1",
+  "description": "Candidate lifecycle as data. A learning-candidate/v1 record is born in initial; every later move is a promotion-record/v1 whose (from, to) must be an edge here. Gates may only be recorded on a record leaving one of gate_sources[gate], which is what forces a canary-class candidate through canary and a maturity-class candidate through probation. Contract: SPECS.md section 15.",
+  "initial": "candidate",
+  "states": [
+    "candidate", "merged", "rejected", "evaluating", "canary", "probation",
+    "active", "reinforced", "superseded", "decayed", "archived", "reverted"
+  ],
+  "terminal": ["archived"],
+  "edges": {
+    "candidate": ["evaluating", "merged", "rejected", "active"],
+    "evaluating": ["canary", "probation", "active", "rejected"],
+    "canary": ["probation", "rejected", "reverted"],
+    "probation": ["active", "rejected", "reverted"],
+    "active": ["reinforced", "superseded", "decayed", "reverted"],
+    "reinforced": ["reinforced", "superseded", "decayed", "reverted"],
+    "merged": ["archived"],
+    "rejected": ["archived"],
+    "superseded": ["archived"],
+    "decayed": ["archived"],
+    "reverted": ["archived"],
+    "archived": []
+  },
+  "forward": ["evaluating", "canary", "probation", "active", "reinforced"],
+  "activating": ["active"],
+  "gate_sources": {
+    "provenance": ["evaluating"],
+    "contradiction": ["evaluating"],
+    "retrieval_regression": ["evaluating"],
+    "offline_eval": ["evaluating"],
+    "replay": ["evaluating"],
+    "tests": ["evaluating"],
+    "canary": ["canary"],
+    "maturity": ["probation"],
+    "independent_review": [
+      "candidate", "evaluating", "canary", "probation", "active", "reinforced"
+    ],
+    "owner": [
+      "candidate", "evaluating", "canary", "probation", "active", "reinforced"
+    ]
+  },
+  "maturity_days": 7
+}

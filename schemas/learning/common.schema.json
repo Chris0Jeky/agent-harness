@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/common.schema.json",
+  "title": "Learning-plane shared definitions",
+  "description": "Definitions every learning-plane record shares. Contract: SPECS.md section 15.",
+  "$defs": {
+    "timestamp": {
+      "description": "UTC instant, second precision or finer, always with a Z suffix.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
+    },
+    "repo": {
+      "description": "Estate repository name, optionally owner-qualified.",
+      "type": "string",
+      "pattern": "^([A-Za-z0-9][A-Za-z0-9-]{0,38}/)?[A-Za-z0-9._-]{1,100}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ref": {
+      "description": "A pointer, never content: scheme:locator, for example claude-session:<id>, muse-job:<lane>/<wave>/<job>, pr:https://github.com/o/r/pull/1, memory:<project>/<name>, skill:<name>, decision:<inbox id>, ledger:<outcome-ledger id>.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}:[^\\s]{1,480}$"
+    },
+    "relpath": {
+      "description": "Repository-relative POSIX path: no leading slash or tilde, no drive, no backslash, no '..' segment.",
+      "type": "string",
+      "maxLength": 400,
+      "pattern": "^(?![/~])(?!.*(^|/)\\.\\.(/|$))[^\\\\:*?\"<>|\\s][^\\\\:*?\"<>|]*$"
+    },
+    "short_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 280
+    },
+    "text": {
+      "description": "Bounded prose. Records point at trajectories; they never carry them.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "exp_id": {
+      "type": "string",
+      "pattern": "^exp_[A-Za-z0-9_-]{6,64}$"
+    },
+    "mu_id": {
+      "type": "string",
+      "pattern": "^mu_[A-Za-z0-9_-]{6,64}$"
+    },
+    "lc_id": {
+      "type": "string",
+      "pattern": "^lc_[A-Za-z0-9_-]{6,64}$"
+    },
+    "gen_id": {
+      "type": "string",
+      "pattern": "^gen_[A-Za-z0-9_-]{6,64}$"
+    },
+    "prom_id": {
+      "type": "string",
+      "pattern": "^prom_[A-Za-z0-9_-]{6,64}$"
+    },
+    "runtime": {
+      "type": "string",
+      "enum": ["claude", "codex", "muse", "grok", "local", "owner", "tool"]
+    },
+    "producer": {
+      "description": "Who wrote the record. owner means the human; tool means a deterministic program.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane", "runtime", "model", "session"],
+      "properties": {
+        "lane": {"$ref": "#/$defs/slug"},
+        "runtime": {"$ref": "#/$defs/runtime"},
+        "model": {"type": ["string", "null"], "maxLength": 80},
+        "session": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "episodic", "semantic", "consolidation", "skill", "recipe",
+        "prompt", "routing", "scheduler", "harness", "policy"
+      ]
+    },
+    "layer": {
+      "type": "string",
+      "enum": [
+        "memory", "skills", "prompts", "recipes", "routing",
+        "scheduler", "harness", "policy"
+      ]
+    },
+    "promotion_class": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "candidate", "merged", "rejected", "evaluating", "canary",
+        "probation", "active", "reinforced", "superseded", "decayed",
+        "archived", "reverted"
+      ]
+    },
+    "gate": {
+      "type": "string",
+      "enum": [
+        "provenance", "contradiction", "retrieval_regression",
+        "offline_eval", "replay", "canary", "maturity", "tests",
+        "independent_review", "owner"
+      ]
+    },
+    "evaluator": {
+      "description": "Who judged. oracle is deterministic; independent_model is a fresh context or another runtime; llm_judge is a model grading output and is always labelled as such; self is the learner and never satisfies a gate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "runtime", "session"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["oracle", "owner", "independent_model", "llm_judge", "self"]
+        },
+        "runtime": {"$ref": "#/$defs/runtime"},
+        "model": {"type": ["string", "null"], "maxLength": 80},
+        "session": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "ext": {
+      "description": "Producer-private extension fields, one object per lane slug. Consumers ignore it; a field another lane needs is asked for on the bus and promoted into the contract.",
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"},
+      "additionalProperties": {"type": "object"}
+    }
+  }
+}
