@@ -96,8 +96,9 @@ finds more; compare digests only between runs over the same ledger.
 Add repeatable `--learning PATH` files or recursive directories to `metrics`, with or without
 `--ledger`. Records live under `%USERPROFILE%\.estate\learning\`, never in a repository.
 The five learning contracts are validated; invalid records and lifecycle fold errors appear in
-`learning.problems`. Experiences and memory-use observations keep the latest `observed_at`, with
-the later loaded record winning ties. The default is sealed `dev`; `--split holdout|all` still
+`learning.problems`. Experiences fold through the contract's `fold_experiences` (latest
+`observed_at`; a later observation that changes the source or split key is a problem, not applied);
+memory-use observations keep the latest `observed_at`. A candidate loaded twice counts once. The default is sealed `dev`; `--split holdout|all` still
 requires `--unseal REASON`. The learning hold-out manifest counts experiences and hashes sorted
 IDs joined by newlines. Counts cover loaded records after re-observation folding.
 

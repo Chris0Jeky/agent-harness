@@ -469,8 +469,42 @@ class MetricTests(unittest.TestCase):
                 "lessons": 1,
                 "cross": {"n": 1, "success_rate": 0.0},
                 "same": {"n": 1, "success_rate": 1.0},
+                "unknown_origin": 0,
             },
         )
+
+    def test_uses_of_a_lesson_without_loaded_evidence_are_unknown_origin(self):
+        cand = candidate(evidence=[experience("absent")["id"]])
+        use = experience("use", at=AFTER, memory_used=["memory:synthetic/lesson.md"])
+        result = aggregate(cand, *activation(cand), use)["cross_runtime_transfer"]
+        self.assertEqual(result["cross"]["n"], 0)
+        self.assertEqual(result["unknown_origin"], 1)
+
+    def test_success_needs_a_succeeding_immediate_outcome(self):
+        published = experience(
+            "published",
+            outcome={"immediate": "published", "matured": None, "regression": None},
+        )
+        clean = experience(
+            "clean",
+            outcome={"immediate": "merged", "matured": "clean", "regression": False},
+        )
+        failed = experience(
+            "failed",
+            outcome={"immediate": "failed", "matured": None, "regression": None},
+        )
+        result = aggregate(published, clean, failed)["memory_assisted_task_delta"]
+        self.assertEqual(result["without_memory"], {"n": 3, "success_rate": 2 / 3})
+
+    def test_a_candidate_loaded_twice_counts_once(self):
+        cand = candidate()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.json"
+            path.write_text(json.dumps(cand), encoding="utf-8")
+            records = lm.load_learning([path, path])
+        self.assertEqual(len(records[lm.CANDIDATE]), 1)
+        result = lm.learning_metrics(records)["metrics"]
+        self.assertEqual(result["candidate_to_promoted_ratio"]["candidates"], 1)
 
     def test_owner_correction_recurrence_orders_experiences_and_ignores_other_feedback(
         self,

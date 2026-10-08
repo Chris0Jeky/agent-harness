@@ -57,6 +57,19 @@ def load_learning(paths):
                     )
                 else:
                     result[record["schema"]].append(record)
+    # Overlapping --learning paths load a candidate twice; count it once.
+    unique = {}
+    for record in result[CANDIDATE]:
+        held = unique.setdefault(record["id"], record)
+        if held != record:
+            result["problems"].append(
+                {
+                    "file": None,
+                    "index": None,
+                    "error": f"{record['id']}: two different records",
+                }
+            )
+    result[CANDIDATE] = list(unique.values())
     # Experiences fold through the contract, which also refuses a later
     # observation that moves a run across the split.
     folded, errors = contracts.fold_experiences(result[EXPERIENCE])
@@ -217,7 +230,7 @@ def learning_metrics(records, split="dev", as_of=None):
         for item in mu["skills"]
         if item.get("completed") is not None
     ]
-    reuse_counts, same, cross = [], [], []
+    reuse_counts, same, cross, unknown = [], [], [], 0
     for candidate, activation_at, landed in lessons:
         uses = [
             exp
@@ -231,6 +244,9 @@ def learning_metrics(records, split="dev", as_of=None):
             for eid in candidate["evidence"]
             if eid in all_experiences
         }
+        if not runtimes:
+            unknown += len(uses)  # no evidence loaded: the origin runtime is unknown
+            continue
         for exp in uses:
             (same if exp["producer"]["runtime"] in runtimes else cross).append(exp)
 
@@ -354,6 +370,7 @@ def learning_metrics(records, split="dev", as_of=None):
                 "lessons": len(lessons),
                 "cross": _success_block(cross),
                 "same": _success_block(same),
+                "unknown_origin": unknown,
             },
             "owner_correction_recurrence": _recurrence(
                 experiences,
