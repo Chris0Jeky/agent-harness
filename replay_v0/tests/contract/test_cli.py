@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, redirect_stderr
+import errno
 import hashlib
 import io
 import json
@@ -1175,6 +1176,313 @@ for index, event in enumerate(events):
             ["indeterminate", "indeterminate"],
             [decision["effect"] for decision in result.decisions],
         )
+
+    def require_user_xattrs(self, path: Path) -> None:
+        if not all(
+            hasattr(os, name)
+            for name in ("setxattr", "getxattr", "listxattr", "removexattr")
+        ):
+            self.skipTest("Python does not expose Linux user xattr operations")
+        try:
+            os.setxattr(path, "user.replaytest", b"probe")
+            os.removexattr(path, "user.replaytest")
+        except OSError as error:
+            if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+                self.skipTest("fixture filesystem does not support user xattrs")
+            raise
+
+    def test_process_snapshot_strips_user_xattrs_without_changing_originals(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source, snapshots = root / "source", root / "snapshots"
+            source.mkdir()
+            snapshots.mkdir()
+            self.require_user_xattrs(source)
+            nested = source / "nested"
+            nested.mkdir()
+            helper = nested / "helper.txt"
+            helper.write_bytes(b"same bytes")
+            policy = source / "policy.py"
+            policy.write_text(
+                "import errno, json, os, sys\n"
+                "from pathlib import Path\n"
+                "paths = [Path(__file__), Path('nested/helper.txt'), Path('nested'), Path.cwd()]\n"
+                "values = []\n"
+                "for path in paths:\n"
+                "    try: values.append(os.getxattr(path, 'user.replaytest'))\n"
+                "    except OSError as e:\n"
+                "        if e.errno != errno.ENODATA: raise\n"
+                "effect = 'deny' if b'deny' in values else 'allow'\n"
+                "for event in map(json.loads, sys.stdin):\n"
+                "    print(json.dumps({'schema_version':'policy-decision.v1', 'event_id':event['event_id'],"
+                "'effect':effect, 'reason':'Synthetic xattr decision.'}))\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            observed = []
+            for value in (b"allow", b"deny"):
+                for path in (source, nested, helper, policy):
+                    os.setxattr(path, "user.replaytest", value)
+                with mock.patch(
+                    "replay_v0.cli.tempfile.gettempdir", return_value=str(snapshots)
+                ):
+                    loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+                result = loaded.source.evaluate(EVENTS)
+                observed.append((loaded.identity, result))
+                for path in (source, nested, helper, policy):
+                    self.assertEqual(value, os.getxattr(path, "user.replaytest"))
+                self.assertEqual([], list(snapshots.iterdir()))
+            self.assertEqual(observed[0][0], observed[1][0])
+            for identity, result in observed:
+                self.assertEqual((), result.failures)
+                self.assertEqual(
+                    ["allow", "allow"], [d["effect"] for d in result.decisions]
+                )
+
+    def test_process_snapshot_xattr_removal_failure_prevents_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.require_user_xattrs(root)
+            policy = root / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            os.setxattr(policy, "user.replaytest", b"original")
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot_root = (
+                loaded.source.snapshot_parent
+                / f"replay-process-inputs-{loaded.identity['sha256']}"
+            )
+            with mock.patch.object(
+                os,
+                "removexattr",
+                side_effect=PermissionError("synthetic removal failure"),
+            ), mock.patch.object(
+                loaded.source, "_evaluate_runtime", return_value=PolicySourceResult(())
+            ) as run:
+                result = loaded.source.evaluate(EVENTS)
+            run.assert_not_called()
+            self.assertEqual(
+                ["process-snapshot-unavailable"], [f.code for f in result.failures]
+            )
+            self.assertEqual(
+                ["indeterminate", "indeterminate"],
+                [d["effect"] for d in result.decisions],
+            )
+            self.assertEqual(b"original", os.getxattr(policy, "user.replaytest"))
+            self.assertFalse(snapshot_root.exists())
+
+    def test_process_snapshot_late_user_xattr_invalidates_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.require_user_xattrs(root)
+            policy = root / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_run = loaded.source._evaluate_runtime
+
+            def mutate_then_run(events, *, argv, cwd):
+                os.setxattr(Path(cwd) / policy.name, "user.replaytest", b"late")
+                return original_run(events, argv=argv, cwd=cwd)
+
+            with mock.patch.object(
+                loaded.source, "_evaluate_runtime", side_effect=mutate_then_run
+            ):
+                result = loaded.source.evaluate(EVENTS)
+            self.assertEqual(
+                ["process-snapshot-changed"], [f.code for f in result.failures]
+            )
+            self.assertEqual(
+                ["indeterminate", "indeterminate"],
+                [d["effect"] for d in result.decisions],
+            )
+            self.assertNotIn("user.replaytest", os.listxattr(policy))
+
+    def test_process_snapshot_strips_readonly_file_xattrs_and_preserves_modes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.require_user_xattrs(root)
+            policy = root / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            helper = root / "readonly.txt"
+            helper.write_bytes(b"readonly helper")
+            os.setxattr(helper, "user.replaytest", b"original")
+            helper.chmod(0o444)
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            snapshot = loaded.source._prepare_input_snapshot(EVENTS)
+            self.assertNotIsInstance(snapshot, PolicySourceResult)
+            try:
+                self.assertEqual(
+                    [],
+                    [
+                        name
+                        for name in os.listxattr(Path(snapshot.cwd) / helper.name)
+                        if name.startswith("user.")
+                    ],
+                )
+                self.assertEqual(
+                    0o444, (Path(snapshot.cwd) / helper.name).stat().st_mode & 0o777
+                )
+                self.assertEqual(b"original", os.getxattr(helper, "user.replaytest"))
+                self.assertEqual(0o444, helper.stat().st_mode & 0o777)
+                self.assertIsNone(snapshot.verification_failure())
+            finally:
+                self.assertIsNone(snapshot.cleanup())
+                helper.chmod(0o644)
+
+    def test_process_snapshot_strips_user_xattrs_from_runner_and_executable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.require_user_xattrs(root)
+            policy = root / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            original_copytree = shutil.copytree
+
+            def copy_then_tag(source, destination, *args, **kwargs):
+                result = original_copytree(source, destination, *args, **kwargs)
+                copied_root = Path(destination).parent
+                for path in (
+                    copied_root,
+                    copied_root / "executable",
+                    *list((copied_root / "executable").iterdir()),
+                ):
+                    os.setxattr(path, "user.replaytest", b"copied fixture")
+                return result
+
+            with mock.patch.object(shutil, "copytree", side_effect=copy_then_tag):
+                snapshot = loaded.source._prepare_input_snapshot(EVENTS)
+            self.assertNotIsInstance(snapshot, PolicySourceResult)
+            try:
+                for path in (
+                    snapshot.root,
+                    snapshot.root / "executable",
+                    Path(snapshot.argv[0]),
+                ):
+                    self.assertNotIn("user.replaytest", os.listxattr(path))
+                self.assertIsNone(snapshot.verification_failure())
+            finally:
+                self.assertIsNone(snapshot.cleanup())
+
+    def test_snapshot_xattr_inspection_errors_fail_closed(self) -> None:
+        for phase in ("prepare", "verify"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                self.require_user_xattrs(root)
+                policy = root / "policy.py"
+                policy.write_text(
+                    self.policy_script("same"), encoding="utf-8", newline="\n"
+                )
+                loaded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+                snapshot_root = (
+                    loaded.source.snapshot_parent
+                    / f"replay-process-inputs-{loaded.identity['sha256']}"
+                )
+                original_list = os.listxattr
+                original_run = loaded.source._evaluate_runtime
+                ran = False
+
+                def unavailable(path, *args, **kwargs):
+                    if Path(path) == snapshot_root and (phase == "prepare" or ran):
+                        raise PermissionError("synthetic enumeration failure")
+                    return original_list(path, *args, **kwargs)
+
+                def run(events, *, argv, cwd):
+                    nonlocal ran
+                    result = original_run(events, argv=argv, cwd=cwd)
+                    ran = True
+                    return result
+
+                with mock.patch.object(
+                    os, "listxattr", side_effect=unavailable
+                ), mock.patch.object(
+                    loaded.source, "_evaluate_runtime", side_effect=run
+                ) as launch:
+                    result = loaded.source.evaluate(EVENTS)
+                self.assertEqual(phase == "verify", launch.called)
+                code = (
+                    "process-snapshot-unavailable"
+                    if phase == "prepare"
+                    else "process-snapshot-changed"
+                )
+                self.assertEqual([code], [f.code for f in result.failures])
+                self.assertEqual(
+                    ["indeterminate", "indeterminate"],
+                    [d["effect"] for d in result.decisions],
+                )
+                self.assertFalse(snapshot_root.exists())
+
+    def test_snapshot_xattr_normalization_keeps_other_namespaces(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with mock.patch.object(
+                policy_sources, "SNAPSHOT_XATTR_CONTRACT", "linux-user-strip-v1"
+            ), mock.patch.object(
+                os,
+                "listxattr",
+                return_value=[
+                    "user.test",
+                    "security.test",
+                    "trusted.test",
+                    "system.test",
+                ],
+                create=True,
+            ) as names, mock.patch.object(
+                os, "removexattr", create=True
+            ) as remove:
+                policy_sources._normalize_snapshot_user_xattrs(root)
+                names.assert_called_once_with(root, follow_symlinks=False)
+                remove.assert_called_once_with(root, "user.test", follow_symlinks=False)
+
+    def test_snapshot_xattr_unsupported_platform_makes_no_normalization_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with mock.patch.object(
+                policy_sources, "SNAPSHOT_XATTR_CONTRACT", "not-normalized-v1"
+            ), mock.patch.object(
+                os, "listxattr", create=True
+            ) as names, mock.patch.object(
+                os, "removexattr", create=True
+            ) as remove:
+                policy_sources._normalize_snapshot_user_xattrs(root)
+                self.assertTrue(
+                    policy_sources._snapshot_user_xattrs_are_normalized(root)
+                )
+                names.assert_not_called()
+                remove.assert_not_called()
+
+    def test_process_identity_versions_xattr_normalization(self) -> None:
+        import replay_v0.cli as cli
+
+        self.assertEqual("process-policy-identity.v10", cli.PROCESS_IDENTITY_VERSION)
+        with tempfile.TemporaryDirectory() as raw:
+            policy = Path(raw) / "policy.py"
+            policy.write_text(
+                self.policy_script("same"), encoding="utf-8", newline="\n"
+            )
+            with mock.patch.object(
+                cli, "SNAPSHOT_XATTR_CONTRACT", "linux-user-strip-v1", create=True
+            ):
+                normalized = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            with mock.patch.object(
+                cli, "SNAPSHOT_XATTR_CONTRACT", "not-normalized-v1", create=True
+            ):
+                unsupported = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            self.assertNotEqual(normalized.identity, unsupported.identity)
 
     def test_process_snapshot_normalizes_policy_and_runner_mtimes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
