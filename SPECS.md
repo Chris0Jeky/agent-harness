@@ -947,6 +947,10 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
 | `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
+| `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
+| `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
+| `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
+| `eval-run/v1` (`run_`) | `suite`, `split`, `gate_name`, `candidate`, `genome`, `baseline_ref`, `candidate_ref`, `tier`, `evaluator`, `training`, `cases`, `holdout_digest`, `anchors`, `policy`, `results`, `verdict`, `gate` | the replay evaluator's report; on the hold-out its `gate` is a ready `promotion-record/v1` gate result whose digest and anchors match the run's |
 
 **Lifecycle** (`schemas/learning/lifecycle.json`). A candidate is born in `candidate` (the plan's
 "Observed" stage is the experience ledger itself; a refused admission is never a candidate). Every
@@ -1001,6 +1005,31 @@ the evaluated case ids, sorted and newline-joined), `training_excluded: true` an
 experiences the evaluated cases came from), which the fold checks against the candidate's
 evidence. The replay evaluator computes all three; excluding a genome's `training_evidence` and
 every case sharing a split key with the training evidence is its job, not the fold's.
+
+**Replay evaluator** (`scripts/learning_eval.py`, W1). It never runs a variant: whoever runs the
+baseline and the candidate records `eval-outputs/v1`, and the evaluator selects, grades and
+compares. Selection is the hold-out separation: a case is on the side `split_of(case.split_key)`
+gives; an anchored case must carry its experience's split key; every case built from the
+candidate's `evidence` or its genome's `training_evidence`, and every case sharing a split key
+with that evidence, is dropped; and evidence missing from the experience ledger refuses the run
+(exclusion that cannot be proven is not claimed). Deterministic oracles grade first (`exact`,
+`contains_all`, `contains_none`, `regex`, `set_match`, `ranked_recall`, `abstain`, `numeric`); a
+`judge` case takes its grade from `eval-labels/v1`, never the learner's session, and demotes the
+run's tier and gate evaluator from `oracle` to that evaluator's kind. Pairs are compared case by
+case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
+layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
+(10) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
+`max_losses` (0); fewer cases is `insufficient`, which emits no gate. Only a hold-out run emits a
+gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
+it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five
+LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
+training leak and a cluster leak the evaluator must drop.
+
+```powershell
+py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> --candidate-outputs <outputs.json> --candidate <lc.json> --experiences <experiences.jsonl> [--genome <gen.json>] [--labels <labels.json>...] [--split holdout|dev] [--gate offline_eval|replay|retrieval_regression]
+```
+
+Exit 0 pass, 1 fail, 3 insufficient, 2 refused.
 
 **Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
 attestation the fold checks for consistency, not proof: evaluator identity is self-reported (the
