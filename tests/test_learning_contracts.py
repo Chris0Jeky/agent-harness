@@ -326,6 +326,14 @@ class MinimaTests(unittest.TestCase):
         )
         self.assertIn("after the gate", lc.salt_errors(future, cand)[0])
 
+    def test_a_failing_gate_is_held_to_the_draw_order_too(self):
+        gate_ = dict(chain()[1]["gates"][0], result="fail")
+        early = dict(
+            gate_, salt_draw=dict(gate_["salt_draw"], at="2026-08-01T00:00:00Z")
+        )
+        self.assertEqual(lc.salt_errors(gate_, candidate()), [])
+        self.assertIn("not after", lc.salt_errors(early, candidate())[0])
+
     def test_an_invalid_candidate_is_refused_not_crashed_on(self):
         broken = candidate()
         del broken["evidence"]
