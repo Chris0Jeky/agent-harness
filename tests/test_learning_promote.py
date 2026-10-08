@@ -267,6 +267,42 @@ class GeneratorTests(unittest.TestCase):
         with self.assertRaises(lp.PromotionRefusal):
             lp.next_record(cand, records + [twin], [], PRODUCER, "2026-09-08T12:00:00Z")
 
+    def eval_report(self):
+        spec_ = importlib.util.spec_from_file_location(
+            "learning_eval", ROOT / "scripts" / "learning_eval.py"
+        )
+        ev = importlib.util.module_from_spec(spec_)
+        spec_.loader.exec_module(ev)
+        suite = EXAMPLES / "memory-eval"
+        cand = lc.read_records(suite / "candidate.json")[0]
+        report = ev.evaluate(
+            lc.read_records(suite / "cases.jsonl"),
+            lc.read_records(suite / "baseline-outputs.json")[0],
+            lc.read_records(suite / "candidate-outputs.json")[0],
+            cand,
+            lc.read_records(suite / "experiences.jsonl"),
+            gate="retrieval_regression",
+            at="2026-09-05T00:00:00Z",
+        )
+        return cand, report
+
+    def test_a_run_report_is_bound_to_its_candidate(self):
+        cand, report = self.eval_report()
+        self.assertEqual(lp.gate_results([report], cand), [report["gate"]])
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.gate_results([report], candidate())
+        self.assertIn("judged lc_memory-eval-0001", str(caught.exception))
+        named = dict(cand, genome="gen_other-0001")
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.gate_results([report], named)
+        self.assertIn("not gen_other-0001", str(caught.exception))
+
+    def test_an_eval_run_gate_moves_its_candidate(self):
+        cand, report = self.eval_report()
+        records, _ = advance(cand, [], [], "2026-09-04T10:00:00Z")
+        _, r = advance(cand, records, [report], "2026-09-05T00:01:00Z")
+        self.assertEqual((r["from"], r["to"]), ("evaluating", "probation"))
+
     def test_eval_runs_without_a_gate_are_refused(self):
         with self.assertRaises(lp.PromotionRefusal):
             lp.gate_results([{"gate": "offline_eval"}])
