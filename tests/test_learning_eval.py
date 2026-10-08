@@ -462,6 +462,90 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(ev.sign_test(3, 3), 1.0)
 
 
+class ProceduralTests(unittest.TestCase):
+    """A proposed skill replayed on historical tasks it was not generated from."""
+
+    def suite(self):
+        inputs = load()
+        procedural = []
+        for n in range(10):
+            case = copy.deepcopy(
+                next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+            )
+            case.update(
+                id=f"case_proc-{n:04d}",
+                layer="procedural",
+                category="task",
+                input_ref=f"synthetic:procedure/{n}",
+                oracle={
+                    "kind": "procedure",
+                    "max_turns": 12,
+                    "require_recovery": n == 0,
+                },
+            )
+            procedural.append(case)
+        inputs["cases"] = procedural
+        inputs["baseline"]["outputs"] = {
+            c["id"]: {
+                "completed": n % 2 == 0,
+                "turns": 15,
+                "recovered": False,
+                "tokens": 9000,
+            }
+            for n, c in enumerate(procedural)
+        }
+        inputs["candidate_outputs"]["outputs"] = {
+            c["id"]: {"completed": True, "turns": 8, "recovered": True, "tokens": 6000}
+            for c in procedural
+        }
+        return inputs
+
+    def test_the_skill_is_judged_on_completion_turns_recovery_and_cost(self):
+        report = run(self.suite(), gate="offline_eval")
+        self.assertEqual(report["verdict"], "pass")
+        block = report["results"]["procedural"]
+        self.assertEqual(block["n"], 10)
+        self.assertEqual(block["baseline"]["completion_rate"], 0.5)
+        self.assertEqual(block["candidate"]["completion_rate"], 1.0)
+        self.assertEqual(
+            (block["baseline"]["turns_mean"], block["candidate"]["turns_mean"]), (15, 8)
+        )
+        self.assertEqual(block["candidate"]["recovery_rate"], 1.0)
+        self.assertEqual(block["candidate"]["tokens_mean"], 6000)
+        # Baseline completions ran over max_turns, so none of them pass.
+        self.assertEqual(report["results"]["baseline"]["passed"], 0)
+
+    def test_procedure_oracle(self):
+        def grade(output, **oracle):
+            case = {"id": "case_x", "oracle": {"kind": "procedure", **oracle}}
+            return ev.grade(case, output)[0]
+
+        self.assertTrue(grade({"completed": True}))
+        self.assertFalse(grade({"completed": False}))
+        self.assertFalse(grade({}))
+        self.assertTrue(grade({"completed": True, "turns": 0}, max_turns=3))
+        self.assertFalse(grade({"completed": True}, max_turns=3))
+        self.assertFalse(grade({"completed": True, "turns": 4}, max_turns=3))
+        self.assertFalse(
+            grade({"completed": True, "recovered": None}, require_recovery=True)
+        )
+        self.assertTrue(
+            grade({"completed": True, "recovered": True}, require_recovery=True)
+        )
+
+    def test_training_tasks_are_excluded_from_a_skills_evaluation(self):
+        inputs = self.suite()
+        anchored = load()["cases"]
+        leak = next(c for c in anchored if c["id"] == "case_leak-training")
+        inputs["cases"].append(dict(copy.deepcopy(leak), oracle={"kind": "procedure"}))
+        inputs["candidate_outputs"]["outputs"][leak["id"]] = {"completed": True}
+        report = run(inputs, gate="offline_eval")
+        self.assertEqual(report["cases"]["excluded_training"], 1)
+
+    def test_no_procedural_cases_no_block(self):
+        self.assertIsNone(run()["results"]["procedural"])
+
+
 class CommandLineTests(unittest.TestCase):
     def cli(self, *extra):
         argv = [
