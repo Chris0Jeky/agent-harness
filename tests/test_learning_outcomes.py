@@ -349,6 +349,19 @@ class OutcomeTests(unittest.TestCase):
 
 
 class StreamTests(unittest.TestCase):
+    def test_a_routing_only_change_is_a_new_version(self):
+        first = experience()
+        moved = experience(day=8)
+        moved["outcome"] = first["outcome"]
+        moved["recipe"] = "relocated-recipe"
+        events, problems = outcomes.events_from_experiences([first, moved])
+        self.assertEqual(problems, [])
+        self.assertEqual([e["version"] for e in events], [1, 2])
+        self.assertEqual(
+            outcomes.latest(events)[outcomes._run_id(events[-1])]["recipe"],
+            "relocated-recipe",
+        )
+
     def test_a_gapped_or_duplicated_stream_is_refused(self):
         events, problems = outcomes.events_from_experiences(history())
         self.assertEqual((problems, outcomes.stream_errors(events)), ([], []))

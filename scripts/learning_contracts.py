@@ -1296,12 +1296,14 @@ def sign_p(wins, losses):
 
 
 def salt_errors(gate, candidate, genome=None):
-    """Why a passing hold-out gate's split could have been aimed at (attack E).
+    """Why a hold-out gate's split could have been aimed at (attack E).
 
     Commit, then draw: the candidate is committed first and the salt is a public
     beacon fixed after it, so no key could have been ground against it.
     """
-    if gate["gate"] not in classes()["eval_minima"] or gate["result"] != "pass":
+    # A failing gate is held to the same order: a split ground to force a fail
+    # is a denial lever, so its draw must follow the candidate too.
+    if gate["gate"] not in classes()["eval_minima"]:
         return []
     draw = gate.get("salt_draw")
     if not isinstance(draw, dict):

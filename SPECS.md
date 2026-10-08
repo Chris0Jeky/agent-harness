@@ -1128,9 +1128,11 @@ beacon was published, could have been ground against it), and one case per disti
 the gate's `cases`, `wins`, `losses` and `delta` are over distinct inputs and clones cannot
 inflate the sign test. The fold also requires the gate's counts to be integers in range and
 coherent (`wins + losses <= cases`, `anchored <= cases`, distinct anchors <= `anchored`, and
-`delta = (wins - losses) / cases`). A passing hold-out gate names its `salt_draw`
-(`source`, `at`), and the fold refuses a gate with none or one drawn at or before the candidate's
-`at`. The fold checks the order only: that the source is the first beacon after the commit (no
+`delta = (wins - losses) / cases`). A hold-out gate, passing or failing (a split ground to force a
+fail is a denial lever), names its `salt_draw` (`source`, `at`), and the fold refuses a gate with
+none or one drawn at or before the candidate's `at`. A candidate built from a genome names it in
+`genome` (the genome lists the candidate back); the fold refuses its anchored gates without that
+genome, so allocate the genome id before staging the candidate. The fold checks the order only: that the source is the first beacon after the commit (no
 shopping among later commits), and that the candidate's own commit time is the store's import
 time rather than the self-reported `at`, are the store's checks (L3). The draw must also follow
 the genome's `at` and precede the gate's. Until the store binds those times, the fold closes
@@ -1217,8 +1219,8 @@ dev-side runs the recipe or skill was written from) is excluded by the evaluator
 
 **One outcome stream** (K4). `scripts/learning_outcomes.py` projects experience observations in
 `observed_at` order into immutable `outcome-event/v1` versions per run, starting at 1 and chained
-by `supersedes`. Only changes to `outcome`, triage `verdicts`, owner `corrections`, `failure_keys`
-or `variant` emit a version; source, split-key and variant drift are skipped and reported using
+by `supersedes`. Only changes to `outcome`, triage `verdicts`, owner `corrections`, `failure_keys`,
+`variant` or routing metadata (`repo`, `task_kind`, `recipe`, `runtime`, `model`) emit a version; source, split-key and variant drift are skipped and reported using
 the experience fold's refusal rules. `read_since` reads strictly after a durable cursor
 (`observed_at`, `id`), ordered by UTC instant then id, and returns the advanced cursor for replay.
 All three reducers consume the latest version per run: `posterior` gives the Muse coordinator's

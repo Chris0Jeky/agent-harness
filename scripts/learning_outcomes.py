@@ -81,8 +81,19 @@ def events_from_experiences(records):
             "failure_keys": sorted(record.get("failure_keys", ())),
             "variant": record.get("variant"),
         }
+        # Routing metadata is projected too: a re-observation that only moves
+        # the run to another repo, recipe or model is a new version, so every
+        # consumer keys it where it now belongs.
+        projected = {
+            **content,
+            "repo": record["repo"],
+            "task_kind": record["task_kind"],
+            "recipe": record.get("recipe"),
+            "runtime": record["producer"]["runtime"],
+            "model": record["producer"]["model"],
+        }
         prior = previous.get(ident)
-        if prior and all(prior[field] == value for field, value in content.items()):
+        if prior and all(prior[field] == value for field, value in projected.items()):
             continue
         version = prior["version"] + 1 if prior else 1
         run = record["source"]
