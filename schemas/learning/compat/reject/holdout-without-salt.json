@@ -1,0 +1,48 @@
+{
+  "schema": "promotion-record/v1",
+  "id": "prom_example-0002",
+  "at": "2026-09-08T12:01:00Z",
+  "producer": {
+    "lane": "example-steward",
+    "runtime": "claude",
+    "model": "example-model",
+    "session": "session-steward-1"
+  },
+  "candidate": "lc_example-0001",
+  "prev": "prom_example-0001",
+  "from": "evaluating",
+  "to": "canary",
+  "promotion_class": "P4",
+  "effect": "shadow",
+  "gates": [
+    {
+      "gate": "offline_eval",
+      "result": "pass",
+      "evaluator": {
+        "kind": "oracle",
+        "runtime": "tool",
+        "model": null,
+        "session": "replay-evaluator-run-1"
+      },
+      "at": "2026-09-08T12:00:00Z",
+      "ref": "eval-run:recipe-replay/2026-09-08-1",
+      "holdout_digest": "0000000000000000000000000000000000000000000000000000000000000001",
+      "training_excluded": true,
+      "anchors": [
+        "exp_a3a41cb23b9f1252"
+      ],
+      "metrics": {
+        "precision_delta": 0.21,
+        "recall_delta": 0.0,
+        "cases": 24,
+        "delta": 0.21,
+        "losses": 0,
+        "anchored": 24,
+        "wins": 9
+      }
+    }
+  ],
+  "reason": "replay on the sealed hold-out beat baseline precision",
+  "genome": "gen_example-0001",
+  "_expect": "missing required 'salt_draw'"
+}

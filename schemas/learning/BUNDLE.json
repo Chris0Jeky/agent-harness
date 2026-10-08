@@ -1,0 +1,89 @@
+{
+  "schema": "learning-contract-bundle/v1",
+  "version": 1,
+  "files": [
+    {
+      "path": "schemas/learning/candidate-genome.schema.json",
+      "sha256": "ef6d1ba3ded348accdd57471bc78a9e4f0e1f559b043b7468beadf07fcc8ee4e"
+    },
+    {
+      "path": "schemas/learning/common.schema.json",
+      "sha256": "9146b8ff4edf3487adb1eb09be3bf459fb99afd620335e401b47256707ed9b7f"
+    },
+    {
+      "path": "schemas/learning/decision-resolution.schema.json",
+      "sha256": "cbdd5515a5fce6f8b6f242ff7f3fd2557f00e2bbbbc38d7ab3f6f03851efbd71"
+    },
+    {
+      "path": "schemas/learning/estate-experience.schema.json",
+      "sha256": "5b49b19b62435d6d325e31a0a3e7a331e0e66d74bd2767d85f63a054f83faf76"
+    },
+    {
+      "path": "schemas/learning/eval-case.schema.json",
+      "sha256": "c179cdf10f7df9b6813ad90496d3ae14c87d09d9a94a4422cc855167bf76b01c"
+    },
+    {
+      "path": "schemas/learning/eval-labels.schema.json",
+      "sha256": "c3027ad5a8d5c4fd5c687f9c818e41855c51952728b9331d1d00a727b9be4849"
+    },
+    {
+      "path": "schemas/learning/eval-outputs.schema.json",
+      "sha256": "74f92e38447759610369d0928a83ad2d4659482348b6f373e4ede1c752e78202"
+    },
+    {
+      "path": "schemas/learning/eval-run.schema.json",
+      "sha256": "64a9afc9b5baae828811d48949a49f6b61e0584eaa55685558e6f1aeb6a4dd2e"
+    },
+    {
+      "path": "schemas/learning/learning-candidate.schema.json",
+      "sha256": "6fcf54ec771eb1991fad0a631f6b41374b6b815db0e7bbc39b315bd8f21f80cd"
+    },
+    {
+      "path": "schemas/learning/lifecycle.json",
+      "sha256": "e68ff7f81b9936463448c84d97e212b82ebeede949ab2799fc0d6d1effb76fee"
+    },
+    {
+      "path": "schemas/learning/memory-use.schema.json",
+      "sha256": "d556da10c4d3a139960f259ed1b505f01361456902bd771fe46614ee47f01f90"
+    },
+    {
+      "path": "schemas/learning/objectives.json",
+      "sha256": "dbee6c0131b1f6b2947fb5a4563b6c28bc17a8d3797f166ab3b071aea83f2730"
+    },
+    {
+      "path": "schemas/learning/promotion-classes.json",
+      "sha256": "3441ff1507452cb84cca49b586a8657ab9ce2229765e82b1cae8c40606418e16"
+    },
+    {
+      "path": "schemas/learning/promotion-record.schema.json",
+      "sha256": "625b53e54e21b96993996fb944ca34a54f7682e79e285486909760cff7b05b2b"
+    },
+    {
+      "path": "schemas/learning/system-run.schema.json",
+      "sha256": "f7537d3c6389b8caebc3f0119519a4e52799c6aee9c13b8b15bdafaa77fdfba1"
+    },
+    {
+      "path": "schemas/learning/would-apply.schema.json",
+      "sha256": "d8d0d33cbb9dad6f8b433a4cf8de422144f136afe3ad06122092d1ee815f944b"
+    },
+    {
+      "path": "scripts/learning_contracts.py",
+      "sha256": "fd8d2b3ce7d4309f7d81e09dbb8e52b08936be154a1ef366084f875effe8bd9c"
+    }
+  ],
+  "record_schemas": [
+    "candidate-genome/v1",
+    "decision-resolution/v1",
+    "estate-experience/v1",
+    "eval-case/v1",
+    "eval-labels/v1",
+    "eval-outputs/v1",
+    "eval-run/v1",
+    "learning-candidate/v1",
+    "learning-would-apply/v1",
+    "memory-use/v1",
+    "promotion-record/v1",
+    "system-run/v1"
+  ],
+  "digest": "3b7e026bc6824a13ea4d2ab05ffb55c1b07f7569727431478d4fc6bb22a47857"
+}

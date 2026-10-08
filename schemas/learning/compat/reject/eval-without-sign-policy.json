@@ -1,0 +1,216 @@
+{
+  "schema": "eval-run/v1",
+  "id": "run_6225bd67565c7591",
+  "at": "2026-09-05T00:00:00Z",
+  "producer": {
+    "lane": "agent-harness",
+    "runtime": "tool",
+    "model": "agent-harness:scripts/learning_eval.py@1",
+    "session": "run_6225bd67565c7591"
+  },
+  "suite": "memory-eval-example",
+  "split": "holdout",
+  "gate_name": "retrieval_regression",
+  "candidate": "lc_memory-eval-0001",
+  "genome": null,
+  "baseline_ref": "estate:example-config@cccccccccccccccccccccccccccccccccccccccc",
+  "candidate_ref": "estate:example-config@dddddddddddddddddddddddddddddddddddddddd",
+  "tier": "oracle",
+  "evaluator": {
+    "kind": "oracle",
+    "runtime": "tool",
+    "model": null,
+    "session": "run_6225bd67565c7591"
+  },
+  "training": {
+    "experiences": 2,
+    "split_keys": 2
+  },
+  "cases": {
+    "total": 24,
+    "other_split": 1,
+    "excluded_training": 1,
+    "excluded_cluster": 1,
+    "unanchored": 1,
+    "evaluated": 21,
+    "distinct_inputs": 21
+  },
+  "holdout_digest": "90d6974b4880873838a5931e25be978a97628bd1e03717c99712f17fc30da14c",
+  "anchors": [
+    "exp_03fec7baa15b6c52",
+    "exp_08b943eaf639895f",
+    "exp_21ec622bb76659f0",
+    "exp_306a271bf01e7a32",
+    "exp_3a04ff02b9258b51",
+    "exp_41842779c4de0044",
+    "exp_56088472f7c5172f",
+    "exp_73d97ca2b0a17aa7",
+    "exp_8b2508e00ad71257",
+    "exp_aa2a5f220e7323ab",
+    "exp_b389d6394647af66",
+    "exp_b9870fb9ab0ea7e3",
+    "exp_ba076542935aa02b",
+    "exp_bb75e286a5d7999d",
+    "exp_c2876dabb82c4f52",
+    "exp_d1074a939f68efc9",
+    "exp_d1f98e16bed13d01",
+    "exp_d99e6693e28e5470",
+    "exp_e2d76f8958700388",
+    "exp_f16d469b21b9e6e6"
+  ],
+  "policy": {
+    "min_cases": 20,
+    "min_delta": 0.0
+  },
+  "results": {
+    "baseline": {
+      "passed": 1,
+      "rate": 0.047619047619047616
+    },
+    "candidate": {
+      "passed": 21,
+      "rate": 1.0
+    },
+    "delta": 0.9523809523809523,
+    "wins": 20,
+    "losses": 0,
+    "ties": 1,
+    "sign_test_p": 1.9073486328125e-06,
+    "by_category": {
+      "dynamic_state_tracking": {
+        "n": 4,
+        "baseline": 0,
+        "candidate": 4,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      },
+      "environment_gotchas": {
+        "n": 4,
+        "baseline": 0,
+        "candidate": 4,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      },
+      "false_premise": {
+        "n": 4,
+        "baseline": 0,
+        "candidate": 4,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      },
+      "static_state_recall": {
+        "n": 5,
+        "baseline": 1,
+        "candidate": 5,
+        "baseline_rate": 0.2,
+        "candidate_rate": 1.0
+      },
+      "workflow_knowledge": {
+        "n": 4,
+        "baseline": 0,
+        "candidate": 4,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      }
+    },
+    "by_layer": {
+      "behavioural": {
+        "n": 11,
+        "baseline": 1,
+        "candidate": 11,
+        "baseline_rate": 0.09090909090909091,
+        "candidate_rate": 1.0
+      },
+      "extraction": {
+        "n": 5,
+        "baseline": 0,
+        "candidate": 5,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      },
+      "retrieval": {
+        "n": 5,
+        "baseline": 0,
+        "candidate": 5,
+        "baseline_rate": 0.0,
+        "candidate_rate": 1.0
+      }
+    },
+    "retrieval": {
+      "n": 5,
+      "baseline": {
+        "recall_at_k": 0.0,
+        "mrr": 0.3333333333333333
+      },
+      "candidate": {
+        "recall_at_k": 1.0,
+        "mrr": 1.0
+      }
+    },
+    "procedural": null,
+    "cost": {
+      "baseline": {
+        "tokens_mean": 900.0,
+        "seconds_mean": null
+      },
+      "candidate": {
+        "tokens_mean": 700.0,
+        "seconds_mean": null
+      }
+    }
+  },
+  "verdict": "pass",
+  "gate": {
+    "gate": "retrieval_regression",
+    "result": "pass",
+    "evaluator": {
+      "kind": "oracle",
+      "runtime": "tool",
+      "model": null,
+      "session": "run_6225bd67565c7591"
+    },
+    "at": "2026-09-05T00:00:00Z",
+    "ref": "eval-run:run_6225bd67565c7591",
+    "summary": "21 hold-out cases: candidate 1.000 vs baseline 0.048, 20 wins, 0 losses (policy: min_delta 0.0, max_sign_p 0.05)",
+    "holdout_digest": "90d6974b4880873838a5931e25be978a97628bd1e03717c99712f17fc30da14c",
+    "training_excluded": true,
+    "anchors": [
+      "exp_03fec7baa15b6c52",
+      "exp_08b943eaf639895f",
+      "exp_21ec622bb76659f0",
+      "exp_306a271bf01e7a32",
+      "exp_3a04ff02b9258b51",
+      "exp_41842779c4de0044",
+      "exp_56088472f7c5172f",
+      "exp_73d97ca2b0a17aa7",
+      "exp_8b2508e00ad71257",
+      "exp_aa2a5f220e7323ab",
+      "exp_b389d6394647af66",
+      "exp_b9870fb9ab0ea7e3",
+      "exp_ba076542935aa02b",
+      "exp_bb75e286a5d7999d",
+      "exp_c2876dabb82c4f52",
+      "exp_d1074a939f68efc9",
+      "exp_d1f98e16bed13d01",
+      "exp_d99e6693e28e5470",
+      "exp_e2d76f8958700388",
+      "exp_f16d469b21b9e6e6"
+    ],
+    "salt_draw": {
+      "source": "agent-hq@7777777777777777777777777777777777777777",
+      "at": "2026-09-04T00:00:00Z"
+    },
+    "metrics": {
+      "delta": 0.9523809523809523,
+      "wins": 20,
+      "losses": 0,
+      "cases": 21,
+      "anchored": 20,
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_sign_p": 0.05,
+      "sign_p": 9.5367431640625e-07
+    }
+  },
+  "_expect": "missing required 'max_sign_p'"
+}

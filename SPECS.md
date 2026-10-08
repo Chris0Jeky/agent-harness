@@ -1214,6 +1214,19 @@ historical run of the procedure. Its `input_ref` is that run's task, and its ora
 cases come from the hold-out side of the experience split, and the candidate's `evidence` (the
 dev-side runs the recipe or skill was written from) is excluded by the evaluator.
 
+**The contract bundle** (K5). `scripts/learning_bundle.py build` writes the versioned
+`schemas/learning/BUNDLE.json`: every top-level `schemas/learning/*.json` file except the manifest
+itself, plus `scripts/learning_contracts.py`, in sorted repository-relative POSIX order. Each file
+is SHA-256 hashed after normalising CRLF to LF; the bundle digest is SHA-256 of the UTF-8 bytes of
+the sorted `path<TAB>sha256<LF>` lines. Consumers pin the value printed by `digest` and use
+`verify --vendored DIR` (with repeated `--map REL=VENDORED_REL` for renamed paths) to compare their
+copies against the manifest and report drift. `check` guards the committed manifest against
+contract edits, additions and removals. The synthetic `schemas/learning/compat/accept/` and
+`reject/` fixtures pin valid records for every schema and invalid records with expected errors;
+a fixture whose expected validation changes is a breaking contract change: run `build --bump`
+and announce it on the learning-plane bus. Never edit a fixture to make a red test green without
+that version bump and announcement.
+
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
 self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
