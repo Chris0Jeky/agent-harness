@@ -1041,11 +1041,15 @@ promotion records and the gate results of its current stay (raw gate results or 
 reports), it writes the record that moves the candidate to the next state on its class's path:
 `candidate` to `evaluating` (P0 straight to `active`); `evaluating` to `canary` or `probation`
 once every evaluation gate is present; `canary` to `probation` on its canary result; `probation`
-to `active` on maturity (and the owner's pass where the class needs it). Any failed gate moves to
-`rejected`. Every generated move is shadow, and reverts, reinforcement, supersession, decay and
-live effects are never generated: they need blame, judgment or the owner. The record's id is
-derived from the move, so a retry is byte-identical and the fold counts it once; the generator
-returns a record only after folding the chain with it appended.
+to `active` on maturity (and the owner's pass where the class needs it). Only passes the fold
+would count move a candidate forward (never the learner's, `self` or an LLM judge alone), since
+an evaluation gate recorded too early would strand the candidate in probation. A failed gate
+while evaluating, in canary or in probation moves to `rejected`. Every generated move is shadow;
+a live candidate, reverts, reinforcement, supersession and decay are never generated, since they
+need blame, judgment or the owner. Run reports are accepted only for this candidate (and the
+genome it names). Gates are stored sorted and the id is derived from the move, so a retry with
+the same `--at`, producer and reason is byte-identical and the fold counts it once. The generator
+refuses times after now and returns a record only after folding the chain with it appended.
 
 ```powershell
 py -3 scripts\learning_promote.py --candidate <lc.json> --records <promotion records.jsonl> --gates <gate or eval-run json>... --lane <lane> --session <session>

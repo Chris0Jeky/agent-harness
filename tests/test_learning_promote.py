@@ -99,7 +99,7 @@ class GeneratorTests(unittest.TestCase):
         records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
         with self.assertRaises(lp.PromotionRefusal) as caught:
             lp.next_record(cand, records, [], PRODUCER, "2026-09-08T12:01:00Z")
-        self.assertIn("awaits offline_eval", str(caught.exception))
+        self.assertIn("awaits a counted pass of offline_eval", str(caught.exception))
 
     def test_the_fold_has_the_last_word(self):
         cand = candidate()
@@ -110,30 +110,67 @@ class GeneratorTests(unittest.TestCase):
         with self.assertRaises(lp.PromotionRefusal) as caught:
             lp.next_record(cand, records, early, PRODUCER, "2026-09-08T12:01:00Z")
         self.assertIn("fold refuses", str(caught.exception))
+
+    def test_gates_that_would_not_count_never_move_a_candidate(self):
+        cand = candidate()
+        records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
         learner = dict(ORACLE, session=cand["producer"]["session"])
-        records = [records[0]]
+        judge = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "j"}
+        for evaluator, words in (
+            (learner, "counted pass"),
+            (judge, "not only an LLM judge"),
+        ):
+            with self.assertRaises(lp.PromotionRefusal) as caught:
+                lp.next_record(
+                    cand,
+                    records,
+                    [gate("offline_eval", "2026-09-08T12:00:00Z", evaluator=evaluator)],
+                    PRODUCER,
+                    "2026-09-08T12:01:00Z",
+                )
+            self.assertIn(words, str(caught.exception))
         records, _ = advance(
             cand,
             records,
             [gate("offline_eval", "2026-09-08T12:00:00Z")],
             "2026-09-08T12:01:00Z",
         )
-        records, _ = advance(
-            cand,
-            records,
-            [gate("canary", "2026-09-09T12:00:00Z", evaluator=learner)],
-            "2026-09-09T12:01:00Z",
-        )
-        with self.assertRaises(lp.PromotionRefusal):
+        with self.assertRaises(lp.PromotionRefusal) as caught:
             lp.next_record(
                 cand,
                 records,
-                [gate("maturity", "2026-09-16T12:05:00Z")],
+                [gate("canary", "2026-09-09T12:00:00Z", evaluator=learner)],
                 PRODUCER,
-                "2026-09-16T12:06:00Z",
+                "2026-09-09T12:01:00Z",
             )
+        self.assertIn("counted canary result", str(caught.exception))
 
-    def test_p8_needs_the_owner_on_the_activating_record(self):
+    def test_future_records_are_refused(self):
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.next_record(candidate(), [], [], PRODUCER, "2999-01-01T00:00:00Z")
+        self.assertIn("not a past contract instant", str(caught.exception))
+
+    def test_malformed_gates_are_refusals(self):
+        for bad in ({}, None, {"gate": "offline_eval"}):
+            with self.assertRaises(lp.PromotionRefusal):
+                lp.next_record(candidate(), [], [bad], PRODUCER, "2026-09-08T11:10:00Z")
+
+    def test_a_live_candidate_is_never_moved_by_the_generator(self):
+        cand = candidate()
+        records = copy.deepcopy(lc.read_records(EXAMPLES / "promotion-chain.jsonl"))
+        records[1].update(effect="live", authority="decision:test-live")
+        self.assertEqual(lc.fold(cand, records[:2]).effect, "live")
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.next_record(
+                cand,
+                records[:2],
+                [gate("canary", "2026-09-09T12:00:00Z")],
+                PRODUCER,
+                "2026-09-09T12:01:00Z",
+            )
+        self.assertIn("owner's records", str(caught.exception))
+
+    def test_gate_order_does_not_change_the_record(self):
         cand = candidate(kind="policy", promotion_class="P8")
         records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
         records, _ = advance(
@@ -142,7 +179,58 @@ class GeneratorTests(unittest.TestCase):
             [gate("tests", "2026-09-08T12:00:00Z")],
             "2026-09-08T12:01:00Z",
         )
-        with self.assertRaises(lp.PromotionRefusal):
+        pair = [
+            gate("maturity", "2026-09-15T12:05:00Z"),
+            gate("owner", "2026-09-15T12:05:00Z", evaluator=OWNER),
+        ]
+        one = lp.next_record(cand, records, pair, PRODUCER, "2026-09-15T12:06:00Z")
+        two = lp.next_record(
+            cand, records, list(reversed(pair)), PRODUCER, "2026-09-15T12:06:00Z"
+        )
+        self.assertEqual(one, two)
+
+    def test_conditional_gates_shape_the_path(self):
+        skill = candidate(kind="skill", promotion_class="P3", consequential=True)
+        records, _ = advance(skill, [], [], "2026-09-08T11:10:00Z")
+        _, r = advance(
+            skill,
+            records,
+            [gate("offline_eval", "2026-09-08T12:00:00Z")],
+            "2026-09-08T12:01:00Z",
+        )
+        self.assertEqual(r["to"], "canary")
+        memory = candidate(kind="semantic", promotion_class="P1", protected=True)
+        records, _ = advance(memory, [], [], "2026-09-08T11:10:00Z")
+        checks = [
+            gate("provenance", "2026-09-08T12:00:00Z"),
+            gate("contradiction", "2026-09-08T12:00:00Z"),
+        ]
+        records, _ = advance(memory, records, checks, "2026-09-08T12:01:00Z")
+        with self.assertRaises(lp.PromotionRefusal) as caught:
+            lp.next_record(
+                memory,
+                records,
+                [gate("maturity", "2026-09-15T12:05:00Z")],
+                PRODUCER,
+                "2026-09-15T12:06:00Z",
+            )
+        self.assertIn("owner", str(caught.exception))
+
+    def test_p8_needs_the_owner_on_the_activating_record(self):
+        cand = candidate(kind="policy", promotion_class="P8")
+        records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
+        # The owner approved while evaluating: that pass exists but is not on
+        # the activating record, so P8 still refuses.
+        records, _ = advance(
+            cand,
+            records,
+            [
+                gate("tests", "2026-09-08T12:00:00Z"),
+                gate("owner", "2026-09-08T12:00:00Z", evaluator=OWNER),
+            ],
+            "2026-09-08T12:01:00Z",
+        )
+        with self.assertRaises(lp.PromotionRefusal) as caught:
             lp.next_record(
                 cand,
                 records,
@@ -150,6 +238,7 @@ class GeneratorTests(unittest.TestCase):
                 PRODUCER,
                 "2026-09-15T12:06:00Z",
             )
+        self.assertIn("never automatic", str(caught.exception))
         owner = [
             gate("maturity", "2026-09-15T12:05:00Z"),
             gate("owner", "2026-09-15T12:05:00Z", evaluator=OWNER),
@@ -209,7 +298,7 @@ class CommandLineTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = lp.main(argv[:2] + ["--records", str(path)] + argv[2:])
             self.assertEqual(code, 2)
-            self.assertIn("awaits offline_eval", err.getvalue())
+            self.assertIn("awaits a counted pass of offline_eval", err.getvalue())
 
 
 if __name__ == "__main__":

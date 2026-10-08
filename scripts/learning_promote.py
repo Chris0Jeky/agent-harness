@@ -14,8 +14,10 @@ Scope, by design:
 - every generated move is shadow; turning a candidate live is the owner's;
 - any failed gate moves the candidate to ``rejected``; reverts, reinforcement,
   supersession and decay need blame or judgment, so they are never generated;
-- the id is derived from the move (candidate, prev, target, gates), so a
-  retried generation is byte-identical and the fold counts it once.
+- the id is derived from the move (candidate, prev, target, gates) and the
+  gates are stored sorted, so a retry with the same time, producer and reason
+  is byte-identical and the fold counts it once; pass ``--at`` to make a retry
+  reproducible.
 """
 
 import argparse
@@ -41,18 +43,34 @@ class PromotionRefusal(Exception):
     """No legal next record can be generated from these inputs (exit 2)."""
 
 
-def gate_results(items):
-    """Gate results from raw gate objects or eval-run/v1 reports, validated."""
+REPORTS = ("eval-run/v1", "system-run/v1")
+
+
+def gate_results(items, candidate=None):
+    """Gate results from raw gate objects or run reports, validated.
+
+    A report (eval-run/v1, system-run/v1) must be about this candidate, and an
+    eval run must have evaluated the genome the candidate names.
+    """
     schema = contracts._document("promotion-record.schema.json")["$defs"]["gate_result"]
     gates = []
     for item in items:
-        if isinstance(item, dict) and item.get("schema") == "eval-run/v1":
+        if isinstance(item, dict) and item.get("schema") in REPORTS:
             problems = contracts.validate_record(item)
             if problems:
-                raise PromotionRefusal(f"eval run {item.get('id')}: {problems[0]}")
+                raise PromotionRefusal(f"report {item.get('id')}: {problems[0]}")
+            if candidate is not None and item["candidate"] != candidate["id"]:
+                raise PromotionRefusal(
+                    f"report {item['id']} judged {item['candidate']}, not {candidate['id']}"
+                )
+            named = candidate.get("genome") if candidate else None
+            if named and item.get("genome", named) != named:
+                raise PromotionRefusal(
+                    f"report {item['id']} evaluated {item.get('genome')}, not {named}"
+                )
             if item["gate"] is None:
                 raise PromotionRefusal(
-                    f"eval run {item['id']} emitted no gate ({item['verdict']})"
+                    f"report {item['id']} emitted no gate ({item['verdict']})"
                 )
             item = item["gate"]
         problems = contracts._schema_errors(
@@ -73,8 +91,15 @@ def _evaluation_gates(candidate):
 
 
 def target_state(candidate, state, gates):
-    """The next state along the class's path, or a refusal naming what is missing."""
-    names = {g["gate"] for g in gates}
+    """The next state along the class's path, or a refusal naming what is missing.
+
+    Only a pass the fold would count moves the candidate forward: a gate judged
+    by the learner, by itself or by nobody independent would strand it in
+    probation, because an evaluation gate cannot be recorded again later.
+    """
+    names = {g["gate"] for g in gates if contracts._counts(g, candidate)}
+    judged = [g for g in gates if g["gate"] not in STAY_GATES and g["gate"] != "owner"]
+    independent = contracts.classes()["evaluators"]["independent"]
     if any(g["result"] == "fail" for g in gates):
         if state in ("evaluating", "canary", "probation"):
             return "rejected"
@@ -87,11 +112,17 @@ def target_state(candidate, state, gates):
     if state == "evaluating":
         missing = [g for g in _evaluation_gates(candidate) if g not in names]
         if missing:
-            raise PromotionRefusal(f"evaluating still awaits {', '.join(missing)}")
+            raise PromotionRefusal(
+                f"evaluating still awaits a counted pass of {', '.join(missing)}"
+            )
+        if judged and not any(g["evaluator"]["kind"] in independent for g in judged):
+            raise PromotionRefusal(
+                "evaluating needs an oracle, owner or independent model, not only an LLM judge"
+            )
         return "canary" if "canary" in required else "probation"
     if state == "canary":
         if "canary" not in names:
-            raise PromotionRefusal("canary still awaits its canary result")
+            raise PromotionRefusal("canary still awaits a counted canary result")
         return "probation"
     if state == "probation":
         missing = [g for g in ("maturity", "owner") if g in required and g not in names]
@@ -107,11 +138,22 @@ def target_state(candidate, state, gates):
     )
 
 
-def next_record(candidate, records, gates, producer, at, reason=None):
-    """The next promotion-record/v1 for this candidate, already proven to fold."""
-    current = contracts.fold(candidate, records)
+def next_record(candidate, records, gates, producer, at, reason=None, as_of=None):
+    """The next promotion-record/v1 for this candidate, already proven to fold.
+
+    ``as_of`` (default now) bounds every timestamp, as the fold CLI does, so a
+    future-dated maturity pass is refused rather than written.
+    """
+    as_of = as_of or dt.datetime.now(dt.timezone.utc)
+    instant = contracts.parse_time(at)
+    if instant is None or instant > as_of:
+        raise PromotionRefusal(f"the record's time {at} is not a past contract instant")
+    gates = sorted(gate_results(gates, candidate), key=lambda g: g["gate"])
+    current = contracts.fold(candidate, records, as_of=as_of)
     if current.errors:
         raise PromotionRefusal(f"the chain does not fold cleanly: {current.errors[0]}")
+    if current.effect == "live":
+        raise PromotionRefusal("a live candidate moves only by its owner's records")
     target = target_state(candidate, current.state, gates)
     prev = current.chain[-1] if current.chain else None
     basis = json.dumps(
@@ -138,7 +180,7 @@ def next_record(candidate, records, gates, producer, at, reason=None):
     }
     if candidate.get("genome"):
         record["genome"] = candidate["genome"]
-    after = contracts.fold(candidate, list(records) + [record])
+    after = contracts.fold(candidate, list(records) + [record], as_of=as_of)
     if after.errors or after.state != target:
         problem = after.errors[0] if after.errors else f"folded to {after.state}"
         raise PromotionRefusal(f"the fold refuses the move to {target}: {problem}")
@@ -176,9 +218,7 @@ def main(argv=None):
         if len(candidates) != 1:
             raise PromotionRefusal("expected exactly one candidate")
         records = contracts.read_records(args.records) if args.records else []
-        gates = gate_results(
-            [g for path in args.gates for g in contracts.read_records(path)]
-        )
+        gates = [g for path in args.gates for g in contracts.read_records(path)]
         at = args.at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if contracts.parse_time(at) is None:
             raise PromotionRefusal(f"--at is not a contract timestamp: {at}")
