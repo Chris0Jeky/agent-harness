@@ -1172,23 +1172,26 @@ def write_corpus(
                 if target.is_symlink() or (target.exists() and not target.is_file()):
                     raise OSError(f"corpus output {name!r} is not a regular file")
                 if target.exists():
-                    target.replace(previous / name)
+                    # Record intent first: a signal can arrive after rename succeeds.
                     moved_previous.append(name)
+                    target.replace(previous / name)
             for name in payloads:
-                (staged / name).replace(output / name)
                 published.append(name)
+                (staged / name).replace(output / name)
         except BaseException as publish_error:
             rollback_errors: list[OSError] = []
             for name in reversed(published):
                 try:
-                    (output / name).unlink()
+                    if not (staged / name).exists():
+                        (output / name).unlink()
                 except FileNotFoundError:
                     pass
                 except OSError as exc:
                     rollback_errors.append(exc)
             for name in reversed(moved_previous):
                 try:
-                    (previous / name).replace(output / name)
+                    if (previous / name).exists():
+                        (previous / name).replace(output / name)
                 except OSError as exc:
                     rollback_errors.append(exc)
             if rollback_errors:
