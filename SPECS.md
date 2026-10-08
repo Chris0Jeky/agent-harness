@@ -1098,7 +1098,9 @@ job's experience (so `split_key` is the job's), and its `input_ref` is the job s
 (`muse-job:<lane>/<wave>/<job>`, carrying repo, base SHA and lens variables). Its oracle is
 `set_match`, with `expected_items` holding the location keys of findings triage confirmed (which
 the variant must still report) and `forbidden_items` holding those it refuted (which it must no
-longer report). A location key is `<path>#L<line // 40>`, the outcome ledger's line bucket.
+longer report). A location key is `<path>#L<line // 40>` with the path normalised as the ledger does (lower case,
+forward slashes); keys are compared verbatim, and a key that lands in both lists makes the case
+uninformative, so the builder drops it.
 Both arms re-run the job at the same base, so runtime drift is shared; neither replays
 historical output. A *skill-procedure* suite (`suite: skill-procedure-<skill>`) has one case per
 historical run of the procedure. Its `input_ref` is that run's task, and its oracle is
