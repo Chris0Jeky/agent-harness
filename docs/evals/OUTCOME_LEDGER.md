@@ -92,6 +92,51 @@ finds more; compare digests only between runs over the same ledger.
 - **Not measured, stated in the output:** avoidable idle (needs supervisor idle intervals) and
   seeded-fault review recall (needs a seeded corpus).
 
+## Learning metrics
+
+Add repeatable `--learning PATH` files or recursive directories to `metrics`, with or without
+`--ledger`. Records live under `%USERPROFILE%\.estate\learning\`, never in a repository.
+The five learning contracts are validated; invalid records and lifecycle fold errors appear in
+`learning.problems`. Experiences fold through the contract's `fold_experiences` (latest
+`observed_at`; a later observation that changes the source or split key is a problem, not applied);
+memory-use observations keep the latest `observed_at`. A candidate loaded twice counts once. The default is sealed `dev`; `--split holdout|all` still
+requires `--unseal REASON`. The learning hold-out manifest counts experiences and hashes sorted
+IDs joined by newlines. Counts cover loaded records after re-observation folding.
+
+```powershell
+py -3 scripts\outcome_ledger.py metrics --learning "$env:USERPROFILE\.estate\learning"
+```
+
+**Task outcomes:** `memory_assisted_task_delta` compares success with supplied memory against
+success without it. This is observational, confounded by task selection, and not a causal
+estimate. Success means completed, published or merged, without a matured revert or an explicit
+regression. `memory_bytes_per_successful_task` divides supplied bytes by successful tasks with
+a memory-use record, reporting unknown bytes separately.
+
+**Memory quality:** `memory_harm_rate` counts helped, harmed and neutral effects judged by an
+evaluator other than self. `retrieval_waste` counts supplied items with measured read or cited
+signals that were neither read nor cited. Unmeasured items do not enter its denominator.
+
+**Reuse:** `lesson_reuse` counts semantic and consolidation candidates that reached active and
+landed at a memory ref, and subsequent experiences supplied that ref. `skill_reuse_success`
+counts measured skill completions, overall and for promoted skill refs. `cross_runtime_transfer`
+splits lesson uses by whether the runtime appears in the lesson's loaded evidence experiences.
+Refs compare without their `@version` suffix. Memory-use records take precedence over the
+experience's `memory_used` fallback, including when no memory was supplied.
+
+**Learning lifecycle:** `candidate_to_promoted_ratio` counts candidates that ever reached active,
+grouped by kind and current folded state. `promotion_to_revert_rate` counts subsequent reverts,
+with pre-promotion canary/probation reverts separately. `time_to_learn` measures hours from the
+earliest evidence experience to activation, using the ledger's quantile rule; promoted candidates
+with any unloaded evidence are counted as missing. These three candidate metrics are not split,
+because candidates are not experiences. Only the applied lifecycle chain contributes activation,
+revert and landed refs. `--as-of` does not replace observed learning outcomes.
+
+**Recurrence:** `owner_correction_recurrence` groups keyed owner corrections, and
+`same_failure_recurrence` groups failure keys, ordered by experience time. Every occurrence after
+the first is a recurrence, attributed to that recurring experience's runtime. Every metric reports
+its denominator or population count; rates with an empty denominator are null.
+
 ## PR state and reverts
 
 `fetch-pr-states` is the one networked step: GitHub REST through `gh api`, one pull read per PR
