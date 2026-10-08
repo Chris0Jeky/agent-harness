@@ -3,8 +3,9 @@
 
 The archive is a tree, not a lineage: every ``candidate-genome/v1`` stays in
 it, linked to its ``parent_genome``, so a dominated variant can still parent a
-better one later. Nothing is optimised as a single scalar. A genome is
-compared only on the objectives it measured, with the directions in
+better one later. Nothing is optimised as a single scalar. A genome joins
+the comparison only when it measured every objective asked for, with the
+directions in
 ``schemas/learning/objectives.json``; the frontier is the set no other
 measured genome dominates, and parents for the next generation are frontier
 members ranked by crowding distance (NSGA-II), so the extremes and the sparse
@@ -63,9 +64,9 @@ def crowding(genomes, objectives):
     for objective in objectives:
         ranked = sorted(genomes, key=lambda g: (_gain(g, objective), g["id"]))
         low, high = _gain(ranked[0], objective), _gain(ranked[-1], objective)
-        distance[ranked[0]["id"]] = distance[ranked[-1]["id"]] = math.inf
         if high == low:
-            continue
+            continue  # a constant objective has no extremes to protect
+        distance[ranked[0]["id"]] = distance[ranked[-1]["id"]] = math.inf
         for before, current, after in zip(ranked, ranked[1:], ranked[2:]):
             spread = (_gain(after, objective) - _gain(before, objective)) / (high - low)
             distance[current["id"]] += spread
@@ -91,7 +92,7 @@ def _tree(by_id, problems):
         depth[key] = level
         frontier_ids += [(child, level + 1) for child in children[key]]
     for key in sorted(set(by_id) - set(depth)):
-        problems.append(f"{key}: on a parent cycle")
+        problems.append(f"{key}: on or below a parent cycle")
         depth[key] = None
     return children, sorted(roots), depth
 
@@ -103,18 +104,26 @@ def archive(genomes, objectives=None, parents=4):
     unknown = [o for o in objectives if o not in known]
     if unknown:
         raise ValueError(f"unknown objectives {unknown}; known: {sorted(known)}")
-    problems, by_id = [], {}
+    problems, by_id, clashed = [], {}, set()
     for genome in genomes:
         errors = contracts.validate_record(genome)
         if not errors and genome.get("schema") != "candidate-genome/v1":
             errors = ["not a candidate-genome/v1"]
+        if not errors and not all(
+            math.isfinite(v) for v in genome.get("objectives", {}).values()
+        ):
+            errors = ["objectives must be finite numbers"]
         ident = genome.get("id", "?") if isinstance(genome, dict) else "?"
         if errors:
             problems.append(f"{ident}: {errors[0]}")
         elif ident in by_id and by_id[ident] != genome:
             problems.append(f"{ident}: two different genomes share this id")
+            clashed.add(ident)
         else:
             by_id[ident] = genome
+    # Neither copy of a clashing id is trusted, so input order cannot decide.
+    for ident in clashed:
+        del by_id[ident]
     children, roots, depth = _tree(by_id, problems)
     measured = [
         g
@@ -171,7 +180,13 @@ def main(argv=None):
         genomes = [g for path in args.genomes for g in contracts.read_records(path)]
         objectives = args.objectives.split(",") if args.objectives else None
         report = archive(genomes, objectives, max(args.parents, 0))
-    except (contracts.ContractError, OSError, ValueError, RecursionError) as exc:
+    except (
+        contracts.ContractError,
+        OSError,
+        ValueError,
+        RecursionError,
+        ArithmeticError,
+    ) as exc:
         print(json.dumps({"status": "refused", "error": str(exc)}), file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2, sort_keys=True))

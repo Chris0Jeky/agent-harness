@@ -89,6 +89,29 @@ class FrontierTests(unittest.TestCase):
         crowd = la.crowding(genomes, ["correctness", "cost"])
         self.assertGreater(crowd["gen_b-0001"], 0)
 
+    def test_a_constant_objective_does_not_crown_genomes_by_name(self):
+        # "a" and "z" sort first and last by id but sit inside the frontier.
+        points = (("k", 0.5, 1.0), ("a", 0.6, 2.0), ("m", 0.7, 2.2), ("z", 0.8, 6.0))
+        genomes = [
+            genome(key, correctness=c, cost=x, reverts=0)
+            for key, c, x in points + (("p", 0.9, 9.0),)
+        ]
+        objectives = ["correctness", "cost", "reverts"]
+        crowd = la.crowding(genomes, objectives)
+        infinite = sorted(k for k, v in crowd.items() if v == float("inf"))
+        self.assertEqual(infinite, ids("k", "p"))
+        # z's neighbours are farthest apart once each objective is normalised.
+        self.assertGreater(crowd["gen_z-0001"], crowd["gen_m-0001"])
+        self.assertGreater(crowd["gen_m-0001"], crowd["gen_a-0001"])
+        report = la.archive(genomes, objectives, parents=3)
+        self.assertEqual(report["parents"], ids("k", "p", "z"))
+
+    def test_non_finite_objectives_are_problems(self):
+        bad = genome("bad", correctness=float("nan"))
+        report = la.archive([bad, genome("ok", correctness=0.1)], ["correctness"])
+        self.assertEqual(report["frontier"], ids("ok"))
+        self.assertEqual(len(report["problems"]), 1)
+
     def test_unknown_objectives_refuse(self):
         with self.assertRaises(ValueError):
             la.archive([], ["vibes"])
@@ -116,6 +139,8 @@ class TreeTests(unittest.TestCase):
         report = la.archive([a, b, orphan], ["correctness"])
         self.assertIn("gen_orphan-0001", report["roots"])
         self.assertEqual(sum("cycle" in p for p in report["problems"]), 2)
+        below = la.archive([a, b, genome("c", "a", correctness=0.1)], ["correctness"])
+        self.assertEqual(sum("cycle" in p for p in below["problems"]), 3)
         self.assertTrue(any("not in the archive" in p for p in report["problems"]))
 
     def test_invalid_and_conflicting_genomes_are_problems(self):
@@ -124,7 +149,7 @@ class TreeTests(unittest.TestCase):
         report = la.archive(
             [good, clash, {"schema": "candidate-genome/v1"}], ["correctness"]
         )
-        self.assertEqual(len(report["genomes"]), 1)
+        self.assertEqual(len(report["genomes"]), 0)  # both copies of the clash dropped
         self.assertEqual(len(report["problems"]), 2)
         self.assertEqual(
             la.archive([good, copy.deepcopy(good)], ["correctness"])["problems"], []
@@ -151,6 +176,13 @@ class CommandLineTests(unittest.TestCase):
             code, out, _ = self.run_cli(str(path), "--objectives", "correctness")
             self.assertEqual((code, json.loads(out)["frontier"]), (0, ids("b")))
             self.assertEqual(self.run_cli(str(path), "--objectives", "vibes")[0], 2)
+            orphan = Path(tmp) / "orphan.json"
+            orphan.write_text(
+                json.dumps(genome("o", "missing", correctness=0.1)), "utf-8"
+            )
+            self.assertEqual(
+                self.run_cli(str(orphan), "--objectives", "correctness")[0], 1
+            )
 
 
 if __name__ == "__main__":
