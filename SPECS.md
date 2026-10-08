@@ -949,6 +949,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `veto`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
 | `decision-resolution/v1` | `decision`, `source`, `status`, `option`, `option_label`, `answered_at`, `created`, `expires`, `subject`, `measures` | what an injected resolver returns for one agent-hq decision read at `origin/main` (`source: agent-hq@<sha>`); an answered or defaulted decision names its option and time; `subject` binds a per-promotion approval or veto window to one candidate; `measures` carries the exit bars and graduation the resolver measured |
 | `learning-would-apply/v1` (`wa_`) | `candidate`, `class`, `class_reasons`, `destination`, `op`, `base`, `bytes`, `sha256`, `authority`, `eligibility`, `verdict`, `reasons` | the applier's account of one candidate: the whole file it would write (UTF-8, LF, at most 256 KiB) and its sha256, which the validator recomputes; `base` names the replaced blob (null for an add) so a revert can guard on it; `would_apply` needs an eligible candidate with no problems, its required authority answered, and a class no lower than the destination's |
+| `promotion-receipt/v1` (`rcpt_`) | `candidate`, `record`, `kind`, `installed`, `observed`, `matured`, `reverted` | written by the applier or the store, never the learner; `id` = `rcpt_` + sha256(candidate\|record\|kind\|canonical evidence)[:16]; carries exactly its kind's evidence: `installed` the destination repo, merge commit, path and blob sha256 on `origin/main`, `observed` an attributed experience, `matured` a window (`since`, `through`) of at least `maturity_days`, issued after it, `reverted` the revert commit; `receipt_status` counts one only against a live record of the folded chain that entered an installed state |
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
@@ -1095,6 +1096,20 @@ gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `ev
 it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five
 LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
 training leak and a cluster leak the evaluator must drop.
+
+**Receipts, not claims** (K3). The path to live carries `promotion-receipt/v1` receipts, written
+by the applier or the store, never by the learner: `installed` (the destination repository, merge
+commit, path and blob sha256 on `origin/main`), `observed` (an attributed use), `matured` (a window
+of at least `maturity_days` with no attributed regression) and `reverted`. `receipt_status` counts a
+receipt only against a live record of the folded chain that entered an installed state, at the
+candidate's destination; observed, matured and reverted count only after that install, and a
+revert inside a maturity window voids it. `learning_metrics` resolves authority from the dataset's
+`decision-resolution/v1` records, and `promoted` (with revert rate and time to learn) counts
+verified installs, never entry into `active`; `activated` counts entry into `active`, shadow
+included. The maturity and owner gates are producible: `learning_promote.py --gates` takes a
+matured receipt as the maturity gate (`ref: receipt:`) and an answered per-candidate decision as
+the owner gate (pass on Approve, fail on Decline), and `--mature` produces a shadow candidate's
+maturity gate from the clock once probation has run its window (`--regressed` fails it).
 
 **Commit, then draw** (K3, attack E). `split_of`'s default salt is a public constant, so a producer
 who chooses split keys can grind them into the hold-out (46 of 200 in the red-team run), and a

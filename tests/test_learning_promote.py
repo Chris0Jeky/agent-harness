@@ -115,6 +115,33 @@ class GeneratorTests(unittest.TestCase):
         )
         self.assertTrue(all(rec["effect"] == "shadow" for rec in records))
 
+    def test_the_maturity_clock_produces_the_shadow_maturity_gate(self):
+        cand, records = candidate(), []
+        records, _ = advance(cand, records, [], "2026-09-08T11:10:00Z")
+        records, _ = advance(
+            cand,
+            records,
+            [gate("offline_eval", "2026-09-08T12:00:00Z")],
+            "2026-09-08T12:01:00Z",
+        )
+        records, r = advance(
+            cand,
+            records,
+            [gate("canary", "2026-09-09T12:00:00Z")],
+            "2026-09-09T12:01:00Z",
+        )
+        self.assertEqual(r["to"], "probation")
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.clock_maturity_gate(cand, records, "2026-09-15T12:00:00Z")  # 6 days
+        clock = lp.clock_maturity_gate(cand, records, "2026-09-16T12:05:00Z")
+        self.assertEqual((clock["result"], clock["ref"]), ("pass", f"prom:{r['id']}"))
+        records, r = advance(cand, records, [clock], "2026-09-16T12:06:00Z")
+        self.assertEqual(r["to"], "active")
+        failed = lp.clock_maturity_gate(
+            cand, records[:-1], "2026-09-16T12:05:00Z", regressed=True
+        )
+        self.assertEqual(failed["result"], "fail")
+
     def test_classes_without_canary_go_straight_to_probation(self):
         cand = candidate(kind="skill", promotion_class="P3")
         records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")

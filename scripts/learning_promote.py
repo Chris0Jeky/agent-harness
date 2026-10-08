@@ -55,6 +55,12 @@ def gate_results(items, candidate=None):
     schema = contracts._document("promotion-record.schema.json")["$defs"]["gate_result"]
     gates = []
     for item in items:
+        # Producible gates: a matured receipt is the maturity gate, an answered
+        # per-candidate decision is the owner gate.
+        if isinstance(item, dict) and item.get("schema") == "promotion-receipt/v1":
+            item = maturity_gate(item)
+        elif isinstance(item, dict) and item.get("schema") == "decision-resolution/v1":
+            item = owner_gate(item)
         if isinstance(item, dict) and item.get("schema") in REPORTS:
             problems = contracts.validate_record(item)
             if problems:
@@ -143,6 +149,80 @@ def target_state(candidate, state, gates, resolve=None):
     raise PromotionRefusal(
         f"{state} moves only by a steward's decision (reinforce, supersede, decay or revert)"
     )
+
+
+TOOL_EVALUATOR = {"kind": "oracle", "runtime": "tool", "model": None}
+
+
+def maturity_gate(receipt):
+    """The maturity gate a verified matured receipt produces (receipt_status first)."""
+    if receipt.get("kind") != "matured" or contracts.validate_record(receipt):
+        raise PromotionRefusal("a maturity gate comes from a valid matured receipt")
+    return {
+        "gate": "maturity",
+        "result": "pass",
+        "evaluator": {**TOOL_EVALUATOR, "session": receipt["producer"]["session"]},
+        "at": receipt["at"],
+        "ref": f"receipt:{receipt['id']}",
+    }
+
+
+def owner_gate(resolution):
+    """The owner gate an answered per-candidate decision produces: pass or fail as answered."""
+    if contracts.validate_record(resolution) or resolution["status"] != "answered":
+        raise PromotionRefusal(
+            "an owner gate comes from an answered decision-resolution"
+        )
+    approval = contracts.classes()["approval"]
+    meaning = contracts.meaning(resolution)
+    if meaning not in approval["grant"] + approval["deny"]:
+        raise PromotionRefusal(
+            f"{resolution['decision']} is not an approval or a decline"
+        )
+    return {
+        "gate": "owner",
+        "result": "pass" if meaning in approval["grant"] else "fail",
+        "evaluator": {
+            "kind": "owner",
+            "runtime": "owner",
+            "model": None,
+            "session": "agent-hq",
+        },
+        "at": resolution["answered_at"],
+        "ref": f"decision:{resolution['decision']}",
+    }
+
+
+def clock_maturity_gate(
+    candidate, records, at, regressed=False, resolve=None, genome=None
+):
+    """The shadow maturity gate: the probation stay has run its window.
+
+    A shadow candidate has no install and so no matured receipt; its maturity
+    is the clock plus the caller's word that no regression was attributed to
+    it (regressed=True fails the gate).
+    """
+    instant = contracts.parse_time(at)
+    if instant is None:
+        raise PromotionRefusal(f"{at} is not a contract timestamp")
+    folded = contracts.fold(
+        candidate, records, as_of=instant, resolve=resolve, genome=genome
+    )
+    if folded.errors or folded.state != "probation":
+        raise PromotionRefusal(
+            "the maturity clock runs only in a cleanly folded probation"
+        )
+    entered = next(r for r in records if r.get("id") == folded.chain[-1])
+    days = contracts.lifecycle()["maturity_days"]
+    if instant - contracts.parse_time(entered["at"]) < dt.timedelta(days=days):
+        raise PromotionRefusal(f"probation has not yet run {days} days")
+    return {
+        "gate": "maturity",
+        "result": "fail" if regressed else "pass",
+        "evaluator": {**TOOL_EVALUATOR, "session": "maturity-clock"},
+        "at": at,
+        "ref": f"prom:{entered['id']}",
+    }
 
 
 def next_record(
@@ -237,6 +317,16 @@ def main(argv=None):
     parser.add_argument("--at", help="record timestamp (default: now)")
     parser.add_argument("--reason")
     parser.add_argument(
+        "--mature",
+        action="store_true",
+        help="add the shadow maturity gate: probation has run its window at --at",
+    )
+    parser.add_argument(
+        "--regressed",
+        action="store_true",
+        help="with --mature: a regression was attributed, so the gate fails",
+    )
+    parser.add_argument(
         "--resolutions",
         type=Path,
         help="decision-resolution/v1 records read from agent-hq origin/main (owner gates count only through these)",
@@ -262,6 +352,12 @@ def main(argv=None):
             if args.resolutions
             else None
         )
+        if args.mature:
+            gates.append(
+                clock_maturity_gate(
+                    candidates[0], records, at, args.regressed, resolve=resolve
+                )
+            )
         record = next_record(
             candidates[0],
             records,

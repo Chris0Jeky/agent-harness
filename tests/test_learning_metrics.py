@@ -197,6 +197,51 @@ def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="acti
     return chain
 
 
+# The owner's P1 answer as the store reads it: option d, the direct lane with no exit bar.
+P1_D = {
+    "schema": "decision-resolution/v1",
+    "decision": "lp-p1-memory-autopromote",
+    "source": "agent-hq@" + "d" * 40,
+    "status": "answered",
+    "option": "d",
+    "answered_at": "2026-09-01T00:00:00Z",
+    "created": "2026-08-31T00:00:00Z",
+    "expires": None,
+    "subject": None,
+    "measures": {"exit_bars": {}, "graduation": {}},
+}
+
+
+def install(cand, chain, at=None):
+    """Turn the chain live from probation on, under P1_D, and receipt the install."""
+    for record in chain:
+        if record["to"] in ("probation", "active"):
+            record.update(effect="live", authority="decision:lp-p1-memory-autopromote")
+            record.setdefault("landed", "memory:synthetic/lesson.md")
+    first = next(r for r in chain if r["to"] == "probation")
+    evidence = {
+        "repo": cand["destination"]["repo"],
+        "commit": "c" * 40,
+        "path": cand["destination"]["path"],
+        "blob_sha256": "b" * 64,
+    }
+    return {
+        "schema": "promotion-receipt/v1",
+        "id": lc.receipt_id(cand["id"], first["id"], "installed", evidence),
+        "at": at or first["at"],
+        "producer": {
+            "lane": "applier",
+            "runtime": "tool",
+            "model": None,
+            "session": "a-1",
+        },
+        "candidate": cand["id"],
+        "record": first["id"],
+        "kind": "installed",
+        "installed": evidence,
+    }
+
+
 def dataset(*records):
     result = {name: [] for name in lc.RECORD_SCHEMAS}
     result["problems"] = []
@@ -380,6 +425,23 @@ class MetricTests(unittest.TestCase):
             },
         )
 
+    def test_promotion_is_a_receipt_not_entry_into_active(self):
+        cand = candidate()
+        chain = activation(cand)
+        shadow = aggregate(cand, *chain, P1_D)["candidate_to_promoted_ratio"]
+        self.assertEqual((shadow["promoted"], shadow["activated"]), (0, 1))
+        receipt = install(cand, chain)
+        live = aggregate(cand, *chain, receipt, P1_D)["candidate_to_promoted_ratio"]
+        self.assertEqual((live["promoted"], live["activated"]), (1, 1))
+        # Without the owner's answer the chain is not live, so the receipt binds nothing.
+        unresolved = lm.learning_metrics(dataset(cand, *chain, receipt), "dev")
+        self.assertEqual(
+            unresolved["metrics"]["candidate_to_promoted_ratio"]["promoted"], 0
+        )
+        self.assertTrue(
+            any("not a live install" in p["error"] for p in unresolved["problems"])
+        )
+
     def test_candidate_ratio_counts_ever_active_and_current_folded_state(self):
         cand, pending = candidate(), candidate("pending", kind="skill")
         chain = activation(cand)
@@ -393,12 +455,16 @@ class MetricTests(unittest.TestCase):
                 prev=chain[-1]["id"],
             )
         )
-        result = aggregate(cand, pending, *chain)["candidate_to_promoted_ratio"]
+        receipt = install(cand, chain)
+        result = aggregate(cand, pending, *chain, receipt, P1_D)[
+            "candidate_to_promoted_ratio"
+        ]
         self.assertEqual(
             result,
             {
                 "candidates": 2,
                 "promoted": 1,
+                "activated": 1,
                 "ratio": 0.5,
                 "by_kind": {
                     "semantic": {"candidates": 1, "promoted": 1},
@@ -421,7 +487,9 @@ class MetricTests(unittest.TestCase):
                 prev=chain[-1]["id"],
             )
         )
-        records = [promoted, clean, *chain, *activation(clean)]
+        clean_chain = activation(clean)
+        records = [promoted, clean, *chain, *clean_chain, P1_D]
+        records += [install(promoted, chain), install(clean, clean_chain)]
         for state in ("canary", "probation"):
             cand = candidate(state, kind="prompt")
             prefix = activation(cand, until=state)
@@ -449,11 +517,14 @@ class MetricTests(unittest.TestCase):
         records = [early, late]
         for n, day in enumerate((2, 3, 4, 5)):
             cand = candidate(str(n), evidence=[late["id"], early["id"]])
-            records.extend([cand, *activation(cand, at=f"2026-10-0{day}T00:00:00Z")])
+            when = f"2026-10-0{day}T00:00:00Z"
+            chain = activation(cand, at=when)
+            records.extend([cand, *chain, install(cand, chain, at=when)])
         missing = candidate(
             "missing", evidence=[early["id"], experience("unloaded")["id"]]
         )
-        records.extend([missing, *activation(missing)])
+        chain = activation(missing)
+        records.extend([missing, *chain, install(missing, chain), P1_D])
         self.assertEqual(
             aggregate(*records)["time_to_learn"],
             {"n": 4, "missing_evidence": 1, "median_hours": 240.0, "p90_hours": 264.0},
@@ -888,6 +959,132 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(result.pop("learning")["schema"], "learning-metrics/v1")
         self.assertEqual(result, ledger.metrics({}, as_of=AS_OF))
+
+
+lp = load_module("learning_promote")
+
+
+def receipt(cand, record_id, kind, evidence, at):
+    return {
+        "schema": "promotion-receipt/v1",
+        "id": lc.receipt_id(cand["id"], record_id, kind, evidence),
+        "at": at,
+        "producer": {
+            "lane": "applier",
+            "runtime": "tool",
+            "model": None,
+            "session": "a-1",
+        },
+        "candidate": cand["id"],
+        "record": record_id,
+        "kind": kind,
+        kind: evidence,
+    }
+
+
+class ReceiptTests(unittest.TestCase):
+    """installed, observed, matured and reverted receipts (K3)."""
+
+    def setUp(self):
+        self.cand = candidate()
+        self.chain = activation(self.cand)
+        self.installed = install(self.cand, self.chain)
+        self.first = self.installed["record"]
+        self.since = self.installed["at"]
+
+    def status(self, *receipts):
+        return lc.receipt_status(
+            self.cand,
+            self.chain,
+            [self.installed, *receipts],
+            resolve=lc.resolver_from([P1_D]),
+        )
+
+    def matured(self, since=None, through="2026-10-05T00:00:00Z", at=None):
+        span = {"since": since or self.since, "through": through}
+        return receipt(self.cand, self.first, "matured", span, at or through)
+
+    def test_receipt_rules(self):
+        good = self.matured()
+        self.assertEqual(lc.validate_record(good), [])
+        for broken, fragment in (
+            (dict(good, id="rcpt_" + "0" * 16), "$.id"),
+            (
+                dict(good, observed={"experience": "exp_abcdef01"}),
+                "carries no observed",
+            ),
+            (self.matured(through="2026-09-27T00:00:00Z"), "spans less than 7 days"),
+            (self.matured(at="2026-10-04T00:00:00Z"), "issued after its window"),
+        ):
+            self.assertTrue(
+                any(fragment in e for e in lc.validate_record(broken)), fragment
+            )
+
+    def test_an_install_binds_to_a_live_record_at_the_destination(self):
+        status, problems = self.status()
+        self.assertEqual((status["installed"], problems), (self.installed["id"], []))
+        elsewhere = dict(self.installed["installed"], path="projects/x/memory/other.md")
+        moved = receipt(self.cand, self.first, "installed", elsewhere, self.since)
+        status, problems = lc.receipt_status(
+            self.cand, self.chain, [moved], resolve=lc.resolver_from([P1_D])
+        )
+        self.assertIsNone(status["installed"])
+        self.assertIn("other than the destination", problems[0])
+
+    def test_observed_matured_and_reverted_count_after_the_install(self):
+        observed = receipt(
+            self.cand, self.first, "observed", {"experience": "exp_abcdef01"}, AFTER
+        )
+        status, problems = self.status(observed, self.matured())
+        self.assertEqual(status["observed"], [observed["id"]])
+        self.assertIsNotNone(status["matured"])
+        early = receipt(
+            self.cand, self.first, "observed", {"experience": "exp_abcdef02"}, AT
+        )
+        self.assertIn("before the install", self.status(early)[1][0])
+        before = self.matured(
+            since="2026-09-20T00:00:00Z", through="2026-09-28T00:00:00Z"
+        )
+        self.assertIn("starts before the install", self.status(before)[1][0])
+        revert = receipt(
+            self.cand,
+            self.first,
+            "reverted",
+            {"commit": "e" * 40, "reason": "attributed regression"},
+            "2026-10-01T00:00:00Z",
+        )
+        status, problems = self.status(revert, self.matured())
+        self.assertEqual((status["reverted"], status["matured"]), (revert["id"], None))
+        self.assertIn("reverted inside its window", problems[0])
+
+    def test_a_matured_receipt_produces_the_maturity_gate(self):
+        gate = lp.maturity_gate(self.matured())
+        self.assertEqual((gate["gate"], gate["result"]), ("maturity", "pass"))
+        self.assertTrue(gate["ref"].startswith("receipt:rcpt_"))
+        self.assertEqual(lp.gate_results([gate]), [gate])
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.maturity_gate(self.installed)
+        # The generator takes the receipt itself as a gate input.
+        self.assertEqual(lp.gate_results([self.matured()]), [gate])
+
+    def test_an_answer_produces_the_owner_gate(self):
+        approval = dict(
+            P1_D,
+            decision="approve-lesson",
+            option="a",
+            option_label="Approve",
+            subject={"candidate": self.cand["id"]},
+        )
+        gate = lp.owner_gate(approval)
+        self.assertEqual(
+            (gate["result"], gate["ref"]), ("pass", "decision:approve-lesson")
+        )
+        self.assertEqual(lp.gate_results([gate]), [gate])
+        self.assertEqual(lp.gate_results([approval]), [gate])
+        declined = lp.owner_gate(dict(approval, option="b", option_label="Decline"))
+        self.assertEqual(declined["result"], "fail")
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.owner_gate(dict(approval, status="open", option=None, answered_at=None))
 
 
 if __name__ == "__main__":

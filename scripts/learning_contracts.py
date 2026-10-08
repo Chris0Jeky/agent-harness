@@ -44,6 +44,7 @@ RECORD_SCHEMAS = {
     "system-run/v1": "system-run.schema.json",
     "decision-resolution/v1": "decision-resolution.schema.json",
     "learning-would-apply/v1": "would-apply.schema.json",
+    "promotion-receipt/v1": "promotion-receipt.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -690,6 +691,7 @@ SEMANTIC_RULES = {
     "system-run/v1": _system_rules,
     "decision-resolution/v1": lambda record: _resolution_rules(record),
     "learning-would-apply/v1": lambda record: _would_apply_rules(record),
+    "promotion-receipt/v1": lambda record: _receipt_rules(record),
 }
 
 
@@ -804,6 +806,118 @@ def _report_authority_errors(cls, authority, at):
             f"$.authority.option: {authority['option']!r} does not let {cls} go live"
         )
     return errors
+
+
+RECEIPT_KINDS = ("installed", "observed", "matured", "reverted")
+
+
+def receipt_id(candidate, record, kind, evidence):
+    """rcpt_ + 16 hex of candidate|record|kind|evidence: a re-issue is the same receipt."""
+    return "rcpt_" + _digest16(f"{candidate}|{record}|{kind}|{_canonical(evidence)}")
+
+
+def _receipt_rules(record):
+    errors = _time_errors(record, ("at",))
+    kind = record["kind"]
+    extra = [k for k in RECEIPT_KINDS if k != kind and k in record]
+    if extra:
+        errors.append(f"$: a {kind} receipt carries no {', '.join(extra)}")
+    expected = receipt_id(record["candidate"], record["record"], kind, record[kind])
+    if record["id"] != expected:
+        errors.append(f"$.id: must be {expected}")
+    if kind == "matured":
+        span = record["matured"]
+        errors += _time_errors(span, ("since", "through"))
+        since, through = parse_time(span["since"]), parse_time(span["through"])
+        days = lifecycle()["maturity_days"]
+        if since and through and through - since < dt.timedelta(days=days):
+            errors.append(f"$.matured: spans less than {days} days")
+        if through and parse_time(record["at"]) and parse_time(record["at"]) < through:
+            errors.append("$.at: a maturity receipt is issued after its window")
+    return errors
+
+
+def receipt_status(candidate, records, receipts, as_of=None, resolve=None, genome=None):
+    """The receipts that hold for this candidate's folded chain, and why others do not.
+
+    installed: a receipt about a live record of the chain that entered an
+    installed state, in the candidate's destination repository and path,
+    issued no earlier than that record. observed, matured and reverted count
+    only against that installed record; matured needs its window to start no
+    earlier than the install and no revert inside it.
+    """
+    folded = fold(candidate, records, as_of=as_of, resolve=resolve, genome=genome)
+    by_id = {r["id"]: r for r in records if isinstance(r, dict) and "id" in r}
+    chain = [by_id[i] for i in folded.chain]
+    live = {r["id"]: r for r in chain if r["effect"] == "live" and r["to"] in INSTALLED}
+    destination = candidate["destination"] or {}
+    status = {"installed": None, "observed": [], "matured": None, "reverted": None}
+    problems = []
+    mine = []
+    for receipt in receipts:
+        errors = (
+            validate_record(receipt) if isinstance(receipt, dict) else ["not a record"]
+        )
+        if not errors and receipt["schema"] != "promotion-receipt/v1":
+            errors = ["not a promotion-receipt/v1"]
+        if not errors and receipt["candidate"] != candidate["id"]:
+            continue
+        if errors:
+            problems.append(
+                f"{receipt.get('id', '?') if isinstance(receipt, dict) else '?'}: {errors[0]}"
+            )
+            continue
+        if as_of and parse_time(receipt["at"]) > as_of:
+            problems.append(f"{receipt['id']}: is dated after as_of")
+            continue
+        mine.append(receipt)
+    installed = None
+    for receipt in sorted(mine, key=lambda r: (r["at"], r["id"])):
+        if receipt["kind"] != "installed":
+            continue
+        record = live.get(receipt["record"])
+        where = receipt["installed"]
+        if record is None:
+            problems.append(
+                f"{receipt['id']}: {receipt['record']} is not a live install in the chain"
+            )
+        elif where["repo"].split("/")[-1] != str(destination.get("repo", "")).split(
+            "/"
+        )[-1] or (where["path"] != destination.get("path")):
+            problems.append(
+                f"{receipt['id']}: installed somewhere other than the destination"
+            )
+        elif parse_time(receipt["at"]) < parse_time(record["at"]):
+            problems.append(f"{receipt['id']}: issued before the record it installs")
+        elif installed is None:
+            installed = receipt
+    if installed is None:
+        return status, problems
+    status["installed"] = installed["id"]
+    since = parse_time(installed["at"])
+    later, reverted_at = [], None
+    for receipt in sorted(mine, key=lambda r: (r["at"], r["id"])):
+        if receipt["kind"] == "installed" or receipt["record"] != installed["record"]:
+            continue
+        if parse_time(receipt["at"]) < since:
+            problems.append(f"{receipt['id']}: dated before the install")
+            continue
+        later.append(receipt)
+        if receipt["kind"] == "observed":
+            status["observed"].append(receipt["id"])
+        elif receipt["kind"] == "reverted" and reverted_at is None:
+            status["reverted"], reverted_at = receipt["id"], parse_time(receipt["at"])
+    for receipt in later:
+        if receipt["kind"] != "matured":
+            continue
+        span = receipt["matured"]
+        if parse_time(span["since"]) < since:
+            problems.append(f"{receipt['id']}: its window starts before the install")
+        elif reverted_at is not None and reverted_at <= parse_time(span["through"]):
+            problems.append(f"{receipt['id']}: reverted inside its window")
+        elif status["matured"] is None:
+            status["matured"] = receipt["id"]
+    return status, problems
 
 
 def _resolution_rules(record):
