@@ -1,6 +1,6 @@
 {
   "schema": "learning-lifecycle/v1",
-  "description": "Candidate lifecycle as data. A learning-candidate/v1 record is born in initial; every later move is a promotion-record/v1 whose (from, to) must be an edge here. Gates may only be recorded on a record leaving one of gate_sources[gate], which is what forces a canary-class candidate through canary and a maturity-class candidate through probation. Contract: SPECS.md section 15.",
+  "description": "Candidate lifecycle as data. A learning-candidate/v1 record is born in initial; every later move is a promotion-record/v1 whose (from, to) must be an edge here. Gates may only be recorded on a record leaving one of gate_sources[gate], which is what forces a canary-class candidate through canary and every class above P0 through probation (maturity). effect live is only legal moving into live_capable. Contract: SPECS.md section 15.",
   "initial": "candidate",
   "states": [
     "candidate", "merged", "rejected", "evaluating", "canary", "probation",
@@ -9,7 +9,7 @@
   "terminal": ["archived"],
   "edges": {
     "candidate": ["evaluating", "merged", "rejected", "active"],
-    "evaluating": ["canary", "probation", "active", "rejected"],
+    "evaluating": ["canary", "probation", "merged", "rejected"],
     "canary": ["probation", "rejected", "reverted"],
     "probation": ["active", "rejected", "reverted"],
     "active": ["reinforced", "superseded", "decayed", "reverted"],
@@ -23,6 +23,7 @@
   },
   "forward": ["evaluating", "canary", "probation", "active", "reinforced"],
   "activating": ["active"],
+  "live_capable": ["canary", "probation", "active", "reinforced"],
   "gate_sources": {
     "provenance": ["evaluating"],
     "contradiction": ["evaluating"],

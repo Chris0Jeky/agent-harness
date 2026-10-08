@@ -1,9 +1,9 @@
 {
   "schema": "estate-experience/v1",
   "id": "exp_4655f2b5185f528e",
-  "at": "2026-10-01T10:20:00Z",
-  "observed_at": "2026-10-08T10:00:00Z",
-  "started_at": "2026-10-01T10:00:00Z",
+  "at": "2026-09-01T10:20:00Z",
+  "observed_at": "2026-09-08T10:00:00Z",
+  "started_at": "2026-09-01T10:00:00Z",
   "producer": {
     "lane": "example-swarm",
     "runtime": "muse",
@@ -41,7 +41,7 @@
     "test-gaps-flags-generated-code"
   ],
   "memory_used": [
-    "memory:example-project/generated-code-is-excluded"
+    "memory:example-project/generated-code-is-excluded.md"
   ],
   "skills_used": [
     "skill:delegate-to-muse"

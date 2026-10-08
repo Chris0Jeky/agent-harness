@@ -26,7 +26,7 @@
     },
     "claim": {"$ref": "common.schema.json#/$defs/text"},
     "evidence": {
-      "description": "The experiences the claim was learned from (at least one). These are the candidate's training evidence and are excluded from its evaluation.",
+      "description": "The experiences the claim was learned from (at least one). These are the candidate's training evidence: the replay evaluator excludes them (and every case sharing their split key) from its evaluation, and the fold refuses a gate whose anchors include them.",
       "type": "array",
       "minItems": 1,
       "maxItems": 256,

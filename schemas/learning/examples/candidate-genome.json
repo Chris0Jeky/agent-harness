@@ -1,7 +1,7 @@
 {
   "schema": "candidate-genome/v1",
   "id": "gen_example-0001",
-  "at": "2026-10-08T11:05:00Z",
+  "at": "2026-09-08T11:05:00Z",
   "producer": {
     "lane": "example-steward",
     "runtime": "claude",
@@ -41,7 +41,7 @@
       "example-config": "cccccccccccccccccccccccccccccccccccccccc"
     },
     "holdout_digest": "0000000000000000000000000000000000000000000000000000000000000001",
-    "result_ref": "eval-run:recipe-replay/2026-10-08-1"
+    "result_ref": "eval-run:recipe-replay/2026-09-08-1"
   },
   "objectives": {
     "correctness": 0.82,

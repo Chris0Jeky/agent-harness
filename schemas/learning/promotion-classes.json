@@ -1,6 +1,6 @@
 {
   "schema": "learning-promotion-classes/v1",
-  "description": "Promotion classes P0-P8 as data. activation_gates must each hold a latest result of pass, from an accepted evaluator, before a candidate enters an activating state; conditional_gates add gates when the candidate sets that flag. Until the owner answers the governance decisions, every effect above P0 is shadow (live needs an authority ref). P8 is never automatic: its owner pass must sit on the activating record itself. Contract: SPECS.md section 15.",
+  "description": "Promotion classes P0-P8 as data. activation_gates must each hold a latest result of pass, from an accepted evaluator, before a candidate enters an activating state; conditional_gates add gates when the candidate sets that flag. Every class above P0 matures through probation before it activates. Until the owner answers the governance decisions, every effect above P0 is shadow (live needs authority: decision:<id>). P8 is never automatic: its owner pass must sit on the activating record itself and on any record that turns it live. Contract: SPECS.md section 15.",
   "kind_class": {
     "episodic": "P0",
     "semantic": "P1",
@@ -18,7 +18,6 @@
     "independent": ["oracle", "owner", "independent_model"],
     "owner_gate": ["owner"]
   },
-  "live_requires_authority_above": "P0",
   "classes": {
     "P0": {
       "label": "episodic",
@@ -36,7 +35,7 @@
       "offline_eval": "provenance and contradiction checks",
       "canary": "no",
       "owner_approval": "protected categories only",
-      "activation_gates": ["provenance", "contradiction"],
+      "activation_gates": ["provenance", "contradiction", "maturity"],
       "conditional_gates": {"protected": ["owner"]},
       "owner_on_activation": false
     },
@@ -46,7 +45,7 @@
       "offline_eval": "retrieval regression",
       "canary": "optional",
       "owner_approval": "no",
-      "activation_gates": ["retrieval_regression"],
+      "activation_gates": ["retrieval_regression", "maturity"],
       "conditional_gates": {"protected": ["owner"]},
       "owner_on_activation": false
     },
@@ -56,9 +55,9 @@
       "offline_eval": "yes",
       "canary": "consequential skills",
       "owner_approval": "no",
-      "activation_gates": ["offline_eval"],
+      "activation_gates": ["offline_eval", "maturity"],
       "conditional_gates": {
-        "consequential": ["canary", "maturity"],
+        "consequential": ["canary"],
         "protected": ["owner"]
       },
       "owner_on_activation": false
@@ -109,7 +108,7 @@
       "offline_eval": "tests",
       "canary": "never automatic",
       "owner_approval": "always",
-      "activation_gates": ["tests", "owner"],
+      "activation_gates": ["tests", "maturity", "owner"],
       "conditional_gates": {},
       "owner_on_activation": true
     }

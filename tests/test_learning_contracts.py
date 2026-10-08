@@ -4,6 +4,7 @@ Synthetic records only (schemas/learning/examples); no live ledger is read.
 """
 
 import copy
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -42,8 +43,10 @@ def chain():
 
 def gate(name, at, evaluator=ORACLE, result="pass"):
     item = {"gate": name, "result": result, "evaluator": evaluator, "at": at}
+    if name == "owner":
+        item["ref"] = "decision:test-owner-1"
     if name in ("offline_eval", "replay"):
-        item.update(holdout_digest=HOLDOUT, training_excluded=True)
+        item.update(holdout_digest=HOLDOUT, training_excluded=True, anchors=[])
     return item
 
 
@@ -227,7 +230,7 @@ class RecordRuleTests(unittest.TestCase):
 
     def test_validity_window_and_timestamps(self):
         self.assertRejected(
-            candidate(valid_until="2026-10-01T00:00:00Z"), "after valid_from"
+            candidate(valid_until="2026-09-01T00:00:00Z"), "after valid_from"
         )
         self.assertRejected(candidate(at="2026-13-01T00:00:00Z"), "real UTC instant")
         self.assertRejected(candidate(at="2026-10-01T00:00:00+01:00"), "does not match")
@@ -333,8 +336,8 @@ class RecordRuleTests(unittest.TestCase):
                 move(
                     1,
                     None,
-                    "candidate",
                     "evaluating",
+                    "canary",
                     effect="live",
                     authority="decision:x-1",
                 )
@@ -360,26 +363,34 @@ class RecordRuleTests(unittest.TestCase):
 class FoldTests(unittest.TestCase):
     """The promotion-gate decision logic: the high-risk core of the contract."""
 
-    def fold_steps(self, cand, *steps, cls=None):
-        return lc.fold(cand, walk(*steps, cls=cls or cand["promotion_class"]))
+    T0 = "2026-09-08T11:00:00Z"  # the example candidate's own `at`
+
+    def fold_steps(self, cand, *steps, cls=None, as_of=None):
+        return lc.fold(
+            cand, walk(*steps, cls=cls or cand["promotion_class"]), as_of=as_of
+        )
+
+    def path(self, evaluation, canary=None, active=(), effect=None):
+        """candidate -> evaluating -> [canary ->] probation -> active, timed legally."""
+        steps = [("candidate", "evaluating", [], self.T0)]
+        if canary is None:
+            steps.append(
+                ("evaluating", "probation", evaluation, "2026-09-08T12:01:00Z")
+            )
+            entered = "2026-09-08T12:01:00Z"
+        else:
+            steps.append(("evaluating", "canary", evaluation, "2026-09-08T12:01:00Z"))
+            steps.append(("canary", "probation", canary, "2026-09-09T12:01:00Z"))
+            entered = "2026-09-09T12:01:00Z"
+        mature = lc.parse_time(entered) + dt.timedelta(days=7, minutes=4)
+        stamp = mature.strftime("%Y-%m-%dT%H:%M:%SZ")
+        after = (mature + dt.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        steps.append(("probation", "active", [gate("maturity", stamp), *active], after))
+        return steps
 
     def test_p4_cannot_skip_canary(self):
-        result = self.fold_steps(
-            candidate(),
-            ("candidate", "evaluating", [], "2026-10-08T11:00:00Z"),
-            (
-                "evaluating",
-                "probation",
-                [gate("offline_eval", "2026-10-08T12:00:00Z")],
-                "2026-10-08T12:01:00Z",
-            ),
-            (
-                "probation",
-                "active",
-                [gate("maturity", "2026-10-16T00:00:00Z")],
-                "2026-10-16T00:01:00Z",
-            ),
-        )
+        steps = self.path([gate("offline_eval", "2026-09-08T12:00:00Z")])
+        result = self.fold_steps(candidate(), *steps)
         self.assertEqual(result.state, "probation")
         self.assertTrue(
             any("pass of canary" in e for e in result.errors), result.errors
@@ -387,75 +398,68 @@ class FoldTests(unittest.TestCase):
 
     def test_p0_activates_directly(self):
         cand = candidate(kind="episodic", promotion_class="P0", destination=None)
-        result = self.fold_steps(
-            cand, ("candidate", "active", [], "2026-10-08T12:00:00Z")
-        )
+        result = self.fold_steps(cand, ("candidate", "active", [], self.T0))
         self.assertEqual((result.state, result.errors), ("active", []))
 
-    def test_p1_direct_activation_without_gates_is_refused(self):
-        cand = candidate(kind="semantic", promotion_class="P1")
-        result = self.fold_steps(
-            cand, ("candidate", "active", [], "2026-10-08T12:00:00Z")
-        )
-        self.assertEqual(result.state, "candidate")
-        self.assertTrue(result.errors)
+    def test_no_class_above_p0_activates_without_probation(self):
+        for kind, cls in (("semantic", "P1"), ("skill", "P3"), ("policy", "P8")):
+            cand = candidate(kind=kind, promotion_class=cls)
+            result = self.fold_steps(cand, ("candidate", "active", [], self.T0))
+            self.assertEqual(result.state, "candidate", cls)
+            self.assertTrue(
+                any("pass of maturity" in e for e in result.errors), result.errors
+            )
+        self.assertNotIn("active", lc.lifecycle()["edges"]["evaluating"])
 
     def test_protected_semantic_memory_needs_the_owner(self):
         cand = candidate(kind="semantic", promotion_class="P1", protected=True)
         checks = [
-            gate("provenance", "2026-10-08T12:00:00Z"),
-            gate("contradiction", "2026-10-08T12:00:00Z"),
+            gate("provenance", "2026-09-08T12:00:00Z"),
+            gate("contradiction", "2026-09-08T12:00:00Z"),
         ]
-        steps = [
-            ("candidate", "evaluating", [], "2026-10-08T11:00:00Z"),
-            ("evaluating", "active", checks, "2026-10-08T12:01:00Z"),
-        ]
-        refused = self.fold_steps(cand, *steps)
+        refused = self.fold_steps(cand, *self.path(checks))
         self.assertTrue(
             any("pass of owner" in e for e in refused.errors), refused.errors
         )
-        steps[1] = (
-            "evaluating",
-            "active",
-            checks + [gate("owner", "2026-10-08T12:00:00Z", OWNER)],
-            "2026-10-08T12:01:00Z",
-        )
-        self.assertEqual(self.fold_steps(cand, *steps).state, "active")
+        owner = [gate("owner", "2026-09-10T00:00:00Z", OWNER)]
+        accepted = self.fold_steps(cand, *self.path(checks, active=owner))
+        self.assertEqual((accepted.state, accepted.errors), ("active", []))
 
     def test_the_learner_never_evaluates_itself(self):
         cand = candidate(kind="skill", promotion_class="P3")
         learner = dict(ORACLE, session=cand["producer"]["session"])
         for evaluator in (learner, dict(ORACLE, kind="self")):
-            result = self.fold_steps(
-                cand,
-                ("candidate", "evaluating", [], "2026-10-08T11:00:00Z"),
-                (
-                    "evaluating",
-                    "active",
-                    [gate("offline_eval", "2026-10-08T12:00:00Z", evaluator)],
-                    "2026-10-08T12:01:00Z",
-                ),
+            evaluation = [gate("offline_eval", "2026-09-08T12:00:00Z", evaluator)]
+            result = self.fold_steps(cand, *self.path(evaluation))
+            self.assertEqual(result.state, "probation", evaluator)
+            self.assertTrue(
+                any("independent pass of offline_eval" in e for e in result.errors)
             )
-            self.assertEqual(result.state, "evaluating", evaluator)
+
+    def test_every_required_gate_is_checked_for_the_learner(self):
+        cand = candidate()  # P4: the learner judging only the canary is refused
+        learner = dict(ORACLE, session=cand["producer"]["session"])
+        steps = self.path(
+            [gate("offline_eval", "2026-09-08T12:00:00Z")],
+            canary=[gate("canary", "2026-09-09T12:00:00Z", learner)],
+        )
+        result = self.fold_steps(cand, *steps)
+        self.assertEqual(result.state, "probation")
+        self.assertTrue(any("independent pass of canary" in e for e in result.errors))
 
     def test_an_llm_judge_alone_cannot_activate(self):
         cand = candidate(kind="skill", promotion_class="P3")
-        judge = {
-            "kind": "llm_judge",
-            "runtime": "grok",
-            "model": "m",
-            "session": "judge-1",
-        }
+        judge = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "j"}
+        evaluation = [gate("offline_eval", "2026-09-08T12:00:00Z", judge)]
         result = self.fold_steps(
             cand,
-            ("candidate", "evaluating", [], "2026-10-08T11:00:00Z"),
-            (
-                "evaluating",
-                "active",
-                [gate("offline_eval", "2026-10-08T12:00:00Z", judge)],
-                "2026-10-08T12:01:00Z",
-            ),
+            *self.path(evaluation, active=()),
         )
+        # maturity is an oracle pass, so the judge is not alone: activation holds.
+        self.assertEqual(result.state, "active")
+        steps = self.path(evaluation)
+        steps[-1][2][0]["evaluator"] = judge
+        result = self.fold_steps(cand, *steps)
         self.assertTrue(
             any("not only an LLM judge" in e for e in result.errors), result.errors
         )
@@ -464,18 +468,18 @@ class FoldTests(unittest.TestCase):
         cand = candidate(kind="skill", promotion_class="P3", consequential=True)
         result = self.fold_steps(
             cand,
-            ("candidate", "evaluating", [], "2026-10-08T11:00:00Z"),
+            ("candidate", "evaluating", [], self.T0),
             (
                 "evaluating",
                 "canary",
-                [gate("offline_eval", "2026-10-08T12:00:00Z")],
-                "2026-10-08T12:01:00Z",
+                [gate("offline_eval", "2026-09-08T12:00:00Z")],
+                "2026-09-08T12:01:00Z",
             ),
             (
                 "canary",
                 "rejected",
-                [gate("canary", "2026-10-09T12:00:00Z", result="fail")],
-                "2026-10-09T12:01:00Z",
+                [gate("canary", "2026-09-09T12:00:00Z", result="fail")],
+                "2026-09-09T12:01:00Z",
             ),
         )
         self.assertEqual((result.state, result.errors), ("rejected", []))
@@ -483,46 +487,80 @@ class FoldTests(unittest.TestCase):
 
     def test_p8_owner_pass_must_be_on_the_activating_record(self):
         cand = candidate(kind="policy", promotion_class="P8")
-        steps = [
-            (
-                "candidate",
-                "evaluating",
-                [gate("owner", "2026-10-08T11:00:00Z", OWNER)],
-                "2026-10-08T11:00:00Z",
-            ),
-            (
-                "evaluating",
-                "active",
-                [gate("tests", "2026-10-08T12:00:00Z")],
-                "2026-10-08T12:01:00Z",
-            ),
-        ]
-        refused = self.fold_steps(cand, *steps)
+        tests = [gate("tests", "2026-09-08T12:00:00Z")]
+        early = self.path(tests)
+        early[0] = ("candidate", "evaluating", [gate("owner", self.T0, OWNER)], self.T0)
+        refused = self.fold_steps(cand, *early)
         self.assertTrue(
             any("never automatic" in e for e in refused.errors), refused.errors
         )
-        steps[1] = (
-            "evaluating",
-            "active",
-            [
-                gate("tests", "2026-10-08T12:00:00Z"),
-                gate("owner", "2026-10-08T12:00:00Z", OWNER),
-            ],
-            "2026-10-08T12:01:00Z",
+        owner = [gate("owner", "2026-09-10T00:00:00Z", OWNER)]
+        self.assertEqual(
+            self.fold_steps(cand, *self.path(tests, active=owner)).state, "active"
         )
-        self.assertEqual(self.fold_steps(cand, *steps).state, "active")
+
+    def test_p8_cannot_turn_live_without_the_owner_on_that_record(self):
+        cand = candidate(kind="policy", promotion_class="P8")
+        records = walk(
+            ("candidate", "evaluating", [], self.T0),
+            (
+                "evaluating",
+                "canary",
+                [gate("tests", "2026-09-08T12:00:00Z")],
+                "2026-09-08T12:01:00Z",
+            ),
+            cls="P8",
+        )
+        records[1].update(effect="live", authority="decision:lp-blanket")
+        result = lc.fold(cand, records)
+        self.assertEqual((result.state, result.effect), ("evaluating", "shadow"))
+        self.assertTrue(any("turns it live" in e for e in result.errors))
+        records[1]["gates"].append(gate("owner", "2026-09-08T12:00:00Z", OWNER))
+        result = lc.fold(cand, records)
+        self.assertEqual(
+            (result.state, result.effect, result.errors), ("canary", "live", [])
+        )
+
+    def test_live_only_into_live_capable_states(self):
+        record = move(1, None, "candidate", "evaluating", effect="live")
+        record["authority"] = "decision:x-1"
+        self.assertTrue(any("nothing is live" in e for e in lc.validate_record(record)))
+
+    def test_any_fold_error_fails_closed_to_shadow(self):
+        records = chain()
+        for record in records[1:]:
+            record.update(effect="live", authority="decision:lp-p4")
+        live = lc.fold(candidate(), records)
+        self.assertEqual((live.state, live.effect, live.errors), ("active", "live", []))
+        broken_revert = move(
+            9, records[-1]["id"], "active", "reverted", at="2026-09-20T00:00:00Z"
+        )  # no revert object: invalid
+        result = lc.fold(candidate(), records + [broken_revert])
+        self.assertEqual((result.state, result.effect), ("active", "shadow"))
+        self.assertTrue(result.errors)
+
+    def test_identical_retries_are_not_a_fork(self):
+        records = chain()
+        result = lc.fold(candidate(), records + [copy.deepcopy(records[2])])
+        self.assertEqual((result.state, result.errors), ("active", []))
+
+    def test_records_dated_after_as_of_are_refused(self):
+        as_of = lc.parse_time("2026-09-12T00:00:00Z")
+        result = lc.fold(candidate(), chain(), as_of=as_of)
+        self.assertEqual(result.state, "probation")
+        self.assertTrue(any("after the fold's as_of" in e for e in result.errors))
 
     def test_maturity_needs_the_full_window(self):
         records = chain()
-        records[3]["gates"][0]["at"] = "2026-10-15T12:00:00Z"
-        records[3]["at"] = "2026-10-15T12:01:00Z"
+        records[3]["gates"][0]["at"] = "2026-09-15T12:00:00Z"
+        records[3]["at"] = "2026-09-15T12:01:00Z"
         result = lc.fold(candidate(), records)
         self.assertEqual(result.state, "probation")
         self.assertTrue(any("before 7 days" in e for e in result.errors), result.errors)
 
     def test_gates_are_judged_during_the_stay(self):
         records = chain()
-        records[1]["gates"][0]["at"] = "2026-10-08T11:00:00Z"  # before evaluating began
+        records[1]["gates"][0]["at"] = "2026-09-08T11:00:00Z"  # before evaluating
         result = lc.fold(candidate(), records)
         self.assertEqual(result.state, "evaluating")
         self.assertTrue(any("outside the evaluating stay" in e for e in result.errors))
@@ -561,6 +599,115 @@ class FoldTests(unittest.TestCase):
         result = lc.fold(candidate(evidence=[]), chain())
         self.assertEqual(result.chain, [])
         self.assertTrue(result.errors)
+        self.assertTrue(lc.fold(["not", "a", "candidate"], chain()).errors)
+
+
+class ExperienceFoldTests(unittest.TestCase):
+    def test_latest_observation_wins(self):
+        first = copy.deepcopy(example("estate-experience.json")[0])
+        later = copy.deepcopy(first)
+        later["observed_at"] = "2026-09-20T00:00:00Z"
+        later["outcome"]["matured"] = "reverted"
+        by_id, errors = lc.fold_experiences([later, first])
+        self.assertEqual(errors, [])
+        self.assertEqual(by_id[first["id"]]["outcome"]["matured"], "reverted")
+
+    def test_split_key_is_fixed_by_the_first_observation(self):
+        first = copy.deepcopy(example("estate-experience.json")[0])
+        moved = copy.deepcopy(first)
+        moved.update(observed_at="2026-09-20T00:00:00Z", split_key="pr:elsewhere")
+        by_id, errors = lc.fold_experiences([first, moved])
+        self.assertTrue(any("split_key differs" in e for e in errors), errors)
+        self.assertNotIn("split_key", by_id[first["id"]])
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Defects found by the #494 review lenses; each pins its fix."""
+
+    def assertRejected(self, record, fragment):
+        errors = lc.validate_record(record)
+        self.assertTrue(any(fragment in e for e in errors), errors)
+
+    def test_a_gate_evaluated_on_the_candidates_evidence_is_refused(self):
+        records = chain()
+        records[1]["gates"][0]["anchors"] = [candidate()["evidence"][0]]
+        result = lc.fold(candidate(), records)
+        self.assertEqual(result.state, "evaluating")
+        self.assertTrue(any("own evidence" in e for e in result.errors), result.errors)
+
+    def test_offline_gates_must_name_their_anchors(self):
+        bare = gate("offline_eval", "2026-10-08T11:00:00Z")
+        del bare["anchors"]
+        self.assertRejected(move(1, None, "evaluating", "canary", [bare]), "anchors")
+
+    def test_owner_gate_cites_a_decision_and_authority_is_a_decision(self):
+        owner = gate("owner", "2026-10-08T11:00:00Z", OWNER)
+        del owner["ref"]
+        self.assertRejected(move(1, None, "evaluating", "canary", [owner]), "'ref'")
+        owner["ref"] = "claude-session:abc"
+        self.assertRejected(move(1, None, "evaluating", "canary", [owner]), "decision")
+        record = move(1, None, "evaluating", "canary", effect="live")
+        record["authority"] = "claude-session:abc"
+        self.assertRejected(record, "authority")
+
+    def test_trailing_newline_never_matches_an_anchored_pattern(self):
+        record = candidate()
+        record["id"] = record["id"] + "\n"
+        self.assertRejected(record, "does not match")
+        self.assertFalse(lc._pattern_matches("^a$", "a\n"))
+        self.assertTrue(lc._pattern_matches("^a$", "a"))
+
+    def test_repository_and_path_cannot_climb(self):
+        for repo in ("..", "a/..", ".git"):
+            dest = {"repo": repo, "path": "x"}
+            self.assertRejected(candidate(destination=dest), "destination")
+        dest = {"repo": "example-repo", "path": "a\n../../x"}
+        self.assertRejected(candidate(destination=dest), "destination")
+
+    def test_a_run_never_judges_its_own_memory(self):
+        record = copy.deepcopy(example("memory-use.json")[0])
+        effect = record["memories"][0]["effect"]
+        effect["evaluator"] = dict(effect["evaluator"], kind="self")
+        self.assertRejected(record, "judged by the run itself")
+        record = copy.deepcopy(example("memory-use.json")[0])
+        effect = record["memories"][0]["effect"]
+        effect["evaluator"] = dict(
+            effect["evaluator"], session=record["producer"]["session"]
+        )
+        self.assertRejected(record, "judged by the run itself")
+
+    def test_non_ascii_future_decision_counts_its_words(self):
+        record = candidate(
+            future_decision="Ob der Prüfer künftig generierte Dateien überspringt."
+        )
+        self.assertEqual(lc.validate_record(record), [])
+
+    def test_integral_floats_are_integers_and_equal_their_ints(self):
+        record = copy.deepcopy(example("estate-experience.json")[0])
+        record["cost"]["tokens"]["input"] = 1.0
+        self.assertEqual(lc.validate_record(record), [])
+        schema = {"uniqueItems": True}
+        self.assertTrue(lc._schema_errors([1, 1.0], schema, "common.schema.json", ""))
+        self.assertFalse(
+            lc._schema_errors(1.0, {"enum": [1]}, "common.schema.json", "")
+        )
+
+    def test_hostile_fold_inputs_are_refused_not_raised(self):
+        cand = candidate()
+        for records in ([cand], [{"schema": []}], [None], ["x"]):
+            result = lc.fold(cand, records)
+            self.assertEqual(result.state, "candidate")
+            self.assertTrue(result.errors)
+        self.assertTrue(lc.fold(None, []).errors)
+
+    def test_cli_refuses_deep_nesting_with_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deep = Path(tmp) / "deep.json"
+            deep.write_text("[" * 100000 + "]" * 100000, "utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = lc.main(["validate", str(deep)])
+            self.assertEqual(code, 2)
 
 
 class SplitTests(unittest.TestCase):

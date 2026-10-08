@@ -172,8 +172,19 @@ def classes():
 # -- the JSON Schema subset -------------------------------------------------
 
 
+def _numeric_normal(value):
+    """JSON Schema instance equality: 1 and 1.0 are the same number."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_numeric_normal(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _numeric_normal(v) for k, v in value.items()}
+    return value
+
+
 def _canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_numeric_normal(value), sort_keys=True, separators=(",", ":"))
 
 
 def _is_type(value, name):
@@ -182,6 +193,8 @@ def _is_type(value, name):
     if name == "boolean":
         return isinstance(value, bool)
     if name == "integer":
+        if isinstance(value, float):
+            return value.is_integer()
         return isinstance(value, int) and not isinstance(value, bool)
     if name == "number":
         return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -197,6 +210,15 @@ def _is_type(value, name):
 @functools.lru_cache(maxsize=None)
 def _regex(pattern):
     return re.compile(pattern)
+
+
+def _pattern_matches(pattern, value):
+    """ECMA-262 search semantics: a final $ does not match before a trailing newline."""
+    match = _regex(pattern).search(value)
+    if match is None:
+        return False
+    anchored_end = pattern.endswith("$") and not pattern.endswith("\\$")
+    return not (anchored_end and match.end() != len(value))
 
 
 def _resolve(ref, base):
@@ -234,7 +256,7 @@ def _schema_errors(value, schema, base, path):
             errors.append(f"{where}: shorter than {schema['minLength']}")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             errors.append(f"{where}: longer than {schema['maxLength']}")
-        if "pattern" in schema and not _regex(schema["pattern"]).search(value):
+        if "pattern" in schema and not _pattern_matches(schema["pattern"], value):
             errors.append(f"{where}: does not match {schema['pattern']}")
     if _is_type(value, "number") and "minimum" in schema:
         if value < schema["minimum"]:
@@ -323,9 +345,14 @@ def split_of(split_key):
     return "holdout" if int(digest[:8], 16) % 100 < HOLDOUT_PERCENT else "dev"
 
 
-def experience_split(record):
+def experience_split_key(record):
+    """The split key in force: split_key, else source.kind|source.key."""
     source = record["source"]
-    return split_of(record.get("split_key") or f"{source['kind']}|{source['key']}")
+    return record.get("split_key") or f"{source['kind']}|{source['key']}"
+
+
+def experience_split(record):
+    return split_of(experience_split_key(record))
 
 
 def class_rank(name):
@@ -374,11 +401,19 @@ def _memory_use_rules(record):
     for index, item in enumerate(record["memories"]):
         if item["cited"] and not (item["supplied"] or item["read"]):
             errors.append(f"$.memories[{index}]: cited but never supplied or read")
+    for field in ("memories", "skills"):
+        for index, item in enumerate(record[field]):
+            judge = item.get("effect", {}).get("evaluator")
+            if judge and (
+                judge["kind"] == "self"
+                or judge["session"] == record["producer"]["session"]
+            ):
+                errors.append(f"$.{field}[{index}].effect: judged by the run itself")
     return errors
 
 
 def _words(text):
-    return re.findall(r"[a-z0-9]+", text.lower())
+    return re.findall(r"\w+", text.casefold())
 
 
 def _candidate_rules(record):
@@ -451,8 +486,8 @@ def _promotion_rules(record):
             errors.append(f"$.{field}: only on a move to {state}")
     if record.get("merged_into") == record["candidate"]:
         errors.append("$.merged_into: a candidate is not merged into itself")
-    if record["effect"] == "live" and record["to"] in ("rejected", "merged"):
-        errors.append("$.effect: a rejected or merged candidate has no live effect")
+    if record["effect"] == "live" and record["to"] not in life["live_capable"]:
+        errors.append(f"$.effect: nothing is live once a candidate is {record['to']}")
     return errors
 
 
@@ -470,7 +505,7 @@ def validate_record(record):
     if not isinstance(record, dict):
         return ["$: a record is a JSON object"]
     name = record.get("schema")
-    if name not in RECORD_SCHEMAS:
+    if not isinstance(name, str) or name not in RECORD_SCHEMAS:
         return [f"$.schema: unknown record schema {name!r}"]
     errors = schema_errors(record, RECORD_SCHEMAS[name])
     if errors:
@@ -574,13 +609,45 @@ def _gate_timing(gate, record, entered_at, left_at, life):
     return problems
 
 
-def fold(candidate, records):
+def _live_switch_errors(candidate, record, effect):
+    """A never-automatic class turns live only with the owner's pass on that record."""
+    spec = classes()["classes"][candidate["promotion_class"]]
+    if (
+        record["effect"] != "live"
+        or effect == "live"
+        or not spec["owner_on_activation"]
+    ):
+        return []
+    if any(g["gate"] == "owner" and _counts(g, candidate) for g in record["gates"]):
+        return []
+    return [
+        f"{candidate['promotion_class']} is never automatic: the record that turns it live carries the owner pass"
+    ]
+
+
+def _distinct(records):
+    """Drop byte-identical retries so an idempotent re-write is not a fork."""
+    seen, result = set(), []
+    for record in records:
+        key = _canonical(record) if isinstance(record, dict) else repr(record)
+        if key not in seen:
+            seen.add(key)
+            result.append(record)
+    return result
+
+
+def fold(candidate, records, as_of=None):
     """Replay a candidate's promotion records into its state.
 
     The state is the one reached by the longest valid prefix of the chain;
     every problem (an invalid record, a fork, an illegal edge, a missing
-    activation gate) is reported and stops the fold at that record.
+    activation gate, a record dated after ``as_of``) is reported and stops the
+    fold at that record. Any error forces ``effect`` to shadow: a consumer
+    stops applying a candidate whose history it cannot fold, so a broken or
+    contested revert fails closed.
     """
+    if not isinstance(candidate, dict):
+        return Fold(None, None, {}, [], ["candidate: not a JSON object"])
     errors = [f"candidate: {e}" for e in validate_record(candidate)]
     if candidate.get("schema") != "learning-candidate/v1":
         return Fold(
@@ -591,9 +658,11 @@ def fold(candidate, records):
     if errors:
         return Fold(state, effect, latest, applied, errors)
     valid = []
-    for record in records:
+    for record in _distinct(records):
         problems = validate_record(record)
-        if not problems and record["candidate"] != candidate["id"]:
+        if not problems and record["schema"] != "promotion-record/v1":
+            problems = ["not a promotion-record/v1"]
+        elif not problems and record["candidate"] != candidate["id"]:
             problems = [f"belongs to {record['candidate']}"]
         if problems:
             ident = record.get("id", "?") if isinstance(record, dict) else "?"
@@ -613,18 +682,59 @@ def fold(candidate, records):
         at = parse_time(record["at"])
         if previous_at and at and at < previous_at:
             problems.append("is earlier than the record it follows")
+        if as_of and at and at > as_of:
+            problems.append("is dated after the fold's as_of instant")
         trial = dict(latest)
         for gate in record["gates"]:
             trial[gate["gate"]] = gate
             problems += _gate_timing(gate, record, previous_at, at, life)
+            if as_of and (parse_time(gate["at"]) or as_of) > as_of:
+                problems.append(f"{gate['gate']} is dated after the fold's as_of")
+            leaked = sorted(set(gate.get("anchors", ())) & set(candidate["evidence"]))
+            if leaked:
+                problems.append(
+                    f"{gate['gate']} evaluated the candidate's own evidence: {leaked[:3]}"
+                )
         if record["to"] in life["activating"]:
             problems += _activation_errors(candidate, trial, record)
+        problems += _live_switch_errors(candidate, record, effect)
         if problems:
             errors += [f"{where}: {p}" for p in problems]
             break
         state, effect, latest, previous_at = record["to"], record["effect"], trial, at
         applied.append(where)
-    return Fold(state, effect, latest, applied, errors)
+    return Fold(state, "shadow" if errors else effect, latest, applied, errors)
+
+
+def fold_experiences(records):
+    """Latest observation per experience id, and the contract errors across them.
+
+    An experience is re-observed as its outcome advances, but its identity
+    (source) and its split key are fixed by its first observation: a later
+    observation that changes either would move a run across the hold-out.
+    """
+    by_id, first, errors = {}, {}, []
+    ordered = sorted(
+        (r for r in records if isinstance(r, dict)),
+        key=lambda r: (str(r.get("observed_at")), _canonical(r)),
+    )
+    for record in ordered:
+        problems = validate_record(record)
+        if not problems and record["schema"] != "estate-experience/v1":
+            problems = ["not an estate-experience/v1 record"]
+        ident = record.get("id", "?")
+        if not problems and ident in first:
+            origin = first[ident]
+            if experience_split_key(origin) != experience_split_key(record):
+                problems.append("split_key differs from the first observation")
+            if origin["source"] != record["source"]:
+                problems.append("source differs from the first observation")
+        if problems:
+            errors += [f"{ident}: {p}" for p in problems]
+            continue
+        first.setdefault(ident, record)
+        by_id[ident] = record
+    return by_id, errors
 
 
 # -- command line -----------------------------------------------------------
@@ -648,12 +758,15 @@ def _validate_command(paths):
     return 1 if failed else 0
 
 
-def _fold_command(candidate_path, records_path):
+def _fold_command(candidate_path, records_path, as_of):
     candidates = read_records(candidate_path)
     if len(candidates) != 1:
         raise ValueError(f"{candidate_path}: expected exactly one candidate")
     records = read_records(records_path) if records_path else []
-    result = fold(candidates[0], records)
+    instant = parse_time(as_of) if as_of else dt.datetime.now(dt.timezone.utc)
+    if instant is None:
+        raise ValueError(f"--as-of is not a contract timestamp: {as_of}")
+    result = fold(candidates[0], records, as_of=instant)
     print(json.dumps(result._asdict(), indent=2, sort_keys=True))
     return 1 if result.errors else 0
 
@@ -670,6 +783,7 @@ def main(argv=None):
     )
     fld.add_argument("--candidate", type=Path, required=True)
     fld.add_argument("--records", type=Path)
+    fld.add_argument("--as-of", help="refuse records dated later (default: now)")
     eid = sub.add_parser("experience-id", help="print the deterministic experience id")
     eid.add_argument("--kind", required=True)
     eid.add_argument("--key", required=True)
@@ -678,10 +792,10 @@ def main(argv=None):
         if args.command == "validate":
             return _validate_command(args.paths)
         if args.command == "fold":
-            return _fold_command(args.candidate, args.records)
+            return _fold_command(args.candidate, args.records, args.as_of)
         print(experience_id(args.kind, args.key))
         return 0
-    except (ContractError, OSError, ValueError) as exc:
+    except (ContractError, OSError, ValueError, RecursionError) as exc:
         print(json.dumps({"status": "refused", "error": str(exc)}), file=sys.stderr)
         return 2
 

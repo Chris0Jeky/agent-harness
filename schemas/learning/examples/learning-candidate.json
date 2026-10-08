@@ -1,7 +1,7 @@
 {
   "schema": "learning-candidate/v1",
   "id": "lc_example-0001",
-  "at": "2026-10-08T11:00:00Z",
+  "at": "2026-09-08T11:00:00Z",
   "producer": {
     "lane": "example-steward",
     "runtime": "claude",
@@ -36,6 +36,6 @@
   "supersedes": [],
   "contradicts": [],
   "genome": "gen_example-0001",
-  "valid_from": "2026-10-08T11:00:00Z",
+  "valid_from": "2026-09-08T11:00:00Z",
   "valid_until": null
 }
