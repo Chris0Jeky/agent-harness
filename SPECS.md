@@ -943,6 +943,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | Record | Fields | Rules beyond the schema |
 |---|---|---|
 | `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `variant`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest, `fold_experiences`); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
+| `outcome-event/v1` (`oev_`) | `observed_at`, `run`, `experience`, `version`, `supersedes`, `repo`, `task_kind`, `recipe`, `runtime`, `model`, `variant`, `outcome`, `success`, `verdicts`, `corrections`, `failure_keys` | `id` = `oev_` + sha256(`run.kind`\|`run.key`\|`version`)[:16]; `experience` matches the run's deterministic experience id; version 1 alone has null `supersedes`; `success` uses `experience_succeeded`; `observed_at` is no earlier than `at` |
 | `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, never `self` or the run's own session |
 | `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
@@ -1169,6 +1170,25 @@ historical run of the procedure. Its `input_ref` is that run's task, and its ora
 `procedure`, with `max_turns` and, where the run hit a failure, `require_recovery`. In both, the
 cases come from the hold-out side of the experience split, and the candidate's `evidence` (the
 dev-side runs the recipe or skill was written from) is excluded by the evaluator.
+
+**One outcome stream** (K4). `scripts/learning_outcomes.py` projects experience observations in
+`observed_at` order into immutable `outcome-event/v1` versions per run, starting at 1 and chained
+by `supersedes`. Only changes to `outcome`, triage `verdicts`, owner `corrections`, `failure_keys`
+or `variant` emit a version; source, split-key and variant drift are skipped and reported using
+the experience fold's refusal rules. `read_since` reads strictly after a durable cursor
+(`observed_at`, `id`), ordered by UTC instant then id, and returns the advanced cursor for replay.
+All three reducers consume the latest version per run: `posterior` gives the Muse coordinator's
+Beta(1 + confirmed + clean merges, 1 + refuted + reverted) per repo and recipe (a merge counts
+only after its 7-day maturity is known); `lesson_eligible` selects matured runs or runs with owner
+corrections; `recurrences` finds correction or failure keys shared by more than one run. A late
+reversion replaces the earlier clean merge contribution in every consumer, rather than counting
+the run twice. `project <experiences...> [--out FILE]` writes JSONL (stdout by default), and
+`posterior --events FILE --repo R --recipe X` reads it; a refusal exits 2 with a JSON error on stderr.
+Projection is whole-history, and `observed_at` is the producer's clock, not an ingestion offset: an
+observation that arrives later with an earlier `observed_at` renumbers the run's later versions on
+the next projection, and an incremental reader whose cursor is past it never sees it. Until the
+stream gains a log offset (#511), a consumer re-reads the whole stream (the reducers are cheap and
+deterministic) rather than trusting a cursor across a re-projection.
 
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
