@@ -208,7 +208,7 @@ class RefusalTests(unittest.TestCase):
             1
             + (lc.split_of(unanchored["split_key"], SALT_DRAW["source"]) == "holdout"),
         )
-        self.assertNotIn("case_static-tie", report["gate"]["anchors"] + [late])
+        self.assertNotIn(late, report["gate"]["anchors"])
         self.assertRefused("draws its split from a beacon", salt_draw=None)
 
     def test_unresolvable_training_evidence_refuses(self):

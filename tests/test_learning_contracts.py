@@ -307,6 +307,7 @@ class MinimaTests(unittest.TestCase):
             ({"wins": 25}, "exceed its cases"),
             ({"anchored": 0}, "anchors"),
             ({"delta": 0.9}, "delta is not"),
+            ({"delta": 10**400}, "outside -1..1"),
         ):
             result = self.fold_with(**metrics)
             self.assertEqual(result.state, "evaluating", metrics)

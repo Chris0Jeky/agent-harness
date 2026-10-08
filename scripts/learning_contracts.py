@@ -1240,7 +1240,7 @@ def resolver_from(resolutions):
     return by_ref.get
 
 
-MAX_CASES = 100000
+MAX_CASES = 4096  # anchors maxItems; keeps sign_p well under a second
 
 
 def sign_p(wins, losses):
@@ -1304,6 +1304,8 @@ def minima_errors(gate):
             return [
                 f"{gate['gate']} anchored {metrics['anchored']} cases on {anchors} anchors"
             ]
+        if not -1 <= metrics["delta"] <= 1:  # exact for big ints; no float overflow
+            return [f"{gate['gate']} delta {metrics['delta']} is outside -1..1"]
         if (
             metrics["cases"]
             and abs(
