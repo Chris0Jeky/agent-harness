@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/eval-outputs.schema.json",
+  "title": "eval-outputs/v1",
+  "description": "What one variant (baseline or candidate) produced for each case of a suite, recorded by whoever ran it. The evaluator grades these; it never runs a variant itself. A case with no output counts as a failure for that variant. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "at", "producer", "suite", "variant", "variant_ref", "outputs"],
+  "properties": {
+    "schema": {"const": "eval-outputs/v1"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "suite": {"$ref": "common.schema.json#/$defs/slug"},
+    "variant": {"type": "string", "enum": ["baseline", "candidate"]},
+    "variant_ref": {
+      "description": "What ran: gen:<genome id>, estate:<repo>@<sha>, or another ref.",
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "outputs": {
+      "type": "object",
+      "propertyNames": {"pattern": "^case_[A-Za-z0-9_-]{6,64}$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "maxLength": 20000},
+          "items": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {"type": "string", "maxLength": 400}
+          },
+          "value": {"type": "number"},
+          "abstained": {"type": "boolean"},
+          "tokens": {"type": "integer", "minimum": 0},
+          "seconds": {"type": "number", "minimum": 0},
+          "error": {"$ref": "common.schema.json#/$defs/short_text"}
+        }
+      }
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  }
+}

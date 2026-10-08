@@ -36,6 +36,10 @@ RECORD_SCHEMAS = {
     "learning-candidate/v1": "learning-candidate.schema.json",
     "candidate-genome/v1": "candidate-genome.schema.json",
     "promotion-record/v1": "promotion-record.schema.json",
+    "eval-case/v1": "eval-case.schema.json",
+    "eval-outputs/v1": "eval-outputs.schema.json",
+    "eval-labels/v1": "eval-labels.schema.json",
+    "eval-run/v1": "eval-run.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -66,6 +70,7 @@ SUPPORTED_KEYWORDS = frozenset(
         "minLength",
         "maxLength",
         "minimum",
+        "maximum",
         "pattern",
         "anyOf",
         "allOf",
@@ -261,6 +266,9 @@ def _schema_errors(value, schema, base, path):
     if _is_type(value, "number") and "minimum" in schema:
         if value < schema["minimum"]:
             errors.append(f"{where}: below {schema['minimum']}")
+    if _is_type(value, "number") and "maximum" in schema:
+        if value > schema["maximum"]:
+            errors.append(f"{where}: above {schema['maximum']}")
     if isinstance(value, list):
         if len(value) < schema.get("minItems", 0):
             errors.append(f"{where}: fewer than {schema['minItems']} items")
@@ -495,12 +503,36 @@ def _promotion_rules(record):
     return errors
 
 
+def _labels_rules(record):
+    errors = _time_errors(record, ("at",))
+    if record["evaluator"]["kind"] == "self":
+        errors.append("$.evaluator: the learner never grades its own outputs")
+    return errors
+
+
+def _run_rules(record):
+    errors = _time_errors(record, ("at",))
+    gate = record["gate"]
+    if gate is not None:
+        if record["split"] != "holdout" or record["verdict"] != gate["result"]:
+            errors.append("$.gate: only a hold-out pass or fail emits a gate, matching the verdict")
+        if gate["holdout_digest"] != record["holdout_digest"] or sorted(
+            gate["anchors"]
+        ) != sorted(record["anchors"]):
+            errors.append("$.gate: digest and anchors must match the run's")
+    return errors
+
+
 SEMANTIC_RULES = {
     "estate-experience/v1": _experience_rules,
     "memory-use/v1": _memory_use_rules,
     "learning-candidate/v1": _candidate_rules,
     "candidate-genome/v1": _genome_rules,
     "promotion-record/v1": _promotion_rules,
+    "eval-case/v1": lambda record: [],
+    "eval-outputs/v1": lambda record: _time_errors(record, ("at",)),
+    "eval-labels/v1": _labels_rules,
+    "eval-run/v1": _run_rules,
 }
 
 
