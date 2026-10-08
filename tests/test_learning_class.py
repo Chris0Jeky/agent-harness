@@ -296,6 +296,8 @@ class WouldApplyTests(unittest.TestCase):
         self.assertTrue(report(ref=None, source=None))
         self.assertTrue(report(option="a"))  # keeps P1 in shadow
         self.assertTrue(report(answered_at="2026-10-09T00:00:00Z"))  # after the report
+        impossible = would_apply(at="2026-02-30T00:00:00Z")  # pattern-valid, not a date
+        self.assertTrue(lc.validate_record(impossible))  # refused, not a crash
         self.assertTrue(report("P3"))  # no live mode
         p8 = would_apply(**{"class": "P8"}, destination=dest("rules/laws.md"))
         self.assertTrue(lc.validate_record(p8))  # a class decision is not an approval

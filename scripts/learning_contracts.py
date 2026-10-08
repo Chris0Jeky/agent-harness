@@ -776,7 +776,8 @@ def _report_authority_errors(cls, authority, at):
     answered = (
         parse_time(authority["answered_at"]) if authority["answered_at"] else None
     )
-    if answered is None or answered > parse_time(at):
+    report_at = parse_time(at)
+    if answered is None or report_at is None or answered > report_at:
         errors.append("$.authority.answered_at: answered before the report")
     if mode == "per_promotion":
         if authority["ref"] in {
