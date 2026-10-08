@@ -29,7 +29,7 @@ def _bundle_files(root):
         + [
             path.relative_to(root).as_posix()
             for path in (root / "schemas" / "learning").glob("*.json")
-            if path.is_file() and path.name != "BUNDLE.json"
+            if path.is_file() and path.suffix == ".json" and path.name != "BUNDLE.json"
         ]
     )
 

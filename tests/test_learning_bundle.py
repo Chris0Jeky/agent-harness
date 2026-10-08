@@ -22,7 +22,7 @@ COMPAT = ROOT / "schemas" / "learning" / "compat"
 
 class BundleTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.tree = Path(temporary.name)
         for relative in (*bundle.BUNDLE_FILES, bundle.MANIFEST_PATH):
@@ -58,7 +58,7 @@ class BundleTests(unittest.TestCase):
             + [
                 f"schemas/learning/{path.name}"
                 for path in (ROOT / "schemas" / "learning").glob("*.json")
-                if path.name != "BUNDLE.json"
+                if path.suffix == ".json" and path.name != "BUNDLE.json"
             ]
         )
         self.assertEqual(list(bundle.BUNDLE_FILES), paths)
