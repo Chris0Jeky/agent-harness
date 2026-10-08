@@ -956,7 +956,8 @@ only be recorded on a record leaving one of its `gate_sources` states: evaluatio
 `independent_review` leave any live-path state. That placement is what forces a canary-class
 candidate through `canary`, and since every class above P0 needs `maturity`, every one of them
 through the seven-day `probation`; only P0 (episodic) goes `candidate` -> `active` directly. A
-record moving forward carries no failed gate.
+record moving forward carries no failed gate, and no record carries two results for one gate (array
+order is not time order).
 
 **Promotion classes** (`schemas/learning/promotion-classes.json`, P0-P8 as data: `kind_class`,
 per-class `activation_gates`, `conditional_gates` for `protected` and `consequential`,

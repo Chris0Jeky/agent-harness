@@ -689,6 +689,20 @@ class ReviewRegressionTests(unittest.TestCase):
             lc._schema_errors(1.0, {"enum": [1]}, "common.schema.json", "")
         )
 
+    def test_one_result_per_gate_per_record(self):
+        learner = dict(ORACLE, kind="self")
+        record = move(
+            1,
+            None,
+            "evaluating",
+            "probation",
+            [
+                gate("offline_eval", "2026-10-08T11:30:00Z", learner),
+                gate("offline_eval", "2026-10-08T11:00:00Z"),
+            ],
+        )
+        self.assertRejected(record, "offline_eval is recorded more than once")
+
     def test_hostile_fold_inputs_are_refused_not_raised(self):
         cand = candidate()
         for records in ([cand], [{"schema": []}], [None], ["x"]):

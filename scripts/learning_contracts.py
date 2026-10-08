@@ -451,6 +451,10 @@ def _gate_placement(record):
     life = lifecycle()
     policy = classes()["evaluators"]
     forward = record["to"] in life["forward"]
+    names = [gate["gate"] for gate in record["gates"]]
+    for name in sorted({n for n in names if names.count(n) > 1}):
+        # One result per gate per record: array order is not time order.
+        errors.append(f"$.gates: {name} is recorded more than once")
     for index, gate in enumerate(record["gates"]):
         where = f"$.gates[{index}]"
         if parse_time(gate["at"]) is None:
