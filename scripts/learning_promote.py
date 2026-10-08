@@ -105,7 +105,6 @@ def target_state(candidate, state, gates, resolve=None):
         for g in gates
         if g["gate"] in evaluation and contracts._counts(g, candidate, resolve)
     ]
-    independent = contracts.classes()["evaluators"]["independent"]
     if any(g["result"] == "fail" for g in gates):
         if state in ("candidate", "evaluating", "canary", "probation"):
             return "rejected"
@@ -121,7 +120,9 @@ def target_state(candidate, state, gates, resolve=None):
             raise PromotionRefusal(
                 f"evaluating still awaits a counted pass of {', '.join(missing)}"
             )
-        if judged and not any(g["evaluator"]["kind"] in independent for g in judged):
+        if judged and not any(
+            contracts._independent(g, candidate, resolve) for g in judged
+        ):
             raise PromotionRefusal(
                 "evaluating needs an oracle, owner or independent model, not only an LLM judge"
             )

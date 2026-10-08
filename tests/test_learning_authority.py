@@ -636,6 +636,46 @@ class LabelTests(unittest.TestCase):
         self.assertTrue(any("vetoed" in e for e in errors), errors)
 
 
+class GateReviewTests(unittest.TestCase):
+    """Findings from the #507 gate review."""
+
+    def test_an_owner_graded_eval_counts_but_vouches_for_nothing(self):
+        # learning_eval labels a run 'owner' when owner-graded labels were used;
+        # the gate's ref is an eval-run, so the claim is unproven.
+        cand = candidate("recipe", "P4")
+        owner_eval = gate(
+            "offline_eval",
+            "2026-09-08T12:00:00Z",
+            OWNER,
+            ref="eval-run:run_" + "1" * 16,
+        )
+        self.assertTrue(lc._counts(owner_eval, cand, None))
+        self.assertFalse(lc._independent(owner_eval, cand, None))
+        self.assertTrue(
+            lc._independent(gate("offline_eval", "2026-09-08T12:00:00Z"), cand, None)
+        )
+
+    def test_a_defaulted_approval_never_approves(self):
+        defaulted = answer("approve-auth-0001", status="defaulted")
+        at = lc.parse_time("2026-09-09T00:00:00Z")
+        errors = lc.approval_errors(
+            "decision:approve-auth-0001", candidate(), at, resolver(defaulted)
+        )
+        self.assertTrue(any("defaulted, not answered" in e for e in errors), errors)
+
+    def test_option_semantics_per_class(self):
+        e = answer("lp-p6-p7-owner-approval", "e", subject=None)
+        self.assertEqual(lc.class_option("P6", e)["approval"], "until_graduated")
+        self.assertEqual(lc.class_option("P7", e)["approval"], "per_promotion")
+        self.assertIsNone(
+            lc.class_option("P1", e)
+        )  # the P6/P7 decision does not decide P1
+        d = answer("lp-p6-p7-owner-approval", "d", subject=None)
+        self.assertEqual(lc.class_option("P7", d)["approval"], "none")
+        unknown = answer("lp-p6-p7-owner-approval", "z", subject=None)
+        self.assertIsNone(lc.class_option("P6", unknown))
+
+
 class HelperTests(unittest.TestCase):
     def test_exit_bar_status(self):
         good = {

@@ -930,13 +930,31 @@ def _counts(gate, candidate, resolve=None):
     policy = classes()["evaluators"]
     if gate["result"] != "pass" or evaluator["kind"] in policy["never_satisfies"]:
         return False
-    if gate["gate"] == "owner" or evaluator["kind"] == "owner":
-        # An owner judgment is the owner's resolved answer, never a claim.
+    if gate["gate"] == "owner":
+        # The owner gate is the owner's resolved answer, never a claim.
         return not approval_errors(
             gate.get("ref"), candidate, parse_time(gate["at"]), resolve
         )
     # The learner is never its own evaluator, whatever kind it claims to be.
     return evaluator["session"] != candidate["producer"]["session"]
+
+
+def _independent(gate, candidate, resolve=None):
+    """Whether a counted gate vouches as an oracle, the owner or an independent model.
+
+    An evaluator calling itself the owner on an evaluation gate (owner-graded
+    labels, say) is a claim the gate's eval-run ref cannot prove, so it
+    vouches only when its ref resolves to the owner's approval of this
+    candidate; otherwise it counts like any other grader but vouches for nothing.
+    """
+    kind = gate["evaluator"]["kind"]
+    if kind not in classes()["evaluators"]["independent"]:
+        return False
+    if kind == "owner":
+        return not approval_errors(
+            gate.get("ref"), candidate, parse_time(gate["at"]), resolve
+        )
+    return True
 
 
 def _activation_errors(candidate, latest, record, resolve=None):
@@ -955,9 +973,7 @@ def _activation_errors(candidate, latest, record, resolve=None):
         for n in judged
         if n in latest and _counts(latest[n], candidate, resolve)
     ]
-    if judged and not any(
-        g["evaluator"]["kind"] in policy["independent"] for g in satisfied
-    ):
+    if judged and not any(_independent(g, candidate, resolve) for g in satisfied):
         errors.append(
             "activation needs an oracle, owner or independent model, not only an LLM judge"
         )

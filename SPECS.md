@@ -1019,7 +1019,9 @@ that defaulted early does not count), and not answered `veto`; a window that exp
 after its days allows. Every installed live record (probation, active, reinforced) names where it
 landed: `landed: pr:https://github.com/<owner>/<repo>/pull/<n>` in the destination's repository
 for a PR channel. A class with no canary stage is never live in `canary`. Any owner gate, on any
-record, counts only as such a resolved approval. The resolver measures exit bars with
+record, counts only as such a resolved approval, and an evaluator that calls itself the owner on
+an evaluation gate (owner-graded labels) counts as a grader but vouches for independence only when
+its ref resolves the same way. The resolver measures exit bars with
 `exit_bar_status(bar, measured)` and graduation with `graduation_status(rule, approved_at,
 reverted_at, as_of)` (events after `as_of` never change it); `resolver_from(resolutions)` adapts
 records a caller already trusts, which makes it exactly as trustworthy as whoever wrote them:
