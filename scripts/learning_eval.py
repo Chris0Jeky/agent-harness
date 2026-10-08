@@ -207,16 +207,25 @@ def grade(case, output):
             return False, {"missing_value": True}
         low, high = oracle.get("at_least"), oracle.get("at_most")
         return (low is None or value >= low) and (high is None or value <= high), {}
-    expected = oracle["expected_items"]
-    items = output.get("items") or []
+    if "items" not in output:
+        return False, {"missing_items": True}  # never a vacuous pass
+    items = output["items"]
+    expected = oracle.get("expected_items", [])
     if kind == "set_match":
         hits = len(set(items) & set(expected))
-        recall = hits / len(expected)
+        recall = hits / len(expected) if expected else 1.0
         precision = hits / len(set(items)) if items else 0.0
-        passed = recall >= oracle.get("min_recall", 1.0) and precision >= oracle.get(
-            "min_precision", 0.0
+        reported = sorted(set(items) & set(oracle.get("forbidden_items", ())))
+        passed = (
+            recall >= oracle.get("min_recall", 1.0)
+            and precision >= oracle.get("min_precision", 0.0)
+            and not reported
         )
-        return passed, {"recall": recall, "precision": precision}
+        return passed, {
+            "recall": recall,
+            "precision": precision,
+            "forbidden": len(reported),
+        }
     if kind == "ranked_recall":
         top = items[: oracle["k"]]
         recall = len(set(top) & set(expected)) / len(expected)

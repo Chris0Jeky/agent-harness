@@ -1017,7 +1017,8 @@ names or the candidate outputs ran as (`variant_ref: gen:<id>`); and evidence mi
 ledger refuses the run (exclusion that cannot be proven is not claimed). A re-worded copy of a
 training run is caught only if it keeps the run's split key. Deterministic oracles grade first (`exact`,
 `contains_all`, `contains_none`, `regex`, `set_match`, `ranked_recall`, `abstain`, `numeric`);
-an output without the field an oracle reads fails rather than passing vacuously. A `judge` case
+an output without the field an oracle reads fails rather than passing vacuously. `set_match` may
+also name `forbidden_items` the output must not contain (with or without `expected_items`). A `judge` case
 takes its grade from `eval-labels/v1`, whose evaluator is never `self`, never `oracle` and never
 the candidate's or genome producer's session, and demotes the run's tier and gate evaluator from
 `oracle` to that evaluator's kind. Pairs are compared case by
@@ -1090,6 +1091,20 @@ tolerances (0 by default). The
 ```powershell
 py -3 scripts\learning_system.py --experiences <experiences.jsonl>... --candidate <lc.json> --baseline-variant <ref> --candidate-variant gen:<id> [--min-runs 20]
 ```
+
+**Suite conventions.** A *recipe-replay* suite (`suite: recipe-replay-<recipe>`, `layer:
+procedural`, `category: task`) has one case per historical lens job. Its `experience` is that
+job's experience (so `split_key` is the job's), and its `input_ref` is the job spec to re-run
+(`muse-job:<lane>/<wave>/<job>`, carrying repo, base SHA and lens variables). Its oracle is
+`set_match`, with `expected_items` holding the location keys of findings triage confirmed (which
+the variant must still report) and `forbidden_items` holding those it refuted (which it must no
+longer report). A location key is `<path>#L<line // 40>`, the outcome ledger's line bucket.
+Both arms re-run the job at the same base, so runtime drift is shared; neither replays
+historical output. A *skill-procedure* suite (`suite: skill-procedure-<skill>`) has one case per
+historical run of the procedure. Its `input_ref` is that run's task, and its oracle is
+`procedure`, with `max_turns` and, where the run hit a failure, `require_recovery`. In both, the
+cases come from the hold-out side of the experience split, and the candidate's `evidence` (the
+dev-side runs the recipe or skill was written from) is excluded by the evaluator.
 
 **Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
 attestation the fold checks for consistency, not proof: evaluator identity is self-reported (the
