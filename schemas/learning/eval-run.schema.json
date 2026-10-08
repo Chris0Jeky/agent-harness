@@ -45,7 +45,7 @@
       "additionalProperties": false,
       "required": [
         "total", "other_split", "excluded_training", "excluded_cluster",
-        "unanchored", "evaluated"
+        "unanchored", "evaluated", "distinct_inputs"
       ],
       "properties": {
         "total": {"type": "integer", "minimum": 0},
@@ -53,7 +53,12 @@
         "excluded_training": {"type": "integer", "minimum": 0},
         "excluded_cluster": {"type": "integer", "minimum": 0},
         "unanchored": {"type": "integer", "minimum": 0},
-        "evaluated": {"type": "integer", "minimum": 0}
+        "evaluated": {"type": "integer", "minimum": 0},
+        "distinct_inputs": {
+          "description": "Evaluated cases with distinct (input_ref, oracle): what min_cases counts.",
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "holdout_digest": {"$ref": "common.schema.json#/$defs/sha256"},

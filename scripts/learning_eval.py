@@ -152,6 +152,10 @@ def select(cases, split, training_ids, training_keys, experiences):
             counts["unanchored"] += anchor is None
             chosen.append(case)
     counts["evaluated"] = len(chosen)
+    # Clones of one task are one piece of evidence, however many ids they carry.
+    counts["distinct_inputs"] = len(
+        {(c["input_ref"], json.dumps(c["oracle"], sort_keys=True)) for c in chosen}
+    )
     return chosen, counts
 
 
@@ -362,7 +366,7 @@ def evaluate(
     base_rate = _rate(sum(r["baseline"] for r in rows), len(rows))
     cand_rate = _rate(sum(r["candidate"] for r in rows), len(rows))
     delta = cand_rate - base_rate if rows else None
-    if len(rows) < policy["min_cases"]:
+    if counts["distinct_inputs"] < policy["min_cases"]:
         verdict = "insufficient"
     elif delta >= policy["min_delta"] and losses <= policy["max_losses"]:
         verdict = "pass"

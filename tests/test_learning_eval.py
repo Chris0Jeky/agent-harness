@@ -380,6 +380,20 @@ class ReviewRegressionTests(unittest.TestCase):
         case["oracle"]["min_recall"] = 1.5
         self.assertTrue(any("above 1" in e for e in lc.validate_record(case)))
 
+    def test_clones_of_one_case_count_once(self):
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["cases"] = [
+            dict(copy.deepcopy(base), id=f"case_clone-{i:06d}") for i in range(10)
+        ]
+        for key in ("baseline", "candidate_outputs"):
+            inputs[key]["outputs"] = {
+                c["id"]: {"text": "main"} for c in inputs["cases"]
+            }
+        report = run(inputs)
+        self.assertEqual(report["cases"]["distinct_inputs"], 1)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
     def test_experience_observations_order_by_instant_not_text(self):
         first = copy.deepcopy(load()["experiences"][0])
         first["observed_at"] = "2026-09-02T00:00:00Z"

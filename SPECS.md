@@ -1022,7 +1022,7 @@ the candidate's or genome producer's session, and demotes the run's tier and gat
 `oracle` to that evaluator's kind. Pairs are compared case by
 case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
 layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
-(10) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
+(10) distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
 `max_losses` (0); fewer cases is `insufficient`, which emits no gate. The policy is part of the
 run id and of the gate's `metrics` and `summary`, so a loosened gate is visible as one. Only a hold-out run emits a
 gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
