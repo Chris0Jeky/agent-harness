@@ -140,7 +140,8 @@ def p1_path(probation=None, active=None):
                 "probation",
                 "2026-09-08T12:01:00Z",
                 checks,
-                probation or dict(LIVE_P1),
+                probation
+                or dict(LIVE_P1, landed="pr:https://github.com/o/claude-config/pull/1"),
             ),
             (
                 "probation",
@@ -152,6 +153,10 @@ def p1_path(probation=None, active=None):
             ),
         ],
     )
+
+
+def ok_time():
+    return lc.parse_time("2026-09-08T12:00:00Z")
 
 
 def errors_of(result):
@@ -292,9 +297,14 @@ class ClassModeTests(unittest.TestCase):
 class P6P7Tests(unittest.TestCase):
     """Option b: approval for each promotion until the class graduates, then a veto window."""
 
-    def path(self, live_gates=(), active_extra=None):
+    def path(self, live_gates=(), active_extra=None, live_from="canary"):
+        """P6 through canary and probation to active; live from canary or only at active."""
         evaluation = [gate("offline_eval", "2026-09-08T12:00:00Z")]
         live = {"effect": "live", "authority": "decision:lp-p6-p7-owner-approval"}
+        pr = "pr:https://github.com/o/claude-config/pull/2"
+        early = dict(live) if live_from == "canary" else {}
+        installed = dict(live, landed=pr) if live_from == "canary" else {}
+        approval = list(live_gates and [owner("2026-09-16T12:05:00Z")])
         return chain(
             "P6",
             [
@@ -304,28 +314,21 @@ class P6P7Tests(unittest.TestCase):
                     "canary",
                     "2026-09-08T12:01:00Z",
                     evaluation + list(live_gates),
-                    dict(live),
+                    early,
                 ),
                 (
                     "canary",
                     "probation",
                     "2026-09-09T12:01:00Z",
                     [gate("canary", "2026-09-09T12:00:00Z")],
-                    dict(live),
+                    installed,
                 ),
                 (
                     "probation",
                     "active",
                     "2026-09-16T12:06:00Z",
-                    [
-                        gate("maturity", "2026-09-16T12:05:00Z"),
-                        *list(live_gates and [owner("2026-09-16T12:05:00Z")]),
-                    ],
-                    dict(
-                        live,
-                        landed="pr:https://github.com/o/claude-config/pull/2",
-                        **(active_extra or {}),
-                    ),
+                    [gate("maturity", "2026-09-16T12:05:00Z"), *approval],
+                    dict(live, landed=pr, **(active_extra or {})),
                 ),
             ],
         )
@@ -338,7 +341,9 @@ class P6P7Tests(unittest.TestCase):
         self.assertEqual(
             refused.state, "evaluating"
         )  # refused where it would turn live
-        self.assertIn("turns live only with the owner's approval", errors_of(refused))
+        self.assertIn(
+            "goes live and activates only with the owner's approval", errors_of(refused)
+        )
         approved = lc.fold(
             self.cand(),
             self.path([owner("2026-09-08T12:00:00Z")]),
@@ -376,7 +381,9 @@ class P6P7Tests(unittest.TestCase):
         )
         result = lc.fold(
             self.cand(),
-            self.path(active_extra={"veto": "decision:veto-auth-0001"}),
+            self.path(
+                active_extra={"veto": "decision:veto-auth-0001"}, live_from="active"
+            ),
             resolve=resolver(self.graduated(), window),
         )
         self.assertEqual(
@@ -384,7 +391,11 @@ class P6P7Tests(unittest.TestCase):
         )
 
     def test_veto_window_refusals(self):
-        missing = lc.fold(self.cand(), self.path(), resolve=resolver(self.graduated()))
+        missing = lc.fold(
+            self.cand(),
+            self.path(live_from="active"),
+            resolve=resolver(self.graduated()),
+        )
         self.assertIn("veto window", errors_of(missing))
         veto = {"veto": "decision:veto-auth-0001"}
         vetoed = answer(
@@ -395,14 +406,14 @@ class P6P7Tests(unittest.TestCase):
         )
         result = lc.fold(
             self.cand(),
-            self.path(active_extra=veto),
+            self.path(active_extra=veto, live_from="active"),
             resolve=resolver(self.graduated(), vetoed),
         )
         self.assertIn("vetoed", errors_of(result))
         young = answer("veto-auth-0001", status="open", created="2026-09-15T00:00:00Z")
         result = lc.fold(
             self.cand(),
-            self.path(active_extra=veto),
+            self.path(active_extra=veto, live_from="active"),
             resolve=resolver(self.graduated(), young),
         )
         self.assertIn("has not closed", errors_of(result))
@@ -410,32 +421,214 @@ class P6P7Tests(unittest.TestCase):
 
 class OwnerGateTests(unittest.TestCase):
     def test_an_asserted_owner_gate_never_counts(self):
+        # A protected P1 candidate goes live only with the owner's approval of it,
+        # on the record that turns it live and on the activating record.
         cand = candidate(protected=True)
-        steps = p1_path(
-            active=dict(LIVE_P1, landed="pr:https://github.com/o/claude-config/pull/1")
-        )
-        steps[2]["gates"].append(
-            owner("2026-09-15T12:05:00Z", ref="decision:forged-owner")
-        )
+        steps = p1_path()
+        for record, at in (
+            (steps[1], "2026-09-08T12:00:00Z"),
+            (steps[2], "2026-09-15T12:05:00Z"),
+        ):
+            record["gates"].append(owner(at, ref="decision:forged-owner"))
         result = lc.fold(cand, steps, resolve=resolver(P1_C))
-        self.assertEqual(result.state, "probation")
-        self.assertIn("pass of owner", errors_of(result))
-        steps[2]["gates"][-1]["ref"] = "decision:approve-auth-0001"
+        self.assertEqual((result.state, result.effect), ("evaluating", "shadow"))
+        self.assertIn("owner's approval", errors_of(result))
+        for record in steps[1:]:
+            record["gates"][-1]["ref"] = "decision:approve-auth-0001"
         result = lc.fold(cand, steps, resolve=resolver(P1_C, APPROVE))
-        self.assertEqual((result.state, result.errors), ("active", []))
-        self.assertFalse(lc.fold(cand, steps).chain[2:])  # no resolver, no owner
+        self.assertEqual(
+            (result.state, result.effect, result.errors), ("active", "live", [])
+        )
+        self.assertFalse(lc.fold(cand, steps).chain[1:])  # no resolver, no owner
+
+    def test_an_approval_bound_to_another_version_does_not_count(self):
+        cand = candidate(protected=True)
+        steps = p1_path()
+        for record, at in (
+            (steps[1], "2026-09-08T12:00:00Z"),
+            (steps[2], "2026-09-15T12:05:00Z"),
+        ):
+            record["gates"].append(owner(at))
+        bound = answer("approve-auth-0001")
+        bound["subject"]["digest"] = lc.candidate_digest(cand)
+        ok = lc.fold(cand, steps, resolve=resolver(P1_C, bound))
+        self.assertEqual((ok.state, ok.errors), ("active", []))
+        changed = dict(
+            cand, claim="Run the unittest suite twice before reporting a fix."
+        )
+        result = lc.fold(changed, steps, resolve=resolver(P1_C, bound))
+        self.assertEqual((result.state, result.effect), ("evaluating", "shadow"))
+        self.assertIn("owner's approval", errors_of(result))
+        why = lc.approval_errors(
+            "decision:approve-auth-0001", changed, ok_time(), resolver(bound)
+        )
+        self.assertIn("another version", " ".join(why))
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Findings from the #507 lenses (deep-reviewer, Sol, reviewer); each pins its fix."""
+
+    def p6(self):
+        return P6P7Tests()
+
+    def test_installed_live_records_name_their_landing(self):
+        steps = p1_path(probation=dict(LIVE_P1))  # live in probation, no landing
+        result = lc.fold(candidate(), steps, resolve=resolver(P1_C))
+        self.assertEqual(result.state, "evaluating")
+        self.assertIn("landed: pr:", errors_of(result))
+        other_repo = dict(
+            LIVE_P1, landed="pr:https://github.com/o/agent-harness/pull/9"
+        )
+        result = lc.fold(
+            candidate(), p1_path(probation=other_repo), resolve=resolver(P1_C)
+        )
+        self.assertIn("in claude-config", errors_of(result))
+
+    def test_p1_has_no_live_canary(self):
+        steps = chain(
+            "P1",
+            [
+                ("candidate", "evaluating", "2026-09-08T11:10:00Z", [], {}),
+                (
+                    "evaluating",
+                    "canary",
+                    "2026-09-08T12:01:00Z",
+                    [gate("provenance", "2026-09-08T12:00:00Z")],
+                    dict(LIVE_P1),
+                ),
+            ],
+        )
+        result = lc.fold(candidate(), steps, resolve=resolver(P1_C))
+        self.assertIn("no canary stage", errors_of(result))
+
+    def test_a_graduated_class_turning_live_late_still_waits_out_a_veto(self):
+        x = self.p6()
+        steps = x.path(live_from="active")
+        for record in steps:  # activate entirely in shadow ...
+            record.update(effect="shadow")
+            record.pop("authority", None)
+        steps.append(
+            {
+                **steps[-1],
+                "id": "prom_auth-0005",
+                "prev": steps[-1]["id"],
+                "from": "active",
+                "to": "reinforced",
+                "at": "2026-09-20T00:00:00Z",
+                "gates": [],
+                "effect": "live",
+                "authority": "decision:lp-p6-p7-owner-approval",
+                "landed": "pr:https://github.com/o/claude-config/pull/2",
+            }
+        )  # ... then turn live on reinforcement
+        result = lc.fold(x.cand(), steps, resolve=resolver(x.graduated()))
+        self.assertEqual(result.effect, "shadow")
+        self.assertIn("veto window", errors_of(result))
+
+    def test_p2_has_no_owner_decision(self):
+        self.assertEqual(lc.classes()["authority"]["P2"]["mode"], "no_live")
+
+    def test_option_d_needs_no_approval_for_protected_notes(self):
+        d = answer("lp-p1-memory-autopromote", "d", subject=None)
+        result = lc.fold(candidate(protected=True), p1_path(), resolve=resolver(d))
+        self.assertEqual(
+            (result.state, result.effect, result.errors), ("active", "live", [])
+        )
+
+    def veto_fold(self, window):
+        x = self.p6()
+        return lc.fold(
+            x.cand(),
+            x.path(
+                active_extra={"veto": "decision:veto-auth-0001"}, live_from="active"
+            ),
+            resolve=resolver(x.graduated(), window),
+        )
+
+    def test_an_elapsed_unvetoed_window_allows(self):
+        expired = answer(
+            "veto-auth-0001", status="expired", created="2026-09-12T00:00:00Z"
+        )
+        expired["expires"] = "2026-09-15T00:00:00Z"
+        self.assertEqual(self.veto_fold(expired).errors, [])
+
+    def test_a_window_must_run_its_days_and_open_in_the_stay(self):
+        early_default = answer(
+            "veto-auth-0001",
+            option="allow",
+            status="defaulted",
+            created="2026-09-12T00:00:00Z",
+            answered_at="2026-09-12T01:00:00Z",
+        )
+        self.assertIn("defaulted before", errors_of(self.veto_fold(early_default)))
+        before_stay = answer(
+            "veto-auth-0001",
+            option="allow",
+            status="defaulted",
+            created="2026-09-01T00:00:00Z",
+            answered_at="2026-09-05T00:00:00Z",
+        )
+        self.assertIn("opened before the stay", errors_of(self.veto_fold(before_stay)))
+
+    def test_measures_hold_only_until_their_until(self):
+        lapsed = answer(
+            "lp-p1-memory-autopromote",
+            "c",
+            subject=None,
+            exit_bars={
+                "p1-shadow-exit": {
+                    "met": True,
+                    "at": "2026-09-02T00:00:00Z",
+                    "until": "2026-09-10T00:00:00Z",
+                }
+            },
+        )
+        result = lc.fold(candidate(), p1_path(), resolve=resolver(lapsed))
+        self.assertEqual(result.state, "probation")  # held at 09-08, lapsed by 09-15
+        self.assertIn("exit bar", errors_of(result))
+
+    def test_future_reverts_do_not_rewrite_graduation(self):
+        t = lambda m, d: dt.datetime(2026, m, d, tzinfo=dt.timezone.utc)  # noqa: E731
+        status = lc.graduation_status(
+            "p6-p7-graduation", [t(8, 1), t(8, 2), t(8, 3)], [t(9, 10)], t(9, 1)
+        )
+        self.assertEqual(
+            (status["graduated"], status["at"]), (True, "2026-08-29T00:00:00Z")
+        )
+
+    def test_bad_resolutions_fail_closed_without_crashing(self):
+        bad = answer(
+            "lp-p6-p7-owner-approval",
+            "b",
+            subject=None,
+            graduation={"P6": {"graduated": True, "at": "2026-02-31T00:00:00Z"}},
+        )
+        result = lc.fold(self.p6().cand(), self.p6().path(), resolve=resolver(bad))
+        self.assertIn("invalid answer", errors_of(result))
+        self.assertIsNone(lc.resolver_from([{}, None, {"decision": 7}])("decision:x"))
 
 
 class HelperTests(unittest.TestCase):
     def test_exit_bar_status(self):
-        good = {"shadow_days": 30, "judged": 60, "precision": 0.93}
+        good = {
+            "shadow_days": 30,
+            "judged": 60,
+            "precision": 0.93,
+            "contradiction_or_revert_rate": 0.02,
+        }
         self.assertTrue(lc.exit_bar_status("p1-shadow-exit", good)["met"])
         self.assertFalse(
             lc.exit_bar_status("p1-shadow-exit", dict(good, precision=0.85))["met"]
         )
+        self.assertFalse(
+            lc.exit_bar_status(
+                "p1-shadow-exit", dict(good, contradiction_or_revert_rate=0.2)
+            )["met"]
+        )
         partial = lc.exit_bar_status("p1-shadow-exit", {"judged": 60})
         self.assertEqual(
-            (partial["met"], partial["missing"]), (False, ["precision", "shadow_days"])
+            (partial["met"], partial["missing"]),
+            (False, ["contradiction_or_revert_rate", "precision", "shadow_days"]),
         )
 
     def test_graduation_status(self):

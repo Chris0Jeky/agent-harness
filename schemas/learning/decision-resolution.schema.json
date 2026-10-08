@@ -38,7 +38,11 @@
           "additionalProperties": false,
           "required": ["candidate"],
           "properties": {
-            "candidate": {"$ref": "common.schema.json#/$defs/lc_id"}
+            "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+            "digest": {
+              "description": "sha256 of the canonical candidate the owner saw; when present, a changed candidate is not approved.",
+              "$ref": "common.schema.json#/$defs/sha256"
+            }
           }
         },
         {"type": "null"}
@@ -59,6 +63,10 @@
             "properties": {
               "met": {"type": "boolean"},
               "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+              "until": {
+                "description": "When the measurement stopped holding, if it has; records before it stay valid.",
+                "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+              },
               "ref": {"$ref": "common.schema.json#/$defs/ref"}
             }
           }
@@ -73,6 +81,9 @@
             "properties": {
               "graduated": {"type": "boolean"},
               "at": {
+                "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+              },
+              "until": {
                 "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
               },
               "approved": {"type": "integer", "minimum": 0},

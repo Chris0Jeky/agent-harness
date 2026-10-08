@@ -622,7 +622,20 @@ def _resolution_rules(record):
         errors.append("$: an answered or defaulted decision names its option and time")
     if not decided and record["option"] is not None:
         errors.append(f"$.option: a {record['status']} decision has no option")
+    for group in ("exit_bars", "graduation"):
+        for name, measure in record["measures"][group].items():
+            for field in ("at", "until"):
+                value = measure.get(field)
+                if value is not None and parse_time(value) is None:
+                    errors.append(
+                        f"$.measures.{group}.{name}.{field}: not a real UTC instant"
+                    )
     return errors
+
+
+def candidate_digest(candidate):
+    """sha256 of the canonical candidate: what an approval may bind to."""
+    return hashlib.sha256(_canonical(candidate).encode("utf-8")).hexdigest()
 
 
 def resolution(ref, resolve):
@@ -659,15 +672,22 @@ def _answered_by(resolved, at, allow_default):
     return []
 
 
+def _subject_errors(ref, resolved, candidate):
+    subject = resolved["subject"] or {}
+    if subject.get("candidate") != candidate["id"]:
+        return [f"{ref} is about {subject.get('candidate')}, not {candidate['id']}"]
+    if "digest" in subject and subject["digest"] != candidate_digest(candidate):
+        return [f"{ref} approved another version of {candidate['id']}"]
+    return []
+
+
 def approval_errors(ref, candidate, at, resolve):
     """Why ref is not the owner's approval of this candidate by instant at."""
     resolved, why = resolution(ref, resolve)
     if why:
         return [why]
     errors = _answered_by(resolved, at, allow_default=False)
-    subject = (resolved["subject"] or {}).get("candidate")
-    if subject != candidate["id"]:
-        errors.append(f"{ref} is about {subject}, not {candidate['id']}")
+    errors += _subject_errors(ref, resolved, candidate)
     if resolved["option"] not in classes()["approval"]["grant"]:
         errors.append(
             f"{ref} answered {resolved['option']!r}, which is not an approval"
@@ -675,31 +695,50 @@ def approval_errors(ref, candidate, at, resolve):
     return errors
 
 
-def _veto_errors(ref, candidate, at, days, resolve):
+def _veto_errors(ref, candidate, at, days, resolve, opened_after):
+    """A veto window opened during this stay, open for its full days, not vetoed.
+
+    Option b promotes unless the owner vetoes, so a window that ran its days
+    and expired unanswered allows; only an answered veto blocks.
+    """
     if ref is None:
         return [
-            "a graduated class activates only after a veto window (veto: decision:<id>)"
+            "a graduated class goes live only after a veto window (veto: decision:<id>)"
         ]
     resolved, why = resolution(ref, resolve)
     if why:
         return [why]
-    errors = []
-    if (resolved["subject"] or {}).get("candidate") != candidate["id"]:
-        errors.append(f"{ref} is a veto window for another candidate")
+    errors = _subject_errors(ref, resolved, candidate)
+    window = dt.timedelta(days=days)
     opened = parse_time(resolved["created"])
-    if at is None or opened is None or at - opened < dt.timedelta(days=days):
+    if opened is None or (opened_after and opened < opened_after):
+        errors.append(f"veto window {ref} opened before the stay it closes")
+    if at is None or opened is None or at - opened < window:
         errors.append(f"the {days}-day veto window of {ref} has not closed")
     veto = classes()["veto"]
-    if resolved["status"] in ("answered", "defaulted"):
+    status = resolved["status"]
+    if status in ("answered", "defaulted"):
         errors += _answered_by(resolved, at, allow_default=True)
+        answered = parse_time(resolved["answered_at"])
+        if status == "defaulted" and opened and answered and answered - opened < window:
+            errors.append(f"veto window {ref} defaulted before its {days} days ran")
         if resolved["option"] in veto["veto"]:
             errors.append(f"the owner vetoed through {ref}")
         elif resolved["option"] not in veto["allow"]:
             errors.append(
                 f"{ref} answered {resolved['option']!r}, neither allow nor veto"
             )
+    elif status == "expired":
+        expired = parse_time(resolved["expires"])
+        if (
+            expired is None
+            or opened is None
+            or expired - opened < window
+            or expired > at
+        ):
+            errors.append(f"veto window {ref} expired without running {days} days")
     else:
-        errors.append(f"veto window {ref} is {resolved['status']}")
+        errors.append(f"veto window {ref} is {status}")
     return errors
 
 
@@ -728,8 +767,43 @@ def _owner_gate_on(record, candidate, resolve):
     )
 
 
-def _authority_errors(candidate, record, effect_before, resolve):
-    """Why this live record is not backed by the owner's resolved answer."""
+def _holds(measure, flag, at):
+    """A measure in force at instant at: true, since its at, and not past its until."""
+    if not measure or not measure[flag] or at is None:
+        return False
+    since, until = parse_time(measure["at"]), parse_time(measure.get("until"))
+    return since is not None and since <= at and (until is None or at < until)
+
+
+def _landing_errors(record, candidate, channel, cls):
+    """An installed live record names where it landed, in its own repository."""
+    landed = str(record.get("landed", ""))
+    if channel in ("reviewed_pr", "pr"):
+        match = re.fullmatch(
+            r"pr:https://github[.]com/([^/]+)/([^/]+)/pull/[0-9]+", landed
+        )
+        repo = (candidate["destination"] or {}).get("repo", "").split("/")[-1]
+        if not match or match.group(2) != repo:
+            return [
+                f"{cls} lands through a reviewed PR in {repo}: landed: pr:<that PR's url> is required"
+            ]
+    elif not landed:
+        return [f"{cls} names where it landed (landed: memory:... or commit:...)"]
+    return []
+
+
+INSTALLED = ("probation", "active", "reinforced")
+
+
+def _authority_errors(candidate, record, effect_before, resolve, entered_at=None):
+    """Why this live record is not backed by the owner's resolved answer.
+
+    The owner's conditions hold on every live record, not only on activation:
+    live is legal in canary, probation, active and reinforced, so whichever
+    record turns the candidate live or activates it carries the approval or
+    the veto window its class requires, and every installed live record names
+    where it landed.
+    """
     if record["effect"] != "live":
         return []
     cls = candidate["promotion_class"]
@@ -739,14 +813,17 @@ def _authority_errors(candidate, record, effect_before, resolve):
     if spec["mode"] == "no_live":
         return [f"{cls} has no owner decision, so it never goes live"]
     at = parse_time(record["at"])
-    turning_live = effect_before != "live"
+    deciding = effect_before != "live" or record["to"] in lifecycle()["activating"]
+    errors = []
+    if record["to"] == "canary" and "canary" not in required_gates(candidate):
+        errors.append(f"{cls} has no canary stage: it is live only once installed")
     if spec["mode"] == "per_promotion":
         # P8: the authority is the owner's approval of this very candidate.
-        return approval_errors(record.get("authority"), candidate, at, resolve)
+        return errors + approval_errors(record.get("authority"), candidate, at, resolve)
     resolved, why = resolution(record.get("authority"), resolve)
     if why:
-        return [why]
-    errors = _answered_by(resolved, at, allow_default=False)
+        return errors + [why]
+    errors += _answered_by(resolved, at, allow_default=False)
     if resolved["decision"] != spec["decision"]:
         return errors + [f"{record['authority']} does not decide {cls}"]
     option = class_option(cls, resolved)
@@ -759,77 +836,57 @@ def _authority_errors(candidate, record, effect_before, resolve):
             f"option {resolved['option']} of {spec['decision']} keeps {cls} in shadow"
         ]
     bar = option.get("exit_bar")
-    if bar:
-        measured = resolved["measures"]["exit_bars"].get(bar)
-        if (
-            not measured
-            or not measured["met"]
-            or (parse_time(measured["at"]) or at) > at
-        ):
-            errors.append(f"exit bar {bar} is not met by {record['at']}")
+    if bar and not _holds(resolved["measures"]["exit_bars"].get(bar), "met", at):
+        errors.append(f"exit bar {bar} is not met at {record['at']}")
     approval = option.get("approval", "none")
-    graduated = False
-    if approval == "until_graduated":
-        state = resolved["measures"]["graduation"].get(cls)
-        graduated = bool(
-            state
-            and state["graduated"]
-            and state["at"] is not None
-            and parse_time(state["at"]) <= at
-        )
-    needs_approval = approval == "per_promotion" or (
-        approval == "until_graduated" and not graduated
+    graduated = approval == "until_graduated" and _holds(
+        resolved["measures"]["graduation"].get(cls), "graduated", at
     )
-    if (
-        needs_approval
-        and turning_live
-        and not _owner_gate_on(record, candidate, resolve)
-    ):
+    needs_approval = (
+        approval == "per_promotion"
+        or (approval == "until_graduated" and not graduated)
+        or (bool(candidate.get("protected")) and option.get("protected_approval", True))
+    )
+    if needs_approval and deciding and not _owner_gate_on(record, candidate, resolve):
         errors.append(
-            f"{cls} turns live only with the owner's approval of this candidate on that record"
+            f"{cls} goes live and activates only with the owner's approval of this candidate on that record"
         )
-    activating = record["to"] in lifecycle()["activating"]
-    if needs_approval and activating and not _owner_gate_on(record, candidate, resolve):
-        errors.append(
-            f"{cls} activates only with the owner's approval of this candidate"
-        )
-    if approval == "until_graduated" and graduated and activating:
+    if approval == "until_graduated" and graduated and deciding:
         errors += _veto_errors(
-            record.get("veto"), candidate, at, option["veto_days"], resolve
+            record.get("veto"), candidate, at, option["veto_days"], resolve, entered_at
         )
-    channel = option.get("channel")
-    if activating and channel in ("reviewed_pr", "pr"):
-        if not str(record.get("landed", "")).startswith("pr:"):
-            errors.append(
-                f"{cls} lands through a reviewed PR: landed: pr:<url> is required"
-            )
+    if record["to"] in INSTALLED:
+        errors += _landing_errors(record, candidate, option.get("channel"), cls)
     return errors
 
 
 def exit_bar_status(name, measured):
-    """Whether an exit bar is met by measured {shadow_days, judged, precision, ...}.
+    """Whether an exit bar is met by its measured values.
 
-    The resolver calls this and reports the result as measures.exit_bars; a
-    measure that was not provided is listed under missing, never read as 0.
+    Every target is a floor ("min") or a ceiling ("max"). The resolver calls
+    this and reports the result as measures.exit_bars; a measure that was not
+    provided is listed under missing, never read as 0.
     """
     bar = classes()["exit_bars"][name]
-    targets = {
-        "shadow_days": bar["shadow_days"],
-        "judged": bar["judged_min"],
-        "precision": bar["precision_min"],
-    }
+    targets = bar["targets"]
     missing = sorted(k for k in targets if measured.get(k) is None)
-    met = not missing and all(measured[k] >= v for k, v in targets.items())
+    met = not missing and all(
+        measured[k] >= t["min"] if "min" in t else measured[k] <= t["max"]
+        for k, t in targets.items()
+    )
     return {"met": met, "missing": missing, "targets": targets, "measured": measured}
 
 
 def graduation_status(name, approved_at, reverted_at, as_of):
-    """Whether a class has graduated: enough approvals, enough days, no revert since.
+    """Whether a class has graduated by as_of: enough approvals, enough days, no revert.
 
     approved_at and reverted_at are instants of the class's approved
-    promotions and reverts; a revert restarts the count.
+    promotions and reverts; a revert restarts the count. Events after as_of
+    never change the status at as_of.
     """
     rule = classes()["graduations"][name]
+    approved_at = [a for a in approved_at if a <= as_of]
+    reverted_at = [r for r in reverted_at if r <= as_of]
     restart = max(reverted_at) if reverted_at and rule["revert_restarts"] else None
     counted = sorted(a for a in approved_at if restart is None or a > restart)
     if len(counted) < rule["approved_min"]:
@@ -850,7 +907,9 @@ def resolver_from(resolutions):
     fold; the records themselves are not proof of anything.
     """
     by_ref = {
-        f"decision:{r['decision']}": r for r in resolutions if isinstance(r, dict)
+        f"decision:{r['decision']}": r
+        for r in resolutions
+        if isinstance(r, dict) and isinstance(r.get("decision"), str)
     }
     return by_ref.get
 
@@ -1044,7 +1103,7 @@ def fold(candidate, records, as_of=None, resolve=None):
         if record["to"] in life["activating"]:
             problems += _activation_errors(candidate, trial, record, resolve)
         problems += _live_switch_errors(candidate, record, effect, resolve)
-        problems += _authority_errors(candidate, record, effect, resolve)
+        problems += _authority_errors(candidate, record, effect, resolve, previous_at)
         if problems:
             errors += [f"{where}: {p}" for p in problems]
             break

@@ -244,15 +244,14 @@ class GeneratorTests(unittest.TestCase):
             gate("contradiction", "2026-09-08T12:00:00Z"),
         ]
         records, _ = advance(memory, records, checks, "2026-09-08T12:01:00Z")
-        with self.assertRaises(lp.PromotionRefusal) as caught:
-            lp.next_record(
-                memory,
-                records,
-                [gate("maturity", "2026-09-15T12:05:00Z")],
-                PRODUCER,
-                "2026-09-15T12:06:00Z",
-            )
-        self.assertIn("owner", str(caught.exception))
+        # Protected memory waits for the owner only to go live; in shadow it activates.
+        _, r = advance(
+            memory,
+            records,
+            [gate("maturity", "2026-09-15T12:05:00Z")],
+            "2026-09-15T12:06:00Z",
+        )
+        self.assertEqual((r["to"], r["effect"]), ("active", "shadow"))
 
     def test_p8_needs_the_owner_on_the_activating_record(self):
         cand = candidate(kind="policy", promotion_class="P8")

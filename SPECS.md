@@ -997,22 +997,33 @@ checks it against the owner's answer: `fold(candidate, records, as_of, resolve)`
 resolver that maps a `decision:` ref to a `decision-resolution/v1` read from agent-hq
 `origin/main` (an answer only in a working copy does not count). With no resolver nothing above
 P0 goes live and no owner gate counts. `promotion-classes.json` holds the map as data:
-`authority` names each class's decision (P1 and P2: `lp-p1-memory-autopromote`; P6 and P7:
-`lp-p6-p7-owner-approval`; P3 to P5: none, so never live; P8: the owner's approval of that one
-candidate, always), and `decisions` gives each answer option its meaning: live or shadow, the exit
-bar (`exit_bars`), approval (`none`, `per_promotion`, or `until_graduated` per `graduations`), the
-veto window in days, and the landing channel. Every live record above P0 must carry `authority`
-that resolves, is answered (an approval is never defaulted) no later than the record, decides the
-candidate's class, and whose option permits live for it; its exit bar must be measured as met by
-then. Where approval is due, the record that turns the candidate live and the activating record
-carry an owner gate whose `ref` resolves to an `approve` answer bound to this candidate
-(`subject.candidate`), so one approval never covers two promotions. A graduated class instead
-activates after its veto window: `veto` names a decision bound to the candidate, created at least
-`veto_days` before the move and not answered `veto`. An activation through a PR channel names
-`landed: pr:<url>`. Any owner gate, on any record, counts only as such a resolved approval. The
-resolver measures exit bars with `exit_bar_status(bar, measured)` and graduation with
-`graduation_status(rule, approved_at, reverted_at, as_of)`; `resolver_from(resolutions)` adapts
-records a caller already trusts.
+`authority` names each class's decision (P1: `lp-p1-memory-autopromote`, which decides P1 notes
+only; P6 and P7: `lp-p6-p7-owner-approval`; P2 to P5: none, so never live; P8: the owner's
+approval of that one candidate, always), and `decisions` gives each answer option its meaning:
+live or shadow, the exit bar (`exit_bars`, each target a floor or a ceiling: P1 needs 28 days in
+shadow, 50 non-protected candidates judged, 0.90 precision and at most a 5% contradiction-or-revert
+rate), approval (`none`, `per_promotion`, or `until_graduated` per `graduations`), whether a
+protected candidate still needs the owner (`protected_approval`: yes for P1 options b and c, no
+for d), the veto window in days, and the landing channel.
+
+The owner's conditions hold on every live record, not only on activation. Each must carry
+`authority` that resolves, is answered (an approval is never defaulted) no later than the record,
+decides the candidate's class, and whose option permits live for it, with its exit bar in force
+at that instant (`at <= record < until`). Whichever record turns the candidate live, and the
+activating record, carry what the class requires: an owner gate whose `ref` resolves to an
+`approve` answer bound to this candidate (`subject.candidate`, and `subject.digest` when the owner
+approved one exact version), or, once the class has graduated, a veto window (`veto: decision:<id>`)
+bound to the candidate, opened during the stay it closes, running its full `veto_days` (a window
+that defaulted early does not count), and not answered `veto`; a window that expired unanswered
+after its days allows. Every installed live record (probation, active, reinforced) names where it
+landed: `landed: pr:https://github.com/<owner>/<repo>/pull/<n>` in the destination's repository
+for a PR channel. A class with no canary stage is never live in `canary`. Any owner gate, on any
+record, counts only as such a resolved approval. The resolver measures exit bars with
+`exit_bar_status(bar, measured)` and graduation with `graduation_status(rule, approved_at,
+reverted_at, as_of)` (events after `as_of` never change it); `resolver_from(resolutions)` adapts
+records a caller already trusts, which makes it exactly as trustworthy as whoever wrote them:
+until the store's reader of agent-hq `origin/main` builds the resolutions, `--resolutions` is a
+test and audit seam, not authority.
 
 **Hold-out.** An experience's split is derived, never stored: `split_of(split_key)`, a salted
 sha256 (`estate-experience/v1/split`) with a 20% hold-out, where `split_key` defaults to
@@ -1133,9 +1144,9 @@ dev-side runs the recipe or skill was written from) is excluded by the evaluator
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
 self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
 the salt is public, so a producer could choose a split key for a side (K3 replaces it with a
-committed salt). Authority is no longer one of them: a live effect, an owner gate, an approval and
-a veto window count only as answers the resolver finds on agent-hq `origin/main`, so a record can
-no longer assert them. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
+committed salt). Authority is resolved rather than asserted, so its strength is the resolver's: once the store
+builds resolutions from agent-hq `origin/main`, a record can no longer claim an answer the owner
+did not give. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
 can be re-run. Memory refs use the journal's spelling, `memory:<project>/<name>.md`, so every lane
 joins on one string.
 

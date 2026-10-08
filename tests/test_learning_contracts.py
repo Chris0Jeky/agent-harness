@@ -456,19 +456,18 @@ class FoldTests(unittest.TestCase):
             )
         self.assertNotIn("active", lc.lifecycle()["edges"]["evaluating"])
 
-    def test_protected_semantic_memory_needs_the_owner(self):
+    def test_protected_memory_waits_for_the_owner_only_to_go_live(self):
+        # In shadow nothing is written, so a protected note activates on its
+        # checks; going live needs the owner's approval (test_learning_authority).
         cand = candidate(kind="semantic", promotion_class="P1", protected=True)
         checks = [
             gate("provenance", "2026-09-08T12:00:00Z"),
             gate("contradiction", "2026-09-08T12:00:00Z"),
         ]
-        refused = self.fold_steps(cand, *self.path(checks))
-        self.assertTrue(
-            any("pass of owner" in e for e in refused.errors), refused.errors
+        shadow = self.fold_steps(cand, *self.path(checks))
+        self.assertEqual(
+            (shadow.state, shadow.effect, shadow.errors), ("active", "shadow", [])
         )
-        owner = [gate("owner", "2026-09-10T00:00:00Z", OWNER)]
-        accepted = self.fold_steps(cand, *self.path(checks, active=owner))
-        self.assertEqual((accepted.state, accepted.errors), ("active", []))
 
     def test_the_learner_never_evaluates_itself(self):
         cand = candidate(kind="skill", promotion_class="P3")
@@ -547,7 +546,7 @@ class FoldTests(unittest.TestCase):
             ("candidate", "evaluating", [], self.T0),
             (
                 "evaluating",
-                "canary",
+                "probation",
                 [gate("tests", "2026-09-08T12:00:00Z")],
                 "2026-09-08T12:01:00Z",
             ),
@@ -561,7 +560,7 @@ class FoldTests(unittest.TestCase):
         records[1]["authority"] = "decision:test-owner-1"
         result = lc.fold(cand, records, resolve=resolver(APPROVAL))
         self.assertEqual(
-            (result.state, result.effect, result.errors), ("canary", "live", [])
+            (result.state, result.effect, result.errors), ("probation", "live", [])
         )
 
     def test_live_only_into_live_capable_states(self):

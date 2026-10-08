@@ -51,11 +51,7 @@
         "contradiction",
         "maturity"
       ],
-      "conditional_gates": {
-        "protected": [
-          "owner"
-        ]
-      },
+      "conditional_gates": {},
       "owner_on_activation": false
     },
     "P2": {
@@ -183,8 +179,8 @@
       "decision": "lp-p1-memory-autopromote"
     },
     "P2": {
-      "mode": "decision",
-      "decision": "lp-p1-memory-autopromote"
+      "mode": "no_live",
+      "why": "lp-p1-memory-autopromote decides P1 notes only; consolidation has no answered decision"
     },
     "P3": {
       "mode": "no_live"
@@ -210,8 +206,7 @@
   "decisions": {
     "lp-p1-memory-autopromote": {
       "classes": [
-        "P1",
-        "P2"
+        "P1"
       ],
       "options": {
         "a": {
@@ -221,19 +216,22 @@
           "live": true,
           "exit_bar": "p1-shadow-exit",
           "approval": "none",
-          "channel": "direct_lane"
+          "channel": "direct_lane",
+          "protected_approval": true
         },
         "c": {
           "live": true,
           "exit_bar": "p1-shadow-exit",
           "approval": "none",
-          "channel": "reviewed_pr"
+          "channel": "reviewed_pr",
+          "protected_approval": true
         },
         "d": {
           "live": true,
           "exit_bar": null,
           "approval": "none",
-          "channel": "direct_lane"
+          "channel": "direct_lane",
+          "protected_approval": false
         }
       }
     },
@@ -289,11 +287,22 @@
   },
   "exit_bars": {
     "p1-shadow-exit": {
-      "description": "P1 leaves shadow after 4 weeks in shadow, 50 judged candidates and precision of at least 0.90 on the sealed memory hold-out.",
-      "shadow_days": 28,
-      "judged_min": 50,
-      "precision_min": 0.9,
-      "suite": "memory-holdout"
+      "description": "P1 leaves shadow after at least 4 weeks in shadow, at least 50 non-protected candidates judged, independent-judge precision of at least 0.90 on the sealed memory hold-out, and a contradiction-or-revert rate of at most 5% (lp-p1-memory-autopromote, options b and c).",
+      "suite": "memory-holdout",
+      "targets": {
+        "shadow_days": {
+          "min": 28
+        },
+        "judged": {
+          "min": 50
+        },
+        "precision": {
+          "min": 0.9
+        },
+        "contradiction_or_revert_rate": {
+          "max": 0.05
+        }
+      }
     }
   },
   "graduations": {
