@@ -37,6 +37,10 @@
       "items": {"$ref": "#/$defs/gate_result"}
     },
     "reason": {"$ref": "common.schema.json#/$defs/short_text"},
+    "veto": {
+      "description": "The veto-window decision a graduated class's activation waited out: decision:<id>, bound to this candidate.",
+      "$ref": "#/$defs/decision"
+    },
     "landed": {
       "description": "Where a live promotion landed: pr:<url>, memory:<project>/<name>.md, commit:<repo>@<sha>.",
       "$ref": "common.schema.json#/$defs/ref"

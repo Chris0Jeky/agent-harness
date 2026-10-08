@@ -38,8 +38,24 @@ def gate(name, at, result="pass", evaluator=ORACLE):
     return item
 
 
+# The owner's approval of lc_example-0001, as a resolver reading agent-hq returns it.
+APPROVAL = {
+    "schema": "decision-resolution/v1",
+    "decision": "test-1",
+    "source": "agent-hq@" + "d" * 40,
+    "status": "answered",
+    "option": "approve",
+    "answered_at": "2026-09-01T00:00:00Z",
+    "created": "2026-08-30T00:00:00Z",
+    "expires": None,
+    "subject": {"candidate": "lc_example-0001"},
+    "measures": {"exit_bars": {}, "graduation": {}},
+}
+RESOLVE = lc.resolver_from([APPROVAL])
+
+
 def advance(cand, records, gates, at):
-    record = lp.next_record(cand, records, gates, PRODUCER, at)
+    record = lp.next_record(cand, records, gates, PRODUCER, at, resolve=RESOLVE)
     return records + [record], record
 
 
@@ -177,18 +193,12 @@ class GeneratorTests(unittest.TestCase):
                 lp.next_record(candidate(), [], [bad], PRODUCER, "2026-09-08T11:10:00Z")
 
     def test_a_live_candidate_is_never_moved_by_the_generator(self):
-        cand = candidate()
-        records = copy.deepcopy(lc.read_records(EXAMPLES / "promotion-chain.jsonl"))
-        records[1].update(effect="live", authority="decision:test-live")
-        self.assertEqual(lc.fold(cand, records[:2]).effect, "live")
+        cand = candidate(kind="episodic", promotion_class="P0", destination=None)
+        records, _ = advance(cand, [], [], "2026-09-08T11:10:00Z")
+        records[0]["effect"] = "live"  # P0 is the one class live without authority
+        self.assertEqual(lc.fold(cand, records).effect, "live")
         with self.assertRaises(lp.PromotionRefusal) as caught:
-            lp.next_record(
-                cand,
-                records[:2],
-                [gate("canary", "2026-09-09T12:00:00Z")],
-                PRODUCER,
-                "2026-09-09T12:01:00Z",
-            )
+            lp.next_record(cand, records, [], PRODUCER, "2026-09-09T12:01:00Z")
         self.assertIn("owner's records", str(caught.exception))
 
     def test_gate_order_does_not_change_the_record(self):
@@ -204,9 +214,16 @@ class GeneratorTests(unittest.TestCase):
             gate("maturity", "2026-09-15T12:05:00Z"),
             gate("owner", "2026-09-15T12:05:00Z", evaluator=OWNER),
         ]
-        one = lp.next_record(cand, records, pair, PRODUCER, "2026-09-15T12:06:00Z")
+        one = lp.next_record(
+            cand, records, pair, PRODUCER, "2026-09-15T12:06:00Z", resolve=RESOLVE
+        )
         two = lp.next_record(
-            cand, records, list(reversed(pair)), PRODUCER, "2026-09-15T12:06:00Z"
+            cand,
+            records,
+            list(reversed(pair)),
+            PRODUCER,
+            "2026-09-15T12:06:00Z",
+            resolve=RESOLVE,
         )
         self.assertEqual(one, two)
 
@@ -227,15 +244,14 @@ class GeneratorTests(unittest.TestCase):
             gate("contradiction", "2026-09-08T12:00:00Z"),
         ]
         records, _ = advance(memory, records, checks, "2026-09-08T12:01:00Z")
-        with self.assertRaises(lp.PromotionRefusal) as caught:
-            lp.next_record(
-                memory,
-                records,
-                [gate("maturity", "2026-09-15T12:05:00Z")],
-                PRODUCER,
-                "2026-09-15T12:06:00Z",
-            )
-        self.assertIn("owner", str(caught.exception))
+        # Protected memory waits for the owner only to go live; in shadow it activates.
+        _, r = advance(
+            memory,
+            records,
+            [gate("maturity", "2026-09-15T12:05:00Z")],
+            "2026-09-15T12:06:00Z",
+        )
+        self.assertEqual((r["to"], r["effect"]), ("active", "shadow"))
 
     def test_p8_needs_the_owner_on_the_activating_record(self):
         cand = candidate(kind="policy", promotion_class="P8")
@@ -258,6 +274,7 @@ class GeneratorTests(unittest.TestCase):
                 [gate("maturity", "2026-09-15T12:05:00Z")],
                 PRODUCER,
                 "2026-09-15T12:06:00Z",
+                resolve=RESOLVE,
             )
         self.assertIn("never automatic", str(caught.exception))
         owner = [

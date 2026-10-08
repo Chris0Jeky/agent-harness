@@ -45,6 +45,42 @@ def chain():
     return copy.deepcopy(example("promotion-chain.jsonl"))
 
 
+SOURCE = "agent-hq@" + "a" * 40
+
+
+def answer(
+    decision,
+    option="approve",
+    answered_at="2026-09-01T00:00:00Z",
+    status="answered",
+    subject="lc_example-0001",
+    created="2026-08-30T00:00:00Z",
+    exit_bars=None,
+    graduation=None,
+):
+    """A decision-resolution/v1 as a resolver reading agent-hq origin/main returns it."""
+    decided = status in ("answered", "defaulted")
+    return {
+        "schema": "decision-resolution/v1",
+        "decision": decision,
+        "source": SOURCE,
+        "status": status,
+        "option": option if decided else None,
+        "answered_at": answered_at if decided else None,
+        "created": created,
+        "expires": None,
+        "subject": {"candidate": subject} if subject else None,
+        "measures": {"exit_bars": exit_bars or {}, "graduation": graduation or {}},
+    }
+
+
+APPROVAL = answer("test-owner-1")  # the owner approved lc_example-0001
+
+
+def resolver(*answers):
+    return lc.resolver_from(answers)
+
+
 def gate(name, at, evaluator=ORACLE, result="pass"):
     item = {"gate": name, "result": result, "evaluator": evaluator, "at": at}
     if name == "owner":
@@ -371,9 +407,12 @@ class FoldTests(unittest.TestCase):
 
     T0 = "2026-09-08T11:00:00Z"  # the example candidate's own `at`
 
-    def fold_steps(self, cand, *steps, cls=None, as_of=None):
+    def fold_steps(self, cand, *steps, cls=None, as_of=None, resolve=None):
         return lc.fold(
-            cand, walk(*steps, cls=cls or cand["promotion_class"]), as_of=as_of
+            cand,
+            walk(*steps, cls=cls or cand["promotion_class"]),
+            as_of=as_of,
+            resolve=resolve or resolver(APPROVAL),
         )
 
     def path(self, evaluation, canary=None, active=(), effect=None):
@@ -417,19 +456,18 @@ class FoldTests(unittest.TestCase):
             )
         self.assertNotIn("active", lc.lifecycle()["edges"]["evaluating"])
 
-    def test_protected_semantic_memory_needs_the_owner(self):
+    def test_protected_memory_waits_for_the_owner_only_to_go_live(self):
+        # In shadow nothing is written, so a protected note activates on its
+        # checks; going live needs the owner's approval (test_learning_authority).
         cand = candidate(kind="semantic", promotion_class="P1", protected=True)
         checks = [
             gate("provenance", "2026-09-08T12:00:00Z"),
             gate("contradiction", "2026-09-08T12:00:00Z"),
         ]
-        refused = self.fold_steps(cand, *self.path(checks))
-        self.assertTrue(
-            any("pass of owner" in e for e in refused.errors), refused.errors
+        shadow = self.fold_steps(cand, *self.path(checks))
+        self.assertEqual(
+            (shadow.state, shadow.effect, shadow.errors), ("active", "shadow", [])
         )
-        owner = [gate("owner", "2026-09-10T00:00:00Z", OWNER)]
-        accepted = self.fold_steps(cand, *self.path(checks, active=owner))
-        self.assertEqual((accepted.state, accepted.errors), ("active", []))
 
     def test_the_learner_never_evaluates_itself(self):
         cand = candidate(kind="skill", promotion_class="P3")
@@ -508,20 +546,21 @@ class FoldTests(unittest.TestCase):
             ("candidate", "evaluating", [], self.T0),
             (
                 "evaluating",
-                "canary",
+                "probation",
                 [gate("tests", "2026-09-08T12:00:00Z")],
                 "2026-09-08T12:01:00Z",
             ),
             cls="P8",
         )
         records[1].update(effect="live", authority="decision:lp-blanket")
-        result = lc.fold(cand, records)
+        result = lc.fold(cand, records, resolve=resolver(APPROVAL))
         self.assertEqual((result.state, result.effect), ("evaluating", "shadow"))
         self.assertTrue(any("turns it live" in e for e in result.errors))
         records[1]["gates"].append(gate("owner", "2026-09-08T12:00:00Z", OWNER))
-        result = lc.fold(cand, records)
+        records[1]["authority"] = "decision:test-owner-1"
+        result = lc.fold(cand, records, resolve=resolver(APPROVAL))
         self.assertEqual(
-            (result.state, result.effect, result.errors), ("canary", "live", [])
+            (result.state, result.effect, result.errors), ("probation", "live", [])
         )
 
     def test_live_only_into_live_capable_states(self):
@@ -530,15 +569,20 @@ class FoldTests(unittest.TestCase):
         self.assertTrue(any("nothing is live" in e for e in lc.validate_record(record)))
 
     def test_any_fold_error_fails_closed_to_shadow(self):
-        records = chain()
-        for record in records[1:]:
-            record.update(effect="live", authority="decision:lp-p4")
-        live = lc.fold(candidate(), records)
+        cand = candidate(kind="episodic", promotion_class="P0", destination=None)
+        records = walk(("candidate", "active", [], self.T0), cls="P0")
+        records[0]["effect"] = "live"
+        live = lc.fold(cand, records)
         self.assertEqual((live.state, live.effect, live.errors), ("active", "live", []))
         broken_revert = move(
-            9, records[-1]["id"], "active", "reverted", at="2026-09-20T00:00:00Z"
+            9,
+            records[-1]["id"],
+            "active",
+            "reverted",
+            at="2026-09-20T00:00:00Z",
+            cls="P0",
         )  # no revert object: invalid
-        result = lc.fold(candidate(), records + [broken_revert])
+        result = lc.fold(cand, records + [broken_revert])
         self.assertEqual((result.state, result.effect), ("active", "shadow"))
         self.assertTrue(result.errors)
 

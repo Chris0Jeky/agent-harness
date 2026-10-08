@@ -41,6 +41,7 @@ RECORD_SCHEMAS = {
     "eval-labels/v1": "eval-labels.schema.json",
     "eval-run/v1": "eval-run.schema.json",
     "system-run/v1": "system-run.schema.json",
+    "decision-resolution/v1": "decision-resolution.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -574,6 +575,7 @@ SEMANTIC_RULES = {
     "eval-labels/v1": _labels_rules,
     "eval-run/v1": _run_rules,
     "system-run/v1": _system_rules,
+    "decision-resolution/v1": lambda record: _resolution_rules(record),
 }
 
 
@@ -603,38 +605,380 @@ def required_gates(candidate):
     return gates
 
 
-def _counts(gate, candidate):
+# -- authority: resolved, never asserted (K1) --------------------------------
+#
+# A record's authority, an owner gate, an approval or a veto window is a
+# decision: ref. It means something only when an injected resolver finds the
+# decision answered on agent-hq origin/main. The fold stays pure: it never reads
+# a file, it asks resolve(ref) and checks the returned decision-resolution/v1.
+# Without a resolver nothing is verified, so no live effect above P0 folds and
+# no owner gate counts.
+
+
+def _resolution_rules(record):
+    errors = _time_errors(record, ("answered_at", "created", "expires"))
+    decided = record["status"] in ("answered", "defaulted")
+    if decided and (record["option"] is None or record["answered_at"] is None):
+        errors.append("$: an answered or defaulted decision names its option and time")
+    if not decided and record["option"] is not None:
+        errors.append(f"$.option: a {record['status']} decision has no option")
+    for group in ("exit_bars", "graduation"):
+        for name, measure in record["measures"][group].items():
+            for field in ("at", "until"):
+                value = measure.get(field)
+                if value is not None and parse_time(value) is None:
+                    errors.append(
+                        f"$.measures.{group}.{name}.{field}: not a real UTC instant"
+                    )
+    return errors
+
+
+def candidate_digest(candidate):
+    """sha256 of the canonical candidate: what an approval may bind to."""
+    return hashlib.sha256(_canonical(candidate).encode("utf-8")).hexdigest()
+
+
+def resolution(ref, resolve):
+    """(decision-resolution/v1, None) or (None, why it does not resolve)."""
+    if resolve is None:
+        return None, "nothing is verified without a resolver"
+    if not isinstance(ref, str) or not ref.startswith("decision:"):
+        return None, f"{ref!r} is not a decision: ref"
+    try:
+        resolved = resolve(ref)
+    except Exception as exc:  # the resolver is a seam: any failure fails closed
+        return None, f"the resolver failed on {ref} ({type(exc).__name__})"
+    if resolved is None:
+        return None, f"{ref} does not resolve to an agent-hq decision"
+    problems = validate_record(resolved)
+    if not problems and resolved.get("schema") != "decision-resolution/v1":
+        problems = ["not a decision-resolution/v1"]
+    if problems:
+        return None, f"{ref} resolved to an invalid answer ({problems[0]})"
+    if resolved["decision"] != ref[len("decision:") :]:
+        return None, f"{ref} resolved to {resolved['decision']}"
+    return resolved, None
+
+
+def _answered_by(resolved, at, allow_default):
+    statuses = ("answered", "defaulted") if allow_default else ("answered",)
+    if resolved["status"] not in statuses:
+        return [
+            f"decision {resolved['decision']} is {resolved['status']}, not answered"
+        ]
+    answered = parse_time(resolved["answered_at"])
+    if at is None or answered is None or answered > at:
+        return [f"decision {resolved['decision']} was answered after the move"]
+    return []
+
+
+def meaning(resolved):
+    """What a per-candidate answer means: its option label, lower-cased.
+
+    The owner answers single-letter keys (a, b); an approval or a veto window
+    carries its meaning in the label (Approve or Decline, Allow or Veto).
+    """
+    label = resolved.get("option_label")
+    return label.strip().casefold() if isinstance(label, str) else resolved["option"]
+
+
+def _subject_errors(ref, resolved, candidate):
+    subject = resolved["subject"] or {}
+    if subject.get("candidate") != candidate["id"]:
+        return [f"{ref} is about {subject.get('candidate')}, not {candidate['id']}"]
+    if "digest" in subject and subject["digest"] != candidate_digest(candidate):
+        return [f"{ref} approved another version of {candidate['id']}"]
+    return []
+
+
+def approval_errors(ref, candidate, at, resolve):
+    """Why ref is not the owner's approval of this candidate by instant at."""
+    resolved, why = resolution(ref, resolve)
+    if why:
+        return [why]
+    errors = _answered_by(resolved, at, allow_default=False)
+    errors += _subject_errors(ref, resolved, candidate)
+    if meaning(resolved) not in classes()["approval"]["grant"]:
+        errors.append(
+            f"{ref} answered {resolved['option']!r}, which is not an approval"
+        )
+    return errors
+
+
+def _veto_errors(ref, candidate, at, days, resolve, opened_after):
+    """A veto window opened during this stay, open for its full days, not vetoed.
+
+    Option b promotes unless the owner vetoes, so a window that ran its days
+    and expired unanswered allows; only an answered veto blocks.
+    """
+    if ref is None:
+        return [
+            "a graduated class goes live only after a veto window (veto: decision:<id>)"
+        ]
+    resolved, why = resolution(ref, resolve)
+    if why:
+        return [why]
+    errors = _subject_errors(ref, resolved, candidate)
+    window = dt.timedelta(days=days)
+    opened = parse_time(resolved["created"])
+    if opened is None or (opened_after and opened < opened_after):
+        errors.append(f"veto window {ref} opened before the stay it closes")
+    if at is None or opened is None or at - opened < window:
+        errors.append(f"the {days}-day veto window of {ref} has not closed")
+    veto = classes()["veto"]
+    status = resolved["status"]
+    if status in ("answered", "defaulted"):
+        errors += _answered_by(resolved, at, allow_default=True)
+        answered = parse_time(resolved["answered_at"])
+        if status == "defaulted" and opened and answered and answered - opened < window:
+            errors.append(f"veto window {ref} defaulted before its {days} days ran")
+        if meaning(resolved) in veto["veto"]:
+            errors.append(f"the owner vetoed through {ref}")
+        elif meaning(resolved) not in veto["allow"]:
+            errors.append(
+                f"{ref} answered {resolved['option']!r}, neither allow nor veto"
+            )
+    elif status == "expired":
+        expired = parse_time(resolved["expires"])
+        if (
+            expired is None
+            or opened is None
+            or expired - opened < window
+            or expired > at
+        ):
+            errors.append(f"veto window {ref} expired without running {days} days")
+    else:
+        errors.append(f"veto window {ref} is {status}")
+    return errors
+
+
+def class_option(cls, resolved):
+    """The option semantics the class's decision answer gives this class, or None."""
+    decision = classes()["decisions"].get(resolved["decision"])
+    if decision is None or cls not in decision["classes"]:
+        return None
+    option = decision["options"].get(resolved["option"])
+    if option is None:
+        return None
+    return (
+        option.get("per_class", {}).get(cls, option)
+        if "per_class" in option
+        else option
+    )
+
+
+def _owner_gate_on(record, candidate, resolve):
+    at = parse_time(record["at"])
+    return any(
+        g["gate"] == "owner"
+        and g["result"] == "pass"
+        and not approval_errors(g.get("ref"), candidate, at, resolve)
+        for g in record["gates"]
+    )
+
+
+def _holds(measure, flag, at):
+    """A measure in force at instant at: true, since its at, and not past its until."""
+    if not measure or not measure[flag] or at is None:
+        return False
+    since, until = parse_time(measure["at"]), parse_time(measure.get("until"))
+    return since is not None and since <= at and (until is None or at < until)
+
+
+def _landing_errors(record, candidate, channel, cls):
+    """An installed live record names where it landed, in its own repository."""
+    landed = str(record.get("landed", ""))
+    if channel in ("reviewed_pr", "pr"):
+        match = re.fullmatch(
+            r"pr:https://github[.]com/([^/]+)/([^/]+)/pull/[0-9]+", landed
+        )
+        repo = (candidate["destination"] or {}).get("repo", "").split("/")[-1]
+        if not match or match.group(2) != repo:
+            return [
+                f"{cls} lands through a reviewed PR in {repo}: landed: pr:<that PR's url> is required"
+            ]
+    elif not landed:
+        return [f"{cls} names where it landed (landed: memory:... or commit:...)"]
+    return []
+
+
+INSTALLED = ("probation", "active", "reinforced")
+
+
+def _authority_errors(candidate, record, effect_before, resolve, entered_at=None):
+    """Why this live record is not backed by the owner's resolved answer.
+
+    The owner's conditions hold on every live record, not only on activation:
+    live is legal in canary, probation, active and reinforced, so whichever
+    record turns the candidate live or activates it carries the approval or
+    the veto window its class requires, and every installed live record names
+    where it landed.
+    """
+    if record["effect"] != "live":
+        return []
+    cls = candidate["promotion_class"]
+    spec = classes()["authority"][cls]
+    if spec["mode"] == "none":
+        return []
+    if spec["mode"] == "no_live":
+        return [f"{cls} has no owner decision, so it never goes live"]
+    at = parse_time(record["at"])
+    deciding = effect_before != "live" or record["to"] in lifecycle()["activating"]
+    errors = []
+    if record["to"] == "canary" and "canary" not in required_gates(candidate):
+        errors.append(f"{cls} has no canary stage: it is live only once installed")
+    if spec["mode"] == "per_promotion":
+        # P8: the authority is the owner's approval of this very candidate.
+        return errors + approval_errors(record.get("authority"), candidate, at, resolve)
+    resolved, why = resolution(record.get("authority"), resolve)
+    if why:
+        return errors + [why]
+    errors += _answered_by(resolved, at, allow_default=False)
+    if resolved["decision"] != spec["decision"]:
+        return errors + [f"{record['authority']} does not decide {cls}"]
+    option = class_option(cls, resolved)
+    if option is None:
+        return errors + [
+            f"option {resolved['option']!r} of {spec['decision']} has no meaning for {cls}"
+        ]
+    if not option["live"]:
+        return errors + [
+            f"option {resolved['option']} of {spec['decision']} keeps {cls} in shadow"
+        ]
+    bar = option.get("exit_bar")
+    if bar and not _holds(resolved["measures"]["exit_bars"].get(bar), "met", at):
+        errors.append(f"exit bar {bar} is not met at {record['at']}")
+    approval = option.get("approval", "none")
+    graduated = approval == "until_graduated" and _holds(
+        resolved["measures"]["graduation"].get(cls), "graduated", at
+    )
+    needs_approval = (
+        approval == "per_promotion"
+        or (approval == "until_graduated" and not graduated)
+        or (bool(candidate.get("protected")) and option.get("protected_approval", True))
+    )
+    if needs_approval and deciding and not _owner_gate_on(record, candidate, resolve):
+        errors.append(
+            f"{cls} goes live and activates only with the owner's approval of this candidate on that record"
+        )
+    if approval == "until_graduated" and graduated and deciding:
+        errors += _veto_errors(
+            record.get("veto"), candidate, at, option["veto_days"], resolve, entered_at
+        )
+    if record["to"] in INSTALLED:
+        errors += _landing_errors(record, candidate, option.get("channel"), cls)
+    return errors
+
+
+def exit_bar_status(name, measured):
+    """Whether an exit bar is met by its measured values.
+
+    Every target is a floor ("min") or a ceiling ("max"). The resolver calls
+    this and reports the result as measures.exit_bars; a measure that was not
+    provided is listed under missing, never read as 0.
+    """
+    bar = classes()["exit_bars"][name]
+    targets = bar["targets"]
+    missing = sorted(k for k in targets if measured.get(k) is None)
+    met = not missing and all(
+        measured[k] >= t["min"] if "min" in t else measured[k] <= t["max"]
+        for k, t in targets.items()
+    )
+    return {"met": met, "missing": missing, "targets": targets, "measured": measured}
+
+
+def graduation_status(name, approved_at, reverted_at, as_of):
+    """Whether a class has graduated by as_of: enough approvals, enough days, no revert.
+
+    approved_at and reverted_at are instants of the class's approved
+    promotions and reverts; a revert restarts the count. Events after as_of
+    never change the status at as_of.
+    """
+    rule = classes()["graduations"][name]
+    approved_at = [a for a in approved_at if a <= as_of]
+    reverted_at = [r for r in reverted_at if r <= as_of]
+    restart = max(reverted_at) if reverted_at and rule["revert_restarts"] else None
+    counted = sorted(a for a in approved_at if restart is None or a > restart)
+    if len(counted) < rule["approved_min"]:
+        return {"graduated": False, "at": None, "approved": len(counted)}
+    when = max(
+        counted[rule["approved_min"] - 1],
+        counted[0] + dt.timedelta(days=rule["days"]),
+    )
+    graduated = when <= as_of
+    stamp = when.strftime("%Y-%m-%dT%H:%M:%SZ") if graduated else None
+    return {"graduated": graduated, "at": stamp, "approved": len(counted)}
+
+
+def resolver_from(resolutions):
+    """A resolver over decision-resolution/v1 records the caller already trusts.
+
+    This is how a caller that read agent-hq origin/main hands its answers to the
+    fold; the records themselves are not proof of anything.
+    """
+    by_ref = {
+        f"decision:{r['decision']}": r
+        for r in resolutions
+        if isinstance(r, dict) and isinstance(r.get("decision"), str)
+    }
+    return by_ref.get
+
+
+def _counts(gate, candidate, resolve=None):
     """Whether a passing gate result is admissible evidence for this candidate."""
     evaluator = gate["evaluator"]
     policy = classes()["evaluators"]
     if gate["result"] != "pass" or evaluator["kind"] in policy["never_satisfies"]:
         return False
+    if gate["gate"] == "owner":
+        # The owner gate is the owner's resolved answer, never a claim.
+        return not approval_errors(
+            gate.get("ref"), candidate, parse_time(gate["at"]), resolve
+        )
     # The learner is never its own evaluator, whatever kind it claims to be.
     return evaluator["session"] != candidate["producer"]["session"]
 
 
-def _activation_errors(candidate, latest, record):
+def _independent(gate, candidate, resolve=None):
+    """Whether a counted gate vouches as an oracle, the owner or an independent model.
+
+    An evaluator calling itself the owner on an evaluation gate (owner-graded
+    labels, say) is a claim the gate's eval-run ref cannot prove, so it
+    vouches only when its ref resolves to the owner's approval of this
+    candidate; otherwise it counts like any other grader but vouches for nothing.
+    """
+    kind = gate["evaluator"]["kind"]
+    if kind not in classes()["evaluators"]["independent"]:
+        return False
+    if kind == "owner":
+        return not approval_errors(
+            gate.get("ref"), candidate, parse_time(gate["at"]), resolve
+        )
+    return True
+
+
+def _activation_errors(candidate, latest, record, resolve=None):
     spec = classes()["classes"][candidate["promotion_class"]]
     policy = classes()["evaluators"]
     errors = []
     needed = required_gates(candidate)
     for name in needed:
         gate = latest.get(name)
-        if gate is None or not _counts(gate, candidate):
+        if gate is None or not _counts(gate, candidate, resolve):
             errors.append(f"activation needs a latest independent pass of {name}")
     # maturity is a waiting period, not a judgment: it never vouches for the rest.
     judged = [n for n in needed if n not in policy["not_judgment"]]
     satisfied = [
-        latest[n] for n in judged if n in latest and _counts(latest[n], candidate)
+        latest[n]
+        for n in judged
+        if n in latest and _counts(latest[n], candidate, resolve)
     ]
-    if judged and not any(
-        g["evaluator"]["kind"] in policy["independent"] for g in satisfied
-    ):
+    if judged and not any(_independent(g, candidate, resolve) for g in satisfied):
         errors.append(
             "activation needs an oracle, owner or independent model, not only an LLM judge"
         )
     if spec["owner_on_activation"] and not any(
-        g["gate"] == "owner" and _counts(g, candidate) for g in record["gates"]
+        g["gate"] == "owner" and _counts(g, candidate, resolve) for g in record["gates"]
     ):
         errors.append(
             f"{candidate['promotion_class']} is never automatic: the owner pass must be on the activating record"
@@ -688,7 +1032,7 @@ def _gate_timing(gate, record, entered_at, left_at, life):
     return problems
 
 
-def _live_switch_errors(candidate, record, effect):
+def _live_switch_errors(candidate, record, effect, resolve=None):
     """A never-automatic class turns live only with the owner's pass on that record."""
     spec = classes()["classes"][candidate["promotion_class"]]
     if (
@@ -697,7 +1041,9 @@ def _live_switch_errors(candidate, record, effect):
         or not spec["owner_on_activation"]
     ):
         return []
-    if any(g["gate"] == "owner" and _counts(g, candidate) for g in record["gates"]):
+    if any(
+        g["gate"] == "owner" and _counts(g, candidate, resolve) for g in record["gates"]
+    ):
         return []
     return [
         f"{candidate['promotion_class']} is never automatic: the record that turns it live carries the owner pass"
@@ -715,7 +1061,7 @@ def _distinct(records):
     return result
 
 
-def fold(candidate, records, as_of=None):
+def fold(candidate, records, as_of=None, resolve=None):
     """Replay a candidate's promotion records into its state.
 
     The state is the one reached by the longest valid prefix of the chain;
@@ -724,6 +1070,12 @@ def fold(candidate, records, as_of=None):
     fold at that record. Any error forces ``effect`` to shadow: a consumer
     stops applying a candidate whose history it cannot fold, so a broken or
     contested revert fails closed.
+
+    ``resolve`` maps a decision: ref to its decision-resolution/v1 on agent-hq
+    origin/main (the store supplies it). Every live record above P0 must be
+    backed by the class's resolved answer, and an owner gate counts only as
+    the owner's resolved approval of this candidate; with no resolver neither
+    can be verified, so neither passes.
     """
     if not isinstance(candidate, dict):
         return Fold(None, None, {}, [], ["candidate: not a JSON object"])
@@ -775,8 +1127,9 @@ def fold(candidate, records, as_of=None):
                     f"{gate['gate']} evaluated the candidate's own evidence: {leaked[:3]}"
                 )
         if record["to"] in life["activating"]:
-            problems += _activation_errors(candidate, trial, record)
-        problems += _live_switch_errors(candidate, record, effect)
+            problems += _activation_errors(candidate, trial, record, resolve)
+        problems += _live_switch_errors(candidate, record, effect, resolve)
+        problems += _authority_errors(candidate, record, effect, resolve, previous_at)
         if problems:
             errors += [f"{where}: {p}" for p in problems]
             break
@@ -844,7 +1197,7 @@ def _validate_command(paths):
     return 1 if failed else 0
 
 
-def _fold_command(candidate_path, records_path, as_of):
+def _fold_command(candidate_path, records_path, as_of, resolutions=None):
     candidates = read_records(candidate_path)
     if len(candidates) != 1:
         raise ValueError(f"{candidate_path}: expected exactly one candidate")
@@ -852,7 +1205,8 @@ def _fold_command(candidate_path, records_path, as_of):
     instant = parse_time(as_of) if as_of else dt.datetime.now(dt.timezone.utc)
     if instant is None:
         raise ValueError(f"--as-of is not a contract timestamp: {as_of}")
-    result = fold(candidates[0], records, as_of=instant)
+    resolve = resolver_from(read_records(resolutions)) if resolutions else None
+    result = fold(candidates[0], records, as_of=instant, resolve=resolve)
     print(json.dumps(result._asdict(), indent=2, sort_keys=True))
     return 1 if result.errors else 0
 
@@ -870,6 +1224,11 @@ def main(argv=None):
     fld.add_argument("--candidate", type=Path, required=True)
     fld.add_argument("--records", type=Path)
     fld.add_argument("--as-of", help="refuse records dated later (default: now)")
+    fld.add_argument(
+        "--resolutions",
+        type=Path,
+        help="decision-resolution/v1 records the caller read from agent-hq origin/main",
+    )
     eid = sub.add_parser("experience-id", help="print the deterministic experience id")
     eid.add_argument("--kind", required=True)
     eid.add_argument("--key", required=True)
@@ -878,7 +1237,9 @@ def main(argv=None):
         if args.command == "validate":
             return _validate_command(args.paths)
         if args.command == "fold":
-            return _fold_command(args.candidate, args.records, args.as_of)
+            return _fold_command(
+                args.candidate, args.records, args.as_of, args.resolutions
+            )
         print(experience_id(args.kind, args.key))
         return 0
     except (ContractError, OSError, ValueError, RecursionError) as exc:

@@ -946,7 +946,8 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, never `self` or the run's own session |
 | `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
-| `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
+| `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `veto`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
+| `decision-resolution/v1` | `decision`, `source`, `status`, `option`, `option_label`, `answered_at`, `created`, `expires`, `subject`, `measures` | what an injected resolver returns for one agent-hq decision read at `origin/main` (`source: agent-hq@<sha>`); an answered or defaulted decision names its option and time; `subject` binds a per-promotion approval or veto window to one candidate; `measures` carries the exit bars and graduation the resolver measured |
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
@@ -989,12 +990,43 @@ record that fails any of:
 Any fold error forces the returned `effect` to `shadow`: a consumer stops applying a candidate
 whose history it cannot fold, so a malformed or contested revert fails closed.
 
-**Shadow mode.** `effect` says whether the candidate's artifact is on a live surface after the
-move: `shadow` means evaluated and shown, nothing written live. `live` is legal only moving into
-`canary`, `probation`, `active` or `reinforced`, and above P0 only with `authority:
-decision:<inbox id>` (the governance lane poses `decision:lp-p1-memory-autopromote`,
-`decision:lp-p6-p7-owner-approval` and `decision:lp-learning-records-home`). Until the owner
-answers them, producers write shadow only.
+**Authority is resolved, never asserted** (K1). `effect` says whether the candidate's artifact is
+on a live surface after the move: `shadow` means evaluated and shown, nothing written live. `live`
+is legal only moving into `canary`, `probation`, `active` or `reinforced`, and above P0 the fold
+checks it against the owner's answer: `fold(candidate, records, as_of, resolve)` takes an injected
+resolver that maps a `decision:` ref to a `decision-resolution/v1` read from agent-hq
+`origin/main` (an answer only in a working copy does not count). With no resolver nothing above
+P0 goes live and no owner gate counts. `promotion-classes.json` holds the map as data:
+`authority` names each class's decision (P1: `lp-p1-memory-autopromote`, which decides P1 notes
+only; P6 and P7: `lp-p6-p7-owner-approval`; P2 to P5: none, so never live; P8: the owner's
+approval of that one candidate, always), and `decisions` gives each answer option its meaning:
+live or shadow, the exit bar (`exit_bars`, each target a floor or a ceiling: P1 needs 28 days in
+shadow, 50 non-protected candidates judged, 0.90 precision and at most a 5% contradiction-or-revert
+rate), approval (`none`, `per_promotion`, or `until_graduated` per `graduations`), whether a
+protected candidate still needs the owner (`protected_approval`: yes for P1 options b and c, no
+for d), the veto window in days, and the landing channel.
+
+The owner's conditions hold on every live record, not only on activation. Each must carry
+`authority` that resolves, is answered (an approval is never defaulted) no later than the record,
+decides the candidate's class, and whose option permits live for it, with its exit bar in force
+at that instant (`at <= record < until`). Whichever record turns the candidate live, and the
+activating record, carry what the class requires: an owner gate whose `ref` resolves to an
+answer meaning `approve` (per-candidate decisions answer keys `a`/`b`, so the meaning is
+`option_label`: Approve or Decline, Allow or Veto) bound to this candidate (`subject.candidate`, and `subject.digest` when the owner
+approved one exact version), or, once the class has graduated, a veto window (`veto: decision:<id>`)
+bound to the candidate, opened during the stay it closes, running its full `veto_days` (a window
+that defaulted early does not count), and not answered `veto`; a window that expired unanswered
+after its days allows. Every installed live record (probation, active, reinforced) names where it
+landed: `landed: pr:https://github.com/<owner>/<repo>/pull/<n>` in the destination's repository
+for a PR channel. A class with no canary stage is never live in `canary`. Any owner gate, on any
+record, counts only as such a resolved approval, and an evaluator that calls itself the owner on
+an evaluation gate (owner-graded labels) counts as a grader but vouches for independence only when
+its ref resolves the same way. The resolver measures exit bars with
+`exit_bar_status(bar, measured)` and graduation with `graduation_status(rule, approved_at,
+reverted_at, as_of)` (events after `as_of` never change it); `resolver_from(resolutions)` adapts
+records a caller already trusts, which makes it exactly as trustworthy as whoever wrote them:
+until the store's reader of agent-hq `origin/main` builds the resolutions, `--resolutions` is a
+test and audit seam, not authority.
 
 **Hold-out.** An experience's split is derived, never stored: `split_of(split_key)`, a salted
 sha256 (`estate-experience/v1/split`) with a 20% hold-out, where `split_key` defaults to
@@ -1111,12 +1143,15 @@ historical run of the procedure. Its `input_ref` is that run's task, and its ora
 cases come from the hold-out side of the experience split, and the candidate's `evidence` (the
 dev-side runs the recipe or skill was written from) is excluded by the evaluator.
 
-**Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
-attestation the fold checks for consistency, not proof: evaluator identity is self-reported (the
-session rule stops accidental self-evaluation, not a dishonest writer), and the salt is public,
-so a producer could choose a split key for a side. What makes a gate checkable is its `ref`: an
-`eval-run:` report can be re-run, an owner gate cites the owner's decision. Memory refs use the
-journal's spelling, `memory:<project>/<name>.md`, so every lane joins on one string.
+**Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
+is an attestation the fold checks for consistency, not proof: evaluator identity is still
+self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
+the salt is public, so a producer could choose a split key for a side (K3 replaces it with a
+committed salt). Authority is resolved rather than asserted, so its strength is the resolver's: once the store
+builds resolutions from agent-hq `origin/main`, a record can no longer claim an answer the owner
+did not give. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
+can be re-run. Memory refs use the journal's spelling, `memory:<project>/<name>.md`, so every lane
+joins on one string.
 
 **Changing a contract.** Additive optional fields keep `/v1`; renaming, removing or tightening a
 field is `/v2`. Every change is announced on the learning-plane bus thread, and
