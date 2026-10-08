@@ -152,7 +152,7 @@ def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="acti
                 "at": when,
                 "evaluator": dict(ORACLE),
             }
-            if name in ("offline_eval", "replay"):
+            if name in ("offline_eval", "replay", "retrieval_regression"):
                 item.update(holdout_digest="a" * 64, training_excluded=True, anchors=[])
             if name == "owner":
                 item.update(

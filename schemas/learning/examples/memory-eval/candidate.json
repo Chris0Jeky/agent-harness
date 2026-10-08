@@ -1,0 +1,31 @@
+{
+  "schema": "learning-candidate/v1",
+  "id": "lc_memory-eval-0001",
+  "at": "2026-09-03T09:00:00Z",
+  "producer": {
+    "lane": "example-steward",
+    "runtime": "claude",
+    "model": "example-model",
+    "session": "steward-7"
+  },
+  "kind": "consolidation",
+  "trigger": "consolidation_run",
+  "claim": "Five scattered example-repo notes consolidate into one repo-basics memory with its gotchas and workflow.",
+  "evidence": [
+    "exp_83c8229f8a78918b",
+    "exp_07e26277a38266ab"
+  ],
+  "future_decision": "Which memory file agents load first when they start work in example-repo.",
+  "scope": {
+    "repos": [
+      "example-repo"
+    ]
+  },
+  "destination": {
+    "repo": "example-config",
+    "path": "projects/example/memory/repo-basics.md"
+  },
+  "promotion_class": "P2",
+  "valid_from": "2026-09-03T09:00:00Z",
+  "valid_until": null
+}

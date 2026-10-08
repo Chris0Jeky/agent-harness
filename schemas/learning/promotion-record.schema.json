@@ -145,7 +145,7 @@
           }
         },
         {
-          "if": {"properties": {"gate": {"enum": ["offline_eval", "replay"]}}},
+          "if": {"properties": {"gate": {"enum": ["offline_eval", "replay", "retrieval_regression"]}}},
           "then": {
             "required": ["holdout_digest", "training_excluded", "anchors"],
             "properties": {"training_excluded": {"const": true}}

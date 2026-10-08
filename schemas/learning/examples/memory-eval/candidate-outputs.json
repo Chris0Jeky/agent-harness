@@ -1,0 +1,109 @@
+{
+  "schema": "eval-outputs/v1",
+  "at": "2026-09-04T00:00:00Z",
+  "producer": {
+    "lane": "example-runner",
+    "runtime": "tool",
+    "model": null,
+    "session": "runner-1"
+  },
+  "suite": "memory-eval-example",
+  "variant": "candidate",
+  "variant_ref": "estate:example-config@dddddddddddddddddddddddddddddddddddddddd",
+  "outputs": {
+    "case_static-state-recall-extract": {
+      "items": [
+        "default-branch:main",
+        "test-runner:unittest"
+      ]
+    },
+    "case_static-state-recall-retrieve": {
+      "items": [
+        "memory:example-project/repo-basics.md",
+        "memory:example-project/unrelated-a.md",
+        "memory:example-project/unrelated-b.md"
+      ]
+    },
+    "case_static-state-recall-behave": {
+      "text": "Branch from main and run the unittest suite.",
+      "tokens": 700
+    },
+    "case_dynamic-state-tracking-extract": {
+      "items": [
+        "ci-python:3.11"
+      ]
+    },
+    "case_dynamic-state-tracking-retrieve": {
+      "items": [
+        "memory:example-project/ci-python-version.md",
+        "memory:example-project/unrelated-a.md",
+        "memory:example-project/unrelated-b.md"
+      ]
+    },
+    "case_dynamic-state-tracking-behave": {
+      "text": "CI runs Python 3.11 since the September bump.",
+      "tokens": 700
+    },
+    "case_workflow-knowledge-extract": {
+      "items": [
+        "step:regenerate-fixture",
+        "step:run-smoke"
+      ]
+    },
+    "case_workflow-knowledge-retrieve": {
+      "items": [
+        "memory:example-project/fixture-workflow.md",
+        "memory:example-project/unrelated-a.md",
+        "memory:example-project/unrelated-b.md"
+      ]
+    },
+    "case_workflow-knowledge-behave": {
+      "text": "Regenerate the fixture, then run the smoke matrix.",
+      "tokens": 700
+    },
+    "case_environment-gotchas-extract": {
+      "items": [
+        "gotcha:heredoc-backslashes"
+      ]
+    },
+    "case_environment-gotchas-retrieve": {
+      "items": [
+        "memory:example-project/shell-heredoc-gotcha.md",
+        "memory:example-project/unrelated-a.md",
+        "memory:example-project/unrelated-b.md"
+      ]
+    },
+    "case_environment-gotchas-behave": {
+      "text": "Use a file write instead of a shell heredoc for backslash-heavy JSON.",
+      "tokens": 700
+    },
+    "case_false-premise-extract": {
+      "items": [
+        "premise:no-deploy-step"
+      ]
+    },
+    "case_false-premise-retrieve": {
+      "items": [
+        "memory:example-project/no-deploy.md",
+        "memory:example-project/unrelated-a.md",
+        "memory:example-project/unrelated-b.md"
+      ]
+    },
+    "case_false-premise-behave": {
+      "abstained": true,
+      "text": "There is no deploy step."
+    },
+    "case_static-tie": {
+      "text": "main"
+    },
+    "case_dev-only": {
+      "text": "smoke"
+    },
+    "case_leak-training": {
+      "text": "smoke"
+    },
+    "case_leak-cluster": {
+      "text": "smoke"
+    }
+  }
+}

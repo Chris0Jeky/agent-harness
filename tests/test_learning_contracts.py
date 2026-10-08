@@ -27,6 +27,10 @@ OWNER = {"kind": "owner", "runtime": "owner", "model": None, "session": "owner-1
 HOLDOUT = "e" * 64
 
 
+def example_files():
+    return sorted(p for p in EXAMPLES.rglob("*") if p.is_file())
+
+
 def example(name):
     return lc.read_records(EXAMPLES / name)
 
@@ -45,7 +49,7 @@ def gate(name, at, evaluator=ORACLE, result="pass"):
     item = {"gate": name, "result": result, "evaluator": evaluator, "at": at}
     if name == "owner":
         item["ref"] = "decision:test-owner-1"
-    if name in ("offline_eval", "replay"):
+    if name in ("offline_eval", "replay", "retrieval_regression"):
         item.update(holdout_digest=HOLDOUT, training_excluded=True, anchors=[])
     return item
 
@@ -170,11 +174,13 @@ class ContractDataTests(unittest.TestCase):
 
 class ExampleTests(unittest.TestCase):
     def test_every_example_is_valid(self):
-        paths = sorted(EXAMPLES.iterdir())
-        self.assertEqual(len(paths), 5)
+        paths = example_files()
+        self.assertEqual(len(paths), 10)
         for path in paths:
             for record in lc.read_records(path):
-                self.assertEqual(lc.validate_record(record), [], record["id"])
+                self.assertEqual(
+                    lc.validate_record(record), [], record.get("id", path.name)
+                )
 
     def test_example_chain_folds_to_active_in_shadow(self):
         result = lc.fold(candidate(), chain())
@@ -743,7 +749,7 @@ class CommandLineTests(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_validate_exit_codes(self):
-        code, out, _ = self.run_cli("validate", *map(str, sorted(EXAMPLES.iterdir())))
+        code, out, _ = self.run_cli("validate", *map(str, example_files()))
         self.assertEqual((code, json.loads(out)["invalid"]), (0, 0))
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "bad.jsonl"

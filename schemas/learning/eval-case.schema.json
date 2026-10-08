@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/eval-case.schema.json",
+  "title": "eval-case/v1",
+  "description": "One evaluation task built from history, with the oracle that grades an output for it. split_key decides the sealed hold-out side exactly as for experiences (split_of), so a case built from an experience shares that experience's side. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "suite", "experience", "split_key", "layer", "category",
+    "input_ref", "oracle"
+  ],
+  "properties": {
+    "schema": {"const": "eval-case/v1"},
+    "id": {
+      "type": "string",
+      "pattern": "^case_[A-Za-z0-9_-]{6,64}$"
+    },
+    "suite": {"$ref": "common.schema.json#/$defs/slug"},
+    "experience": {
+      "description": "The historical run this case was built from; null for a synthetic case.",
+      "anyOf": [{"$ref": "common.schema.json#/$defs/exp_id"}, {"type": "null"}]
+    },
+    "split_key": {
+      "description": "Must equal the anchoring experience's effective split key when that experience is known.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400
+    },
+    "layer": {
+      "description": "Memory evals use extraction, retrieval and behavioural; procedural and system evals use their own layer.",
+      "type": "string",
+      "enum": ["extraction", "retrieval", "behavioural", "procedural", "system"]
+    },
+    "category": {
+      "description": "The five LongMemEval-V2 memory categories, or task for procedural and system cases.",
+      "type": "string",
+      "enum": [
+        "static_state_recall", "dynamic_state_tracking", "workflow_knowledge",
+        "environment_gotchas", "false_premise", "task"
+      ]
+    },
+    "input_ref": {"$ref": "common.schema.json#/$defs/ref"},
+    "oracle": {"$ref": "#/$defs/oracle"},
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  },
+  "$defs": {
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 400}
+    },
+    "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+    "oracle": {
+      "description": "Deterministic graders first. judge means no deterministic oracle exists: the grade comes from an eval-labels/v1 file and the run is labelled with that evaluator's kind.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "exact", "contains_all", "contains_none", "regex", "set_match",
+            "ranked_recall", "abstain", "numeric", "judge"
+          ]
+        },
+        "expected": {"type": "string", "maxLength": 2000},
+        "needles": {"$ref": "#/$defs/items"},
+        "pattern": {"type": "string", "minLength": 1, "maxLength": 400},
+        "expected_items": {"$ref": "#/$defs/items"},
+        "min_recall": {"$ref": "#/$defs/fraction"},
+        "min_precision": {"$ref": "#/$defs/fraction"},
+        "k": {"type": "integer", "minimum": 1},
+        "expected_abstain": {"type": "boolean"},
+        "at_least": {"type": "number"},
+        "at_most": {"type": "number"}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "exact"}}}, "then": {"required": ["expected"]}},
+        {"if": {"properties": {"kind": {"enum": ["contains_all", "contains_none"]}}}, "then": {"required": ["needles"]}},
+        {"if": {"properties": {"kind": {"const": "regex"}}}, "then": {"required": ["pattern"]}},
+        {"if": {"properties": {"kind": {"const": "set_match"}}}, "then": {"required": ["expected_items"]}},
+        {"if": {"properties": {"kind": {"const": "ranked_recall"}}}, "then": {"required": ["expected_items", "k"]}},
+        {"if": {"properties": {"kind": {"const": "abstain"}}}, "then": {"required": ["expected_abstain"]}},
+        {"if": {"properties": {"kind": {"const": "numeric"}}}, "then": {"anyOf": [{"required": ["at_least"]}, {"required": ["at_most"]}]}}
+      ]
+    }
+  }
+}

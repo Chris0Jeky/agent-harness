@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/eval-run.schema.json",
+  "title": "eval-run/v1",
+  "description": "One replay-evaluator run: baseline against candidate over the cases the candidate may be judged on. On the hold-out split its gate block is a promotion-record/v1 gate result, ready to embed. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "producer", "suite", "split", "gate_name",
+    "candidate", "genome", "baseline_ref", "candidate_ref", "tier",
+    "evaluator", "training", "cases", "holdout_digest", "anchors", "policy",
+    "results", "verdict", "gate"
+  ],
+  "properties": {
+    "schema": {"const": "eval-run/v1"},
+    "id": {"type": "string", "pattern": "^run_[0-9a-f]{16}$"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "suite": {"$ref": "common.schema.json#/$defs/slug"},
+    "split": {"type": "string", "enum": ["holdout", "dev"]},
+    "gate_name": {"type": "string", "enum": ["offline_eval", "replay", "retrieval_regression"]},
+    "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "genome": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/gen_id"}, {"type": "null"}]
+    },
+    "baseline_ref": {"$ref": "common.schema.json#/$defs/ref"},
+    "candidate_ref": {"$ref": "common.schema.json#/$defs/ref"},
+    "tier": {
+      "description": "oracle when every case was graded deterministically; otherwise the labelling evaluator's kind (llm_judge, independent_model or owner).",
+      "type": "string",
+      "enum": ["oracle", "llm_judge", "independent_model", "owner"]
+    },
+    "evaluator": {"$ref": "common.schema.json#/$defs/evaluator"},
+    "training": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["experiences", "split_keys"],
+      "properties": {
+        "experiences": {"type": "integer", "minimum": 0},
+        "split_keys": {"type": "integer", "minimum": 0}
+      }
+    },
+    "cases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total", "other_split", "excluded_training", "excluded_cluster",
+        "unanchored", "evaluated", "distinct_inputs"
+      ],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "other_split": {"type": "integer", "minimum": 0},
+        "excluded_training": {"type": "integer", "minimum": 0},
+        "excluded_cluster": {"type": "integer", "minimum": 0},
+        "unanchored": {"type": "integer", "minimum": 0},
+        "evaluated": {"type": "integer", "minimum": 0},
+        "distinct_inputs": {
+          "description": "Evaluated cases with distinct (input_ref, oracle): what min_cases counts.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "holdout_digest": {"$ref": "common.schema.json#/$defs/sha256"},
+    "anchors": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/exp_id"}
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_cases", "min_delta", "max_losses"],
+      "properties": {
+        "min_cases": {"type": "integer", "minimum": 1},
+        "min_delta": {"type": "number"},
+        "max_losses": {"type": "integer", "minimum": 0}
+      }
+    },
+    "results": {
+      "description": "Pass rates, paired wins and losses, the exact sign test, and breakdowns by memory category and layer; retrieval recall@k and MRR where cases rank; mean cost per variant.",
+      "type": "object",
+      "required": ["baseline", "candidate", "delta", "wins", "losses", "ties", "sign_test_p", "by_category", "by_layer"]
+    },
+    "verdict": {"type": "string", "enum": ["pass", "fail", "insufficient"]},
+    "gate": {
+      "anyOf": [
+        {"$ref": "promotion-record.schema.json#/$defs/gate_result"},
+        {"type": "null"}
+      ]
+    }
+  }
+}
