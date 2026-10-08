@@ -1009,17 +1009,22 @@ every case sharing a split key with the training evidence is its job, not the fo
 **Replay evaluator** (`scripts/learning_eval.py`, W1). It never runs a variant: whoever runs the
 baseline and the candidate records `eval-outputs/v1`, and the evaluator selects, grades and
 compares. Selection is the hold-out separation: a case is on the side `split_of(case.split_key)`
-gives; an anchored case must carry its experience's split key; every case built from the
-candidate's `evidence` or its genome's `training_evidence`, and every case sharing a split key
-with that evidence, is dropped; and evidence missing from the experience ledger refuses the run
-(exclusion that cannot be proven is not claimed). Deterministic oracles grade first (`exact`,
-`contains_all`, `contains_none`, `regex`, `set_match`, `ranked_recall`, `abstain`, `numeric`); a
-`judge` case takes its grade from `eval-labels/v1`, never the learner's session, and demotes the
-run's tier and gate evaluator from `oracle` to that evaluator's kind. Pairs are compared case by
+gives; an anchored case's experience must be in the ledger and its split key must match; every
+case built from the candidate's `evidence` or its genome's `training_evidence`, and every case
+sharing a split key with that evidence, is dropped; the genome is exactly the one the candidate
+names or the candidate outputs ran as (`variant_ref: gen:<id>`); and evidence missing from the
+ledger refuses the run (exclusion that cannot be proven is not claimed). A re-worded copy of a
+training run is caught only if it keeps the run's split key. Deterministic oracles grade first (`exact`,
+`contains_all`, `contains_none`, `regex`, `set_match`, `ranked_recall`, `abstain`, `numeric`);
+an output without the field an oracle reads fails rather than passing vacuously. A `judge` case
+takes its grade from `eval-labels/v1`, whose evaluator is never `self`, never `oracle` and never
+the candidate's or genome producer's session, and demotes the run's tier and gate evaluator from
+`oracle` to that evaluator's kind. Pairs are compared case by
 case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
 layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
 (10) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
-`max_losses` (0); fewer cases is `insufficient`, which emits no gate. Only a hold-out run emits a
+`max_losses` (0); fewer cases is `insufficient`, which emits no gate. The policy is part of the
+run id and of the gate's `metrics` and `summary`, so a loosened gate is visible as one. Only a hold-out run emits a
 gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
 it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five
 LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
