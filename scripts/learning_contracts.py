@@ -1249,7 +1249,34 @@ def _distinct(records):
     return result
 
 
-def fold(candidate, records, as_of=None, resolve=None):
+def _training_evidence(candidate, genome):
+    """(experience ids the candidate learned from, problem or None).
+
+    A candidate built from a genome learned from that genome's training
+    evidence too, so an evaluation gate anchored on any of it is not hold-out.
+    """
+    training = set(candidate["evidence"])
+    named = candidate.get("genome")
+    if genome is None:
+        return training, None
+    if (
+        not isinstance(genome, dict)
+        or validate_record(genome)
+        or genome.get("schema") != "candidate-genome/v1"
+    ):
+        return (
+            training,
+            "the genome given to the fold is not a valid candidate-genome/v1",
+        )
+    if genome["id"] != named or candidate["id"] not in genome["candidates"]:
+        return (
+            training,
+            f"{genome['id']} is not the genome {candidate['id']} names and implements",
+        )
+    return training | set(genome["training_evidence"]["experiences"]), None
+
+
+def fold(candidate, records, as_of=None, resolve=None, genome=None):
     """Replay a candidate's promotion records into its state.
 
     The state is the one reached by the longest valid prefix of the chain;
@@ -1264,6 +1291,10 @@ def fold(candidate, records, as_of=None, resolve=None):
     backed by the class's resolved answer, and an owner gate counts only as
     the owner's resolved approval of this candidate; with no resolver neither
     can be verified, so neither passes.
+
+    ``genome`` is the candidate-genome/v1 the candidate names, if any: its
+    training evidence is excluded from evaluation like the candidate's own.
+    A candidate that names a genome folds its anchored gates only with it.
     """
     if not isinstance(candidate, dict):
         return Fold(None, None, {}, [], ["candidate: not a JSON object"])
@@ -1274,6 +1305,9 @@ def fold(candidate, records, as_of=None, resolve=None):
         )
     life = lifecycle()
     state, effect, latest, applied = life["initial"], "shadow", {}, []
+    training, genome_problem = _training_evidence(candidate, genome)
+    if genome_problem:
+        errors.append(f"candidate: {genome_problem}")
     if errors:
         return Fold(state, effect, latest, applied, errors)
     valid = []
@@ -1309,10 +1343,15 @@ def fold(candidate, records, as_of=None, resolve=None):
             problems += _gate_timing(gate, record, previous_at, at, life)
             if as_of and (parse_time(gate["at"]) or as_of) > as_of:
                 problems.append(f"{gate['gate']} is dated after the fold's as_of")
-            leaked = sorted(set(gate.get("anchors", ())) & set(candidate["evidence"]))
+            anchors = set(gate.get("anchors", ()))
+            leaked = sorted(anchors & training)
             if leaked:
                 problems.append(
-                    f"{gate['gate']} evaluated the candidate's own evidence: {leaked[:3]}"
+                    f"{gate['gate']} evaluated the candidate's own training evidence: {leaked[:3]}"
+                )
+            if "anchors" in gate and candidate.get("genome") and genome is None:
+                problems.append(
+                    f"{gate['gate']}: fold with genome {candidate['genome']} to exclude its training evidence"
                 )
         if record["to"] in life["activating"]:
             problems += _activation_errors(candidate, trial, record, resolve)
@@ -1385,7 +1424,7 @@ def _validate_command(paths):
     return 1 if failed else 0
 
 
-def _fold_command(candidate_path, records_path, as_of, resolutions=None):
+def _fold_command(candidate_path, records_path, as_of, resolutions=None, genome=None):
     candidates = read_records(candidate_path)
     if len(candidates) != 1:
         raise ValueError(f"{candidate_path}: expected exactly one candidate")
@@ -1394,7 +1433,10 @@ def _fold_command(candidate_path, records_path, as_of, resolutions=None):
     if instant is None:
         raise ValueError(f"--as-of is not a contract timestamp: {as_of}")
     resolve = resolver_from(read_records(resolutions)) if resolutions else None
-    result = fold(candidates[0], records, as_of=instant, resolve=resolve)
+    genome_record = read_records(genome)[0] if genome else None
+    result = fold(
+        candidates[0], records, as_of=instant, resolve=resolve, genome=genome_record
+    )
     print(json.dumps(result._asdict(), indent=2, sort_keys=True))
     return 1 if result.errors else 0
 
@@ -1417,6 +1459,9 @@ def main(argv=None):
         type=Path,
         help="decision-resolution/v1 records the caller read from agent-hq origin/main",
     )
+    fld.add_argument(
+        "--genome", type=Path, help="the candidate-genome/v1 the candidate names"
+    )
     eid = sub.add_parser("experience-id", help="print the deterministic experience id")
     eid.add_argument("--kind", required=True)
     eid.add_argument("--key", required=True)
@@ -1426,7 +1471,7 @@ def main(argv=None):
             return _validate_command(args.paths)
         if args.command == "fold":
             return _fold_command(
-                args.candidate, args.records, args.as_of, args.resolutions
+                args.candidate, args.records, args.as_of, args.resolutions, args.genome
             )
         print(experience_id(args.kind, args.key))
         return 0

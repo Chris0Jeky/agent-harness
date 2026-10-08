@@ -146,7 +146,15 @@ def target_state(candidate, state, gates, resolve=None):
 
 
 def next_record(
-    candidate, records, gates, producer, at, reason=None, as_of=None, resolve=None
+    candidate,
+    records,
+    gates,
+    producer,
+    at,
+    reason=None,
+    as_of=None,
+    resolve=None,
+    genome=None,
 ):
     """The next promotion-record/v1 for this candidate, already proven to fold.
 
@@ -158,7 +166,9 @@ def next_record(
     if instant is None or instant > as_of:
         raise PromotionRefusal(f"the record's time {at} is not a past contract instant")
     gates = sorted(gate_results(gates, candidate), key=lambda g: g["gate"])
-    current = contracts.fold(candidate, records, as_of=as_of, resolve=resolve)
+    current = contracts.fold(
+        candidate, records, as_of=as_of, resolve=resolve, genome=genome
+    )
     if current.errors:
         raise PromotionRefusal(f"the chain does not fold cleanly: {current.errors[0]}")
     if current.effect == "live":
@@ -190,7 +200,7 @@ def next_record(
     if candidate.get("genome"):
         record["genome"] = candidate["genome"]
     after = contracts.fold(
-        candidate, list(records) + [record], as_of=as_of, resolve=resolve
+        candidate, list(records) + [record], as_of=as_of, resolve=resolve, genome=genome
     )
     if after.errors or after.state != target:
         problem = after.errors[0] if after.errors else f"folded to {after.state}"
@@ -209,6 +219,9 @@ def _reason(state, target, gates):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument(
+        "--genome", type=Path, help="the candidate-genome/v1 the candidate names"
+    )
     parser.add_argument(
         "--records", type=Path, help="the candidate's promotion records"
     )
@@ -250,7 +263,14 @@ def main(argv=None):
             else None
         )
         record = next_record(
-            candidates[0], records, gates, producer, at, args.reason, resolve=resolve
+            candidates[0],
+            records,
+            gates,
+            producer,
+            at,
+            args.reason,
+            resolve=resolve,
+            genome=contracts.read_records(args.genome)[0] if args.genome else None,
         )
     except (
         PromotionRefusal,

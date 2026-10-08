@@ -55,6 +55,8 @@ SURFACES = {
 
 def candidate(**changes):
     record = copy.deepcopy(example("learning-candidate.json")[0])
+    if "genome" not in changes:  # genome exclusion has its own tests
+        record.pop("genome", None)
     if "kind" in changes and "destination" not in changes:
         changes["destination"] = SURFACES[changes["kind"]]
     record.update(changes)
@@ -701,7 +703,9 @@ class ReviewRegressionTests(unittest.TestCase):
         records[1]["gates"][0]["anchors"] = [candidate()["evidence"][0]]
         result = lc.fold(candidate(), records)
         self.assertEqual(result.state, "evaluating")
-        self.assertTrue(any("own evidence" in e for e in result.errors), result.errors)
+        self.assertTrue(
+            any("own training evidence" in e for e in result.errors), result.errors
+        )
 
     def test_offline_gates_must_name_their_anchors(self):
         bare = gate("offline_eval", "2026-10-08T11:00:00Z")
@@ -833,6 +837,8 @@ class CommandLineTests(unittest.TestCase):
             str(EXAMPLES / "learning-candidate.json"),
             "--records",
             str(EXAMPLES / "promotion-chain.jsonl"),
+            "--genome",
+            str(EXAMPLES / "candidate-genome.json"),
         )
         self.assertEqual((code, json.loads(out)["state"]), (0, "active"))
 

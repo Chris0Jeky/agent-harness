@@ -43,6 +43,8 @@ SURFACES = {
 
 def candidate(**changes):
     record = copy.deepcopy(lc.read_records(EXAMPLES / "learning-candidate.json")[0])
+    if "genome" not in changes:  # genome exclusion has its own tests
+        record.pop("genome", None)
     if "kind" in changes and "destination" not in changes:
         changes["destination"] = SURFACES[changes["kind"]]
     record.update(changes)

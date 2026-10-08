@@ -26,6 +26,10 @@ def candidate():
     return copy.deepcopy(lc.read_records(EXAMPLES / "learning-candidate.json")[0])
 
 
+def genome():
+    return copy.deepcopy(lc.read_records(EXAMPLES / "candidate-genome.json")[0])
+
+
 def run(key, variant, immediate="merged", matured="clean", corrected=False, **extra):
     record = copy.deepcopy(lc.read_records(EXAMPLES / "estate-experience.json")[0])
     record["source"] = {"kind": "muse-job", "key": key}
@@ -71,6 +75,7 @@ def arms(n=20, cand_reverts=0, base_reverts=0, cand_corrections=0):
 
 class CompareTests(unittest.TestCase):
     def compare(self, runs, **options):
+        options.setdefault("genome", genome())
         return ls.compare(runs, candidate(), BASE, CAND, at=AT, **options)
 
     def test_equal_arms_pass_as_a_canary_gate(self):
@@ -164,7 +169,7 @@ class CompareTests(unittest.TestCase):
             **{"from": "canary", "to": "probation"},
         )
         leaving["gates"] = [gate]
-        result = lc.fold(candidate(), records + [leaving])
+        result = lc.fold(candidate(), records + [leaving], genome=genome())
         self.assertEqual((result.state, result.errors), ("probation", []))
 
     def test_success_is_the_contract_definition(self):
@@ -187,6 +192,8 @@ class CommandLineTests(unittest.TestCase):
                 str(path),
                 "--candidate",
                 str(EXAMPLES / "learning-candidate.json"),
+                "--genome",
+                str(EXAMPLES / "candidate-genome.json"),
                 "--baseline-variant",
                 BASE,
                 "--candidate-variant",
