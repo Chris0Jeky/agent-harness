@@ -23,6 +23,11 @@
       "enum": ["answered", "defaulted", "open", "expired", "withdrawn"]
     },
     "option": {"type": ["string", "null"], "maxLength": 40},
+    "option_label": {
+      "description": "The chosen option's label as agent-hq shows it (e.g. Approve, Decline, Allow, Veto). Per-candidate approvals and veto windows answer single-letter keys, so their meaning is the label; class decisions are read by key.",
+      "type": ["string", "null"],
+      "maxLength": 80
+    },
     "answered_at": {
       "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
     },

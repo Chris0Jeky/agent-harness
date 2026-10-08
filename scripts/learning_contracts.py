@@ -672,6 +672,16 @@ def _answered_by(resolved, at, allow_default):
     return []
 
 
+def meaning(resolved):
+    """What a per-candidate answer means: its option label, lower-cased.
+
+    The owner answers single-letter keys (a, b); an approval or a veto window
+    carries its meaning in the label (Approve or Decline, Allow or Veto).
+    """
+    label = resolved.get("option_label")
+    return label.strip().casefold() if isinstance(label, str) else resolved["option"]
+
+
 def _subject_errors(ref, resolved, candidate):
     subject = resolved["subject"] or {}
     if subject.get("candidate") != candidate["id"]:
@@ -688,7 +698,7 @@ def approval_errors(ref, candidate, at, resolve):
         return [why]
     errors = _answered_by(resolved, at, allow_default=False)
     errors += _subject_errors(ref, resolved, candidate)
-    if resolved["option"] not in classes()["approval"]["grant"]:
+    if meaning(resolved) not in classes()["approval"]["grant"]:
         errors.append(
             f"{ref} answered {resolved['option']!r}, which is not an approval"
         )
@@ -722,9 +732,9 @@ def _veto_errors(ref, candidate, at, days, resolve, opened_after):
         answered = parse_time(resolved["answered_at"])
         if status == "defaulted" and opened and answered and answered - opened < window:
             errors.append(f"veto window {ref} defaulted before its {days} days ran")
-        if resolved["option"] in veto["veto"]:
+        if meaning(resolved) in veto["veto"]:
             errors.append(f"the owner vetoed through {ref}")
-        elif resolved["option"] not in veto["allow"]:
+        elif meaning(resolved) not in veto["allow"]:
             errors.append(
                 f"{ref} answered {resolved['option']!r}, neither allow nor veto"
             )

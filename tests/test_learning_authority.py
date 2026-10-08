@@ -608,6 +608,34 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertIsNone(lc.resolver_from([{}, None, {"decision": 7}])("decision:x"))
 
 
+class LabelTests(unittest.TestCase):
+    """agent-hq answers per-candidate decisions with keys a/b; the label is the meaning."""
+
+    def test_approval_and_veto_meaning_comes_from_the_label(self):
+        cand = candidate("policy", "P8")
+        at = lc.parse_time("2026-09-09T00:00:00Z")
+        approve = dict(answer("approve-auth-0001", option="a"), option_label="Approve")
+        decline = dict(answer("approve-auth-0001", option="b"), option_label="Decline")
+        ref = "decision:approve-auth-0001"
+        self.assertEqual(lc.approval_errors(ref, cand, at, resolver(approve)), [])
+        self.assertTrue(lc.approval_errors(ref, cand, at, resolver(decline)))
+        unlabeled = answer("approve-auth-0001", option="a")
+        self.assertTrue(lc.approval_errors(ref, cand, at, resolver(unlabeled)))
+        veto = dict(
+            answer(
+                "veto-auth-0001",
+                option="b",
+                created="2026-09-01T00:00:00Z",
+                answered_at="2026-09-02T00:00:00Z",
+            ),
+            option_label="Veto",
+        )
+        errors = lc._veto_errors(
+            "decision:veto-auth-0001", cand, at, 3, resolver(veto), None
+        )
+        self.assertTrue(any("vetoed" in e for e in errors), errors)
+
+
 class HelperTests(unittest.TestCase):
     def test_exit_bar_status(self):
         good = {
