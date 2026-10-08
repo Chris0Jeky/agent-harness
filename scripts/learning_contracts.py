@@ -870,6 +870,15 @@ def receipt_status(candidate, records, receipts, as_of=None, resolve=None, genom
         if as_of and parse_time(receipt["at"]) > as_of:
             problems.append(f"{receipt['id']}: is dated after as_of")
             continue
+        learner = candidate["producer"]
+        if (
+            receipt["producer"]["session"] == learner["session"]
+            or receipt["producer"]["lane"] == learner["lane"]
+        ):
+            problems.append(
+                f"{receipt['id']}: the learner does not issue its own receipts"
+            )
+            continue
         mine.append(receipt)
     installed = None
     for receipt in sorted(mine, key=lambda r: (r["at"], r["id"])):
@@ -881,9 +890,9 @@ def receipt_status(candidate, records, receipts, as_of=None, resolve=None, genom
             problems.append(
                 f"{receipt['id']}: {receipt['record']} is not a live install in the chain"
             )
-        elif where["repo"].split("/")[-1] != str(destination.get("repo", "")).split(
-            "/"
-        )[-1] or (where["path"] != destination.get("path")):
+        elif where["repo"] != destination.get("repo") or (
+            where["path"] != destination.get("path")
+        ):
             problems.append(
                 f"{receipt['id']}: installed somewhere other than the destination"
             )
@@ -1231,6 +1240,9 @@ def resolver_from(resolutions):
     return by_ref.get
 
 
+MAX_CASES = 100000
+
+
 def sign_p(wins, losses):
     """One-sided exact sign test on discordant pairs: P(W >= wins | p = 0.5)."""
     n = wins + losses
@@ -1239,7 +1251,7 @@ def sign_p(wins, losses):
     return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
 
 
-def salt_errors(gate, candidate):
+def salt_errors(gate, candidate, genome=None):
     """Why a passing hold-out gate's split could have been aimed at (attack E).
 
     Commit, then draw: the candidate is committed first and the salt is a public
@@ -1251,11 +1263,16 @@ def salt_errors(gate, candidate):
     if not isinstance(draw, dict):
         return [f"{gate['gate']} names no salt draw; a public split can be ground"]
     drawn = parse_time(draw.get("at"))
-    if drawn is None or drawn <= parse_time(candidate["at"]):
+    committed = [parse_time(candidate["at"])]
+    if genome is not None:
+        committed.append(parse_time(genome["at"]))
+    if drawn is None or any(c is None or drawn <= c for c in committed):
         return [
-            f"{gate['gate']} salt was drawn at {draw.get('at')}, "
-            "not after the candidate was committed (commit, then draw)"
+            f"{gate['gate']} salt was drawn at {draw.get('at')}, not after the "
+            "candidate and its genome were committed (commit, then draw)"
         ]
+    if drawn > parse_time(gate["at"]):
+        return [f"{gate['gate']} used a salt drawn after the gate was judged"]
     return []
 
 
@@ -1268,6 +1285,34 @@ def minima_errors(gate):
     missing = [
         k for k in ("cases", "delta", "wins", "losses", "anchored") if k not in metrics
     ]
+    if not missing:
+        counts = [metrics[k] for k in ("cases", "wins", "losses", "anchored")]
+        if not all(
+            isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= MAX_CASES
+            for c in counts
+        ):
+            return [
+                f"{gate['gate']} counts are not integers in 0..{MAX_CASES}: {counts}"
+            ]
+        if (
+            metrics["wins"] + metrics["losses"] > metrics["cases"]
+            or metrics["anchored"] > metrics["cases"]
+        ):
+            return [f"{gate['gate']} wins, losses or anchored exceed its cases"]
+        anchors = len(set(gate.get("anchors", ())))
+        if anchors > metrics["anchored"] or (metrics["anchored"] > 0) != (anchors > 0):
+            return [
+                f"{gate['gate']} anchored {metrics['anchored']} cases on {anchors} anchors"
+            ]
+        if (
+            metrics["cases"]
+            and abs(
+                metrics["delta"]
+                - (metrics["wins"] - metrics["losses"]) / metrics["cases"]
+            )
+            > 1e-9
+        ):
+            return [f"{gate['gate']} delta is not (wins - losses) / cases"]
     if missing:
         return [
             f"{gate['gate']} does not report {', '.join(missing)} against the pinned minima"
@@ -1488,11 +1533,11 @@ def fold(candidate, records, as_of=None, resolve=None, genome=None):
         )
     life = lifecycle()
     state, effect, latest, applied = life["initial"], "shadow", {}, []
+    if errors:  # an invalid candidate is refused before anything reads its fields
+        return Fold(state, effect, latest, applied, errors)
     training, genome_problem = _training_evidence(candidate, genome)
     if genome_problem:
-        errors.append(f"candidate: {genome_problem}")
-    if errors:
-        return Fold(state, effect, latest, applied, errors)
+        return Fold(state, effect, latest, applied, [f"candidate: {genome_problem}"])
     valid = []
     for record in _distinct(records):
         problems = validate_record(record)
@@ -1527,7 +1572,7 @@ def fold(candidate, records, as_of=None, resolve=None, genome=None):
             if as_of and (parse_time(gate["at"]) or as_of) > as_of:
                 problems.append(f"{gate['gate']} is dated after the fold's as_of")
             problems += minima_errors(gate)
-            problems += salt_errors(gate, candidate)
+            problems += salt_errors(gate, candidate, genome)
             anchors = set(gate.get("anchors", ()))
             leaked = sorted(anchors & training)
             if leaked:

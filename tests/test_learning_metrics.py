@@ -161,10 +161,10 @@ def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="acti
                 item.update(
                     holdout_digest="a" * 64,
                     training_excluded=True,
-                    anchors=[],
+                    anchors=["exp_fixture-anchor"],
                     metrics={
                         "cases": 20,
-                        "delta": 0.1,
+                        "delta": 0.4,
                         "wins": 8,
                         "losses": 0,
                         "anchored": 20,
@@ -1031,6 +1031,33 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(status["installed"])
         self.assertIn("other than the destination", problems[0])
 
+    def test_the_learner_does_not_issue_its_own_receipts(self):
+        own = dict(self.installed, producer=dict(self.cand["producer"]))
+        status, problems = lc.receipt_status(
+            self.cand, self.chain, [own], resolve=lc.resolver_from([P1_D])
+        )
+        self.assertIsNone(status["installed"])
+        self.assertIn("does not issue its own receipts", problems[0])
+        qualified = dict(self.installed["installed"], repo="evil/claude-config")
+        moved = receipt(self.cand, self.first, "installed", qualified, self.since)
+        status, _ = lc.receipt_status(
+            self.cand, self.chain, [moved], resolve=lc.resolver_from([P1_D])
+        )
+        self.assertIsNone(status["installed"])
+
+    def test_a_genome_naming_candidate_folds_in_metrics(self):
+        examples = ROOT / "schemas" / "learning" / "examples"
+        records = [
+            *lc.read_records(examples / "learning-candidate.json"),
+            *lc.read_records(examples / "promotion-chain.jsonl"),
+            *lc.read_records(examples / "candidate-genome.json"),
+        ]
+        result = lm.learning_metrics(dataset(*records), "dev")
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(
+            result["metrics"]["candidate_to_promoted_ratio"]["activated"], 1
+        )
+
     def test_observed_matured_and_reverted_count_after_the_install(self):
         observed = receipt(
             self.cand, self.first, "observed", {"experience": "exp_abcdef01"}, AFTER
@@ -1057,15 +1084,35 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((status["reverted"], status["matured"]), (revert["id"], None))
         self.assertIn("reverted inside its window", problems[0])
 
+    def gate_for(self, *receipts):
+        return lp.maturity_gate(
+            self.cand,
+            self.chain,
+            [self.installed, *receipts],
+            resolve=lc.resolver_from([P1_D]),
+        )
+
     def test_a_matured_receipt_produces_the_maturity_gate(self):
-        gate = lp.maturity_gate(self.matured())
-        self.assertEqual((gate["gate"], gate["result"]), ("maturity", "pass"))
-        self.assertTrue(gate["ref"].startswith("receipt:rcpt_"))
+        matured = self.matured()
+        gate = self.gate_for(matured)
+        self.assertEqual(
+            (gate["gate"], gate["result"], gate["ref"]),
+            ("maturity", "pass", f"receipt:{matured['id']}"),
+        )
         self.assertEqual(lp.gate_results([gate]), [gate])
+        # Not verified against this install: refused, never a pass.
+        other = candidate("other")
+        foreign = receipt(
+            other, self.first, "matured", matured["matured"], matured["at"]
+        )
         with self.assertRaises(lp.PromotionRefusal):
-            lp.maturity_gate(self.installed)
-        # The generator takes the receipt itself as a gate input.
-        self.assertEqual(lp.gate_results([self.matured()]), [gate])
+            self.gate_for(foreign)
+        with self.assertRaises(lp.PromotionRefusal):  # no install at all
+            lp.maturity_gate(
+                self.cand, self.chain, [matured], resolve=lc.resolver_from([P1_D])
+            )
+        with self.assertRaises(lp.PromotionRefusal):  # a receipt is not a gate input
+            lp.gate_results([matured], self.cand)
 
     def test_an_answer_produces_the_owner_gate(self):
         approval = dict(
@@ -1075,16 +1122,23 @@ class ReceiptTests(unittest.TestCase):
             option_label="Approve",
             subject={"candidate": self.cand["id"]},
         )
-        gate = lp.owner_gate(approval)
+        gate = lp.owner_gate(approval, self.cand)
         self.assertEqual(
             (gate["result"], gate["ref"]), ("pass", "decision:approve-lesson")
         )
-        self.assertEqual(lp.gate_results([gate]), [gate])
-        self.assertEqual(lp.gate_results([approval]), [gate])
-        declined = lp.owner_gate(dict(approval, option="b", option_label="Decline"))
+        self.assertEqual(lp.gate_results([approval], self.cand), [gate])
+        declined = lp.owner_gate(
+            dict(approval, option="b", option_label="Decline"), self.cand
+        )
         self.assertEqual(declined["result"], "fail")
+        with self.assertRaises(lp.PromotionRefusal):  # about someone else
+            lp.owner_gate(dict(approval, option_label="Decline"), candidate("other"))
         with self.assertRaises(lp.PromotionRefusal):
-            lp.owner_gate(dict(approval, status="open", option=None, answered_at=None))
+            lp.owner_gate(
+                dict(approval, status="open", option=None, answered_at=None), self.cand
+            )
+        with self.assertRaises(lp.PromotionRefusal):
+            lp.gate_results([approval])  # no candidate to bind to
 
 
 if __name__ == "__main__":

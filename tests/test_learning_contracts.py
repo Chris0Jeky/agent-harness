@@ -111,8 +111,8 @@ def gate(name, at, evaluator=ORACLE, result="pass"):
         item.update(
             holdout_digest=HOLDOUT,
             training_excluded=True,
-            anchors=[],
-            metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
+            anchors=["exp_fixture-anchor"],
+            metrics={"cases": 20, "delta": 0.4, "wins": 8, "losses": 0, "anchored": 20},
             salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
         )
     return item
@@ -264,6 +264,9 @@ class MinimaTests(unittest.TestCase):
         records = chain()
         gate_ = records[1]["gates"][0]
         gate_["metrics"].update(metrics)
+        if "delta" not in metrics:  # keep the counts coherent unless delta is the point
+            m = gate_["metrics"]
+            m["delta"] = (m["wins"] - m["losses"]) / m["cases"]
         for name in [k for k, v in metrics.items() if v is None]:
             del gate_["metrics"][name]
         return lc.fold(candidate(), records)
@@ -292,6 +295,41 @@ class MinimaTests(unittest.TestCase):
             self.assertTrue(
                 any(fragment in e for e in result.errors), (metrics, result.errors)
             )
+
+    def test_counts_are_bounded_coherent_integers_before_any_arithmetic(self):
+        # Review of #512: negative counts crashed the fold, huge ones hung it,
+        # and wins 5 / losses -1 computed p = 0.
+        for metrics, fragment in (
+            ({"wins": -1, "losses": 30}, "not integers"),
+            ({"wins": 5, "losses": -1}, "not integers"),
+            ({"losses": 10**7}, "not integers"),
+            ({"wins": 5.0}, "not integers"),
+            ({"wins": 25}, "exceed its cases"),
+            ({"anchored": 0}, "anchors"),
+            ({"delta": 0.9}, "delta is not"),
+        ):
+            result = self.fold_with(**metrics)
+            self.assertEqual(result.state, "evaluating", metrics)
+            self.assertTrue(
+                any(fragment in e for e in result.errors), (metrics, result.errors)
+            )
+
+    def test_the_draw_follows_the_genome_and_precedes_the_gate(self):
+        gate_ = chain()[1]["gates"][0]
+        cand = candidate()
+        self.assertEqual(lc.salt_errors(gate_, cand), [])
+        late_genome = {"at": gate_["salt_draw"]["at"]}  # committed with the draw
+        self.assertIn("its genome", lc.salt_errors(gate_, cand, late_genome)[0])
+        future = dict(
+            gate_, salt_draw=dict(gate_["salt_draw"], at="2100-01-01T00:00:00Z")
+        )
+        self.assertIn("after the gate", lc.salt_errors(future, cand)[0])
+
+    def test_an_invalid_candidate_is_refused_not_crashed_on(self):
+        broken = candidate()
+        del broken["evidence"]
+        result = lc.fold(broken, chain())
+        self.assertTrue(any("evidence" in e for e in result.errors), result.errors)
 
     def test_the_sign_test_matches_the_audit_table(self):
         # The smallest passing W for L = 0..4 at one-sided p < 0.05.

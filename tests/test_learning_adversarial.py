@@ -306,7 +306,7 @@ class KeyGrindingTests(unittest.TestCase):
             "2026-09-01T01:30:00Z",
             holdout_digest="e" * 64,
             training_excluded=True,
-            anchors=[],
+            anchors=["exp_redteamE0001"],
             metrics={
                 "cases": 40,
                 "delta": 0.4,

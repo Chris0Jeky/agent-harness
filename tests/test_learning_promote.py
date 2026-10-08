@@ -57,8 +57,8 @@ def gate(name, at, result="pass", evaluator=ORACLE):
         item.update(
             holdout_digest="f" * 64,
             training_excluded=True,
-            anchors=[],
-            metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
+            anchors=["exp_fixture-anchor"],
+            metrics={"cases": 20, "delta": 0.4, "wins": 8, "losses": 0, "anchored": 20},
             salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
         )
     if name == "owner":

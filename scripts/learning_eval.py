@@ -119,17 +119,28 @@ def training_set(candidate, genome, experiences, ran=None):
     return ids, {effective_split_key(experiences[i]) for i in ids}
 
 
-def select(cases, split, training_ids, training_keys, experiences, salt=None):
-    """Cases the candidate may be judged on, and why the others were dropped."""
+def select(
+    cases, split, training_ids, training_keys, experiences, salt=None, drawn_at=None
+):
+    """Cases the candidate may be judged on, and why the others were dropped.
+
+    One case per distinct input (input_ref, oracle): clones are one piece of
+    evidence, so every count the gate reports is over distinct inputs. With a
+    beacon drawn at drawn_at, only cases anchored to an experience that existed
+    by then are admitted; an unanchored case's key, or one created after the
+    draw, could have been ground against the published beacon.
+    """
     counts = {
         "total": len(cases),
         "other_split": 0,
         "excluded_training": 0,
         "excluded_cluster": 0,
         "unanchored": 0,
+        "after_draw": 0,
+        "clones": 0,
     }
-    seen, chosen = set(), []
-    for case in cases:
+    seen, inputs, chosen = set(), set(), []
+    for case in sorted(cases, key=lambda c: c["id"]):
         if case["id"] in seen:
             raise EvalRefusal(f"duplicate case id {case['id']}")
         seen.add(case["id"])
@@ -153,14 +164,20 @@ def select(cases, split, training_ids, training_keys, experiences, salt=None):
             counts["excluded_training"] += 1
         elif case["split_key"] in training_keys:
             counts["excluded_cluster"] += 1
+        elif drawn_at is not None and (
+            anchor is None or contracts.parse_time(anchor["at"]) > drawn_at
+        ):
+            counts["after_draw"] += 1
+        elif (
+            key := (case["input_ref"], json.dumps(case["oracle"], sort_keys=True))
+        ) in inputs:
+            counts["clones"] += 1
         else:
+            inputs.add(key)
             counts["unanchored"] += anchor is None
             chosen.append(case)
     counts["evaluated"] = len(chosen)
-    # Clones of one task are one piece of evidence, however many ids they carry.
-    counts["distinct_inputs"] = len(
-        {(c["input_ref"], json.dumps(c["oracle"], sort_keys=True)) for c in chosen}
-    )
+    counts["distinct_inputs"] = len(chosen)
     return chosen, counts
 
 
@@ -376,7 +393,17 @@ def evaluate(
         <= contracts.parse_time(candidate["at"])
     ):
         raise EvalRefusal("the salt is drawn after the candidate is committed")
+    if (
+        salt_draw is not None
+        and genome is not None
+        and contracts.parse_time(salt_draw["at"]) <= contracts.parse_time(genome["at"])
+    ):
+        raise EvalRefusal("the salt is drawn after the genome is committed")
     salt = salt_draw["source"] if salt_draw else None
+    if split == "holdout" and salt_draw is None:
+        raise EvalRefusal(
+            "a hold-out run draws its split from a beacon: pass --salt-source and --salt-at"
+        )
     policy = {**default_policy(gate), **(policy or {})}
     if policy["min_cases"] < 1 or not 0 < policy["max_sign_p"] <= 1:
         raise EvalRefusal("min_cases is at least 1 and max_sign_p in (0, 1]")
@@ -394,7 +421,13 @@ def evaluate(
         candidate, genome, experiences, candidate_outputs["variant_ref"]
     )
     chosen, counts = select(
-        cases, split, training_ids, training_keys, experiences, salt
+        cases,
+        split,
+        training_ids,
+        training_keys,
+        experiences,
+        salt,
+        contracts.parse_time(salt_draw["at"]) if salt_draw else None,
     )
     label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
     graders = set()

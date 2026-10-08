@@ -54,6 +54,16 @@
         "excluded_cluster": {"type": "integer", "minimum": 0},
         "unanchored": {"type": "integer", "minimum": 0},
         "evaluated": {"type": "integer", "minimum": 0},
+        "after_draw": {
+          "description": "Hold-out cases dropped because no experience anchored them before the beacon was drawn.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "clones": {
+          "description": "Cases dropped as clones of an already chosen (input_ref, oracle).",
+          "type": "integer",
+          "minimum": 0
+        },
         "distinct_inputs": {
           "description": "Evaluated cases with distinct (input_ref, oracle): what min_cases counts.",
           "type": "integer",

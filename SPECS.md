@@ -1082,7 +1082,8 @@ also name `forbidden_items` the output must not contain (with or without `expect
 takes its grade from `eval-labels/v1`, whose evaluator is never `self`, never `oracle` and never
 the candidate's or genome producer's session, and demotes the run's tier and gate evaluator from
 `oracle` to that evaluator's kind. Pairs are compared case by
-case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
+case by case (wins, losses, ties, an exact two-sided sign test reported in `results`; the
+verdict and the gate use the one-sided `sign_p`) with breakdowns by memory category and
 layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
 distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is
 at least `min_delta` and the one-sided exact sign test on the discordant pairs is under
@@ -1102,8 +1103,11 @@ by the applier or the store, never by the learner: `installed` (the destination 
 commit, path and blob sha256 on `origin/main`), `observed` (an attributed use), `matured` (a window
 of at least `maturity_days` with no attributed regression) and `reverted`. `receipt_status` counts a
 receipt only against a live record of the folded chain that entered an installed state, at the
-candidate's destination; observed, matured and reverted count only after that install, and a
-revert inside a maturity window voids it. `learning_metrics` resolves authority from the dataset's
+candidate's exact destination repository and path, issued by someone other than the learner
+(its producer's session and lane differ from the candidate's); observed, matured and reverted
+count only after that install, and a revert inside a maturity window voids it. The fold sees
+records, not git: that the commit is on the destination's `origin/main` and the blob hashes to
+`blob_sha256` is the store's verification (L3) before it admits a receipt. `learning_metrics` resolves authority from the dataset's
 `decision-resolution/v1` records, and `promoted` (with revert rate and time to learn) counts
 verified installs, never entry into `active`; `activated` counts entry into `active`, shadow
 included. The maturity and owner gates are producible: `learning_promote.py --gates` takes a
@@ -1117,10 +1121,19 @@ single-user host cannot hide a salt from its own agents. So the order is reverse
 (with its evidence and genome) is committed first, and the split is drawn afterwards with a public
 beacon fixed after that commit, such as a later agent-hq `main` commit
 (`learning_eval.py --salt-source agent-hq@<sha> --salt-at <when it was fixed>`). The beacon string
-is the salt, so anyone can recompute the split. A passing hold-out gate names its `salt_draw`
+is the salt, so anyone can recompute the split. A beaconed hold-out admits only cases anchored to
+an experience whose `at` is no later than the draw (an unanchored key, or one created after the
+beacon was published, could have been ground against it), and one case per distinct input, so
+the gate's `cases`, `wins`, `losses` and `delta` are over distinct inputs and clones cannot
+inflate the sign test. The fold also requires the gate's counts to be integers in range and
+coherent (`wins + losses <= cases`, `anchored <= cases`, distinct anchors <= `anchored`, and
+`delta = (wins - losses) / cases`). A passing hold-out gate names its `salt_draw`
 (`source`, `at`), and the fold refuses a gate with none or one drawn at or before the candidate's
 `at`. The fold checks the order only: that the source is the first beacon after the commit (no
-shopping among later commits) is the store's check (L3), which reads agent-hq history.
+shopping among later commits), and that the candidate's own commit time is the store's import
+time rather than the self-reported `at`, are the store's checks (L3). The draw must also follow
+the genome's `at` and precede the gate's. Until the store binds those times, the fold closes
+attack E against reusing the public salt, not against a writer who back-dates its own records.
 
 ```powershell
 py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> --candidate-outputs <outputs.json> --candidate <lc.json> --experiences <experiences.jsonl> [--genome <gen.json>] [--labels <labels.json>...] [--split holdout|dev] [--gate offline_eval|replay|retrieval_regression]

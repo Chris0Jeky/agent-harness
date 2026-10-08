@@ -88,8 +88,8 @@ def gate(name, at, evaluator=ORACLE, **extra):
         item.update(
             holdout_digest="c" * 64,
             training_excluded=True,
-            anchors=[],
-            metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
+            anchors=["exp_fixture-anchor"],
+            metrics={"cases": 20, "delta": 0.4, "wins": 8, "losses": 0, "anchored": 20},
             salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
         )
     item.update(extra)

@@ -55,12 +55,15 @@ def gate_results(items, candidate=None):
     schema = contracts._document("promotion-record.schema.json")["$defs"]["gate_result"]
     gates = []
     for item in items:
-        # Producible gates: a matured receipt is the maturity gate, an answered
-        # per-candidate decision is the owner gate.
-        if isinstance(item, dict) and item.get("schema") == "promotion-receipt/v1":
-            item = maturity_gate(item)
-        elif isinstance(item, dict) and item.get("schema") == "decision-resolution/v1":
-            item = owner_gate(item)
+        # Producible gate: an answered per-candidate decision about this
+        # candidate is its owner gate. (A matured receipt needs the chain and
+        # the install: see maturity_gate.)
+        if isinstance(item, dict) and item.get("schema") == "decision-resolution/v1":
+            if candidate is None:
+                raise PromotionRefusal(
+                    "an owner gate is produced for a named candidate"
+                )
+            item = owner_gate(item, candidate)
         if isinstance(item, dict) and item.get("schema") in REPORTS:
             problems = contracts.validate_record(item)
             if problems:
@@ -154,10 +157,21 @@ def target_state(candidate, state, gates, resolve=None):
 TOOL_EVALUATOR = {"kind": "oracle", "runtime": "tool", "model": None}
 
 
-def maturity_gate(receipt):
-    """The maturity gate a verified matured receipt produces (receipt_status first)."""
-    if receipt.get("kind") != "matured" or contracts.validate_record(receipt):
-        raise PromotionRefusal("a maturity gate comes from a valid matured receipt")
+def maturity_gate(candidate, records, receipts, as_of=None, resolve=None, genome=None):
+    """The maturity gate of a live install, from its verified matured receipt.
+
+    receipt_status binds the receipt to this candidate's live install and voids
+    it on a revert inside the window; anything it does not verify is refused.
+    """
+    status, problems = contracts.receipt_status(
+        candidate, records, receipts, as_of=as_of, resolve=resolve, genome=genome
+    )
+    if status["matured"] is None:
+        raise PromotionRefusal(
+            "no verified matured receipt for this install"
+            + (f": {problems[0]}" if problems else "")
+        )
+    receipt = next(r for r in receipts if r.get("id") == status["matured"])
     return {
         "gate": "maturity",
         "result": "pass",
@@ -167,12 +181,17 @@ def maturity_gate(receipt):
     }
 
 
-def owner_gate(resolution):
-    """The owner gate an answered per-candidate decision produces: pass or fail as answered."""
+def owner_gate(resolution, candidate):
+    """The owner gate an answered decision about this candidate produces: pass or fail as answered."""
     if contracts.validate_record(resolution) or resolution["status"] != "answered":
         raise PromotionRefusal(
             "an owner gate comes from an answered decision-resolution"
         )
+    wrong = contracts._subject_errors(
+        f"decision:{resolution['decision']}", resolution, candidate
+    )
+    if wrong:
+        raise PromotionRefusal(wrong[0])
     approval = contracts.classes()["approval"]
     meaning = contracts.meaning(resolution)
     if meaning not in approval["grant"] + approval["deny"]:
@@ -352,10 +371,16 @@ def main(argv=None):
             if args.resolutions
             else None
         )
+        genome = contracts.read_records(args.genome)[0] if args.genome else None
         if args.mature:
             gates.append(
                 clock_maturity_gate(
-                    candidates[0], records, at, args.regressed, resolve=resolve
+                    candidates[0],
+                    records,
+                    at,
+                    args.regressed,
+                    resolve=resolve,
+                    genome=genome,
                 )
             )
         record = next_record(
@@ -366,7 +391,7 @@ def main(argv=None):
             at,
             args.reason,
             resolve=resolve,
-            genome=contracts.read_records(args.genome)[0] if args.genome else None,
+            genome=genome,
         )
     except (
         PromotionRefusal,

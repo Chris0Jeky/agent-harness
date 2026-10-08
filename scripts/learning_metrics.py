@@ -208,10 +208,14 @@ def learning_metrics(records, split="dev", as_of=None):
     # Authority is resolved from the dataset's decision-resolution/v1 records (the
     # store's reading of agent-hq origin/main); with none, nothing above P0 is live.
     resolve = contracts.resolver_from(records.get("decision-resolution/v1", []))
+    genomes = {g["id"]: g for g in records.get("candidate-genome/v1", [])}
     candidates, lessons, promoted_skills = [], [], set()
     for candidate in records.get(CANDIDATE, []):
         moves = promotions[candidate["id"]]
-        folded = contracts.fold(candidate, moves, resolve=resolve)
+        genome = genomes.get(candidate.get("genome"))
+        folded = contracts.fold(
+            candidate, moves, as_of=as_of, resolve=resolve, genome=genome
+        )
         problems.extend(
             {"candidate": candidate["id"], "error": error} for error in folded.errors
         )
@@ -220,7 +224,12 @@ def learning_metrics(records, split="dev", as_of=None):
         activation = next((move for move in chain if move["to"] == "active"), None)
         # Promotion is a verified install receipt, never entry into active (K3).
         status, receipt_problems = contracts.receipt_status(
-            candidate, moves, receipts[candidate["id"]], resolve=resolve
+            candidate,
+            moves,
+            receipts[candidate["id"]],
+            as_of=as_of,
+            resolve=resolve,
+            genome=genome,
         )
         problems.extend(
             {"candidate": candidate["id"], "error": error} for error in receipt_problems

@@ -187,6 +187,30 @@ class RefusalTests(unittest.TestCase):
             run(salt_draw=other)["holdout_digest"], run()["holdout_digest"]
         )
 
+    def test_only_cases_anchored_before_the_draw_enter_a_beaconed_holdout(self):
+        inputs = load()
+        cases = {c["id"]: c for c in inputs["cases"]}
+        late = cases["case_static-tie"]["experience"]
+        for exp in inputs["experiences"]:
+            if exp["id"] == late:
+                exp["at"] = "2026-09-04T00:00:01Z"  # after SALT_DRAW["at"]
+                exp["observed_at"] = "2026-09-04T00:00:02Z"
+        unanchored = dict(
+            copy.deepcopy(cases["case_static-tie"]),
+            id="case_unanchored",
+            experience=None,
+            input_ref="synthetic:memory-eval-example/unanchored",
+        )
+        inputs["cases"].append(unanchored)
+        report = run(inputs)
+        self.assertEqual(
+            report["cases"]["after_draw"],
+            1
+            + (lc.split_of(unanchored["split_key"], SALT_DRAW["source"]) == "holdout"),
+        )
+        self.assertNotIn("case_static-tie", report["gate"]["anchors"] + [late])
+        self.assertRefused("draws its split from a beacon", salt_draw=None)
+
     def test_unresolvable_training_evidence_refuses(self):
         inputs = load()
         inputs["experiences"] = inputs["experiences"][2:]
@@ -424,6 +448,35 @@ class ReviewRegressionTests(unittest.TestCase):
         report = run(inputs)
         self.assertEqual(report["cases"]["distinct_inputs"], 1)
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
+    def test_clones_cannot_inflate_the_sign_test(self):
+        # Review of #512: 19 tie inputs plus one winning input cloned 5 times
+        # once passed (5 wins, p = 0.031); clones are one piece of evidence.
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        cases = [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_tie-{i:06d}",
+                input_ref=f"synthetic:t/{i}",
+            )
+            for i in range(19)
+        ] + [
+            dict(copy.deepcopy(base), id=f"case_win-{i:06d}", input_ref="synthetic:w")
+            for i in range(5)
+        ]
+        inputs["cases"] = cases
+        inputs["baseline"]["outputs"] = {c["id"]: {"text": "main"} for c in cases}
+        inputs["candidate_outputs"]["outputs"] = {
+            c["id"]: {"text": "main"} for c in cases
+        }
+        for c in cases[19:]:
+            inputs["baseline"]["outputs"][c["id"]] = {"text": "master"}
+        report = run(inputs)
+        self.assertEqual(
+            (report["cases"]["clones"], report["cases"]["distinct_inputs"]), (4, 20)
+        )
+        self.assertEqual((report["results"]["wins"], report["verdict"]), (1, "fail"))
 
     def test_experience_observations_order_by_instant_not_text(self):
         first = copy.deepcopy(load()["experiences"][0])
