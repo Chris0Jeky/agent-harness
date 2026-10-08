@@ -25,7 +25,7 @@ def load_module(name):
 lm = load_module("learning_metrics")
 ledger = load_module("outcome_ledger")
 lc = lm.contracts
-AT = "2026-10-01T00:00:00Z"
+AT = "2026-09-24T00:00:00Z"
 ACTIVE = "2026-10-02T00:00:00Z"
 AFTER = "2026-10-03T00:00:00Z"
 AS_OF = dt.datetime(2026, 10, 8, tzinfo=dt.timezone.utc)
@@ -54,7 +54,7 @@ def experience(key="run", at=AT, runtime="codex", side="dev", **changes):
     return record
 
 
-def memory(ref="memory:synthetic/lesson", **changes):
+def memory(ref="memory:synthetic/lesson.md", **changes):
     item = {"ref": ref, "supplied": True, "read": False, "cited": False, "bytes": 100}
     item.update(changes)
     return item
@@ -122,27 +122,62 @@ def move(cand, n, frm, to, at=ACTIVE, prev=None, gates=(), **changes):
     return record
 
 
-def activation(cand, landed="memory:synthetic/lesson", at=ACTIVE):
-    first = move(cand, 1, "candidate", "evaluating", at=AT)
-    gates = []
-    for name in lc.required_gates(cand):
-        item = {"gate": name, "result": "pass", "at": at, "evaluator": dict(ORACLE)}
-        if name in ("offline_eval", "replay"):
-            item.update(holdout_digest="a" * 64, training_excluded=True)
-        gates.append(item)
-    return [
-        first,
-        move(
+def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="active"):
+    """Build a legal path (or prefix), with each gate judged in its source stay."""
+    needed = lc.required_gates(cand)
+    states = ["candidate"]
+    if cand["promotion_class"] != "P0":
+        states.append("evaluating")
+        if "canary" in needed or until == "canary":
+            states.append("canary")
+        states.append("probation")
+    states.append("active")
+    chain = []
+    evaluated_at = (lc.parse_time(cand["at"]) + dt.timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    for frm, to in zip(states, states[1:]):
+        when = (
+            at if to == "active" else cand["at"] if frm == "candidate" else evaluated_at
+        )
+        gates = []
+        for name in needed:
+            if frm not in lc.lifecycle()["gate_sources"][name]:
+                continue
+            if name == "owner" and to != "active":
+                continue
+            item = {
+                "gate": name,
+                "result": "pass",
+                "at": when,
+                "evaluator": dict(ORACLE),
+            }
+            if name in ("offline_eval", "replay"):
+                item.update(holdout_digest="a" * 64, training_excluded=True, anchors=[])
+            if name == "owner":
+                item.update(
+                    evaluator={"kind": "owner", "runtime": "owner", "session": "owner"},
+                    ref="decision:synthetic-approval",
+                )
+            gates.append(item)
+        record = move(
             cand,
-            2,
-            "evaluating",
-            "active",
-            at=at,
-            prev=first["id"],
+            len(chain) + 1,
+            frm,
+            to,
+            at=when,
+            prev=chain[-1]["id"] if chain else None,
             gates=gates,
-            landed=landed,
-        ),
-    ]
+        )
+        if to == "active":
+            record["landed"] = landed
+        chain.append(record)
+        if to == until:
+            break
+    folded = lc.fold(cand, chain, as_of=lc.parse_time(at))
+    if folded.errors or folded.state != until:
+        raise AssertionError(folded.errors or f"path did not reach {until}")
+    return chain
 
 
 def dataset(*records):
@@ -164,7 +199,7 @@ class MetricTests(unittest.TestCase):
     def test_assisted_delta_uses_supplied_and_rejects_reverted_or_regressed_success(
         self,
     ):
-        good = experience("good", memory_used=["memory:fallback"])
+        good = experience("good", memory_used=["memory:synthetic/fallback.md"])
         reverted = experience(
             "reverted",
             outcome={"immediate": "merged", "matured": "reverted", "regression": False},
@@ -174,7 +209,9 @@ class MetricTests(unittest.TestCase):
             outcome={"immediate": "published", "matured": None, "regression": True},
         )
         plain = experience("plain")
-        overridden = experience("overridden", memory_used=["memory:fallback"])
+        overridden = experience(
+            "overridden", memory_used=["memory:synthetic/fallback.md"]
+        )
         result = aggregate(
             good,
             reverted,
@@ -202,7 +239,15 @@ class MetricTests(unittest.TestCase):
                 ("unknown", "oracle"),
             )
         ]
-        result = aggregate(exp, memory_use(exp, items))["memory_harm_rate"]
+        mu = memory_use(exp, items)
+        self.assertTrue(
+            any("judged by the run itself" in e for e in lc.validate_record(mu))
+        )
+        # Ingestion rejects self judgments; inject one to exercise the metric's
+        # own exclusion as well, rather than weakening this negative fixture.
+        records = dataset(exp)
+        records[lm.MEMORY_USE].append(mu)
+        result = lm.learning_metrics(records)["metrics"]["memory_harm_rate"]
         self.assertEqual(
             result,
             {"n": 3, "harmed": 1, "helped": 1, "harm_rate": 1 / 3, "help_rate": 1 / 3},
@@ -253,36 +298,38 @@ class MetricTests(unittest.TestCase):
 
     def test_lesson_reuse_is_after_activation_matches_versions_and_latest_landed(self):
         cand = candidate()
-        chain = activation(cand, "memory:synthetic/old")
+        chain = activation(cand, "memory:synthetic/old.md")
         chain.append(
             move(
                 cand,
-                3,
+                len(chain) + 1,
                 "active",
                 "reinforced",
                 prev=chain[-1]["id"],
-                landed="memory:synthetic/new@v1",
+                landed="memory:synthetic/new.md@v1",
             )
         )
-        before = experience("before", memory_used=["memory:synthetic/new"])
-        equal = experience("equal", at=ACTIVE, memory_used=["memory:synthetic/new"])
-        after = experience("after", at=AFTER, memory_used=["memory:synthetic/new@v2"])
-        old = experience("old", at=AFTER, memory_used=["memory:synthetic/old"])
+        before = experience("before", memory_used=["memory:synthetic/new.md"])
+        equal = experience("equal", at=ACTIVE, memory_used=["memory:synthetic/new.md"])
+        after = experience(
+            "after", at=AFTER, memory_used=["memory:synthetic/new.md@v2"]
+        )
+        old = experience("old", at=AFTER, memory_used=["memory:synthetic/old.md"])
         unsupplied = experience(
-            "unsupplied", at=AFTER, memory_used=["memory:synthetic/new"]
+            "unsupplied", at=AFTER, memory_used=["memory:synthetic/new.md"]
         )
         unused = candidate("unused", kind="consolidation")
         result = aggregate(
             cand,
             *chain,
             unused,
-            *activation(unused, "memory:unused"),
+            *activation(unused, "memory:synthetic/unused.md"),
             before,
             equal,
             after,
             old,
             unsupplied,
-            memory_use(unsupplied, [memory("memory:synthetic/new", supplied=False)]),
+            memory_use(unsupplied, [memory("memory:synthetic/new.md", supplied=False)]),
         )["lesson_reuse"]
         self.assertEqual(
             result,
@@ -320,7 +367,14 @@ class MetricTests(unittest.TestCase):
         cand, pending = candidate(), candidate("pending", kind="skill")
         chain = activation(cand)
         chain.append(
-            move(cand, 3, "active", "reverted", at=AFTER, prev=chain[-1]["id"])
+            move(
+                cand,
+                len(chain) + 1,
+                "active",
+                "reverted",
+                at=AFTER,
+                prev=chain[-1]["id"],
+            )
         )
         result = aggregate(cand, pending, *chain)["candidate_to_promoted_ratio"]
         self.assertEqual(
@@ -341,19 +395,31 @@ class MetricTests(unittest.TestCase):
         promoted, clean = candidate("reverted"), candidate("clean")
         chain = activation(promoted)
         chain.append(
-            move(promoted, 3, "active", "reverted", at=AFTER, prev=chain[-1]["id"])
+            move(
+                promoted,
+                len(chain) + 1,
+                "active",
+                "reverted",
+                at=AFTER,
+                prev=chain[-1]["id"],
+            )
         )
         records = [promoted, clean, *chain, *activation(clean)]
         for state in ("canary", "probation"):
-            cand = candidate(state)
-            first = move(cand, 1, "candidate", "evaluating", at=AT)
-            second = move(cand, 2, "evaluating", state, prev=first["id"])
+            cand = candidate(state, kind="prompt")
+            prefix = activation(cand, until=state)
             records.extend(
                 [
                     cand,
-                    first,
-                    second,
-                    move(cand, 3, state, "reverted", at=AFTER, prev=second["id"]),
+                    *prefix,
+                    move(
+                        cand,
+                        len(prefix) + 1,
+                        state,
+                        "reverted",
+                        at=AFTER,
+                        prev=prefix[-1]["id"],
+                    ),
                 ]
             )
         self.assertEqual(
@@ -362,7 +428,7 @@ class MetricTests(unittest.TestCase):
         )
 
     def test_time_to_learn_earliest_complete_evidence_and_ledger_quantiles(self):
-        early, late = experience("early"), experience("late", at="2026-10-01T12:00:00Z")
+        early, late = experience("early"), experience("late", at="2026-09-24T12:00:00Z")
         records = [early, late]
         for n, day in enumerate((2, 3, 4, 5)):
             cand = candidate(str(n), evidence=[late["id"], early["id"]])
@@ -373,17 +439,22 @@ class MetricTests(unittest.TestCase):
         records.extend([missing, *activation(missing)])
         self.assertEqual(
             aggregate(*records)["time_to_learn"],
-            {"n": 4, "missing_evidence": 1, "median_hours": 72.0, "p90_hours": 96.0},
+            {"n": 4, "missing_evidence": 1, "median_hours": 240.0, "p90_hours": 264.0},
         )
-        self.assertEqual(ledger._quantile([24, 48, 72, 96], 0.5), 72.0)
+        self.assertEqual(ledger._quantile([192, 216, 240, 264], 0.5), 240.0)
 
     def test_cross_runtime_uses_loaded_evidence_runtimes_and_success_definition(self):
         evidence = experience("evidence", runtime="claude", side="holdout")
         cand = candidate(evidence=[evidence["id"]])
         same = experience(
-            "same", at=AFTER, runtime="claude", memory_used=["memory:synthetic/lesson"]
+            "same",
+            at=AFTER,
+            runtime="claude",
+            memory_used=["memory:synthetic/lesson.md"],
         )
-        cross = experience("cross", at=AFTER, memory_used=["memory:synthetic/lesson"])
+        cross = experience(
+            "cross", at=AFTER, memory_used=["memory:synthetic/lesson.md"]
+        )
         cross["outcome"] = {
             "immediate": "merged",
             "matured": "reverted",
@@ -478,15 +549,15 @@ class MetricTests(unittest.TestCase):
         chain.append(
             move(
                 cand,
-                3,
+                len(chain) + 1,
                 "reinforced",
                 "reinforced",
                 at=AFTER,
                 prev=chain[-1]["id"],
-                landed="memory:invalid",
+                landed="memory:synthetic/invalid.md",
             )
         )
-        exp = experience("use", at=AFTER, memory_used=["memory:synthetic/lesson"])
+        exp = experience("use", at=AFTER, memory_used=["memory:synthetic/lesson.md"])
         result = lm.learning_metrics(dataset(cand, *chain, exp))
         self.assertEqual(result["metrics"]["lesson_reuse"]["uses"], 1)
         self.assertEqual(
