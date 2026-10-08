@@ -347,9 +347,7 @@ class DispatchAsHookTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            dispatch.floor_posture(
-                {"tier": 1, "floor_posture": "guide", "flags": {}}
-            ),
+            dispatch.floor_posture({"tier": 1, "floor_posture": "guide", "flags": {}}),
             "guide",
         )
         faulty = workspace / "faulty_dispatch.py"
