@@ -178,7 +178,9 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(len(paths), 10)
         for path in paths:
             for record in lc.read_records(path):
-                self.assertEqual(lc.validate_record(record), [], record.get("id", path.name))
+                self.assertEqual(
+                    lc.validate_record(record), [], record.get("id", path.name)
+                )
 
     def test_example_chain_folds_to_active_in_shadow(self):
         result = lc.fold(candidate(), chain())
