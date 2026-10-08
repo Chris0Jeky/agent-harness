@@ -143,6 +143,10 @@
         "usd": {"type": ["number", "null"], "minimum": 0}
       }
     },
+    "variant": {
+      "description": "What the run executed under, when it took part in a comparison: gen:<genome id> for a candidate arm, estate:<repo>@<sha> or baseline:<label> for the baseline arm.",
+      "$ref": "common.schema.json#/$defs/ref"
+    },
     "split_key": {
       "description": "The equivalence class that decides the sealed hold-out split (default source.kind|source.key). Runs that share a split_key land on the same side.",
       "type": "string",

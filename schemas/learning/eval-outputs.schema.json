@@ -33,7 +33,10 @@
           "abstained": {"type": "boolean"},
           "tokens": {"type": "integer", "minimum": 0},
           "seconds": {"type": "number", "minimum": 0},
-          "error": {"$ref": "common.schema.json#/$defs/short_text"}
+          "error": {"$ref": "common.schema.json#/$defs/short_text"},
+          "completed": {"type": "boolean"},
+          "turns": {"type": "integer", "minimum": 0},
+          "recovered": {"type": ["boolean", "null"]}
         }
       }
     },

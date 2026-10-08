@@ -192,6 +192,15 @@ def grade(case, output):
         return re.search(oracle["pattern"], output.get("text") or "") is not None, {}
     if kind == "abstain":
         return bool(output.get("abstained")) == oracle["expected_abstain"], {}
+    if kind == "procedure":
+        detail = {k: output.get(k) for k in ("completed", "turns", "recovered")}
+        passed = output.get("completed") is True
+        if "max_turns" in oracle:
+            turns = output.get("turns")
+            passed = passed and turns is not None and turns <= oracle["max_turns"]
+        if oracle.get("require_recovery"):
+            passed = passed and output.get("recovered") is True
+        return passed, detail
     if kind == "numeric":
         value = output.get("value")
         if value is None:
@@ -267,6 +276,33 @@ def _retrieval(rows):
             "recall_at_k": sum(d.get("recall_at_k", 0.0) for d in details)
             / len(ranked),
             "mrr": sum(d.get("reciprocal_rank", 0.0) for d in details) / len(ranked),
+        }
+    return result
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def _procedural(rows, cases, baseline, candidate_outputs):
+    """Completion, turns, recovery and cost of procedural cases, per variant."""
+    procedural = {c["id"] for c in cases if c["oracle"]["kind"] == "procedure"}
+    if not procedural:
+        return None
+    result = {"n": len(procedural)}
+    for variant, outputs in (("baseline", baseline), ("candidate", candidate_outputs)):
+        runs = [outputs["outputs"].get(case) or {} for case in sorted(procedural)]
+        # Completion agrees with grading (an errored run did not complete), and
+        # turns count only completed runs, so giving up early never looks efficient.
+        done = [r for r in runs if r.get("completed") is True and not r.get("error")]
+        recovered = [r["recovered"] for r in runs if r.get("recovered") is not None]
+        result[variant] = {
+            "completion_rate": len(done) / len(runs),
+            "turns_mean": _mean(r.get("turns") for r in done),
+            "recovery_rate": (sum(recovered) / len(recovered)) if recovered else None,
+            "tokens_mean": _mean(r.get("tokens") for r in runs),
+            "seconds_mean": _mean(r.get("seconds") for r in runs),
         }
     return result
 
@@ -440,6 +476,7 @@ def evaluate(
             "by_category": _breakdown(rows, "category"),
             "by_layer": _breakdown(rows, "layer"),
             "retrieval": _retrieval(rows),
+            "procedural": _procedural(rows, chosen, baseline, candidate_outputs),
             "cost": {
                 "baseline": _cost(baseline["outputs"], chosen),
                 "candidate": _cost(candidate_outputs["outputs"], chosen),

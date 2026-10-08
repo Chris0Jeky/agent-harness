@@ -53,7 +53,7 @@
     },
     "fraction": {"type": "number", "minimum": 0, "maximum": 1},
     "oracle": {
-      "description": "Deterministic graders first. judge means no deterministic oracle exists: the grade comes from an eval-labels/v1 file and the run is labelled with that evaluator's kind.",
+      "description": "Deterministic graders first. procedure grades a procedural run (a skill replayed on a historical task): it passes when the run completed, within max_turns when set, and recovered from its injected failure when require_recovery is set. judge means no deterministic oracle exists: the grade comes from an eval-labels/v1 file and the run is labelled with that evaluator's kind.",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
@@ -62,7 +62,7 @@
           "type": "string",
           "enum": [
             "exact", "contains_all", "contains_none", "regex", "set_match",
-            "ranked_recall", "abstain", "numeric", "judge"
+            "ranked_recall", "abstain", "numeric", "procedure", "judge"
           ]
         },
         "expected": {"type": "string", "maxLength": 2000},
@@ -74,7 +74,9 @@
         "k": {"type": "integer", "minimum": 1},
         "expected_abstain": {"type": "boolean"},
         "at_least": {"type": "number"},
-        "at_most": {"type": "number"}
+        "at_most": {"type": "number"},
+        "max_turns": {"type": "integer", "minimum": 1},
+        "require_recovery": {"type": "boolean"}
       },
       "allOf": [
         {"if": {"properties": {"kind": {"const": "exact"}}}, "then": {"required": ["expected"]}},

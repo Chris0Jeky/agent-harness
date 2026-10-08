@@ -942,7 +942,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 
 | Record | Fields | Rules beyond the schema |
 |---|---|---|
-| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest, `fold_experiences`); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
+| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `variant`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest, `fold_experiences`); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
 | `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, never `self` or the run's own session |
 | `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
@@ -950,6 +950,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
+| `system-run/v1` (`sys_`) | `candidate`, `baseline_variant`, `candidate_variant`, `excluded_training`, `arms`, `policy`, `verdict`, `reasons`, `gate` | a system evaluation over the experience ledger's two arms (runs tagged with `variant`); a pass or fail emits the candidate's `canary` gate, `insufficient` none |
 | `eval-run/v1` (`run_`) | `suite`, `split`, `gate_name`, `candidate`, `genome`, `baseline_ref`, `candidate_ref`, `tier`, `evaluator`, `training`, `cases`, `holdout_digest`, `anchors`, `policy`, `results`, `verdict`, `gate` | the replay evaluator's report; on the hold-out its `gate` is a ready `promotion-record/v1` gate result whose digest and anchors match the run's |
 
 **Lifecycle** (`schemas/learning/lifecycle.json`). A candidate is born in `candidate` (the plan's
@@ -1067,6 +1068,27 @@ roots, the frontier, the unmeasured genomes, the best genome per objective and t
 
 ```powershell
 py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctness,cost] [--parents 4]
+
+**Procedural and system evals** (W2). A procedural case (`layer: procedural`, oracle
+`procedure`) replays a proposed skill on a historical task it was not generated from: the
+recorded output carries `completed`, `turns` and `recovered`, and the case passes when the run
+completed, within `max_turns` when set, and recovered from its injected failure when
+`require_recovery` is set. The run's `results.procedural` reports completion rate (an errored run did
+not complete), mean turns over completed runs, recovery rate and mean cost per variant. A system evaluation (`scripts/learning_system.py`)
+compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
+genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
+the candidate's own evidence. A run's `variant` is fixed by its first observation, like its split
+key. Each arm reports success
+(`experience_succeeded`, the one success definition), maturity, clean and revert rates,
+regressions, triage precision, owner-correction rate and cost. It is a non-regression gate: with
+at least `min_runs` (20) runs and `min_matured` (10) matured runs per arm (reverts are only known
+once runs mature, so an unmatured arm is `insufficient`, never a silent pass), the candidate passes
+when success has not fallen, and reverts and owner corrections have not risen, beyond the policy's
+tolerances (0 by default). The
+`canary` gate it emits drops into the record leaving `canary`.
+
+```powershell
+py -3 scripts\learning_system.py --experiences <experiences.jsonl>... --candidate <lc.json> --baseline-variant <ref> --candidate-variant gen:<id> [--min-runs 20]
 ```
 
 **Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
