@@ -1234,6 +1234,14 @@ the next projection, and an incremental reader whose cursor is past it never see
 stream gains a log offset (#511), a consumer re-reads the whole stream (the reducers are cheap and
 deterministic) rather than trusting a cursor across a re-projection.
 
+**Retiring a consolidated single** (cc#835). `probation -> merged` joins `evaluating -> merged`
+and `candidate -> merged`, so a single (typically a protected P1 owner correction) that reached
+probation before its consolidation was admitted can still retire into it. `merged` is not
+live-capable, so a merge out of a live probation folds to `effect: shadow` and the applier removes
+the installed note in that move, guarded by the expected hash. `merged_into` names the superseder;
+that it is admitted, of a class no lower than the single's, and (for a protected single) carries
+a counted owner pass is L2's and the store's check, since the fold sees one candidate.
+
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
 self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
