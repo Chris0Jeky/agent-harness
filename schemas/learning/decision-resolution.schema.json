@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/decision-resolution.schema.json",
+  "title": "decision-resolution/v1",
+  "description": "What a resolver returns for one agent-hq decision, read from agent-hq origin/main only (an answer in a working copy does not count: git history is the tamper evidence). The fold calls the injected resolver with a decision: ref and checks a live effect, an owner gate, a per-promotion approval or a veto window against this answer. Measures are the resolver's measurements of the class's exit bar and graduation. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "decision", "source", "status", "option", "answered_at",
+    "created", "expires", "subject", "measures"
+  ],
+  "properties": {
+    "schema": {"const": "decision-resolution/v1"},
+    "decision": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$"},
+    "source": {
+      "description": "The agent-hq origin/main commit the decision file was read at.",
+      "type": "string",
+      "pattern": "^agent-hq@[0-9a-f]{40}$"
+    },
+    "status": {
+      "description": "answered: the owner chose an option. defaulted: the decision expired and its default_on_expiry option applied (never valid for an approval). open, expired (no default) and withdrawn carry no option.",
+      "type": "string",
+      "enum": ["answered", "defaulted", "open", "expired", "withdrawn"]
+    },
+    "option": {"type": ["string", "null"], "maxLength": 40},
+    "answered_at": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+    },
+    "created": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "expires": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+    },
+    "subject": {
+      "description": "Set on per-promotion approvals and veto windows: the one candidate the answer is about.",
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate"],
+          "properties": {
+            "candidate": {"$ref": "common.schema.json#/$defs/lc_id"}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "measures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_bars", "graduation"],
+      "properties": {
+        "exit_bars": {
+          "type": "object",
+          "propertyNames": {"$ref": "common.schema.json#/$defs/slug"},
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["met", "at"],
+            "properties": {
+              "met": {"type": "boolean"},
+              "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+              "ref": {"$ref": "common.schema.json#/$defs/ref"}
+            }
+          }
+        },
+        "graduation": {
+          "type": "object",
+          "propertyNames": {"$ref": "common.schema.json#/$defs/promotion_class"},
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["graduated", "at"],
+            "properties": {
+              "graduated": {"type": "boolean"},
+              "at": {
+                "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+              },
+              "approved": {"type": "integer", "minimum": 0},
+              "reverts": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    }
+  }
+}
