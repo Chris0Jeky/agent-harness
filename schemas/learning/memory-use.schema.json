@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/memory-use.schema.json",
+  "title": "memory-use/v1",
+  "description": "Which memories and skills were supplied to one experience and, where measurable, which were read, cited or blamed. id is mu_ + the experience id's hash suffix, so one experience has one memory-use record (re-observed like the experience). Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "observed_at", "producer", "experience",
+    "memories", "skills", "method"
+  ],
+  "properties": {
+    "schema": {"const": "memory-use/v1"},
+    "id": {"$ref": "common.schema.json#/$defs/mu_id"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "observed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "experience": {"$ref": "common.schema.json#/$defs/exp_id"},
+    "memories": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "supplied", "read", "cited"],
+        "properties": {
+          "ref": {
+            "description": "memory:<project>/<name>, optionally @<git blob sha> to pin the version supplied.",
+            "$ref": "common.schema.json#/$defs/ref"
+          },
+          "supplied": {"type": "boolean"},
+          "read": {"type": ["boolean", "null"]},
+          "cited": {"type": ["boolean", "null"]},
+          "bytes": {"type": ["integer", "null"], "minimum": 0},
+          "effect": {"$ref": "#/$defs/effect"}
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "invoked_by"],
+        "properties": {
+          "ref": {
+            "description": "skill:<name>, for example skill:review-and-ship.",
+            "$ref": "common.schema.json#/$defs/ref"
+          },
+          "invoked_by": {
+            "type": "string",
+            "enum": ["model", "user", "subagent", "hook"]
+          },
+          "completed": {"type": ["boolean", "null"]},
+          "effect": {"$ref": "#/$defs/effect"}
+        }
+      }
+    },
+    "method": {
+      "description": "How each signal was measured, e.g. supplied: index-loaded, read: tool-read, cited: name-mention. null means the signal was not measured.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supplied", "read", "cited"],
+      "properties": {
+        "supplied": {"$ref": "common.schema.json#/$defs/slug"},
+        "read": {
+          "anyOf": [{"$ref": "common.schema.json#/$defs/slug"}, {"type": "null"}]
+        },
+        "cited": {
+          "anyOf": [{"$ref": "common.schema.json#/$defs/slug"}, {"type": "null"}]
+        }
+      }
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  },
+  "$defs": {
+    "effect": {
+      "description": "Credit or blame, assigned after the fact by an evaluator other than the run itself.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "evaluator"],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": ["helped", "harmed", "neutral", "unknown"]
+        },
+        "evaluator": {"$ref": "common.schema.json#/$defs/evaluator"},
+        "ref": {"$ref": "common.schema.json#/$defs/ref"}
+      }
+    }
+  }
+}

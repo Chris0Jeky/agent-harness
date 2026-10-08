@@ -1,0 +1,54 @@
+{
+  "schema": "candidate-genome/v1",
+  "id": "gen_example-0001",
+  "at": "2026-09-08T11:05:00Z",
+  "producer": {
+    "lane": "example-steward",
+    "runtime": "claude",
+    "model": "example-model",
+    "session": "session-steward-1"
+  },
+  "parent": {
+    "example-config": "cccccccccccccccccccccccccccccccccccccccc",
+    "example-repo": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "parent_genome": null,
+  "changes": {
+    "recipes": [
+      {
+        "repo": "example-config",
+        "path": "recipes/test-gaps.json",
+        "op": "modify",
+        "after_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  },
+  "candidates": [
+    "lc_example-0001"
+  ],
+  "training_evidence": {
+    "experiences": [
+      "exp_4655f2b5185f528e",
+      "exp_a4d8694eaa84d69a"
+    ],
+    "ledger": [
+      "example-lane/007/example-repo--test-gaps-1"
+    ]
+  },
+  "evaluation": {
+    "suite": "recipe-replay",
+    "baseline": {
+      "example-config": "cccccccccccccccccccccccccccccccccccccccc"
+    },
+    "holdout_digest": "0000000000000000000000000000000000000000000000000000000000000001",
+    "result_ref": "eval-run:recipe-replay/2026-09-08-1"
+  },
+  "objectives": {
+    "correctness": 0.82,
+    "reliability": 0.97,
+    "cost": 1.4,
+    "latency": 1180,
+    "owner_intervention": 0,
+    "reverts": 0
+  }
+}

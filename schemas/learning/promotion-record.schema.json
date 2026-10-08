@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/promotion-record.schema.json",
+  "title": "promotion-record/v1",
+  "description": "One lifecycle transition of one candidate, with the gate results that justified it; a move in either direction (rejection, revert) is a promotion record too. Records chain through prev, and a candidate's state is the fold of its chain. Legal edges, gate placement and per-class activation gates are data: lifecycle.json and promotion-classes.json. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "producer", "candidate", "prev", "from", "to",
+    "promotion_class", "effect", "gates", "reason"
+  ],
+  "properties": {
+    "schema": {"const": "promotion-record/v1"},
+    "id": {"$ref": "common.schema.json#/$defs/prom_id"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "prev": {
+      "description": "The candidate's previous promotion record, null for the first. Two records naming the same prev are a fork and the fold refuses them.",
+      "anyOf": [{"$ref": "common.schema.json#/$defs/prom_id"}, {"type": "null"}]
+    },
+    "from": {"$ref": "common.schema.json#/$defs/state"},
+    "to": {"$ref": "common.schema.json#/$defs/state"},
+    "promotion_class": {"$ref": "common.schema.json#/$defs/promotion_class"},
+    "effect": {
+      "description": "Whether the candidate's artifact is on a live surface after this move. shadow: evaluated and shown, nothing written live. live: only into canary, probation, active or reinforced, and above P0 only with authority.",
+      "type": "string",
+      "enum": ["shadow", "live"]
+    },
+    "authority": {
+      "description": "The owner decision that permits a live effect: decision:<agent-hq inbox id>.",
+      "$ref": "#/$defs/decision"
+    },
+    "gates": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/gate_result"}
+    },
+    "reason": {"$ref": "common.schema.json#/$defs/short_text"},
+    "landed": {
+      "description": "Where a live promotion landed: pr:<url>, memory:<project>/<name>.md, commit:<repo>@<sha>.",
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "genome": {"$ref": "common.schema.json#/$defs/gen_id"},
+    "merged_into": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "superseded_by": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "revert": {
+      "description": "A negative learning event against the blamed guidance.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blamed", "regression_evidence"],
+      "properties": {
+        "blamed": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              {"$ref": "common.schema.json#/$defs/lc_id"},
+              {"$ref": "common.schema.json#/$defs/ref"}
+            ]
+          }
+        },
+        "regression_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "common.schema.json#/$defs/exp_id"}
+        }
+      }
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"to": {"const": "merged"}}},
+      "then": {"required": ["merged_into"]}
+    },
+    {
+      "if": {"properties": {"to": {"const": "superseded"}}},
+      "then": {"required": ["superseded_by"]}
+    },
+    {
+      "if": {"properties": {"to": {"const": "reverted"}}},
+      "then": {"required": ["revert"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "effect": {"const": "live"},
+          "promotion_class": {
+            "enum": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
+          }
+        }
+      },
+      "then": {"required": ["authority"]}
+    }
+  ],
+  "$defs": {
+    "decision": {
+      "description": "An owner decision in the agent-hq inbox.",
+      "type": "string",
+      "pattern": "^decision:[A-Za-z0-9._:-]{1,200}$"
+    },
+    "gate_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate", "result", "evaluator", "at"],
+      "properties": {
+        "gate": {"$ref": "common.schema.json#/$defs/gate"},
+        "result": {"type": "string", "enum": ["pass", "fail"]},
+        "evaluator": {"$ref": "common.schema.json#/$defs/evaluator"},
+        "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "ref": {"$ref": "common.schema.json#/$defs/ref"},
+        "summary": {"$ref": "common.schema.json#/$defs/short_text"},
+        "holdout_digest": {
+          "description": "sha256 of the evaluated case ids, sorted and joined by a newline: anyone holding the suite can recompute it.",
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "training_excluded": {
+          "description": "The evaluator removed the candidate's training evidence (and every case sharing its split key) from the evaluation set.",
+          "type": "boolean"
+        },
+        "anchors": {
+          "description": "The experiences the evaluated cases were built from (synthetic cases have none). The fold refuses a gate whose anchors include the candidate's own evidence.",
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"$ref": "common.schema.json#/$defs/exp_id"}
+        },
+        "metrics": {
+          "type": "object",
+          "propertyNames": {"$ref": "common.schema.json#/$defs/slug"},
+          "additionalProperties": {"type": "number"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"gate": {"const": "owner"}}},
+          "then": {
+            "required": ["ref"],
+            "properties": {"ref": {"$ref": "#/$defs/decision"}}
+          }
+        },
+        {
+          "if": {"properties": {"gate": {"enum": ["offline_eval", "replay"]}}},
+          "then": {
+            "required": ["holdout_digest", "training_excluded", "anchors"],
+            "properties": {"training_excluded": {"const": true}}
+          }
+        }
+      ]
+    }
+  }
+}

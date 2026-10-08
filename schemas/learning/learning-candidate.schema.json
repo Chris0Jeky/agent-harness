@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/learning-candidate.schema.json",
+  "title": "learning-candidate/v1",
+  "description": "A proposed lesson, memory, skill, recipe, prompt, routing, scheduler, harness or policy change. Admission fails without future_decision: a candidate that cannot name the future decision it changes stays in the episodic log. The record is immutable; its state is the fold of its promotion records. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "producer", "kind", "trigger", "claim", "evidence",
+    "future_decision", "scope", "destination", "promotion_class", "valid_from"
+  ],
+  "properties": {
+    "schema": {"const": "learning-candidate/v1"},
+    "id": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "kind": {"$ref": "common.schema.json#/$defs/kind"},
+    "trigger": {
+      "type": "string",
+      "enum": [
+        "owner_rule", "owner_correction", "novel_failure", "repeated_failure",
+        "successful_procedure", "matured_outcome", "regression",
+        "external_change", "low_utility", "contradiction",
+        "consolidation_run", "manual"
+      ]
+    },
+    "claim": {"$ref": "common.schema.json#/$defs/text"},
+    "evidence": {
+      "description": "The experiences the claim was learned from (at least one). These are the candidate's training evidence: the replay evaluator excludes them (and every case sharing their split key) from its evaluation, and the fold refuses a gate whose anchors include them.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/exp_id"}
+    },
+    "future_decision": {
+      "description": "The concrete future decision this candidate changes. Required, at least four words, never a placeholder.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 600
+    },
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {"$ref": "common.schema.json#/$defs/repo"},
+        "preceding_action": {"$ref": "common.schema.json#/$defs/short_text"}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repos"],
+      "properties": {
+        "repos": {
+          "description": "Repositories the candidate applies to; [\"*\"] means estate-wide.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              {"$ref": "common.schema.json#/$defs/repo"},
+              {"const": "*"}
+            ]
+          }
+        },
+        "runtimes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "common.schema.json#/$defs/runtime"}
+        },
+        "task_kinds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "common.schema.json#/$defs/slug"}
+        }
+      }
+    },
+    "destination": {
+      "description": "Where the promoted artifact would land. null only for episodic candidates, which stay in the learning store.",
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repo", "path"],
+          "properties": {
+            "repo": {"$ref": "common.schema.json#/$defs/repo"},
+            "path": {"$ref": "common.schema.json#/$defs/relpath"}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "promotion_class": {
+      "description": "At least the kind's default class (promotion-classes.json); a class may be raised, never lowered.",
+      "$ref": "common.schema.json#/$defs/promotion_class"
+    },
+    "protected": {
+      "description": "An owner-protected category (owner preferences, authority, identity): adds the owner gate.",
+      "type": "boolean"
+    },
+    "consequential": {
+      "description": "A consequential skill: adds canary and maturity gates to P3.",
+      "type": "boolean"
+    },
+    "supersedes": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/target"}
+    },
+    "contradicts": {
+      "description": "Declared contradictions, so conflict detection does not have to guess.",
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/target"}
+    },
+    "genome": {
+      "description": "The candidate-genome/v1 that implements this candidate, for skill and higher kinds.",
+      "anyOf": [{"$ref": "common.schema.json#/$defs/gen_id"}, {"type": "null"}]
+    },
+    "valid_from": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "valid_until": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  },
+  "$defs": {
+    "target": {
+      "description": "Another candidate (lc_...) or a live artifact (memory:..., skill:...).",
+      "anyOf": [
+        {"$ref": "common.schema.json#/$defs/lc_id"},
+        {"$ref": "common.schema.json#/$defs/ref"}
+      ]
+    }
+  }
+}
