@@ -42,6 +42,7 @@ RECORD_SCHEMAS = {
     "eval-run/v1": "eval-run.schema.json",
     "system-run/v1": "system-run.schema.json",
     "decision-resolution/v1": "decision-resolution.schema.json",
+    "learning-would-apply/v1": "would-apply.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -439,6 +440,79 @@ def _words(text):
     return re.findall(r"\w+", text.casefold())
 
 
+# -- class is the blast radius (K2) ------------------------------------------
+
+
+def _max_class(*names):
+    return max(names, key=class_rank)
+
+
+def destination_class(destination):
+    """(class, reasons): the lowest class whose allowlist admits the destination.
+
+    No destination is an episodic record (P0). A destination on no allowlist,
+    or one that cannot be checked, is P8: unknown blast radius fails closed.
+    """
+    if destination is None:
+        return "P0", []
+    rules = classes()["destinations"]
+    where = f"{destination.get('repo')}:{destination.get('path')}"
+    try:
+        admitted = [
+            rule["class"]
+            for rule in rules["allow"]
+            if _pattern_matches(rule["repo"], destination["repo"])
+            and _pattern_matches(rule["path"], destination["path"])
+        ]
+    except (KeyError, TypeError, re.error):
+        return rules["default_class"], [f"destination {where} cannot be checked"]
+    if not admitted:
+        return rules["default_class"], [
+            f"destination {where} is on no class's allowlist"
+        ]
+    cls = min(admitted, key=class_rank)
+    return cls, [f"destination {where} is a {cls} surface"]
+
+
+def content_class(texts):
+    """(class, reasons): authority or permission language anywhere makes it P8."""
+    rules = classes()["content"]
+    found = []
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        folded = text.casefold()
+        for pattern in rules["patterns"]:
+            try:
+                hit = re.search(pattern, folded)
+            except re.error:
+                return rules["class"], [f"content pattern {pattern!r} is broken"]
+            if hit:
+                found.append(f"authority language {hit.group(0).strip()!r}")
+    if found:
+        return rules["class"], sorted(set(found))
+    return "P0", []
+
+
+def effective_class(candidate):
+    """(class, reasons): max(kind, destination, content), the candidate's blast radius."""
+    kind_cls = classes()["kind_class"][candidate["kind"]]
+    reasons = [f"kind {candidate['kind']} is {kind_cls}"]
+    dest_cls, why = destination_class(candidate["destination"])
+    reasons += why
+    destination = candidate["destination"] or {}
+    context = candidate.get("context") or {}
+    texts = [
+        candidate["claim"],
+        candidate["future_decision"],
+        destination.get("path"),
+        context.get("preceding_action"),
+    ]
+    text_cls, why = content_class(texts)
+    reasons += why
+    return _max_class(kind_cls, dest_cls, text_cls), reasons
+
+
 def _candidate_rules(record):
     errors = _time_errors(record, ("at", "valid_from", "valid_until"))
     decision = record["future_decision"].strip()
@@ -446,13 +520,19 @@ def _candidate_rules(record):
         errors.append("$.future_decision: must name a concrete future decision")
     elif _words(decision) == _words(record["claim"]):
         errors.append("$.future_decision: restates the claim instead of the decision")
-    floor = classes()["kind_class"][record["kind"]]
+    episodic = record["kind"] == "episodic"
+    if record["destination"] is None and not episodic:
+        errors.append("$.destination: only an episodic candidate may have none")
+    if record["destination"] is not None and episodic:
+        errors.append(
+            "$.destination: an episodic candidate has none; it writes no surface"
+        )
+    floor, reasons = effective_class(record)
     if class_rank(record["promotion_class"]) < class_rank(floor):
         errors.append(
-            f"$.promotion_class: {record['kind']} is at least {floor}; a class is never lowered"
+            f"$.promotion_class: the candidate is at least {floor} ({'; '.join(reasons)}); "
+            "a class is never lowered"
         )
-    if record["destination"] is None and record["kind"] != "episodic":
-        errors.append("$.destination: only an episodic candidate may have none")
     start, end = parse_time(record["valid_from"]), parse_time(record.get("valid_until"))
     if start and end and end <= start:
         errors.append("$.valid_until: must be after valid_from")
@@ -576,6 +656,7 @@ SEMANTIC_RULES = {
     "eval-run/v1": _run_rules,
     "system-run/v1": _system_rules,
     "decision-resolution/v1": lambda record: _resolution_rules(record),
+    "learning-would-apply/v1": lambda record: _would_apply_rules(record),
 }
 
 
@@ -613,6 +694,31 @@ def required_gates(candidate):
 # a file, it asks resolve(ref) and checks the returned decision-resolution/v1.
 # Without a resolver nothing is verified, so no live effect above P0 folds and
 # no owner gate counts.
+
+
+def _would_apply_rules(record):
+    errors = _time_errors(record, ("at",))
+    text = record["bytes"]
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != record["sha256"]:
+        errors.append("$.sha256: is not the sha256 of bytes")
+    if "\r" in text:
+        errors.append("$.bytes: line endings are LF only")
+    if (record["op"] == "add") != (record["base"]["blob_sha256"] is None):
+        errors.append("$.base.blob_sha256: null exactly when the op adds a file")
+    if record["verdict"] == "would_apply":
+        authority = record["authority"]
+        if not record["eligibility"]["eligible"] or record["eligibility"]["problems"]:
+            errors.append(
+                "$.verdict: would_apply needs an eligible candidate with no problems"
+            )
+        if authority["required"] and authority["status"] != "answered":
+            errors.append(
+                "$.verdict: would_apply needs its required authority answered"
+            )
+        cls, _ = destination_class(record["destination"])
+        if class_rank(record["class"]) < class_rank(cls):
+            errors.append(f"$.class: the destination is a {cls} surface")
+    return errors
 
 
 def _resolution_rules(record):

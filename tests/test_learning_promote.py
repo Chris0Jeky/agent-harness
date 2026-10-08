@@ -23,8 +23,28 @@ ORACLE = {"kind": "oracle", "runtime": "tool", "model": None, "session": "eval-1
 OWNER = {"kind": "owner", "runtime": "owner", "model": None, "session": "owner-1"}
 
 
+# A destination each kind may really write (K2: class is the blast radius).
+SURFACES = {
+    "semantic": {"repo": "claude-config", "path": "projects/example/memory/lesson.md"},
+    "consolidation": {
+        "repo": "claude-config",
+        "path": "projects/example/memory/lesson.md",
+    },
+    "skill": {"repo": "claude-config", "path": "skills/example-skill/SKILL.md"},
+    "recipe": {"repo": "claude-config", "path": "muse/recipes/test-gaps.md"},
+    "prompt": {"repo": "claude-config", "path": "muse/coordinator-turn.md"},
+    "routing": {"repo": "claude-config", "path": "muse/agent-routes.json"},
+    "scheduler": {"repo": "claude-config", "path": "tools/muse_coordinator.py"},
+    "harness": {"repo": "claude-config", "path": "tools/example_tool.py"},
+    "policy": {"repo": "claude-config", "path": "rules/laws.md"},
+    "episodic": None,
+}
+
+
 def candidate(**changes):
     record = copy.deepcopy(lc.read_records(EXAMPLES / "learning-candidate.json")[0])
+    if "kind" in changes and "destination" not in changes:
+        changes["destination"] = SURFACES[changes["kind"]]
     record.update(changes)
     return record
 

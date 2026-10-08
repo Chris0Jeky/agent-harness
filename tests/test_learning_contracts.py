@@ -35,8 +35,28 @@ def example(name):
     return lc.read_records(EXAMPLES / name)
 
 
+# A destination each kind may really write (K2: class is the blast radius).
+SURFACES = {
+    "semantic": {"repo": "claude-config", "path": "projects/example/memory/lesson.md"},
+    "consolidation": {
+        "repo": "claude-config",
+        "path": "projects/example/memory/lesson.md",
+    },
+    "skill": {"repo": "claude-config", "path": "skills/example-skill/SKILL.md"},
+    "recipe": {"repo": "claude-config", "path": "muse/recipes/test-gaps.md"},
+    "prompt": {"repo": "claude-config", "path": "muse/coordinator-turn.md"},
+    "routing": {"repo": "claude-config", "path": "muse/agent-routes.json"},
+    "scheduler": {"repo": "claude-config", "path": "tools/muse_coordinator.py"},
+    "harness": {"repo": "claude-config", "path": "tools/example_tool.py"},
+    "policy": {"repo": "claude-config", "path": "rules/laws.md"},
+    "episodic": None,
+}
+
+
 def candidate(**changes):
     record = copy.deepcopy(example("learning-candidate.json")[0])
+    if "kind" in changes and "destination" not in changes:
+        changes["destination"] = SURFACES[changes["kind"]]
     record.update(changes)
     return record
 
@@ -146,7 +166,7 @@ class ContractDataTests(unittest.TestCase):
             row = next(
                 line for line in section.splitlines() if line.startswith(f"| `{name}`")
             )
-            listed = set(re.findall(r"`([a-z_]+)`", row.split("|")[2]))
+            listed = set(re.findall(r"`([a-z_0-9]+)`", row.split("|")[2]))
             fields = set(lc._document(path)["properties"]) - envelope
             self.assertEqual(listed, fields, name)
 

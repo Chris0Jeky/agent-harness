@@ -89,7 +89,12 @@ def candidate(key="lesson", kind="semantic", evidence=None, **changes):
         "future_decision": "Read the relevant lesson before selecting the next action.",
         "scope": {"repos": ["synthetic"]},
         "destination": (
-            None if kind == "episodic" else {"repo": "synthetic", "path": "lesson.md"}
+            None
+            if kind == "episodic"
+            else {
+                "repo": "claude-config",
+                "path": "projects/synthetic/memory/lesson.md",
+            }
         ),
         "promotion_class": lc.classes()["kind_class"][kind],
         "valid_from": AT,
