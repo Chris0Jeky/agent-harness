@@ -147,7 +147,10 @@ def p1_path(probation=None, active=None):
                 "2026-09-08T12:01:00Z",
                 checks,
                 probation
-                or dict(LIVE_P1, landed="pr:https://github.com/o/claude-config/pull/1"),
+                or dict(
+                    LIVE_P1,
+                    landed="pr:https://github.com/Chris0Jeky/claude-config/pull/1",
+                ),
             ),
             (
                 "probation",
@@ -155,7 +158,10 @@ def p1_path(probation=None, active=None):
                 "2026-09-15T12:06:00Z",
                 [gate("maturity", "2026-09-15T12:05:00Z")],
                 active
-                or dict(LIVE_P1, landed="pr:https://github.com/o/claude-config/pull/1"),
+                or dict(
+                    LIVE_P1,
+                    landed="pr:https://github.com/Chris0Jeky/claude-config/pull/1",
+                ),
             ),
         ],
     )
@@ -167,6 +173,40 @@ def ok_time():
 
 def errors_of(result):
     return " | ".join(result.errors)
+
+
+class MergedFromProbationTests(unittest.TestCase):
+    """A consolidated single retires from probation into its superseder (L2, cc#835)."""
+
+    def merge(self, effect):
+        steps = p1_path()[:2]
+        steps.append(
+            {
+                **steps[-1],
+                "id": "prom_auth-0003",
+                "prev": steps[-1]["id"],
+                "from": "probation",
+                "to": "merged",
+                "at": "2026-09-10T00:00:00Z",
+                "gates": [],
+                "effect": effect,
+                "merged_into": "lc_auth-consolidated",
+            }
+        )
+        for field in ("authority", "landed"):
+            steps[-1].pop(field, None)
+        return lc.fold(candidate(), steps, resolve=resolver(P1_C))
+
+    def test_a_live_single_merges_and_leaves_its_surface(self):
+        result = self.merge("shadow")
+        self.assertEqual(
+            (result.state, result.effect, result.errors), ("merged", "shadow", [])
+        )
+
+    def test_merged_is_never_live(self):
+        result = self.merge("live")
+        self.assertEqual(result.state, "probation")
+        self.assertTrue(result.errors)
 
 
 class P1AuthorityTests(unittest.TestCase):
@@ -311,7 +351,7 @@ class P6P7Tests(unittest.TestCase):
         """P6 through canary and probation to active; live from canary or only at active."""
         evaluation = [gate("offline_eval", "2026-09-08T12:00:00Z")]
         live = {"effect": "live", "authority": "decision:lp-p6-p7-owner-approval"}
-        pr = "pr:https://github.com/o/claude-config/pull/2"
+        pr = "pr:https://github.com/Chris0Jeky/claude-config/pull/2"
         early = dict(live) if live_from == "canary" else {}
         installed = dict(live, landed=pr) if live_from == "canary" else {}
         approval = list(live_gates and [owner("2026-09-16T12:05:00Z")])
@@ -430,6 +470,18 @@ class P6P7Tests(unittest.TestCase):
 
 
 class OwnerGateTests(unittest.TestCase):
+    def test_the_approval_predates_the_gate_not_just_the_record(self):
+        # L2's Codex review: an answer given after the gate but before the
+        # record must not count, as _counts already holds for owner gates.
+        record = {
+            "at": "2026-09-10T00:00:00Z",
+            "gates": [owner("2026-09-05T00:00:00Z")],
+        }
+        late = answer("approve-auth-0001", answered_at="2026-09-07T00:00:00Z")
+        early = answer("approve-auth-0001", answered_at="2026-09-04T00:00:00Z")
+        self.assertFalse(lc._owner_gate_on(record, candidate(), resolver(late)))
+        self.assertTrue(lc._owner_gate_on(record, candidate(), resolver(early)))
+
     def test_an_asserted_owner_gate_never_counts(self):
         # A protected P1 candidate goes live only with the owner's approval of it,
         # on the record that turns it live and on the activating record.
@@ -487,11 +539,17 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(result.state, "evaluating")
         self.assertIn("landed: pr:", errors_of(result))
         other_repo = dict(
-            LIVE_P1, landed="pr:https://github.com/o/agent-harness/pull/9"
+            LIVE_P1, landed="pr:https://github.com/Chris0Jeky/agent-harness/pull/9"
         )
         result = lc.fold(
             candidate(), p1_path(probation=other_repo), resolve=resolver(P1_C)
         )
+        self.assertIn("in claude-config", errors_of(result))
+        # The owner counts too: a PR in attacker/claude-config is not the destination's.
+        forged = dict(
+            LIVE_P1, landed="pr:https://github.com/attacker/claude-config/pull/9"
+        )
+        result = lc.fold(candidate(), p1_path(probation=forged), resolve=resolver(P1_C))
         self.assertIn("in claude-config", errors_of(result))
 
     def test_p1_has_no_live_canary(self):
@@ -528,7 +586,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 "gates": [],
                 "effect": "live",
                 "authority": "decision:lp-p6-p7-owner-approval",
-                "landed": "pr:https://github.com/o/claude-config/pull/2",
+                "landed": "pr:https://github.com/Chris0Jeky/claude-config/pull/2",
             }
         )  # ... then turn live on reinforcement
         result = lc.fold(x.cand(), steps, resolve=resolver(x.graduated()))

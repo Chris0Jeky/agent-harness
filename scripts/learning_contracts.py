@@ -33,6 +33,7 @@ import sys
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas" / "learning"
 RECORD_SCHEMAS = {
     "estate-experience/v1": "estate-experience.schema.json",
+    "outcome-event/v1": "outcome-event.schema.json",
     "memory-use/v1": "memory-use.schema.json",
     "learning-candidate/v1": "learning-candidate.schema.json",
     "candidate-genome/v1": "candidate-genome.schema.json",
@@ -678,8 +679,32 @@ def _system_rules(record):
     return errors
 
 
+def _outcome_event_rules(record):
+    errors = _time_errors(record, ("at", "observed_at"))
+    errors += _ordered(record, "at", "observed_at")
+    run = record["run"]
+    expected = "oev_" + _digest16(
+        f"{run['kind']}|{run['key']}|{int(record['version'])}"
+    )
+    if record["id"] != expected:
+        errors.append(f"$.id: must be {expected}")
+    if record["experience"] != experience_id(run["kind"], run["key"]):
+        errors.append("$.experience: must match the run's experience id")
+    if record["version"] == 1:
+        if record["supersedes"] is not None:
+            errors.append("$.supersedes: null exactly when version is 1")
+    else:
+        prev = "oev_" + _digest16(f"{run['kind']}|{run['key']}|{record['version'] - 1}")
+        if record["supersedes"] != prev:
+            errors.append(f"$.supersedes: must be the run's previous version {prev}")
+    if record["success"] != experience_succeeded({"outcome": record["outcome"]}):
+        errors.append("$.success: must match experience_succeeded")
+    return errors
+
+
 SEMANTIC_RULES = {
     "estate-experience/v1": _experience_rules,
+    "outcome-event/v1": _outcome_event_rules,
     "memory-use/v1": _memory_use_rules,
     "learning-candidate/v1": _candidate_rules,
     "candidate-genome/v1": _genome_rules,
@@ -1082,11 +1107,11 @@ def class_option(cls, resolved):
 
 
 def _owner_gate_on(record, candidate, resolve):
-    at = parse_time(record["at"])
+    """An owner pass on this record, answered by the gate's own time (as _counts)."""
     return any(
         g["gate"] == "owner"
         and g["result"] == "pass"
-        and not approval_errors(g.get("ref"), candidate, at, resolve)
+        and not approval_errors(g.get("ref"), candidate, parse_time(g["at"]), resolve)
         for g in record["gates"]
     )
 
@@ -1099,6 +1124,22 @@ def _holds(measure, flag, at):
     return since is not None and since <= at and (until is None or at < until)
 
 
+def _same_repository(full, destination):
+    """Is owner/repo the destination repository, owner included?
+
+    An owner-qualified destination must match exactly (GitHub names fold case);
+    an unqualified one matches only an owner/repo its class's allowlist admits
+    for that path, so attacker/claude-config never stands in for the real one.
+    """
+    repo, path = destination.get("repo", ""), destination.get("path", "")
+    if "/" in repo:
+        return full.casefold() == repo.casefold()
+    return full.split("/")[-1] == repo and any(
+        _pattern_matches(rule["repo"], full) and _pattern_matches(rule["path"], path)
+        for rule in classes()["destinations"]["allow"]
+    )
+
+
 def _landing_errors(record, candidate, channel, cls):
     """An installed live record names where it landed, in its own repository."""
     landed = str(record.get("landed", ""))
@@ -1106,8 +1147,11 @@ def _landing_errors(record, candidate, channel, cls):
         match = re.fullmatch(
             r"pr:https://github[.]com/([^/]+)/([^/]+)/pull/[0-9]+", landed
         )
-        repo = (candidate["destination"] or {}).get("repo", "").split("/")[-1]
-        if not match or match.group(2) != repo:
+        destination = candidate["destination"] or {}
+        repo = destination.get("repo", "")
+        if not match or not _same_repository(
+            f"{match.group(1)}/{match.group(2)}", destination
+        ):
             return [
                 f"{cls} lands through a reviewed PR in {repo}: landed: pr:<that PR's url> is required"
             ]

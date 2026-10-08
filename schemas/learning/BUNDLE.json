@@ -40,7 +40,7 @@
     },
     {
       "path": "schemas/learning/lifecycle.json",
-      "sha256": "e68ff7f81b9936463448c84d97e212b82ebeede949ab2799fc0d6d1effb76fee"
+      "sha256": "4ccd9b1637ece62543403e9416e9dd6285187413963daa4810ff961aa3e43e65"
     },
     {
       "path": "schemas/learning/memory-use.schema.json",
@@ -49,6 +49,10 @@
     {
       "path": "schemas/learning/objectives.json",
       "sha256": "dbee6c0131b1f6b2947fb5a4563b6c28bc17a8d3797f166ab3b071aea83f2730"
+    },
+    {
+      "path": "schemas/learning/outcome-event.schema.json",
+      "sha256": "e98addfb6e16cbb9c404da88c1d4d2d4ea54be501bc9e50c67068982e556fbda"
     },
     {
       "path": "schemas/learning/promotion-classes.json",
@@ -72,7 +76,7 @@
     },
     {
       "path": "scripts/learning_contracts.py",
-      "sha256": "f6c211441a9dd1593b3148140d5f3ce681162255888543d9216d5e09dfdf1fb0"
+      "sha256": "a8e69e311d7a07264a6f192984ce2f7685a6cf971b6498df221d947ff2a06642"
     }
   ],
   "record_schemas": [
@@ -86,9 +90,10 @@
     "learning-candidate/v1",
     "learning-would-apply/v1",
     "memory-use/v1",
+    "outcome-event/v1",
     "promotion-receipt/v1",
     "promotion-record/v1",
     "system-run/v1"
   ],
-  "digest": "4307d0d90a0a0e58e68d8f2ef695a1a7bdedb9be7a1efe34b5a505f942d6fe6e"
+  "digest": "e47ba93d10b9cfdc57aedde4f42471fbcf036d987f657235c939e795f055577e"
 }

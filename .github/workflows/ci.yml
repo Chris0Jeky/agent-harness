@@ -80,6 +80,7 @@ jobs:
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
           scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
           scripts/learning_bundle.py tests/test_learning_bundle.py
           tests/test_learning_authority.py tests/test_learning_adversarial.py
           tests/test_learning_class.py
@@ -131,6 +132,7 @@ jobs:
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
           scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
           scripts/learning_bundle.py tests/test_learning_bundle.py
           tests/test_learning_authority.py tests/test_learning_adversarial.py
           tests/test_learning_class.py
@@ -182,6 +184,7 @@ jobs:
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
           scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
           scripts/learning_bundle.py tests/test_learning_bundle.py
           tests/test_learning_authority.py tests/test_learning_adversarial.py
           tests/test_learning_class.py
