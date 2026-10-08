@@ -948,6 +948,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
 | `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `veto`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
 | `decision-resolution/v1` | `decision`, `source`, `status`, `option`, `option_label`, `answered_at`, `created`, `expires`, `subject`, `measures` | what an injected resolver returns for one agent-hq decision read at `origin/main` (`source: agent-hq@<sha>`); an answered or defaulted decision names its option and time; `subject` binds a per-promotion approval or veto window to one candidate; `measures` carries the exit bars and graduation the resolver measured |
+| `learning-would-apply/v1` (`wa_`) | `candidate`, `class`, `class_reasons`, `destination`, `op`, `base`, `bytes`, `sha256`, `authority`, `eligibility`, `verdict`, `reasons` | the applier's account of one candidate: the whole file it would write (UTF-8, LF, at most 256 KiB) and its sha256, which the validator recomputes; `base` names the replaced blob (null for an add) so a revert can guard on it; `would_apply` needs an eligible candidate with no problems, its required authority answered, and a class no lower than the destination's |
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
@@ -989,6 +990,32 @@ record that fails any of:
 
 Any fold error forces the returned `effect` to `shadow`: a consumer stops applying a candidate
 whose history it cannot fold, so a malformed or contested revert fails closed.
+
+**Class is the blast radius** (K2). A candidate's class is `max(kind, destination, content)`
+(`effective_class`), and its declared `promotion_class` may be no lower; the reasons travel with
+the refusal. `destination_class` takes the highest class whose allowlist
+(`promotion-classes.json` `destinations.allow`) admits the repository and path, so an overlapping
+entry can only raise it: P1 and P2 write one curated memory note,
+`projects/<real project directory>/memory/<name>.md` in claude-config; P3 a `skills/<s>/SKILL.md`;
+P4 a Muse recipe or coordinator prompt; P5 `muse/agent-routes.json`; P6 the scheduler; P7 one tool
+or harness script, never gate, merge, token, tier, policy, hook, trust or learning-contract code.
+A destination on no allowlist is P8, and so is any path with a protected segment
+(`destinations.protected_segments`: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and the other
+auto-loaded instruction files, and Windows device names), in any case. An episodic candidate has
+`destination: null` and writes nothing. `content_class` is a tripwire, not a proof: it escalates to
+P8 on authority, permission or injection language (`content.patterns`) in the claim, the future
+decision, the destination path, and every string of `context`, `scope` and `ext`, after NFKC
+normalisation, removal of format characters, collapsing whitespace and casefolding. A broken
+pattern fails closed to P8. Paraphrases can still evade it; the owner's per-promotion approval of
+P8 and the reviewed PR of P1 notes are the real gate. `relpath` refuses `.git` segments, segments
+ending in a dot or space (Windows strips them) and `~` (8.3 short names). A `would_apply` report
+is checked the same way: its class is at least the destination's and its bytes' content class, its
+bytes are at most 262144 bytes of UTF-8, and its `authority` is what the class requires (`required`
+from the class's mode, the class's own decision with a live option for P1, P6 and P7, a
+per-promotion approval rather than a class decision for P8, answered before the report, with its
+ref and source), never what the report asserts. Paths are classed case-exactly, so the applier
+refuses a path whose on-disk spelling differs from the classed one (a case or short-name alias), a
+symlink or junction on any segment, and any write whose bytes do not hash to what the reviewer saw.
 
 **Authority is resolved, never asserted** (K1). `effect` says whether the candidate's artifact is
 on a live surface after the move: `shadow` means evaluated and shown, nothing written live. `live`

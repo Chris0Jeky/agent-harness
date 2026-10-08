@@ -281,7 +281,11 @@ class ClassModeTests(unittest.TestCase):
                 "probation",
                 "2026-09-08T12:01:00Z",
                 [gate("tests", "2026-09-08T12:00:00Z"), owner("2026-09-08T12:00:00Z")],
-                {"effect": "live", "authority": "decision:approve-auth-0001"},
+                {
+                    "effect": "live",
+                    "authority": "decision:approve-auth-0001",
+                    "landed": "commit:" + "e" * 40,
+                },
             ),
         ]
         ok = lc.fold(cand, chain("P8", steps), resolve=resolver(APPROVE))
@@ -595,6 +599,21 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(
             (status["graduated"], status["at"]), (True, "2026-08-29T00:00:00Z")
         )
+
+    def test_a_live_p8_install_names_its_landing(self):
+        cand = candidate("policy", "P8")
+        steps = [
+            ("candidate", "evaluating", "2026-09-08T11:10:00Z", [], {}),
+            (
+                "evaluating",
+                "probation",
+                "2026-09-08T12:01:00Z",
+                [gate("tests", "2026-09-08T12:00:00Z"), owner("2026-09-08T12:00:00Z")],
+                {"effect": "live", "authority": "decision:approve-auth-0001"},
+            ),
+        ]
+        result = lc.fold(cand, chain("P8", steps), resolve=resolver(APPROVE))
+        self.assertIn("names where it landed", errors_of(result))
 
     def test_bad_resolutions_fail_closed_without_crashing(self):
         bad = answer(

@@ -328,5 +328,111 @@
     "allow": [
       "allow"
     ]
+  },
+  "destinations": {
+    "description": "Where each class may write. A destination's class is the HIGHEST class whose allowlist admits it, so an overlapping entry can only raise it; a destination on no allowlist, or with a protected segment, is P8. Paths are matched case-exactly against the real names; the fold is pure, so the applier also refuses a path whose on-disk spelling differs from the classed one (a case or short-name alias), a path with a symlink or junction on any segment, a path that resolves outside its repository, and any write the rendered bytes do not hash to.",
+    "default_class": "P8",
+    "allow": [
+      {
+        "class": "P1",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^projects/[A-Za-z0-9][A-Za-z0-9._-]{0,199}/memory/[A-Za-z0-9][A-Za-z0-9._-]{0,120}[.]md$",
+        "what": "one curated memory note under a real project directory; never the MEMORY.md index or an instruction file (protected_segments)"
+      },
+      {
+        "class": "P3",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^skills/[a-z0-9][a-z0-9._-]{0,79}/SKILL\\.md$",
+        "what": "one skill definition"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/recipes/(?![Rr][Ee][Aa][Dd][Mm][Ee]\\.)[a-z0-9][a-z0-9._-]{0,79}\\.(md|json)$",
+        "what": "one Muse recipe"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/(coordinator-brief|coordinator-turn)\\.md$",
+        "what": "a coordinator prompt"
+      },
+      {
+        "class": "P5",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/agent-routes\\.json$",
+        "what": "the routing table"
+      },
+      {
+        "class": "P6",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/muse_coordinator\\.py$",
+        "what": "the scheduler"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/(?!muse_coordinator[.]py$)(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_-]{0,79}[.](py|ps1)$",
+        "what": "one tool script; never the scheduler (P6) or gate, token, tier, policy, hook, trust or learning-contract code (P8)"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?agent-harness$",
+        "path": "^scripts/(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_]{0,79}[.]py$",
+        "what": "one harness script; never the hook templates or gate, merge, policy or learning-contract code (P8)"
+      }
+    ],
+    "protected_segments": {
+      "what": "Path segments that are never below P8, matched case-insensitively against each segment: auto-loaded instruction and index files, and Windows device names.",
+      "patterns": [
+        "^(memory|claude|claude[.]local|agents|gemini|copilot-instructions)[.]md$",
+        "^(con|prn|aux|nul|conin[$]|conout[$]|com[0-9¹²³]|lpt[0-9¹²³])([.].*)?$"
+      ]
+    }
+  },
+  "content": {
+    "description": "A tripwire, not a proof: authority, permission or injection language in a candidate's claim, future decision, destination path, context, scope or ext (every string, recursively), or in a would-apply report's bytes, makes it P8, because it touches who may do what. Text is NFKC-normalised, format characters are removed, whitespace runs collapse to one space and it is casefolded before matching; a broken pattern fails closed to P8. Paraphrases can still evade it: the owner's per-promotion approval of P8 and the reviewed PR of P1 notes are the real gate.",
+    "class": "P8",
+    "patterns": [
+      "\\bpermissions?\\b",
+      "\\bauthori[sz](e|ed|es|ation|ations|ing)\\b",
+      "\\bauthorit(y|ies)\\b",
+      "\\bapprov(e|ed|es|al|als|ing)\\b",
+      "\\bconsent\\b",
+      "\\bbypass",
+      "\\boverrid(e|es|ing|den)\\b",
+      "\\bskip(s|ped|ping)? (the |a |any |all )?(review|gate|check|test|hook|ci)s?\\b",
+      "\\b(disable|disables|disabled|disabling|turn off|turns off|turned off) (the |all |any )?(hooks?|checks?|reviews?|gates?|ci|floor)\\b",
+      "--no-verify",
+      "--force\\b",
+      "\\bpush -f\\b",
+      "\\bforce[- ]?push",
+      "\\bauto-?merge",
+      "\\bwithout (a |any |the )?(review|reviewer|approval|asking|permission|consent)\\b",
+      "\\bno (human |owner )?(review|reviewer|approval|consent|sign-?off)s? (is |are )?(needed|required)\\b",
+      "\\b(merge|push|land)(es|ed|ing|s)? (its|your|their|my|our) own\\b",
+      "\\b(straight|directly) (in)?to (main|master)\\b",
+      "\\b(tools?|commands?|actions?) (are |is )?(all )?(allowed|permitted)\\b",
+      "\\b(review|merge|tier|deny) gate\\b",
+      "\\bdeny[- ]floor\\b",
+      "\\btier\\.json\\b",
+      "\\blaws?\\.md\\b",
+      "(^|[\\s/`'\\\"])rules/",
+      "\\bsettings(\\.local)?\\.json\\b",
+      "(^|[\\s/`'\\\"])hooks?/",
+      "\\ballow[- ]?list\\b",
+      "\\bsudo\\b",
+      "\\badministrator\\b",
+      "\\bsecrets?\\b",
+      "\\bcredentials?\\b",
+      "\\bapi[ _-]?keys?\\b",
+      "\\b(access|auth|bearer|session|app) tokens?\\b",
+      "\\bestop\\b",
+      "\\bkill[- ]?switch\\b",
+      "\\b(ignore|disregard|forget)s? (all |any )?(of )?(the |these |those |your )?(previous|prior|above|earlier|preceding|former|other)\\b",
+      "\\bobey\\b",
+      "\\byou (must|should) now\\b",
+      "\\bsystem prompt\\b"
+    ]
   }
 }

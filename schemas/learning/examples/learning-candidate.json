@@ -29,8 +29,8 @@
     ]
   },
   "destination": {
-    "repo": "example-config",
-    "path": "recipes/test-gaps.json"
+    "repo": "claude-config",
+    "path": "muse/recipes/test-gaps.md"
   },
   "promotion_class": "P4",
   "supersedes": [],

@@ -22,7 +22,7 @@
     ]
   },
   "destination": {
-    "repo": "example-config",
+    "repo": "claude-config",
     "path": "projects/example/memory/repo-basics.md"
   },
   "promotion_class": "P2",
