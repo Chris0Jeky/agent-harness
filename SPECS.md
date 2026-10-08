@@ -1083,8 +1083,13 @@ the candidate's or genome producer's session, and demotes the run's tier and gat
 `oracle` to that evaluator's kind. Pairs are compared case by
 case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
 layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
-(10) distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
-`max_losses` (0); fewer cases is `insufficient`, which emits no gate. The policy is part of the
+distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is
+at least `min_delta` and the one-sided exact sign test on the discordant pairs is under
+`max_sign_p`; fewer cases is `insufficient`, which emits no gate. The defaults are each gate's
+pinned `eval_minima` in `promotion-classes.json` (20, 0, 0.05, from the 2026-10-08 statistics
+audit: `max_losses = 0` failed real improvements more often as n grew), and the fold re-checks a
+passing gate's own `metrics` (`cases`, `delta`, `wins`, `losses`, `anchored`) against them,
+computing the sign test itself, so a loosened policy never moves a candidate. The policy is part of the
 run id and of the gate's `metrics` and `summary`, so a loosened gate is visible as one. Only a hold-out run emits a
 gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
 it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five

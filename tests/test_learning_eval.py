@@ -135,15 +135,25 @@ class SuiteTests(unittest.TestCase):
         report = run(policy={"min_cases": 100})
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
 
-    def test_a_single_loss_fails_the_gate(self):
+    def test_the_gate_is_a_sign_test_not_zero_losses(self):
+        # Statistics audit: one loss among many wins is noise, not a failure ...
         inputs = load()
         case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
         inputs["candidate_outputs"]["outputs"][case["id"]] = {"text": "master"}
         report = run(inputs)
-        self.assertEqual(
-            (report["verdict"], report["gate"]["result"]), ("fail", "fail")
-        )
         self.assertEqual(report["results"]["losses"], 1)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertLess(report["gate"]["metrics"]["sign_p"], 0.05)
+        # ... but too few wins over the losses is.
+        outputs, base = (
+            inputs["candidate_outputs"]["outputs"],
+            inputs["baseline"]["outputs"],
+        )
+        for cid in sorted(set(outputs) & set(base) - {case["id"]})[:15]:
+            outputs[cid] = base[cid]  # a win becomes a tie
+        weak = run(inputs)
+        self.assertEqual((weak["verdict"], weak["gate"]["result"]), ("fail", "fail"))
+        self.assertGreaterEqual(weak["gate"]["metrics"]["sign_p"], 0.05)
 
     def test_missing_candidate_output_counts_as_failure(self):
         inputs = load()
@@ -344,8 +354,9 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_policy_is_bounded_and_recorded_in_the_gate(self):
         self.assertRefused("min_cases is at least 1", policy={"min_cases": 0})
-        loose = run(policy={"max_losses": 5})
-        self.assertEqual(loose["gate"]["metrics"]["max_losses"], 5)
+        self.assertRefused("max_sign_p in (0, 1]", policy={"max_sign_p": 0})
+        loose = run(policy={"max_sign_p": 0.5})
+        self.assertEqual(loose["gate"]["metrics"]["max_sign_p"], 0.5)
         self.assertNotEqual(loose["id"], run()["id"])
 
     def test_the_named_evaluator_does_not_depend_on_order(self):

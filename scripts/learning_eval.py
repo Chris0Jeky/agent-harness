@@ -50,8 +50,7 @@ GATES = ("offline_eval", "replay", "retrieval_regression")
 def default_policy(gate):
     """The pinned minima for this gate (promotion-classes.json eval_minima)."""
     pinned = contracts.classes()["eval_minima"][gate]
-    return {k: pinned[k] for k in ("min_cases", "min_delta", "max_losses")}
-
+    return {k: pinned[k] for k in ("min_cases", "min_delta", "max_sign_p")}
 
 
 class EvalRefusal(Exception):
@@ -366,10 +365,8 @@ def evaluate(
     if gate not in GATES:
         raise EvalRefusal(f"gate must be one of {GATES}")
     policy = {**default_policy(gate), **(policy or {})}
-    if policy["min_cases"] < 1 or policy["max_losses"] < 0:
-        raise EvalRefusal("min_cases is at least 1 and max_losses at least 0")
-    if gate not in GATES:
-        raise EvalRefusal(f"gate must be one of {GATES}")
+    if policy["min_cases"] < 1 or not 0 < policy["max_sign_p"] <= 1:
+        raise EvalRefusal("min_cases is at least 1 and max_sign_p in (0, 1]")
     suites = {c["suite"] for c in cases}
     if len(suites) != 1:
         raise EvalRefusal(f"one suite per run, got {sorted(suites)}")
@@ -427,7 +424,10 @@ def evaluate(
     delta = cand_rate - base_rate if rows else None
     if counts["distinct_inputs"] < policy["min_cases"]:
         verdict = "insufficient"
-    elif delta >= policy["min_delta"] and losses <= policy["max_losses"]:
+    elif (
+        delta >= policy["min_delta"]
+        and contracts.sign_p(wins, losses) < policy["max_sign_p"]
+    ):
         verdict = "pass"
     else:
         verdict = "fail"
@@ -518,7 +518,7 @@ def evaluate(
             "summary": (
                 f"{len(rows)} hold-out cases: candidate {cand_rate:.3f} vs baseline "
                 f"{base_rate:.3f}, {wins} wins, {losses} losses (policy: min_delta "
-                f"{policy['min_delta']}, max_losses {policy['max_losses']})"
+                f"{policy['min_delta']}, max_sign_p {policy['max_sign_p']})"
             )[:280],
             "holdout_digest": holdout_digest,
             "training_excluded": True,
@@ -531,7 +531,8 @@ def evaluate(
                 "anchored": sum(1 for c in chosen if c["experience"]),
                 "min_cases": policy["min_cases"],
                 "min_delta": policy["min_delta"],
-                "max_losses": policy["max_losses"],
+                "max_sign_p": policy["max_sign_p"],
+                "sign_p": contracts.sign_p(wins, losses),
             },
         }
     problems = contracts.validate_record(report)
@@ -585,9 +586,15 @@ def main(argv=None):
     parser.add_argument("--labels", type=Path, nargs="*", default=())
     parser.add_argument("--split", choices=("holdout", "dev"), default="holdout")
     parser.add_argument("--gate", choices=GATES, default="offline_eval")
-    parser.add_argument("--min-cases", type=int, help="default: the gate's pinned minimum")
-    parser.add_argument("--min-delta", type=float, help="default: the gate's pinned minimum")
-    parser.add_argument("--max-losses", type=int, help="default: the gate's pinned minimum")
+    parser.add_argument(
+        "--min-cases", type=int, help="default: the gate's pinned minimum"
+    )
+    parser.add_argument(
+        "--min-delta", type=float, help="default: the gate's pinned minimum"
+    )
+    parser.add_argument(
+        "--max-sign-p", type=float, help="default: the gate's pinned minimum"
+    )
     parser.add_argument("--at", help="report timestamp (default: now)")
     args = parser.parse_args(argv)
     try:
@@ -608,7 +615,7 @@ def main(argv=None):
                 for k, v in (
                     ("min_cases", args.min_cases),
                     ("min_delta", args.min_delta),
-                    ("max_losses", args.max_losses),
+                    ("max_sign_p", args.max_sign_p),
                 )
                 if v is not None
             },

@@ -112,7 +112,7 @@ def gate(name, at, evaluator=ORACLE, result="pass"):
             holdout_digest=HOLDOUT,
             training_excluded=True,
             anchors=[],
-            metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+            metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
         )
     return item
 
@@ -275,13 +275,14 @@ class MinimaTests(unittest.TestCase):
         )
         for pinned in minima.values():
             self.assertGreaterEqual(pinned["min_cases"], 20)
-            self.assertEqual(pinned["max_losses"], 0)
+            self.assertEqual(pinned["max_sign_p"], 0.05)
 
     def test_short_or_lossy_or_unanchored_gates_do_not_count(self):
         for metrics, fragment in (
             ({"cases": 19, "anchored": 19}, "under 20"),
             ({"delta": -0.01}, "delta"),
-            ({"losses": 1}, "lost 1"),
+            ({"wins": 4, "losses": 0}, "p = 0.062"),  # audit: W >= 5 at L = 0
+            ({"wins": 6, "losses": 1}, "p = 0.062"),  # W >= 7 at L = 1
             ({"anchored": 5}, "anchored 0.21"),
             ({"anchored": None}, "does not report anchored"),
         ):
@@ -290,6 +291,12 @@ class MinimaTests(unittest.TestCase):
             self.assertTrue(
                 any(fragment in e for e in result.errors), (metrics, result.errors)
             )
+
+    def test_the_sign_test_matches_the_audit_table(self):
+        # The smallest passing W for L = 0..4 at one-sided p < 0.05.
+        for losses, wins in enumerate((5, 7, 9, 10, 12)):
+            self.assertLess(lc.sign_p(wins, losses), 0.05, (wins, losses))
+            self.assertGreaterEqual(lc.sign_p(wins - 1, losses), 0.05, (wins, losses))
 
     def test_a_failed_gate_is_not_held_to_the_minima(self):
         records = chain()

@@ -1112,13 +1112,23 @@ def resolver_from(resolutions):
     return by_ref.get
 
 
+def sign_p(wins, losses):
+    """One-sided exact sign test on discordant pairs: P(W >= wins | p = 0.5)."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
+
+
 def minima_errors(gate):
     """Why a passing hold-out gate's own results fall short of the pinned minima."""
     pinned = classes()["eval_minima"].get(gate["gate"])
     if pinned is None or gate["result"] != "pass":
         return []
     metrics = gate.get("metrics") or {}
-    missing = [k for k in ("cases", "delta", "losses", "anchored") if k not in metrics]
+    missing = [
+        k for k in ("cases", "delta", "wins", "losses", "anchored") if k not in metrics
+    ]
     if missing:
         return [
             f"{gate['gate']} does not report {', '.join(missing)} against the pinned minima"
@@ -1132,9 +1142,11 @@ def minima_errors(gate):
         errors.append(
             f"{gate['gate']} delta {metrics['delta']} is under {pinned['min_delta']}"
         )
-    if metrics["losses"] > pinned["max_losses"]:
+    p = sign_p(int(metrics["wins"]), int(metrics["losses"]))
+    if p >= pinned["max_sign_p"]:
         errors.append(
-            f"{gate['gate']} lost {metrics['losses']} cases, over {pinned['max_losses']}"
+            f"{gate['gate']} {metrics['wins']} wins / {metrics['losses']} losses: "
+            f"one-sided sign test p = {p:.3f}, not under {pinned['max_sign_p']}"
         )
     share = metrics["anchored"] / metrics["cases"] if metrics["cases"] else 0.0
     if share < pinned["min_anchored_share"]:

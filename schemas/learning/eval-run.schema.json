@@ -70,11 +70,11 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["min_cases", "min_delta", "max_losses"],
+      "required": ["min_cases", "min_delta", "max_sign_p"],
       "properties": {
         "min_cases": {"type": "integer", "minimum": 1},
         "min_delta": {"type": "number"},
-        "max_losses": {"type": "integer", "minimum": 0}
+        "max_sign_p": {"type": "number", "minimum": 0, "maximum": 1}
       }
     },
     "results": {

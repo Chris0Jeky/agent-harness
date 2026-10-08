@@ -436,23 +436,23 @@
     ]
   },
   "eval_minima": {
-    "description": "Pinned minima for a passing hold-out gate, checked by the fold against the gate's own results (metrics cases, delta, losses, anchored), whatever policy the evaluator ran with. Provisional until the statistics audit of the first evolved recipe; revised on the bus thread.",
+    "description": "Pinned minima for a passing hold-out gate, checked by the fold against the gate's own results (metrics cases, delta, wins, losses, anchored), whatever policy the evaluator ran with. From the 2026-10-08 statistics audit: max_losses = 0 failed a true +0.30 candidate more often as n grew, so the gate is at least 20 distinct inputs, a non-negative delta and a one-sided exact sign test on the discordant pairs with p < max_sign_p (W >= 5, 7, 9, 10, 12 for L = 0 to 4), which kept false passes at or below 3.3% in every model tried. Plan for 45-50 cases for 90% power at +0.30.",
     "offline_eval": {
       "min_cases": 20,
       "min_delta": 0.0,
-      "max_losses": 0,
+      "max_sign_p": 0.05,
       "min_anchored_share": 0.5
     },
     "replay": {
       "min_cases": 20,
       "min_delta": 0.0,
-      "max_losses": 0,
+      "max_sign_p": 0.05,
       "min_anchored_share": 0.5
     },
     "retrieval_regression": {
       "min_cases": 20,
       "min_delta": 0.0,
-      "max_losses": 0,
+      "max_sign_p": 0.05,
       "min_anchored_share": 0.5
     }
   }

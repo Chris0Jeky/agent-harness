@@ -162,7 +162,13 @@ def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="acti
                     holdout_digest="a" * 64,
                     training_excluded=True,
                     anchors=[],
-                    metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+                    metrics={
+                        "cases": 20,
+                        "delta": 0.1,
+                        "wins": 8,
+                        "losses": 0,
+                        "anchored": 20,
+                    },
                 )
             if name == "owner":
                 item.update(

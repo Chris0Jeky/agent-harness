@@ -58,7 +58,7 @@ def gate(name, at, result="pass", evaluator=ORACLE):
             holdout_digest="f" * 64,
             training_excluded=True,
             anchors=[],
-            metrics={"cases": 20, "delta": 0.1, "losses": 0, "anchored": 20},
+            metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
         )
     if name == "owner":
         item["ref"] = "decision:test-1"
