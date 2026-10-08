@@ -545,10 +545,12 @@ def _activation_errors(candidate, latest, record):
         gate = latest.get(name)
         if gate is None or not _counts(gate, candidate):
             errors.append(f"activation needs a latest independent pass of {name}")
+    # maturity is a waiting period, not a judgment: it never vouches for the rest.
+    judged = [n for n in needed if n not in policy["not_judgment"]]
     satisfied = [
-        latest[n] for n in needed if n in latest and _counts(latest[n], candidate)
+        latest[n] for n in judged if n in latest and _counts(latest[n], candidate)
     ]
-    if needed and not any(
+    if judged and not any(
         g["evaluator"]["kind"] in policy["independent"] for g in satisfied
     ):
         errors.append(

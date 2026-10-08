@@ -38,7 +38,7 @@
     },
     "reason": {"$ref": "common.schema.json#/$defs/short_text"},
     "landed": {
-      "description": "Where a live promotion landed: pr:<url>, memory:<project>/<name>, commit:<repo>@<sha>.",
+      "description": "Where a live promotion landed: pr:<url>, memory:<project>/<name>.md, commit:<repo>@<sha>.",
       "$ref": "common.schema.json#/$defs/ref"
     },
     "genome": {"$ref": "common.schema.json#/$defs/gen_id"},

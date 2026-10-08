@@ -16,7 +16,8 @@
   "evaluators": {
     "never_satisfies": ["self"],
     "independent": ["oracle", "owner", "independent_model"],
-    "owner_gate": ["owner"]
+    "owner_gate": ["owner"],
+    "not_judgment": ["maturity"]
   },
   "classes": {
     "P0": {

@@ -451,18 +451,15 @@ class FoldTests(unittest.TestCase):
         cand = candidate(kind="skill", promotion_class="P3")
         judge = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "j"}
         evaluation = [gate("offline_eval", "2026-09-08T12:00:00Z", judge)]
-        result = self.fold_steps(
-            cand,
-            *self.path(evaluation, active=()),
-        )
-        # maturity is an oracle pass, so the judge is not alone: activation holds.
-        self.assertEqual(result.state, "active")
-        steps = self.path(evaluation)
-        steps[-1][2][0]["evaluator"] = judge
-        result = self.fold_steps(cand, *steps)
+        # The oracle's maturity pass is a waiting period; it does not vouch.
+        result = self.fold_steps(cand, *self.path(evaluation))
+        self.assertEqual(result.state, "probation")
         self.assertTrue(
             any("not only an LLM judge" in e for e in result.errors), result.errors
         )
+        review = [gate("independent_review", "2026-09-10T00:00:00Z")]
+        accepted = self.fold_steps(cand, *self.path(evaluation, active=review))
+        self.assertEqual(accepted.state, "probation")  # review is not required
 
     def test_a_later_failure_overrides_an_earlier_pass(self):
         cand = candidate(kind="skill", promotion_class="P3", consequential=True)
