@@ -83,13 +83,7 @@ def _rate(numerator, denominator):
     return numerator / denominator if denominator else None
 
 
-def _success(experience):
-    outcome = experience["outcome"]
-    return (
-        outcome["immediate"] in ("completed", "published", "merged")
-        and outcome["matured"] != "reverted"
-        and outcome["regression"] is not True
-    )
+_success = contracts.experience_succeeded
 
 
 def _success_block(experiences):

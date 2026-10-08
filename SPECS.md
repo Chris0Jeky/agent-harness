@@ -1073,14 +1073,18 @@ py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctn
 `procedure`) replays a proposed skill on a historical task it was not generated from: the
 recorded output carries `completed`, `turns` and `recovered`, and the case passes when the run
 completed, within `max_turns` when set, and recovered from its injected failure when
-`require_recovery` is set. The run's `results.procedural` reports completion rate, mean turns,
-recovery rate and mean cost per variant. A system evaluation (`scripts/learning_system.py`)
-compares the runs the canary made under the candidate (`variant: gen:<id>`) with the runs made
-under the baseline, leaving out the candidate's training evidence. Each arm reports success
+`require_recovery` is set. The run's `results.procedural` reports completion rate (an errored run did
+not complete), mean turns over completed runs, recovery rate and mean cost per variant. A system evaluation (`scripts/learning_system.py`)
+compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
+genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
+the candidate's own evidence. A run's `variant` is fixed by its first observation, like its split
+key. Each arm reports success
 (`experience_succeeded`, the one success definition), maturity, clean and revert rates,
 regressions, triage precision, owner-correction rate and cost. It is a non-regression gate: with
-at least `min_runs` (20) per arm, the candidate passes when success has not fallen, and reverts
-and owner corrections have not risen, beyond the policy's tolerances (0 by default). The
+at least `min_runs` (20) runs and `min_matured` (10) matured runs per arm (reverts are only known
+once runs mature, so an unmatured arm is `insufficient`, never a silent pass), the candidate passes
+when success has not fallen, and reverts and owner corrections have not risen, beyond the policy's
+tolerances (0 by default). The
 `canary` gate it emits drops into the record leaving `canary`.
 
 ```powershell

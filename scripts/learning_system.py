@@ -31,6 +31,7 @@ _SPEC.loader.exec_module(contracts)
 TOOL = "agent-harness:scripts/learning_system.py@1"
 DEFAULT_POLICY = {
     "min_runs": 20,
+    "min_matured": 10,
     "max_success_drop": 0.0,
     "max_revert_rise": 0.0,
     "max_correction_rise": 0.0,
@@ -122,13 +123,24 @@ def compare(
 ):
     """The system-run/v1 report for a candidate's canary."""
     policy = {**DEFAULT_POLICY, **(policy or {})}
-    if policy["min_runs"] < 1 or any(
-        policy[k] < 0
-        for k in ("max_success_drop", "max_revert_rise", "max_correction_rise")
+    if (
+        policy["min_runs"] < 1
+        or policy["min_matured"] < 1
+        or any(
+            policy[k] < 0
+            for k in ("max_success_drop", "max_revert_rise", "max_correction_rise")
+        )
     ):
-        raise SystemRefusal("min_runs is at least 1 and every tolerance at least 0")
+        raise SystemRefusal(
+            "min_runs and min_matured are at least 1, tolerances at least 0"
+        )
     if baseline_variant == candidate_variant:
         raise SystemRefusal("the two arms must be different variants")
+    named = candidate.get("genome")
+    if named and candidate_variant != f"gen:{named}":
+        raise SystemRefusal(
+            f"the candidate runs as gen:{named}, not {candidate_variant}"
+        )
     by_id, errors = contracts.fold_experiences(experiences)
     if errors:
         raise SystemRefusal(f"experience ledger is inconsistent: {errors[0]}")
@@ -146,13 +158,19 @@ def compare(
             continue
         arms[side].append(record)
     stats = {side: arm(runs) for side, runs in arms.items()}
-    short = [s for s in stats if stats[s]["runs"] < policy["min_runs"]]
-    if short:
+    # Reverts are only known once runs mature: an unmatured arm is not evidence
+    # that nothing regressed, so it is insufficient rather than a silent pass.
+    reasons = [
+        f"{s} arm has {stats[s]['runs']} runs, needs {policy['min_runs']}"
+        for s in stats
+        if stats[s]["runs"] < policy["min_runs"]
+    ] + [
+        f"{s} arm has {stats[s]['matured']} matured runs, needs {policy['min_matured']}"
+        for s in stats
+        if stats[s]["matured"] < policy["min_matured"]
+    ]
+    if reasons:
         verdict = "insufficient"
-        reasons = [
-            f"{s} arm has {stats[s]['runs']} runs, needs {policy['min_runs']}"
-            for s in short
-        ]
     else:
         reasons = _regressions(stats["baseline"], stats["candidate"], policy)
         verdict = "fail" if reasons else "pass"
@@ -232,7 +250,11 @@ def main(argv=None):
             r for path in args.experiences for r in contracts.read_records(path)
         ]
         candidates = contracts.read_records(args.candidate)
-        if len(candidates) != 1 or contracts.validate_record(candidates[0]):
+        if (
+            len(candidates) != 1
+            or contracts.validate_record(candidates[0])
+            or candidates[0].get("schema") != "learning-candidate/v1"
+        ):
             raise SystemRefusal("expected exactly one valid learning candidate")
         if args.at and contracts.parse_time(args.at) is None:
             raise SystemRefusal(f"--at is not a contract timestamp: {args.at}")

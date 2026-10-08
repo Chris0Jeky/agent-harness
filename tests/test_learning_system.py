@@ -130,6 +130,43 @@ class CompareTests(unittest.TestCase):
         with self.assertRaises(ls.SystemRefusal):
             self.compare(arms(), policy={"min_runs": 0})
 
+    def test_an_unmatured_arm_is_insufficient_not_a_silent_pass(self):
+        runs = arms()
+        for record in runs:
+            if record["variant"] == CAND:
+                record["outcome"]["matured"] = None
+        report = self.compare(runs)
+        self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+        self.assertTrue(any("matured runs" in r for r in report["reasons"]))
+
+    def test_a_run_cannot_leave_its_arm_when_re_observed(self):
+        runs = arms()
+        later = copy.deepcopy(next(r for r in runs if r["variant"] == CAND))
+        later.update(observed_at="2026-09-30T00:00:00Z")
+        del later["variant"]
+        with self.assertRaises(ls.SystemRefusal) as caught:
+            self.compare(runs + [later])
+        self.assertIn("variant differs", str(caught.exception))
+
+    def test_the_candidate_variant_is_the_candidates_genome(self):
+        with self.assertRaises(ls.SystemRefusal) as caught:
+            ls.compare(arms(), candidate(), BASE, "gen:gen_other-0001", at=AT)
+        self.assertIn("runs as gen:gen_example-0001", str(caught.exception))
+
+    def test_the_canary_gate_folds_leaving_canary(self):
+        gate = self.compare(arms())["gate"]
+        records = lc.read_records(EXAMPLES / "promotion-chain.jsonl")[:2]
+        leaving = dict(
+            copy.deepcopy(records[1]),
+            id="prom_example-canary",
+            prev=records[1]["id"],
+            at="2026-09-20T00:01:00Z",
+            **{"from": "canary", "to": "probation"},
+        )
+        leaving["gates"] = [gate]
+        result = lc.fold(candidate(), records + [leaving])
+        self.assertEqual((result.state, result.errors), ("probation", []))
+
     def test_success_is_the_contract_definition(self):
         self.assertFalse(
             lc.experience_succeeded(run("x", BASE, immediate="failed", matured=None))

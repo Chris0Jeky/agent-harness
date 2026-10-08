@@ -542,6 +542,18 @@ class ProceduralTests(unittest.TestCase):
         report = run(inputs, gate="offline_eval")
         self.assertEqual(report["cases"]["excluded_training"], 1)
 
+    def test_errored_and_unfinished_runs_do_not_flatter_the_block(self):
+        inputs = self.suite()
+        first = inputs["cases"][0]["id"]
+        inputs["candidate_outputs"]["outputs"][first] = {
+            "completed": True,
+            "turns": 1,
+            "error": "crashed",
+        }
+        block = run(inputs, gate="offline_eval")["results"]["procedural"]
+        self.assertEqual(block["candidate"]["completion_rate"], 0.9)
+        self.assertEqual(block["candidate"]["turns_mean"], 8)
+
     def test_no_procedural_cases_no_block(self):
         self.assertIsNone(run()["results"]["procedural"])
 

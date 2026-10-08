@@ -293,11 +293,13 @@ def _procedural(rows, cases, baseline, candidate_outputs):
     result = {"n": len(procedural)}
     for variant, outputs in (("baseline", baseline), ("candidate", candidate_outputs)):
         runs = [outputs["outputs"].get(case) or {} for case in sorted(procedural)]
+        # Completion agrees with grading (an errored run did not complete), and
+        # turns count only completed runs, so giving up early never looks efficient.
+        done = [r for r in runs if r.get("completed") is True and not r.get("error")]
         recovered = [r["recovered"] for r in runs if r.get("recovered") is not None]
         result[variant] = {
-            "completion_rate": sum(r.get("completed") is True for r in runs)
-            / len(runs),
-            "turns_mean": _mean(r.get("turns") for r in runs),
+            "completion_rate": len(done) / len(runs),
+            "turns_mean": _mean(r.get("turns") for r in done),
             "recovery_rate": (sum(recovered) / len(recovered)) if recovered else None,
             "tokens_mean": _mean(r.get("tokens") for r in runs),
             "seconds_mean": _mean(r.get("seconds") for r in runs),

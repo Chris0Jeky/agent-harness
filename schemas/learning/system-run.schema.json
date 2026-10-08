@@ -31,9 +31,10 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["min_runs", "max_success_drop", "max_revert_rise", "max_correction_rise"],
+      "required": ["min_runs", "min_matured", "max_success_drop", "max_revert_rise", "max_correction_rise"],
       "properties": {
         "min_runs": {"type": "integer", "minimum": 1},
+        "min_matured": {"type": "integer", "minimum": 1},
         "max_success_drop": {"type": "number", "minimum": 0},
         "max_revert_rise": {"type": "number", "minimum": 0},
         "max_correction_rise": {"type": "number", "minimum": 0}
