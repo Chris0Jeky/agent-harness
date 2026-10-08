@@ -942,8 +942,8 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 
 | Record | Fields | Rules beyond the schema |
 |---|---|---|
-| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
-| `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, not the run |
+| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest, `fold_experiences`); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
+| `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, never `self` or the run's own session |
 | `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
 | `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
 | `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
@@ -954,35 +954,58 @@ later move is a promotion record whose (`from`, `to`) is an edge of that file. A
 only be recorded on a record leaving one of its `gate_sources` states: evaluation gates leave
 `evaluating`, `canary` leaves `canary`, `maturity` leaves `probation`, `owner` and
 `independent_review` leave any live-path state. That placement is what forces a canary-class
-candidate through `canary` and a maturity-class one through `probation`. A record moving forward
-carries no failed gate.
+candidate through `canary`, and since every class above P0 needs `maturity`, every one of them
+through the seven-day `probation`; only P0 (episodic) goes `candidate` -> `active` directly. A
+record moving forward carries no failed gate.
 
 **Promotion classes** (`schemas/learning/promotion-classes.json`, P0-P8 as data: `kind_class`,
 per-class `activation_gates`, `conditional_gates` for `protected` and `consequential`,
-`owner_on_activation`). The fold of a candidate's records (`fold(candidate, records)`) is the
-promotion-gate decision logic. It stops at the first record that fails any of:
+`owner_on_activation`). The fold of a candidate's records (`fold(candidate, records, as_of)`) is
+the promotion-gate decision logic. Byte-identical retries count once; the fold stops at the first
+record that fails any of:
 
-- the chain is linear: one record with `prev: null`, no two records naming the same `prev` (a
-  fork), no record following an unknown or invalid one, `from` equal to the folded state, `at`
-  never earlier than the record before it, and the candidate's own `promotion_class`;
+- the chain is linear: one record with `prev: null`, no two different records naming the same
+  `prev` (a fork), no record following an unknown or invalid one, `from` equal to the folded
+  state, `at` never earlier than the record before it nor later than `as_of` (the CLI defaults it
+  to now), and the candidate's own `promotion_class`;
 - each gate was judged during the stay it leaves (`at` between entering and leaving that state),
-  and a `maturity` pass comes at least `maturity_days` (7) after entering `probation`;
+  a `maturity` pass comes at least `maturity_days` (7) after entering `probation`, and no
+  evaluation gate's `anchors` include the candidate's own `evidence`;
 - entering `active`, every required gate holds a latest result of `pass`, from an evaluator that
-  is not `self` and whose `session` is not the candidate producer's (the learner never evaluates
-  itself), at least one of them from an `oracle`, the `owner` or an `independent_model` (an
-  `llm_judge` alone never activates), and the `owner` gate judged by the owner;
-- for P8 (`owner_on_activation`), the owner's pass sits on the activating record itself: policy,
-  security and authority are never automatic.
+  is not `self` and whose `session` is not the candidate producer's, at least one of them from an
+  `oracle`, the `owner` or an `independent_model` (an `llm_judge` alone never activates), and the
+  `owner` gate judged by the owner and citing the decision (`ref: decision:<id>`);
+- for P8 (`owner_on_activation`), the owner's pass sits on the activating record itself and on
+  the record that first turns the candidate live: policy, security and authority are never
+  automatic, whatever blanket decision exists.
 
-**Shadow mode.** `effect: shadow` means evaluated and shown, nothing written to a live surface;
-`effect: live` above P0 requires `authority` (the owner decision, `decision:<inbox id>`). Until
-the owner answers the governance lane's decisions, producers write shadow only.
+Any fold error forces the returned `effect` to `shadow`: a consumer stops applying a candidate
+whose history it cannot fold, so a malformed or contested revert fails closed.
 
-**Hold-out.** Offline evaluation and replay gates name the sealed hold-out they ran on
-(`holdout_digest`) and assert `training_excluded: true`. An experience's split is derived, never
-stored: `split_of(split_key)`, a salted sha256 (`estate-experience/v1/split`) with a 20% hold-out,
-where `split_key` defaults to `source.kind|source.key`; producers set it to group runs that must
-land on one side (one PR, one finding cluster, one correction key).
+**Shadow mode.** `effect` says whether the candidate's artifact is on a live surface after the
+move: `shadow` means evaluated and shown, nothing written live. `live` is legal only moving into
+`canary`, `probation`, `active` or `reinforced`, and above P0 only with `authority:
+decision:<inbox id>` (the governance lane poses `decision:lp-p1-memory-autopromote`,
+`decision:lp-p6-p7-owner-approval` and `decision:lp-learning-records-home`). Until the owner
+answers them, producers write shadow only.
+
+**Hold-out.** An experience's split is derived, never stored: `split_of(split_key)`, a salted
+sha256 (`estate-experience/v1/split`) with a 20% hold-out, where `split_key` defaults to
+`source.kind|source.key`; producers set it to group runs that must land on one side (one PR, one
+finding cluster, one correction key). The first observation fixes an experience's `source` and
+split key: `fold_experiences` refuses a later observation that changes either, so a run never
+moves across the split. Offline evaluation and replay gates carry `holdout_digest` (sha256 of
+the evaluated case ids, sorted and newline-joined), `training_excluded: true` and `anchors` (the
+experiences the evaluated cases came from), which the fold checks against the candidate's
+evidence. The replay evaluator computes all three; excluding a genome's `training_evidence` and
+every case sharing a split key with the training evidence is its job, not the fold's.
+
+**Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
+attestation the fold checks for consistency, not proof: evaluator identity is self-reported (the
+session rule stops accidental self-evaluation, not a dishonest writer), and the salt is public,
+so a producer could choose a split key for a side. What makes a gate checkable is its `ref`: an
+`eval-run:` report can be re-run, an owner gate cites the owner's decision. Memory refs use the
+journal's spelling, `memory:<project>/<name>.md`, so every lane joins on one string.
 
 **Changing a contract.** Additive optional fields keep `/v1`; renaming, removing or tightening a
 field is `/v2`. Every change is announced on the learning-plane bus thread, and
