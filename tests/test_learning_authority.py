@@ -163,6 +163,40 @@ def errors_of(result):
     return " | ".join(result.errors)
 
 
+class MergedFromProbationTests(unittest.TestCase):
+    """A consolidated single retires from probation into its superseder (L2, cc#835)."""
+
+    def merge(self, effect):
+        steps = p1_path()[:2]
+        steps.append(
+            {
+                **steps[-1],
+                "id": "prom_auth-0003",
+                "prev": steps[-1]["id"],
+                "from": "probation",
+                "to": "merged",
+                "at": "2026-09-10T00:00:00Z",
+                "gates": [],
+                "effect": effect,
+                "merged_into": "lc_auth-consolidated",
+            }
+        )
+        for field in ("authority", "landed"):
+            steps[-1].pop(field, None)
+        return lc.fold(candidate(), steps, resolve=resolver(P1_C))
+
+    def test_a_live_single_merges_and_leaves_its_surface(self):
+        result = self.merge("shadow")
+        self.assertEqual(
+            (result.state, result.effect, result.errors), ("merged", "shadow", [])
+        )
+
+    def test_merged_is_never_live(self):
+        result = self.merge("live")
+        self.assertEqual(result.state, "probation")
+        self.assertTrue(result.errors)
+
+
 class P1AuthorityTests(unittest.TestCase):
     def test_option_c_with_its_exit_bar_met_goes_live_through_a_pr(self):
         result = lc.fold(candidate(), p1_path(), resolve=resolver(P1_C))

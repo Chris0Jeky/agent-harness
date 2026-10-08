@@ -11,7 +11,7 @@
     "candidate": ["evaluating", "merged", "rejected", "active"],
     "evaluating": ["canary", "probation", "merged", "rejected"],
     "canary": ["probation", "rejected", "reverted"],
-    "probation": ["active", "rejected", "reverted"],
+    "probation": ["active", "merged", "rejected", "reverted"],
     "active": ["reinforced", "superseded", "decayed", "reverted"],
     "reinforced": ["reinforced", "superseded", "decayed", "reverted"],
     "merged": ["archived"],
