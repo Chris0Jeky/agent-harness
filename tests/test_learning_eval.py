@@ -448,6 +448,24 @@ class OracleTests(unittest.TestCase):
         self.assertTrue(self.grade(ranked, {"items": ["m", "x"]}))
         self.assertFalse(self.grade(ranked, {"items": ["x", "m"]}))
 
+    def test_set_match_forbids_items(self):
+        keeps = {
+            "kind": "set_match",
+            "expected_items": ["a.py#L0"],
+            "forbidden_items": ["b.py#L1"],
+        }
+        self.assertTrue(self.grade(keeps, {"items": ["a.py#L0", "c.py#L2"]}))
+        self.assertFalse(self.grade(keeps, {"items": ["a.py#L0", "b.py#L1"]}))
+        drops = {"kind": "set_match", "forbidden_items": ["b.py#L1"]}
+        self.assertTrue(self.grade(drops, {"items": []}))
+        self.assertFalse(self.grade(drops, {}))
+        self.assertFalse(self.grade(drops, {"items": ["b.py#L1"]}))
+        case = copy.deepcopy(load()["cases"][0])
+        case["oracle"] = {"kind": "set_match"}
+        self.assertTrue(lc.validate_record(case))
+        case["oracle"] = drops
+        self.assertEqual(lc.validate_record(case), [])
+
     def test_missing_and_errored_outputs_fail(self):
         self.assertFalse(self.grade({"kind": "exact", "expected": "a"}, None))
         self.assertFalse(

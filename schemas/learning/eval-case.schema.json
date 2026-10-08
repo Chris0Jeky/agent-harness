@@ -69,6 +69,10 @@
         "needles": {"$ref": "#/$defs/items"},
         "pattern": {"type": "string", "minLength": 1, "maxLength": 400},
         "expected_items": {"$ref": "#/$defs/items"},
+        "forbidden_items": {
+          "description": "set_match only: items the output must not contain, e.g. the location keys of findings triage refuted, which a revised recipe should no longer report.",
+          "$ref": "#/$defs/items"
+        },
         "min_recall": {"$ref": "#/$defs/fraction"},
         "min_precision": {"$ref": "#/$defs/fraction"},
         "k": {"type": "integer", "minimum": 1},
@@ -82,7 +86,7 @@
         {"if": {"properties": {"kind": {"const": "exact"}}}, "then": {"required": ["expected"]}},
         {"if": {"properties": {"kind": {"enum": ["contains_all", "contains_none"]}}}, "then": {"required": ["needles"]}},
         {"if": {"properties": {"kind": {"const": "regex"}}}, "then": {"required": ["pattern"]}},
-        {"if": {"properties": {"kind": {"const": "set_match"}}}, "then": {"required": ["expected_items"]}},
+        {"if": {"properties": {"kind": {"const": "set_match"}}}, "then": {"anyOf": [{"required": ["expected_items"]}, {"required": ["forbidden_items"]}]}},
         {"if": {"properties": {"kind": {"const": "ranked_recall"}}}, "then": {"required": ["expected_items", "k"]}},
         {"if": {"properties": {"kind": {"const": "abstain"}}}, "then": {"required": ["expected_abstain"]}},
         {"if": {"properties": {"kind": {"const": "numeric"}}}, "then": {"anyOf": [{"required": ["at_least"]}, {"required": ["at_most"]}]}}
