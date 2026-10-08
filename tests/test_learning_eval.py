@@ -165,7 +165,7 @@ class RefusalTests(unittest.TestCase):
     def test_a_named_genome_must_be_supplied(self):
         inputs = load()
         inputs["candidate"]["genome"] = "gen_missing-0001"
-        self.assertRefused("pass that genome", inputs)
+        self.assertRefused("pass exactly that genome", inputs)
 
     def test_genome_training_evidence_is_excluded_too(self):
         inputs = load()
@@ -244,6 +244,153 @@ class RefusalTests(unittest.TestCase):
         )
         self.assertEqual(report["tier"], "llm_judge")
         self.assertEqual(report["gate"]["evaluator"]["kind"], "llm_judge")
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Defects found by the #497 review lenses; each pins its fix."""
+
+    def assertRefused(self, fragment, inputs=None, **options):
+        with self.assertRaises(ev.EvalRefusal) as caught:
+            run(inputs, **options)
+        self.assertIn(fragment, str(caught.exception))
+
+    def genome(self, inputs, gid, evidence):
+        return {
+            "schema": "candidate-genome/v1",
+            "id": gid,
+            "at": "2026-09-03T09:05:00Z",
+            "producer": dict(inputs["candidate"]["producer"], session="generator-1"),
+            "parent": {"example-config": "c" * 40},
+            "parent_genome": None,
+            "changes": {
+                "memory": [{"repo": "example-config", "path": "m.md", "op": "add"}]
+            },
+            "candidates": [inputs["candidate"]["id"]],
+            "training_evidence": {"experiences": evidence},
+        }
+
+    def test_only_the_named_genome_is_accepted(self):
+        inputs = load()
+        inputs["candidate"]["genome"] = "gen_named-0001"
+        other = self.genome(inputs, "gen_other-0001", inputs["candidate"]["evidence"])
+        self.assertRefused("pass exactly that genome", inputs, genome=other)
+
+    def test_outputs_from_a_genome_require_that_genome(self):
+        inputs = load()
+        inputs["candidate_outputs"]["variant_ref"] = "gen:gen_ran-0001"
+        self.assertRefused("runs as gen_ran-0001", inputs)
+
+    def test_an_anchor_missing_from_the_ledger_refuses(self):
+        inputs = load()
+        anchored = next(c for c in inputs["cases"] if c["experience"])
+        inputs["experiences"] = [
+            e for e in inputs["experiences"] if e["id"] != anchored["experience"]
+        ]
+        self.assertRefused("not in the ledger", inputs)
+
+    def test_an_invalid_pattern_refuses(self):
+        inputs = load()
+        case = next(c for c in inputs["cases"] if c["oracle"]["kind"] == "regex")
+        case["oracle"]["pattern"] = "(?i"
+        self.assertRefused("invalid pattern", inputs)
+
+    def test_labels_never_claim_to_be_an_oracle(self):
+        record = labels(
+            "baseline", {"case_static-tie": "pass"}, dict(JUDGE, kind="oracle")
+        )
+        self.assertTrue(lc.validate_record(record))
+
+    def test_labels_from_the_genome_producer_are_the_learners(self):
+        inputs = load()
+        case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        case["oracle"] = {"kind": "judge"}
+        genome = self.genome(inputs, "gen_mine-0001", inputs["candidate"]["evidence"])
+        inputs["candidate"]["genome"] = genome["id"]
+        mine = dict(JUDGE, session="generator-1")
+        self.assertRefused(
+            "learner's own session",
+            inputs,
+            genome=genome,
+            labels=[
+                labels(v, {case["id"]: "pass"}, mine) for v in ("baseline", "candidate")
+            ],
+        )
+
+    def test_absent_text_never_passes_a_text_oracle(self):
+        for oracle in (
+            {"kind": "contains_none", "needles": ["3.9"]},
+            {"kind": "regex", "pattern": "^$"},
+            {"kind": "exact", "expected": ""},
+        ):
+            self.assertFalse(
+                ev.grade({"id": "case_x", "oracle": oracle}, {"tokens": 1})[0]
+            )
+        abstain = {"kind": "abstain", "expected_abstain": False}
+        self.assertFalse(ev.grade({"id": "case_x", "oracle": abstain}, {})[0])
+        self.assertTrue(
+            ev.grade({"id": "case_x", "oracle": abstain}, {"abstained": False})[0]
+        )
+
+    def test_an_errored_output_fails_a_judge_case(self):
+        inputs = load()
+        case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        case["oracle"] = {"kind": "judge"}
+        inputs["candidate_outputs"]["outputs"][case["id"]] = {"error": "crashed"}
+        report = run(
+            inputs,
+            labels=[labels(v, {case["id"]: "pass"}) for v in ("baseline", "candidate")],
+        )
+        self.assertEqual(report["results"]["losses"], 1)
+
+    def test_policy_is_bounded_and_recorded_in_the_gate(self):
+        self.assertRefused("min_cases is at least 1", policy={"min_cases": 0})
+        loose = run(policy={"max_losses": 5})
+        self.assertEqual(loose["gate"]["metrics"]["max_losses"], 5)
+        self.assertNotEqual(loose["id"], run()["id"])
+
+    def test_the_named_evaluator_does_not_depend_on_order(self):
+        inputs = load()
+        case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        case["oracle"] = {"kind": "judge"}
+        a, b = dict(JUDGE, session="judge-A"), dict(JUDGE, session="judge-B")
+        one = [
+            labels("baseline", {case["id"]: "pass"}, a),
+            labels("candidate", {case["id"]: "pass"}, b),
+        ]
+        self.assertEqual(
+            run(copy.deepcopy(inputs), labels=one)["evaluator"]["session"], "judge-A"
+        )
+        self.assertEqual(
+            run(inputs, labels=list(reversed(one)))["evaluator"]["session"], "judge-A"
+        )
+
+    def test_run_records_keep_their_gate_consistent(self):
+        report = run()
+        for change in (
+            {"tier": "llm_judge"},
+            {"gate_name": "offline_eval"},
+            {"gate": None},
+        ):
+            self.assertTrue(
+                lc.validate_record(dict(copy.deepcopy(report), **change)), change
+            )
+
+    def test_maximum_bounds_fractions(self):
+        case = copy.deepcopy(load()["cases"][0])
+        case["oracle"]["min_recall"] = 1.5
+        self.assertTrue(any("above 1" in e for e in lc.validate_record(case)))
+
+    def test_experience_observations_order_by_instant_not_text(self):
+        first = copy.deepcopy(load()["experiences"][0])
+        first["observed_at"] = "2026-09-02T00:00:00Z"
+        later = copy.deepcopy(first)
+        later["observed_at"] = "2026-09-02T00:00:00.5Z"
+        later["outcome"]["matured"] = None
+        later["outcome"]["immediate"] = "failed"
+        by_id, errors = lc.fold_experiences([later, first])
+        self.assertEqual(
+            (errors, by_id[first["id"]]["outcome"]["immediate"]), ([], "failed")
+        )
 
 
 class OracleTests(unittest.TestCase):

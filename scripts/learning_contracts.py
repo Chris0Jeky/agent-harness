@@ -505,17 +505,31 @@ def _promotion_rules(record):
 
 def _labels_rules(record):
     errors = _time_errors(record, ("at",))
-    if record["evaluator"]["kind"] == "self":
-        errors.append("$.evaluator: the learner never grades its own outputs")
+    if record["evaluator"]["kind"] in ("self", "oracle"):
+        errors.append(
+            "$.evaluator: labels come from a judge, the owner or an independent model, never self or oracle"
+        )
     return errors
 
 
 def _run_rules(record):
     errors = _time_errors(record, ("at",))
     gate = record["gate"]
+    if record["tier"] != record["evaluator"]["kind"]:
+        errors.append("$.tier: must be the run evaluator's kind")
+    if (
+        gate is None
+        and record["split"] == "holdout"
+        and record["verdict"] != "insufficient"
+    ):
+        errors.append("$.gate: a hold-out pass or fail emits its gate")
     if gate is not None:
+        if gate["gate"] != record["gate_name"]:
+            errors.append("$.gate.gate: must be the run's gate_name")
         if record["split"] != "holdout" or record["verdict"] != gate["result"]:
-            errors.append("$.gate: only a hold-out pass or fail emits a gate, matching the verdict")
+            errors.append(
+                "$.gate: only a hold-out pass or fail emits a gate, matching the verdict"
+            )
         if gate["holdout_digest"] != record["holdout_digest"] or sorted(
             gate["anchors"]
         ) != sorted(record["anchors"]):
@@ -754,7 +768,11 @@ def fold_experiences(records):
     by_id, first, errors = {}, {}, []
     ordered = sorted(
         (r for r in records if isinstance(r, dict)),
-        key=lambda r: (str(r.get("observed_at")), _canonical(r)),
+        key=lambda r: (
+            parse_time(r.get("observed_at"))
+            or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+            _canonical(r),
+        ),
     )
     for record in ordered:
         problems = validate_record(record)

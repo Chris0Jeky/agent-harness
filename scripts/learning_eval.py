@@ -17,7 +17,7 @@ Selection is the hold-out separation the learning plane depends on:
 - every case built from the candidate's training evidence (its ``evidence``
   plus its genome's ``training_evidence``) is dropped, and so is every case
   sharing a split key with that evidence, so a re-worded duplicate of the
-  training run does not leak back in;
+  training run that keeps its split key does not leak back in;
 - the training evidence must resolve in the supplied experience ledger, or
   the run refuses: exclusion that cannot be proven is not claimed.
 
@@ -84,19 +84,25 @@ def latest_experiences(records):
 effective_split_key = contracts.experience_split_key
 
 
-def training_set(candidate, genome, experiences):
-    """(experience ids, split keys) the candidate learned from; refuse if unresolved."""
-    if candidate.get("genome") and genome is None:
+def training_set(candidate, genome, experiences, ran=None):
+    """(experience ids, split keys) the candidate learned from; refuse if unresolved.
+
+    ``ran`` is the candidate outputs' variant_ref: a ``gen:`` ref names the
+    genome that actually produced them, whose training evidence is excluded too.
+    """
+    named = candidate.get("genome")
+    if ran and ran.startswith("gen:"):
+        if named and named != ran[4:]:
+            raise EvalRefusal(
+                f"the outputs came from {ran[4:]}, the candidate names {named}"
+            )
+        named = ran[4:]
+    if named and (genome is None or genome["id"] != named):
         raise EvalRefusal(
-            f"{candidate['id']} names {candidate['genome']}: pass that genome so its "
-            "training evidence is excluded too"
+            f"{candidate['id']} runs as {named}: pass exactly that genome"
         )
-    if genome is not None:
-        if (
-            genome["id"] != candidate.get("genome")
-            and candidate["id"] not in genome["candidates"]
-        ):
-            raise EvalRefusal(f"{genome['id']} does not implement {candidate['id']}")
+    if genome is not None and candidate["id"] not in genome["candidates"]:
+        raise EvalRefusal(f"{genome['id']} does not implement {candidate['id']}")
     ids = set(candidate["evidence"])
     if genome is not None:
         ids |= set(genome["training_evidence"]["experiences"])
@@ -123,6 +129,15 @@ def select(cases, split, training_ids, training_keys, experiences):
             raise EvalRefusal(f"duplicate case id {case['id']}")
         seen.add(case["id"])
         anchor = experiences.get(case["experience"]) if case["experience"] else None
+        if case["experience"] and anchor is None:
+            raise EvalRefusal(
+                f"{case['id']}: its experience is not in the ledger, so its split cannot be proven"
+            )
+        if case["oracle"]["kind"] == "regex":
+            try:
+                re.compile(case["oracle"]["pattern"])
+            except re.error as exc:
+                raise EvalRefusal(f"{case['id']}: invalid pattern ({exc})") from exc
         if anchor is not None and effective_split_key(anchor) != case["split_key"]:
             raise EvalRefusal(
                 f"{case['id']}: split_key differs from its experience's; a case cannot move across the split"
@@ -155,6 +170,13 @@ def grade(case, output):
         return False, {"missing": True}
     if output.get("error"):
         return False, {"error": output["error"]}
+    if (
+        kind in ("exact", "contains_all", "contains_none", "regex")
+        and "text" not in output
+    ):
+        return False, {"missing_text": True}
+    if kind == "abstain" and "abstained" not in output:
+        return False, {"missing_abstained": True}
     text = _fold_text(output.get("text"))
     if kind == "exact":
         return (output.get("text") or "").strip() == oracle["expected"].strip(), {}
@@ -281,6 +303,8 @@ def evaluate(
 ):
     """Judge a candidate against the baseline; returns an eval-run/v1 report."""
     policy = {**DEFAULT_POLICY, **(policy or {})}
+    if policy["min_cases"] < 1 or policy["max_losses"] < 0:
+        raise EvalRefusal("min_cases is at least 1 and max_losses at least 0")
     if gate not in GATES:
         raise EvalRefusal(f"gate must be one of {GATES}")
     suites = {c["suite"] for c in cases}
@@ -293,7 +317,9 @@ def evaluate(
                 f"the {variant} outputs are for {outputs['variant']}/{outputs['suite']}"
             )
     experiences = latest_experiences(experiences)
-    training_ids, training_keys = training_set(candidate, genome, experiences)
+    training_ids, training_keys = training_set(
+        candidate, genome, experiences, candidate_outputs["variant_ref"]
+    )
     chosen, counts = select(cases, split, training_ids, training_keys, experiences)
     label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
     graders = set()
@@ -318,19 +344,18 @@ def evaluate(
                         f"{case['id']}: judge case without a {variant} label"
                     )
                 graders.add(json.dumps(label_file["evaluator"], sort_keys=True))
-                passed, detail = (output is not None and label == "pass"), {
-                    "label": label
-                }
+                usable = output is not None and not output.get("error")
+                passed, detail = (usable and label == "pass"), {"label": label}
             else:
                 passed, detail = grade(case, output)
             row[variant] = int(passed)
             row["detail"][variant] = detail
         rows.append(row)
+    learners = {candidate["producer"]["session"]}
+    if genome is not None:
+        learners.add(genome["producer"]["session"])
     for label_file in label_files.values():
-        if (
-            label_file
-            and label_file["evaluator"]["session"] == candidate["producer"]["session"]
-        ):
+        if label_file and label_file["evaluator"]["session"] in learners:
             raise EvalRefusal("the labels come from the learner's own session")
     wins = sum(r["candidate"] and not r["baseline"] for r in rows)
     losses = sum(r["baseline"] and not r["candidate"] for r in rows)
@@ -351,11 +376,20 @@ def evaluate(
         + _digest(
             [
                 candidate["id"],
+                genome["id"] if genome else "",
                 baseline["variant_ref"],
                 candidate_outputs["variant_ref"],
                 split,
                 gate,
                 holdout_digest,
+                json.dumps(policy, sort_keys=True),
+                _digest(
+                    [
+                        json.dumps(o["outputs"], sort_keys=True)
+                        for o in (baseline, candidate_outputs)
+                    ]
+                ),
+                _digest(sorted(json.dumps(lab, sort_keys=True) for lab in labels)),
             ]
         )[:16]
     )
@@ -419,8 +453,9 @@ def evaluate(
             "ref": f"eval-run:{run_id}",
             "summary": (
                 f"{len(rows)} hold-out cases: candidate {cand_rate:.3f} vs baseline "
-                f"{base_rate:.3f}, {wins} wins, {losses} losses"
-            ),
+                f"{base_rate:.3f}, {wins} wins, {losses} losses (policy: min_delta "
+                f"{policy['min_delta']}, max_losses {policy['max_losses']})"
+            )[:280],
             "holdout_digest": holdout_digest,
             "training_excluded": True,
             "anchors": anchors,
@@ -429,6 +464,9 @@ def evaluate(
                 "wins": wins,
                 "losses": losses,
                 "cases": len(rows),
+                "min_cases": policy["min_cases"],
+                "min_delta": policy["min_delta"],
+                "max_losses": policy["max_losses"],
             },
         }
     problems = contracts.validate_record(report)
@@ -448,7 +486,11 @@ def _run_evaluator(graders, run_id):
                 "baseline and candidate were labelled by different kinds of evaluator"
             )
     order = {"llm_judge": 0, "independent_model": 1, "owner": 2}
-    return min((json.loads(g) for g in graders), key=lambda e: order.get(e["kind"], -1))
+    # Sorted first, so the same inputs always name the same evaluator.
+    return min(
+        (json.loads(g) for g in sorted(graders)),
+        key=lambda e: order.get(e["kind"], -1),
+    )
 
 
 # -- command line -----------------------------------------------------------
