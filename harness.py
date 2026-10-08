@@ -7401,7 +7401,13 @@ def skill_name_chains_alias(
             return True
         finally:
             for path in reversed(created):
-                path.rmdir()
+                try:
+                    path.rmdir()
+                except OSError as exc:
+                    raise HarnessError(
+                        f"cannot clean up skill name probe: {path}: {exc}; "
+                        f"probe directory may remain: {created[0]}"
+                    ) from exc
     except OSError as exc:
         raise HarnessError(
             f"cannot preflight selected skill roots: {anchor}: {exc}"
