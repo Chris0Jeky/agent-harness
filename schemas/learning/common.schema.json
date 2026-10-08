@@ -33,10 +33,10 @@
       "pattern": "^[a-z][a-z0-9-]{0,31}:[^\\s]{1,480}$"
     },
     "relpath": {
-      "description": "Repository-relative POSIX path: no leading slash or tilde, no drive, no backslash, no control character, no '..' or '.git' segment.",
+      "description": "Repository-relative POSIX path: no leading slash or tilde, no drive, no backslash, no control character, no '..' or '.git' segment, no segment ending in a dot or space (Windows strips them, so '.git.' is '.git'), no '~' (8.3 short names alias real ones).",
       "type": "string",
       "maxLength": 400,
-      "pattern": "^(?![/~])(?!.*(^|/)[.][gG][iI][tT](/|$))(?!.*(^|/)\\.\\.(/|$))[^\\\\:*?\"<>|\\s][^\\\\:*?\"<>|\\x00-\\x1f]*$"
+      "pattern": "^(?!.*~)(?!.*[. ](/|$))(?![/])(?!.*(^|/)[.][gG][iI][tT](/|$))(?!.*(^|/)\\.\\.(/|$))[^\\\\:*?\"<>|\\s][^\\\\:*?\"<>|\\x00-\\x1f]*$"
     },
     "short_text": {
       "type": "string",

@@ -330,14 +330,14 @@
     ]
   },
   "destinations": {
-    "description": "Where each class may write. A destination's class is the lowest class whose allowlist admits it; a destination on no allowlist is P8. The fold is pure, so the applier also refuses a path with a symlink or junction on any segment, a path that resolves outside its repository, and any write the rendered bytes do not hash to.",
+    "description": "Where each class may write. A destination's class is the HIGHEST class whose allowlist admits it, so an overlapping entry can only raise it; a destination on no allowlist, or with a protected segment, is P8. Paths are matched case-exactly against the real names; the fold is pure, so the applier also refuses a path whose on-disk spelling differs from the classed one (a case or short-name alias), a path with a symlink or junction on any segment, a path that resolves outside its repository, and any write the rendered bytes do not hash to.",
     "default_class": "P8",
     "allow": [
       {
         "class": "P1",
         "repo": "^(Chris0Jeky/)?claude-config$",
-        "path": "^projects/[a-z0-9][a-z0-9._-]{0,79}/memory/(?![Mm][Ee][Mm][Oo][Rr][Yy]\\.[Mm][Dd]$)[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.md$",
-        "what": "one curated memory note, never the auto-loaded MEMORY.md index"
+        "path": "^projects/[A-Za-z0-9][A-Za-z0-9._-]{0,199}/memory/[A-Za-z0-9][A-Za-z0-9._-]{0,120}[.]md$",
+        "what": "one curated memory note under a real project directory; never the MEMORY.md index or an instruction file (protected_segments)"
       },
       {
         "class": "P3",
@@ -372,32 +372,47 @@
       {
         "class": "P7",
         "repo": "^(Chris0Jeky/)?claude-config$",
-        "path": "^tools/[a-z0-9][a-z0-9_-]{0,79}[.](py|ps1)$",
-        "what": "one tool script (the scheduler itself is P6)"
+        "path": "^tools/(?!muse_coordinator[.]py$)(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_-]{0,79}[.](py|ps1)$",
+        "what": "one tool script; never the scheduler (P6) or gate, token, tier, policy, hook, trust or learning-contract code (P8)"
       },
       {
         "class": "P7",
         "repo": "^(Chris0Jeky/)?agent-harness$",
-        "path": "^scripts/[a-z0-9][a-z0-9_]{0,79}[.]py$",
-        "what": "one harness script (never the hook templates)"
+        "path": "^scripts/(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_]{0,79}[.]py$",
+        "what": "one harness script; never the hook templates or gate, merge, policy or learning-contract code (P8)"
       }
-    ]
+    ],
+    "protected_segments": {
+      "what": "Path segments that are never below P8, matched case-insensitively against each segment: auto-loaded instruction and index files, and Windows device names.",
+      "patterns": [
+        "^(memory|claude|claude[.]local|agents|gemini|copilot-instructions)[.]md$",
+        "^(con|prn|aux|nul|conin[$]|conout[$]|com[0-9¹²³]|lpt[0-9¹²³])([.].*)?$"
+      ]
+    }
   },
   "content": {
-    "description": "Authority or permission language anywhere in a candidate's claim, future decision, context or destination makes it P8: it touches who may do what, so it is never automatic. Matched case-insensitively; an error in a pattern fails closed to P8.",
+    "description": "A tripwire, not a proof: authority, permission or injection language in a candidate's claim, future decision, destination path, context, scope or ext (every string, recursively), or in a would-apply report's bytes, makes it P8, because it touches who may do what. Text is NFKC-normalised, format characters are removed, whitespace runs collapse to one space and it is casefolded before matching; a broken pattern fails closed to P8. Paraphrases can still evade it: the owner's per-promotion approval of P8 and the reviewed PR of P1 notes are the real gate.",
     "class": "P8",
     "patterns": [
       "\\bpermissions?\\b",
-      "\\bauthori[sz](e|ed|es|ation|ing)\\b",
-      "\\bapprov(e|ed|es|al|ing)\\b",
+      "\\bauthori[sz](e|ed|es|ation|ations|ing)\\b",
+      "\\bauthorit(y|ies)\\b",
+      "\\bapprov(e|ed|es|al|als|ing)\\b",
+      "\\bconsent\\b",
       "\\bbypass",
       "\\boverrid(e|es|ing|den)\\b",
-      "\\bskip(s|ped|ping)? (the |a |any )?(review|gate|check|test|hook)s?\\b",
+      "\\bskip(s|ped|ping)? (the |a |any |all )?(review|gate|check|test|hook|ci)s?\\b",
+      "\\b(disable|disables|disabled|disabling|turn off|turns off|turned off) (the |all |any )?(hooks?|checks?|reviews?|gates?|ci|floor)\\b",
       "--no-verify",
       "--force\\b",
+      "\\bpush -f\\b",
       "\\bforce[- ]?push",
-      "\\bwithout (a |any )?(review|approval|asking|permission)\\b",
-      "\\b(merge|push)(es|ed|ing)? (it )?(straight|directly) to (main|master)\\b",
+      "\\bauto-?merge",
+      "\\bwithout (a |any |the )?(review|reviewer|approval|asking|permission|consent)\\b",
+      "\\bno (human |owner )?(review|reviewer|approval|consent|sign-?off)s? (is |are )?(needed|required)\\b",
+      "\\b(merge|push|land)(es|ed|ing|s)? (its|your|their|my|our) own\\b",
+      "\\b(straight|directly) (in)?to (main|master)\\b",
+      "\\b(tools?|commands?|actions?) (are |is )?(all )?(allowed|permitted)\\b",
       "\\b(review|merge|tier|deny) gate\\b",
       "\\bdeny[- ]floor\\b",
       "\\btier\\.json\\b",
@@ -411,11 +426,11 @@
       "\\bsecrets?\\b",
       "\\bcredentials?\\b",
       "\\bapi[ _-]?keys?\\b",
-      "\\b(access|auth|bearer|session) tokens?\\b",
+      "\\b(access|auth|bearer|session|app) tokens?\\b",
       "\\bestop\\b",
       "\\bkill[- ]?switch\\b",
-      "\\bignore (all |any )?(previous|prior|above|earlier) instructions\\b",
-      "\\bdisregard (all |any )?(previous|prior|above|earlier)? ?instructions\\b",
+      "\\b(ignore|disregard|forget)s? (all |any )?(of )?(the |these |those |your )?(previous|prior|above|earlier|preceding|former|other)\\b",
+      "\\bobey\\b",
       "\\byou (must|should) now\\b",
       "\\bsystem prompt\\b"
     ]

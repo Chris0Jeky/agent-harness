@@ -27,6 +27,7 @@ import json
 import math
 from pathlib import Path
 import re
+import unicodedata
 import sys
 
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas" / "learning"
@@ -448,30 +449,61 @@ def _max_class(*names):
 
 
 def destination_class(destination):
-    """(class, reasons): the lowest class whose allowlist admits the destination.
+    """(class, reasons): the highest class whose allowlist admits the destination.
 
     No destination is an episodic record (P0). A destination on no allowlist,
-    or one that cannot be checked, is P8: unknown blast radius fails closed.
+    with a protected segment, or one that cannot be checked, is P8: unknown
+    blast radius fails closed, and an overlapping entry can only raise it.
     """
     if destination is None:
         return "P0", []
     rules = classes()["destinations"]
     where = f"{destination.get('repo')}:{destination.get('path')}"
     try:
+        protected = [
+            segment
+            for segment in destination["path"].split("/")
+            for pattern in rules["protected_segments"]["patterns"]
+            if re.search(pattern, segment.casefold())
+        ]
+        if protected:
+            return rules["default_class"], [
+                f"destination {where} has protected segment {protected[0]!r}"
+            ]
         admitted = [
             rule["class"]
             for rule in rules["allow"]
             if _pattern_matches(rule["repo"], destination["repo"])
             and _pattern_matches(rule["path"], destination["path"])
         ]
-    except (KeyError, TypeError, re.error):
+    except (AttributeError, KeyError, TypeError, re.error):
         return rules["default_class"], [f"destination {where} cannot be checked"]
     if not admitted:
         return rules["default_class"], [
             f"destination {where} is on no class's allowlist"
         ]
-    cls = min(admitted, key=class_rank)
+    cls = max(admitted, key=class_rank)
     return cls, [f"destination {where} is a {cls} surface"]
+
+
+def _fold_text(text):
+    """NFKC, no format characters, one space per whitespace run, casefolded."""
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return " ".join(text.split()).casefold()
+
+
+def _strings(value):
+    """Every string inside a JSON value, recursively (keys included)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
 
 
 def content_class(texts):
@@ -481,7 +513,7 @@ def content_class(texts):
     for text in texts:
         if not isinstance(text, str):
             continue
-        folded = text.casefold()
+        folded = _fold_text(text)
         for pattern in rules["patterns"]:
             try:
                 hit = re.search(pattern, folded)
@@ -501,13 +533,9 @@ def effective_class(candidate):
     dest_cls, why = destination_class(candidate["destination"])
     reasons += why
     destination = candidate["destination"] or {}
-    context = candidate.get("context") or {}
-    texts = [
-        candidate["claim"],
-        candidate["future_decision"],
-        destination.get("path"),
-        context.get("preceding_action"),
-    ]
+    texts = [candidate["claim"], candidate["future_decision"], destination.get("path")]
+    for field in ("context", "scope", "ext"):
+        texts += _strings(candidate.get(field))
     text_cls, why = content_class(texts)
     reasons += why
     return _max_class(kind_cls, dest_cls, text_cls), reasons
@@ -696,10 +724,19 @@ def required_gates(candidate):
 # no owner gate counts.
 
 
+MAX_APPLY_BYTES = 262144
+
+
 def _would_apply_rules(record):
     errors = _time_errors(record, ("at",))
     text = record["bytes"]
-    if hashlib.sha256(text.encode("utf-8")).hexdigest() != record["sha256"]:
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return errors + ["$.bytes: is not encodable UTF-8 text"]
+    if len(encoded) > MAX_APPLY_BYTES:
+        errors.append(f"$.bytes: more than {MAX_APPLY_BYTES} bytes of UTF-8")
+    if hashlib.sha256(encoded).hexdigest() != record["sha256"]:
         errors.append("$.sha256: is not the sha256 of bytes")
     if "\r" in text:
         errors.append("$.bytes: line endings are LF only")
@@ -711,13 +748,55 @@ def _would_apply_rules(record):
             errors.append(
                 "$.verdict: would_apply needs an eligible candidate with no problems"
             )
-        if authority["required"] and authority["status"] != "answered":
+        dest_cls, _ = destination_class(record["destination"])
+        text_cls, why = content_class([text, record["destination"]["path"]])
+        if class_rank(record["class"]) < class_rank(dest_cls):
+            errors.append(f"$.class: the destination is a {dest_cls} surface")
+        if class_rank(record["class"]) < class_rank(text_cls):
+            errors.append(f"$.class: the bytes are {text_cls} ({'; '.join(why)})")
+        errors += _report_authority_errors(record["class"], authority, record["at"])
+    return errors
+
+
+def _report_authority_errors(cls, authority, at):
+    """The report's authority must be what its class requires, answered in time."""
+    spec = classes()["authority"][cls]
+    mode = spec["mode"]
+    if authority["required"] != (mode != "none"):
+        return [f"$.authority.required: {cls} is mode {mode}"]
+    if mode == "none":
+        return []
+    if mode == "no_live":
+        return [f"$.verdict: {cls} has no owner decision, so it never would_apply"]
+    errors = []
+    if authority["status"] != "answered":
+        errors.append("$.verdict: would_apply needs its required authority answered")
+    if authority["ref"] is None or authority["source"] is None:
+        errors.append("$.authority: an answered authority names its ref and source")
+    answered = (
+        parse_time(authority["answered_at"]) if authority["answered_at"] else None
+    )
+    if answered is None or answered > parse_time(at):
+        errors.append("$.authority.answered_at: answered before the report")
+    if mode == "per_promotion":
+        if authority["ref"] in {
+            f"decision:{s['decision']}"
+            for s in classes()["authority"].values()
+            if "decision" in s
+        }:
             errors.append(
-                "$.verdict: would_apply needs its required authority answered"
+                f"$.authority.ref: {cls} needs its own per-promotion approval"
             )
-        cls, _ = destination_class(record["destination"])
-        if class_rank(record["class"]) < class_rank(cls):
-            errors.append(f"$.class: the destination is a {cls} surface")
+        return errors
+    if authority["ref"] != f"decision:{spec['decision']}":
+        return errors + [f"$.authority.ref: {cls} is decided by {spec['decision']}"]
+    option = class_option(
+        cls, {"decision": spec["decision"], "option": authority["option"]}
+    )
+    if option is None or not option["live"]:
+        errors.append(
+            f"$.authority.option: {authority['option']!r} does not let {cls} go live"
+        )
     return errors
 
 
@@ -935,6 +1014,8 @@ def _authority_errors(candidate, record, effect_before, resolve, entered_at=None
         errors.append(f"{cls} has no canary stage: it is live only once installed")
     if spec["mode"] == "per_promotion":
         # P8: the authority is the owner's approval of this very candidate.
+        if record["to"] in INSTALLED:
+            errors += _landing_errors(record, candidate, None, cls)
         return errors + approval_errors(record.get("authority"), candidate, at, resolve)
     resolved, why = resolution(record.get("authority"), resolve)
     if why:

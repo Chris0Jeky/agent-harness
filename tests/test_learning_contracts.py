@@ -578,6 +578,7 @@ class FoldTests(unittest.TestCase):
         self.assertTrue(any("turns it live" in e for e in result.errors))
         records[1]["gates"].append(gate("owner", "2026-09-08T12:00:00Z", OWNER))
         records[1]["authority"] = "decision:test-owner-1"
+        records[1]["landed"] = "commit:" + "e" * 40
         result = lc.fold(cand, records, resolve=resolver(APPROVAL))
         self.assertEqual(
             (result.state, result.effect, result.errors), ("probation", "live", [])
