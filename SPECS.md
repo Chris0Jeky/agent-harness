@@ -1053,6 +1053,20 @@ refuses times after now and returns a record only after folding the chain with i
 
 ```powershell
 py -3 scripts\learning_promote.py --candidate <lc.json> --records <promotion records.jsonl> --gates <gate or eval-run json>... --lane <lane> --session <session>
+
+**Variant archive** (`scripts/learning_archive.py`, W3). Every `candidate-genome/v1` stays in the
+archive, linked by `parent_genome` into a tree (orphans become roots and cycles are reported, never
+followed), so a dominated variant can still parent a better one. Nothing is reduced to one
+number: `schemas/learning/objectives.json` gives each objective its direction (correctness and
+reliability up; cost, latency, owner intervention and reverts down), a genome is compared only
+when it measured every objective asked for, and the frontier is the set no other such genome
+dominates. Parents for the next generation are frontier members ranked by NSGA-II crowding
+distance, so the extremes and the sparse regions come first. The `learning-archive/v1` report lists
+each genome (parent, depth, children, layers, objectives, `frontier`, evaluation ref), the
+roots, the frontier, the unmeasured genomes, the best genome per objective and the chosen parents.
+
+```powershell
+py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctness,cost] [--parents 4]
 ```
 
 **Trust limits, stated rather than implied.** Records are written by agents, so a gate is an
