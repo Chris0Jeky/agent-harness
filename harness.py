@@ -7487,14 +7487,31 @@ def preflight_selected_skill_roots(
     destination parent, and the backup parent that holds same-named recovery
     copies of ``backup_targets``, is probed with name-only directories before
     any live or backup write, whether the destination is absent or populated.
+    Existing targets also compare their own filesystem identities: distinct
+    parents do not prove distinct roots when a target is a bind mount.
     """
     if len(targets) < 2 and (backup_parent is None or len(backup_targets) < 2):
         return
     by_parent: list[tuple[Path, list[str]]] = []
+    existing_targets: list[Path] = []
     for target in targets:
         reject_sync_path_aliases(target, label)
         parent = target.parent
         try:
+            try:
+                target.stat()
+            except FileNotFoundError:
+                pass  # Absent destinations still use their parent's lookup below.
+            else:
+                # Bind mounts can alias the targets without aliasing their parents.
+                # Never infer distinct roots solely from parent identity or names.
+                for known_target in existing_targets:
+                    if target.samefile(known_target):
+                        raise HarnessError(
+                            f"selected skill roots collide on this destination: "
+                            f"{known_target}; {target}"
+                        )
+                existing_targets.append(target)
             for known, names in by_parent:
                 # Path equality case-folds on Windows even in sensitive directories.
                 # Parents group by filesystem identity: the nearest existing
