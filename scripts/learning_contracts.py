@@ -40,6 +40,7 @@ RECORD_SCHEMAS = {
     "eval-outputs/v1": "eval-outputs.schema.json",
     "eval-labels/v1": "eval-labels.schema.json",
     "eval-run/v1": "eval-run.schema.json",
+    "system-run/v1": "system-run.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -353,6 +354,19 @@ def split_of(split_key):
     return "holdout" if int(digest[:8], 16) % 100 < HOLDOUT_PERCENT else "dev"
 
 
+SUCCEEDING = ("completed", "published", "merged")
+
+
+def experience_succeeded(record):
+    """The one success definition: it finished well and nothing later undid it."""
+    outcome = record["outcome"]
+    return (
+        outcome["immediate"] in SUCCEEDING
+        and outcome["matured"] != "reverted"
+        and outcome["regression"] is not True
+    )
+
+
 def experience_split_key(record):
     """The split key in force: split_key, else source.kind|source.key."""
     source = record["source"]
@@ -537,6 +551,18 @@ def _run_rules(record):
     return errors
 
 
+def _system_rules(record):
+    errors = _time_errors(record, ("at",))
+    gate = record["gate"]
+    if (gate is None) != (record["verdict"] == "insufficient"):
+        errors.append("$.gate: a pass or fail emits its canary gate, insufficient none")
+    elif gate is not None and (
+        gate["gate"] != "canary" or gate["result"] != record["verdict"]
+    ):
+        errors.append("$.gate: a canary gate matching the verdict")
+    return errors
+
+
 SEMANTIC_RULES = {
     "estate-experience/v1": _experience_rules,
     "memory-use/v1": _memory_use_rules,
@@ -547,6 +573,7 @@ SEMANTIC_RULES = {
     "eval-outputs/v1": lambda record: _time_errors(record, ("at",)),
     "eval-labels/v1": _labels_rules,
     "eval-run/v1": _run_rules,
+    "system-run/v1": _system_rules,
 }
 
 
