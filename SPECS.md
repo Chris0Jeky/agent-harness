@@ -973,7 +973,8 @@ record that fails any of:
   evaluation gate's `anchors` include the candidate's own `evidence`;
 - entering `active`, every required gate holds a latest result of `pass`, from an evaluator that
   is not `self` and whose `session` is not the candidate producer's, at least one of them from an
-  `oracle`, the `owner` or an `independent_model` (an `llm_judge` alone never activates), and the
+  `oracle`, the `owner` or an `independent_model` (an `llm_judge` alone never activates, and
+  `maturity`, a waiting period rather than a judgment, never vouches for the rest), and the
   `owner` gate judged by the owner and citing the decision (`ref: decision:<id>`);
 - for P8 (`owner_on_activation`), the owner's pass sits on the activating record itself and on
   the record that first turns the candidate live: policy, security and authority are never
