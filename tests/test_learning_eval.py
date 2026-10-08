@@ -554,6 +554,13 @@ class ProceduralTests(unittest.TestCase):
         self.assertEqual(block["candidate"]["completion_rate"], 0.9)
         self.assertEqual(block["candidate"]["turns_mean"], 8)
 
+    def test_recovery_rate_counts_only_cases_that_needed_recovery(self):
+        inputs = self.suite()  # only the first case requires recovery
+        for key, output in inputs["candidate_outputs"]["outputs"].items():
+            output["recovered"] = key == inputs["cases"][0]["id"]
+        block = run(inputs, gate="offline_eval")["results"]["procedural"]
+        self.assertEqual(block["candidate"]["recovery_rate"], 1.0)
+
     def test_no_procedural_cases_no_block(self):
         self.assertIsNone(run()["results"]["procedural"])
 

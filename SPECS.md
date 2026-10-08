@@ -1045,7 +1045,7 @@ once every evaluation gate is present; `canary` to `probation` on its canary res
 to `active` on maturity (and the owner's pass where the class needs it). Only passes the fold
 would count move a candidate forward (never the learner's, `self` or an LLM judge alone), since
 an evaluation gate recorded too early would strand the candidate in probation. A failed gate
-while evaluating, in canary or in probation moves to `rejected`. Every generated move is shadow;
+before activation (as a candidate, while evaluating, in canary or in probation) moves to `rejected`. Every generated move is shadow;
 a live candidate, reverts, reinforcement, supersession and decay are never generated, since they
 need blame, judgment or the owner. Run reports are accepted only for this candidate (and the
 genome it names). Gates are stored sorted and the id is derived from the move, so a retry with
@@ -1074,7 +1074,8 @@ py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctn
 recorded output carries `completed`, `turns` and `recovered`, and the case passes when the run
 completed, within `max_turns` when set, and recovered from its injected failure when
 `require_recovery` is set. The run's `results.procedural` reports completion rate (an errored run did
-not complete), mean turns over completed runs, recovery rate and mean cost per variant. A system evaluation (`scripts/learning_system.py`)
+not complete), mean turns over completed runs, recovery rate over the cases that require recovery, and mean
+cost per variant. A system evaluation (`scripts/learning_system.py`)
 compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
 genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
 the candidate's own evidence. A run's `variant` is fixed by its first observation, like its split

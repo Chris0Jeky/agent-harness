@@ -296,7 +296,13 @@ def _procedural(rows, cases, baseline, candidate_outputs):
         # Completion agrees with grading (an errored run did not complete), and
         # turns count only completed runs, so giving up early never looks efficient.
         done = [r for r in runs if r.get("completed") is True and not r.get("error")]
-        recovered = [r["recovered"] for r in runs if r.get("recovered") is not None]
+        # Recovery is a rate over the cases that injected a failure to recover from.
+        needing = [
+            outputs["outputs"].get(c["id"]) or {}
+            for c in sorted(cases, key=lambda c: c["id"])
+            if c["id"] in procedural and c["oracle"].get("require_recovery")
+        ]
+        recovered = [r.get("recovered") is True for r in needing]
         result[variant] = {
             "completion_rate": len(done) / len(runs),
             "turns_mean": _mean(r.get("turns") for r in done),
