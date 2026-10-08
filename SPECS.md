@@ -950,6 +950,7 @@ optional `ext` object keyed by lane slug for producer-private fields consumers i
 | `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `veto`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
 | `decision-resolution/v1` | `decision`, `source`, `status`, `option`, `option_label`, `answered_at`, `created`, `expires`, `subject`, `measures` | what an injected resolver returns for one agent-hq decision read at `origin/main` (`source: agent-hq@<sha>`); an answered or defaulted decision names its option and time; `subject` binds a per-promotion approval or veto window to one candidate; `measures` carries the exit bars and graduation the resolver measured |
 | `learning-would-apply/v1` (`wa_`) | `candidate`, `class`, `class_reasons`, `destination`, `op`, `base`, `bytes`, `sha256`, `authority`, `eligibility`, `verdict`, `reasons` | the applier's account of one candidate: the whole file it would write (UTF-8, LF, at most 256 KiB) and its sha256, which the validator recomputes; `base` names the replaced blob (null for an add) so a revert can guard on it; `would_apply` needs an eligible candidate with no problems, its required authority answered, and a class no lower than the destination's |
+| `promotion-receipt/v1` (`rcpt_`) | `candidate`, `record`, `kind`, `installed`, `observed`, `matured`, `reverted` | written by the applier or the store, never the learner; `id` = `rcpt_` + sha256(candidate\|record\|kind\|canonical evidence)[:16]; carries exactly its kind's evidence: `installed` the destination repo, merge commit, path and blob sha256 on `origin/main`, `observed` an attributed experience, `matured` a window (`since`, `through`) of at least `maturity_days`, issued after it, `reverted` the revert commit; `receipt_status` counts one only against a live record of the folded chain that entered an installed state |
 | `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
 | `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
 | `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
@@ -1082,15 +1083,58 @@ also name `forbidden_items` the output must not contain (with or without `expect
 takes its grade from `eval-labels/v1`, whose evaluator is never `self`, never `oracle` and never
 the candidate's or genome producer's session, and demotes the run's tier and gate evaluator from
 `oracle` to that evaluator's kind. Pairs are compared case by
-case (wins, losses, ties, an exact two-sided sign test) with breakdowns by memory category and
+case by case (wins, losses, ties, an exact two-sided sign test reported in `results`; the
+verdict and the gate use the one-sided `sign_p`) with breakdowns by memory category and
 layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
-(10) distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is at least `min_delta` (0) and losses are at most
-`max_losses` (0); fewer cases is `insufficient`, which emits no gate. The policy is part of the
+distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is
+at least `min_delta` and the one-sided exact sign test on the discordant pairs is under
+`max_sign_p`; fewer cases is `insufficient`, which emits no gate. The defaults are each gate's
+pinned `eval_minima` in `promotion-classes.json` (20, 0, 0.05, from the 2026-10-08 statistics
+audit: `max_losses = 0` failed real improvements more often as n grew), and the fold re-checks a
+passing gate's own `metrics` (`cases`, `delta`, `wins`, `losses`, `anchored`) against them,
+computing the sign test itself, so a loosened policy never moves a candidate. The policy is part of the
 run id and of the gate's `metrics` and `summary`, so a loosened gate is visible as one. Only a hold-out run emits a
 gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
 it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five
 LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
 training leak and a cluster leak the evaluator must drop.
+
+**Receipts, not claims** (K3). The path to live carries `promotion-receipt/v1` receipts, written
+by the applier or the store, never by the learner: `installed` (the destination repository, merge
+commit, path and blob sha256 on `origin/main`), `observed` (an attributed use), `matured` (a window
+of at least `maturity_days` with no attributed regression) and `reverted`. `receipt_status` counts a
+receipt only against a live record of the folded chain that entered an installed state, at the
+candidate's exact destination repository and path, issued by someone other than the learner
+(its producer's session and lane differ from the candidate's); observed, matured and reverted
+count only after that install, and a revert inside a maturity window voids it. The fold sees
+records, not git: that the commit is on the destination's `origin/main` and the blob hashes to
+`blob_sha256` is the store's verification (L3) before it admits a receipt. `learning_metrics` resolves authority from the dataset's
+`decision-resolution/v1` records, and `promoted` (with revert rate and time to learn) counts
+verified installs, never entry into `active`; `activated` counts entry into `active`, shadow
+included. The maturity and owner gates are producible: `learning_promote.py --gates` takes a
+matured receipt as the maturity gate (`ref: receipt:`) and an answered per-candidate decision as
+the owner gate (pass on Approve, fail on Decline), and `--mature` produces a shadow candidate's
+maturity gate from the clock once probation has run its window (`--regressed` fails it).
+
+**Commit, then draw** (K3, attack E). `split_of`'s default salt is a public constant, so a producer
+who chooses split keys can grind them into the hold-out (46 of 200 in the red-team run), and a
+single-user host cannot hide a salt from its own agents. So the order is reversed: the candidate
+(with its evidence and genome) is committed first, and the split is drawn afterwards with a public
+beacon fixed after that commit, such as a later agent-hq `main` commit
+(`learning_eval.py --salt-source agent-hq@<sha> --salt-at <when it was fixed>`). The beacon string
+is the salt, so anyone can recompute the split. A beaconed hold-out admits only cases anchored to
+an experience whose `at` is no later than the draw (an unanchored key, or one created after the
+beacon was published, could have been ground against it), and one case per distinct input, so
+the gate's `cases`, `wins`, `losses` and `delta` are over distinct inputs and clones cannot
+inflate the sign test. The fold also requires the gate's counts to be integers in range and
+coherent (`wins + losses <= cases`, `anchored <= cases`, distinct anchors <= `anchored`, and
+`delta = (wins - losses) / cases`). A passing hold-out gate names its `salt_draw`
+(`source`, `at`), and the fold refuses a gate with none or one drawn at or before the candidate's
+`at`. The fold checks the order only: that the source is the first beacon after the commit (no
+shopping among later commits), and that the candidate's own commit time is the store's import
+time rather than the self-reported `at`, are the store's checks (L3). The draw must also follow
+the genome's `at` and precede the gate's. Until the store binds those times, the fold closes
+attack E against reusing the public salt, not against a writer who back-dates its own records.
 
 ```powershell
 py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> --candidate-outputs <outputs.json> --candidate <lc.json> --experiences <experiences.jsonl> [--genome <gen.json>] [--labels <labels.json>...] [--split holdout|dev] [--gate offline_eval|replay|retrieval_regression]
@@ -1193,8 +1237,8 @@ deterministic) rather than trusting a cursor across a re-projection.
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
 self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
-the salt is public, so a producer could choose a split key for a side (K3 replaces it with a
-committed salt). Authority is resolved rather than asserted, so its strength is the resolver's: once the store
+a hold-out split is only as unaimable as its beacon: the fold checks that it was drawn after the
+candidate, the store that it was the first beacon after it. Authority is resolved rather than asserted, so its strength is the resolver's: once the store
 builds resolutions from agent-hq `origin/main`, a record can no longer claim an answer the owner
 did not give. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
 can be re-run. Memory refs use the journal's spelling, `memory:<project>/<name>.md`, so every lane

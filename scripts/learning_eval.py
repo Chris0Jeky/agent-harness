@@ -45,7 +45,12 @@ _SPEC.loader.exec_module(contracts)
 RUN_SCHEMA = "eval-run/v1"
 TOOL = "agent-harness:scripts/learning_eval.py@1"
 GATES = ("offline_eval", "replay", "retrieval_regression")
-DEFAULT_POLICY = {"min_cases": 10, "min_delta": 0.0, "max_losses": 0}
+
+
+def default_policy(gate):
+    """The pinned minima for this gate (promotion-classes.json eval_minima)."""
+    pinned = contracts.classes()["eval_minima"][gate]
+    return {k: pinned[k] for k in ("min_cases", "min_delta", "max_sign_p")}
 
 
 class EvalRefusal(Exception):
@@ -114,17 +119,28 @@ def training_set(candidate, genome, experiences, ran=None):
     return ids, {effective_split_key(experiences[i]) for i in ids}
 
 
-def select(cases, split, training_ids, training_keys, experiences):
-    """Cases the candidate may be judged on, and why the others were dropped."""
+def select(
+    cases, split, training_ids, training_keys, experiences, salt=None, drawn_at=None
+):
+    """Cases the candidate may be judged on, and why the others were dropped.
+
+    One case per distinct input (input_ref, oracle): clones are one piece of
+    evidence, so every count the gate reports is over distinct inputs. With a
+    beacon drawn at drawn_at, only cases anchored to an experience that existed
+    by then are admitted; an unanchored case's key, or one created after the
+    draw, could have been ground against the published beacon.
+    """
     counts = {
         "total": len(cases),
         "other_split": 0,
         "excluded_training": 0,
         "excluded_cluster": 0,
         "unanchored": 0,
+        "after_draw": 0,
+        "clones": 0,
     }
-    seen, chosen = set(), []
-    for case in cases:
+    seen, inputs, chosen = set(), set(), []
+    for case in sorted(cases, key=lambda c: c["id"]):
         if case["id"] in seen:
             raise EvalRefusal(f"duplicate case id {case['id']}")
         seen.add(case["id"])
@@ -142,20 +158,26 @@ def select(cases, split, training_ids, training_keys, experiences):
             raise EvalRefusal(
                 f"{case['id']}: split_key differs from its experience's; a case cannot move across the split"
             )
-        if contracts.split_of(case["split_key"]) != split:
+        if contracts.split_of(case["split_key"], *([salt] if salt else [])) != split:
             counts["other_split"] += 1
         elif case["experience"] in training_ids:
             counts["excluded_training"] += 1
         elif case["split_key"] in training_keys:
             counts["excluded_cluster"] += 1
+        elif drawn_at is not None and (
+            anchor is None or contracts.parse_time(anchor["at"]) > drawn_at
+        ):
+            counts["after_draw"] += 1
+        elif (
+            key := (case["input_ref"], json.dumps(case["oracle"], sort_keys=True))
+        ) in inputs:
+            counts["clones"] += 1
         else:
+            inputs.add(key)
             counts["unanchored"] += anchor is None
             chosen.append(case)
     counts["evaluated"] = len(chosen)
-    # Clones of one task are one piece of evidence, however many ids they carry.
-    counts["distinct_inputs"] = len(
-        {(c["input_ref"], json.dumps(c["oracle"], sort_keys=True)) for c in chosen}
-    )
+    counts["distinct_inputs"] = len(chosen)
     return chosen, counts
 
 
@@ -355,13 +377,36 @@ def evaluate(
     gate="offline_eval",
     policy=None,
     at=None,
+    salt_draw=None,
 ):
-    """Judge a candidate against the baseline; returns an eval-run/v1 report."""
-    policy = {**DEFAULT_POLICY, **(policy or {})}
-    if policy["min_cases"] < 1 or policy["max_losses"] < 0:
-        raise EvalRefusal("min_cases is at least 1 and max_losses at least 0")
+    """Judge a candidate against the baseline; returns an eval-run/v1 report.
+
+    salt_draw ({source, at}) draws the split with a public beacon fixed after
+    the candidate was committed; without it the public salt is used and the
+    gate will not count.
+    """
     if gate not in GATES:
         raise EvalRefusal(f"gate must be one of {GATES}")
+    if salt_draw is not None and (
+        contracts.parse_time(salt_draw.get("at")) is None
+        or contracts.parse_time(salt_draw["at"])
+        <= contracts.parse_time(candidate["at"])
+    ):
+        raise EvalRefusal("the salt is drawn after the candidate is committed")
+    if (
+        salt_draw is not None
+        and genome is not None
+        and contracts.parse_time(salt_draw["at"]) <= contracts.parse_time(genome["at"])
+    ):
+        raise EvalRefusal("the salt is drawn after the genome is committed")
+    salt = salt_draw["source"] if salt_draw else None
+    if split == "holdout" and salt_draw is None:
+        raise EvalRefusal(
+            "a hold-out run draws its split from a beacon: pass --salt-source and --salt-at"
+        )
+    policy = {**default_policy(gate), **(policy or {})}
+    if policy["min_cases"] < 1 or not 0 < policy["max_sign_p"] <= 1:
+        raise EvalRefusal("min_cases is at least 1 and max_sign_p in (0, 1]")
     suites = {c["suite"] for c in cases}
     if len(suites) != 1:
         raise EvalRefusal(f"one suite per run, got {sorted(suites)}")
@@ -375,7 +420,15 @@ def evaluate(
     training_ids, training_keys = training_set(
         candidate, genome, experiences, candidate_outputs["variant_ref"]
     )
-    chosen, counts = select(cases, split, training_ids, training_keys, experiences)
+    chosen, counts = select(
+        cases,
+        split,
+        training_ids,
+        training_keys,
+        experiences,
+        salt,
+        contracts.parse_time(salt_draw["at"]) if salt_draw else None,
+    )
     label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
     graders = set()
     rows = []
@@ -419,7 +472,10 @@ def evaluate(
     delta = cand_rate - base_rate if rows else None
     if counts["distinct_inputs"] < policy["min_cases"]:
         verdict = "insufficient"
-    elif delta >= policy["min_delta"] and losses <= policy["max_losses"]:
+    elif (
+        delta >= policy["min_delta"]
+        and contracts.sign_p(wins, losses) < policy["max_sign_p"]
+    ):
         verdict = "pass"
     else:
         verdict = "fail"
@@ -435,6 +491,7 @@ def evaluate(
                 baseline["variant_ref"],
                 candidate_outputs["variant_ref"],
                 split,
+                salt or "",
                 gate,
                 holdout_digest,
                 json.dumps(policy, sort_keys=True),
@@ -510,19 +567,22 @@ def evaluate(
             "summary": (
                 f"{len(rows)} hold-out cases: candidate {cand_rate:.3f} vs baseline "
                 f"{base_rate:.3f}, {wins} wins, {losses} losses (policy: min_delta "
-                f"{policy['min_delta']}, max_losses {policy['max_losses']})"
+                f"{policy['min_delta']}, max_sign_p {policy['max_sign_p']})"
             )[:280],
             "holdout_digest": holdout_digest,
             "training_excluded": True,
             "anchors": anchors,
+            **({"salt_draw": dict(salt_draw)} if salt_draw else {}),
             "metrics": {
                 "delta": delta,
                 "wins": wins,
                 "losses": losses,
                 "cases": len(rows),
+                "anchored": sum(1 for c in chosen if c["experience"]),
                 "min_cases": policy["min_cases"],
                 "min_delta": policy["min_delta"],
-                "max_losses": policy["max_losses"],
+                "max_sign_p": policy["max_sign_p"],
+                "sign_p": contracts.sign_p(wins, losses),
             },
         }
     problems = contracts.validate_record(report)
@@ -576,9 +636,19 @@ def main(argv=None):
     parser.add_argument("--labels", type=Path, nargs="*", default=())
     parser.add_argument("--split", choices=("holdout", "dev"), default="holdout")
     parser.add_argument("--gate", choices=GATES, default="offline_eval")
-    parser.add_argument("--min-cases", type=int, default=DEFAULT_POLICY["min_cases"])
-    parser.add_argument("--min-delta", type=float, default=DEFAULT_POLICY["min_delta"])
-    parser.add_argument("--max-losses", type=int, default=DEFAULT_POLICY["max_losses"])
+    parser.add_argument(
+        "--min-cases", type=int, help="default: the gate's pinned minimum"
+    )
+    parser.add_argument(
+        "--min-delta", type=float, help="default: the gate's pinned minimum"
+    )
+    parser.add_argument(
+        "--max-sign-p", type=float, help="default: the gate's pinned minimum"
+    )
+    parser.add_argument(
+        "--salt-source", help="public beacon fixed after the candidate (agent-hq@<sha>)"
+    )
+    parser.add_argument("--salt-at", help="when the beacon was fixed")
     parser.add_argument("--at", help="report timestamp (default: now)")
     args = parser.parse_args(argv)
     try:
@@ -595,11 +665,20 @@ def main(argv=None):
             split=args.split,
             gate=args.gate,
             policy={
-                "min_cases": args.min_cases,
-                "min_delta": args.min_delta,
-                "max_losses": args.max_losses,
+                k: v
+                for k, v in (
+                    ("min_cases", args.min_cases),
+                    ("min_delta", args.min_delta),
+                    ("max_sign_p", args.max_sign_p),
+                )
+                if v is not None
             },
             at=args.at,
+            salt_draw=(
+                {"source": args.salt_source, "at": args.salt_at}
+                if args.salt_source
+                else None
+            ),
         )
     except (EvalRefusal, contracts.ContractError, OSError, ValueError) as exc:
         print(json.dumps({"status": "refused", "error": str(exc)}), file=sys.stderr)

@@ -119,7 +119,13 @@ def _regressions(base, cand, policy):
 
 
 def compare(
-    experiences, candidate, baseline_variant, candidate_variant, policy=None, at=None
+    experiences,
+    candidate,
+    baseline_variant,
+    candidate_variant,
+    policy=None,
+    at=None,
+    genome=None,
 ):
     """The system-run/v1 report for a candidate's canary."""
     policy = {**DEFAULT_POLICY, **(policy or {})}
@@ -144,7 +150,13 @@ def compare(
     by_id, errors = contracts.fold_experiences(experiences)
     if errors:
         raise SystemRefusal(f"experience ledger is inconsistent: {errors[0]}")
-    training = set(candidate["evidence"])
+    training, why = contracts._training_evidence(candidate, genome)
+    if why:
+        raise SystemRefusal(why)
+    if named and genome is None:
+        raise SystemRefusal(
+            f"the candidate runs as gen:{named}: pass that genome so its training runs stay out"
+        )
     arms = {"baseline": [], "candidate": []}
     excluded = 0
     for record in by_id.values():
@@ -242,6 +254,9 @@ def main(argv=None):
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--baseline-variant", required=True)
     parser.add_argument("--candidate-variant", required=True)
+    parser.add_argument(
+        "--genome", type=Path, help="the candidate-genome/v1 the candidate names"
+    )
     parser.add_argument("--min-runs", type=int, default=DEFAULT_POLICY["min_runs"])
     parser.add_argument("--at", help="report timestamp (default: now)")
     args = parser.parse_args(argv)
@@ -265,6 +280,7 @@ def main(argv=None):
             args.candidate_variant,
             {"min_runs": args.min_runs},
             args.at,
+            genome=contracts.read_records(args.genome)[0] if args.genome else None,
         )
     except (
         SystemRefusal,

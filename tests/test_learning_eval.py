@@ -23,6 +23,8 @@ lc = ev.contracts
 
 SUITE = ROOT / "schemas" / "learning" / "examples" / "memory-eval"
 AT = "2026-09-05T00:00:00Z"
+# The example suite's split salt: a synthetic beacon fixed after its candidate (09-03).
+SALT_DRAW = {"source": "agent-hq@" + "7" * 40, "at": "2026-09-04T00:00:00Z"}
 JUDGE = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "judge-1"}
 
 
@@ -33,6 +35,7 @@ def load():
         "candidate_outputs": lc.read_records(SUITE / "candidate-outputs.json")[0],
         "candidate": lc.read_records(SUITE / "candidate.json")[0],
         "experiences": lc.read_records(SUITE / "experiences.jsonl"),
+        "salt_draw": dict(SALT_DRAW),
     }
 
 
@@ -40,6 +43,7 @@ def run(inputs=None, **options):
     inputs = inputs or load()
     options.setdefault("at", AT)
     options.setdefault("gate", "retrieval_regression")
+    options.setdefault("salt_draw", inputs.get("salt_draw"))
     return ev.evaluate(
         inputs["cases"],
         inputs["baseline"],
@@ -79,7 +83,7 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(report["verdict"], "pass")
         self.assertEqual(report["tier"], "oracle")
         results = report["results"]
-        self.assertEqual((results["wins"], results["losses"]), (15, 0))
+        self.assertEqual((results["wins"], results["losses"]), (20, 0))
         self.assertLess(results["sign_test_p"], 0.001)
         self.assertEqual(results["retrieval"]["candidate"]["mrr"], 1.0)
         self.assertEqual(
@@ -135,15 +139,25 @@ class SuiteTests(unittest.TestCase):
         report = run(policy={"min_cases": 100})
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
 
-    def test_a_single_loss_fails_the_gate(self):
+    def test_the_gate_is_a_sign_test_not_zero_losses(self):
+        # Statistics audit: one loss among many wins is noise, not a failure ...
         inputs = load()
         case = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
         inputs["candidate_outputs"]["outputs"][case["id"]] = {"text": "master"}
         report = run(inputs)
-        self.assertEqual(
-            (report["verdict"], report["gate"]["result"]), ("fail", "fail")
-        )
         self.assertEqual(report["results"]["losses"], 1)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertLess(report["gate"]["metrics"]["sign_p"], 0.05)
+        # ... but too few wins over the losses is.
+        outputs, base = (
+            inputs["candidate_outputs"]["outputs"],
+            inputs["baseline"]["outputs"],
+        )
+        for cid in sorted(set(outputs) & set(base) - {case["id"]})[:15]:
+            outputs[cid] = base[cid]  # a win becomes a tie
+        weak = run(inputs)
+        self.assertEqual((weak["verdict"], weak["gate"]["result"]), ("fail", "fail"))
+        self.assertGreaterEqual(weak["gate"]["metrics"]["sign_p"], 0.05)
 
     def test_missing_candidate_output_counts_as_failure(self):
         inputs = load()
@@ -156,6 +170,46 @@ class RefusalTests(unittest.TestCase):
         with self.assertRaises(ev.EvalRefusal) as caught:
             run(inputs, **options)
         self.assertIn(fragment, str(caught.exception))
+
+    def test_the_salt_is_drawn_after_the_candidate(self):
+        early = dict(
+            SALT_DRAW, at="2026-09-03T09:00:00Z"
+        )  # the candidate's own instant
+        self.assertRefused("drawn after the candidate", salt_draw=early)
+        gate = run()["gate"]
+        self.assertEqual(gate["salt_draw"], SALT_DRAW)
+        cand = load()["candidate"]
+        self.assertEqual(lc.salt_errors(gate, cand), [])
+        self.assertIn("not after", lc.salt_errors(dict(gate, salt_draw=early), cand)[0])
+        # The beacon really drives the split: another beacon draws another hold-out.
+        other = dict(SALT_DRAW, source="agent-hq@" + "8" * 40)
+        self.assertNotEqual(
+            run(salt_draw=other)["holdout_digest"], run()["holdout_digest"]
+        )
+
+    def test_only_cases_anchored_before_the_draw_enter_a_beaconed_holdout(self):
+        inputs = load()
+        cases = {c["id"]: c for c in inputs["cases"]}
+        late = cases["case_static-tie"]["experience"]
+        for exp in inputs["experiences"]:
+            if exp["id"] == late:
+                exp["at"] = "2026-09-04T00:00:01Z"  # after SALT_DRAW["at"]
+                exp["observed_at"] = "2026-09-04T00:00:02Z"
+        unanchored = dict(
+            copy.deepcopy(cases["case_static-tie"]),
+            id="case_unanchored",
+            experience=None,
+            input_ref="synthetic:memory-eval-example/unanchored",
+        )
+        inputs["cases"].append(unanchored)
+        report = run(inputs)
+        self.assertEqual(
+            report["cases"]["after_draw"],
+            1
+            + (lc.split_of(unanchored["split_key"], SALT_DRAW["source"]) == "holdout"),
+        )
+        self.assertNotIn(late, report["gate"]["anchors"])
+        self.assertRefused("draws its split from a beacon", salt_draw=None)
 
     def test_unresolvable_training_evidence_refuses(self):
         inputs = load()
@@ -344,8 +398,9 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_policy_is_bounded_and_recorded_in_the_gate(self):
         self.assertRefused("min_cases is at least 1", policy={"min_cases": 0})
-        loose = run(policy={"max_losses": 5})
-        self.assertEqual(loose["gate"]["metrics"]["max_losses"], 5)
+        self.assertRefused("max_sign_p in (0, 1]", policy={"max_sign_p": 0})
+        loose = run(policy={"max_sign_p": 0.5})
+        self.assertEqual(loose["gate"]["metrics"]["max_sign_p"], 0.5)
         self.assertNotEqual(loose["id"], run()["id"])
 
     def test_the_named_evaluator_does_not_depend_on_order(self):
@@ -393,6 +448,35 @@ class ReviewRegressionTests(unittest.TestCase):
         report = run(inputs)
         self.assertEqual(report["cases"]["distinct_inputs"], 1)
         self.assertEqual((report["verdict"], report["gate"]), ("insufficient", None))
+
+    def test_clones_cannot_inflate_the_sign_test(self):
+        # Review of #512: 19 tie inputs plus one winning input cloned 5 times
+        # once passed (5 wins, p = 0.031); clones are one piece of evidence.
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        cases = [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_tie-{i:06d}",
+                input_ref=f"synthetic:t/{i}",
+            )
+            for i in range(19)
+        ] + [
+            dict(copy.deepcopy(base), id=f"case_win-{i:06d}", input_ref="synthetic:w")
+            for i in range(5)
+        ]
+        inputs["cases"] = cases
+        inputs["baseline"]["outputs"] = {c["id"]: {"text": "main"} for c in cases}
+        inputs["candidate_outputs"]["outputs"] = {
+            c["id"]: {"text": "main"} for c in cases
+        }
+        for c in cases[19:]:
+            inputs["baseline"]["outputs"][c["id"]] = {"text": "master"}
+        report = run(inputs)
+        self.assertEqual(
+            (report["cases"]["clones"], report["cases"]["distinct_inputs"]), (4, 20)
+        )
+        self.assertEqual((report["results"]["wins"], report["verdict"]), (1, "fail"))
 
     def test_experience_observations_order_by_instant_not_text(self):
         first = copy.deepcopy(load()["experiences"][0])
@@ -486,7 +570,7 @@ class ProceduralTests(unittest.TestCase):
     def suite(self):
         inputs = load()
         procedural = []
-        for n in range(10):
+        for n in range(20):
             case = copy.deepcopy(
                 next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
             )
@@ -522,7 +606,7 @@ class ProceduralTests(unittest.TestCase):
         report = run(self.suite(), gate="offline_eval")
         self.assertEqual(report["verdict"], "pass")
         block = report["results"]["procedural"]
-        self.assertEqual(block["n"], 10)
+        self.assertEqual(block["n"], 20)
         self.assertEqual(block["baseline"]["completion_rate"], 0.5)
         self.assertEqual(block["candidate"]["completion_rate"], 1.0)
         self.assertEqual(
@@ -569,7 +653,7 @@ class ProceduralTests(unittest.TestCase):
             "error": "crashed",
         }
         block = run(inputs, gate="offline_eval")["results"]["procedural"]
-        self.assertEqual(block["candidate"]["completion_rate"], 0.9)
+        self.assertEqual(block["candidate"]["completion_rate"], 0.95)
         self.assertEqual(block["candidate"]["turns_mean"], 8)
 
     def test_recovery_rate_counts_only_cases_that_needed_recovery(self):
@@ -607,6 +691,10 @@ class CommandLineTests(unittest.TestCase):
             "retrieval_regression",
             "--at",
             AT,
+            "--salt-source",
+            SALT_DRAW["source"],
+            "--salt-at",
+            SALT_DRAW["at"],
             *extra,
         ]
         out, err = io.StringIO(), io.StringIO()

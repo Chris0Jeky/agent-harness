@@ -16,6 +16,7 @@ EXPERIENCE = "estate-experience/v1"
 MEMORY_USE = "memory-use/v1"
 CANDIDATE = "learning-candidate/v1"
 PROMOTION = "promotion-record/v1"
+RECEIPT = "promotion-receipt/v1"
 
 
 def _latest(records):
@@ -198,20 +199,45 @@ def learning_metrics(records, split="dev", as_of=None):
         if mu["experience"] in selected
     }
     problems = list(records.get("problems", []))
-    promotions = defaultdict(list)
+    promotions, receipts = defaultdict(list), defaultdict(list)
     for record in records.get(PROMOTION, []):
         promotions[record["candidate"]].append(record)
+    for receipt in records.get(RECEIPT, []):
+        receipts[receipt["candidate"]].append(receipt)
+    receipt_by_id = {r["id"]: r for r in records.get(RECEIPT, [])}
+    # Authority is resolved from the dataset's decision-resolution/v1 records (the
+    # store's reading of agent-hq origin/main); with none, nothing above P0 is live.
+    resolve = contracts.resolver_from(records.get("decision-resolution/v1", []))
+    genomes = {g["id"]: g for g in records.get("candidate-genome/v1", [])}
     candidates, lessons, promoted_skills = [], [], set()
     for candidate in records.get(CANDIDATE, []):
         moves = promotions[candidate["id"]]
-        folded = contracts.fold(candidate, moves)
+        genome = genomes.get(candidate.get("genome"))
+        folded = contracts.fold(
+            candidate, moves, as_of=as_of, resolve=resolve, genome=genome
+        )
         problems.extend(
             {"candidate": candidate["id"], "error": error} for error in folded.errors
         )
         by_id = {move["id"]: move for move in moves}
         chain = [by_id[ident] for ident in folded.chain]
         activation = next((move for move in chain if move["to"] == "active"), None)
-        candidates.append((candidate, folded.state, chain, activation))
+        # Promotion is a verified install receipt, never entry into active (K3).
+        status, receipt_problems = contracts.receipt_status(
+            candidate,
+            moves,
+            receipts[candidate["id"]],
+            as_of=as_of,
+            resolve=resolve,
+            genome=genome,
+        )
+        problems.extend(
+            {"candidate": candidate["id"], "error": error} for error in receipt_problems
+        )
+        installed = receipt_by_id.get(status["installed"])
+        candidates.append(
+            (candidate, folded.state, chain, activation, installed, status)
+        )
         landed = next(
             (move["landed"] for move in reversed(chain) if "landed" in move), None
         )
@@ -286,23 +312,24 @@ def learning_metrics(records, split="dev", as_of=None):
 
     by_kind = defaultdict(lambda: {"candidates": 0, "promoted": 0})
     states = Counter()
-    promoted = reverted = pre_reverts = missing = 0
+    promoted = activated = reverted = pre_reverts = missing = 0
     hours = []
-    for candidate, state, chain, activation in candidates:
+    for candidate, state, chain, activation, installed, status in candidates:
         states[state] += 1
         by_kind[candidate["kind"]]["candidates"] += 1
         pre_reverts += sum(
             move["to"] == "reverted" and move["from"] in ("canary", "probation")
             for move in chain
         )
-        if activation is None:
+        activated += activation is not None
+        if installed is None:
             continue
         promoted += 1
         by_kind[candidate["kind"]]["promoted"] += 1
-        reverted += any(
+        reverted += status["reverted"] is not None or any(
             move["to"] == "reverted"
             and contracts.parse_time(move["at"])
-            >= contracts.parse_time(activation["at"])
+            >= contracts.parse_time(installed["at"])
             for move in chain
         )
         if not all(eid in all_experiences for eid in candidate["evidence"]):
@@ -313,7 +340,7 @@ def learning_metrics(records, split="dev", as_of=None):
             for eid in candidate["evidence"]
         )
         hours.append(
-            (contracts.parse_time(activation["at"]) - earliest).total_seconds() / 3600
+            (contracts.parse_time(installed["at"]) - earliest).total_seconds() / 3600
         )
 
     holdout = sorted(
@@ -337,6 +364,7 @@ def learning_metrics(records, split="dev", as_of=None):
             "memory_assisted_task_delta is observational, confounded by task selection; not a causal estimate.",
             "Candidate-level metrics (candidate_to_promoted_ratio, promotion_to_revert_rate, time_to_learn) are not split: candidates are not experiences.",
             "time_to_learn requires all evidence experiences loaded; missing_evidence counts promoted candidates with incomplete evidence.",
+            "promoted counts candidates with a verified installed receipt (promotion-receipt/v1), never entry into active; activated counts entry into active, shadow included.",
         ],
         "metrics": {
             "memory_assisted_task_delta": {
@@ -384,6 +412,7 @@ def learning_metrics(records, split="dev", as_of=None):
             "candidate_to_promoted_ratio": {
                 "candidates": len(candidates),
                 "promoted": promoted,
+                "activated": activated,
                 "ratio": _rate(promoted, len(candidates)),
                 "by_kind": dict(sorted(by_kind.items())),
                 "by_state": dict(sorted(states.items())),

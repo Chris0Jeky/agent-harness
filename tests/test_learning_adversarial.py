@@ -290,5 +290,81 @@ class AttackTests(unittest.TestCase):
         self.assertEqual(lc.validate_record(dict(cand, promotion_class="P8")), [])
 
 
+class KeyGrindingTests(unittest.TestCase):
+    """E: a producer grinds split keys into the hold-out with the public salt."""
+
+    def replay_fold(self, **gate_extra):
+        cand = candidate(
+            "lc_redteamE001",
+            "recipe",
+            "P4",
+            {"repo": "claude-config", "path": "muse/recipes/redteam-e.md"},
+        )
+        gate = judged(
+            "offline_eval",
+            "oracle",
+            "2026-09-01T01:30:00Z",
+            holdout_digest="e" * 64,
+            training_excluded=True,
+            anchors=["exp_redteamE0001"],
+            metrics={
+                "cases": 40,
+                "delta": 0.4,
+                "wins": 16,
+                "losses": 0,
+                "anchored": 40,
+            },
+        )
+        gate.update(gate_extra)
+        records = [
+            move(
+                cand["id"],
+                1,
+                None,
+                "candidate",
+                "evaluating",
+                "2026-09-01T01:00:00Z",
+                [],
+                "P4",
+            ),
+            move(
+                cand["id"],
+                2,
+                "prom_rtE00101",
+                "evaluating",
+                "canary",
+                "2026-09-01T02:00:00Z",
+                [gate],
+                "P4",
+            ),
+        ]
+        return fold(cand, records, RESOLVE)
+
+    def test_e_a_ground_split_does_not_move_a_candidate(self):
+        beacon = "agent-hq@" + "5" * 40
+        for extra in (
+            {},  # no draw: the split used the public salt the producer ground against
+            {"salt_draw": {"source": beacon, "at": "2026-08-01T00:00:00Z"}},  # before
+            {
+                "salt_draw": {"source": beacon, "at": "2026-09-01T00:00:00Z"}
+            },  # same instant
+        ):
+            result = self.replay_fold(**extra)
+            self.assertEqual(result.state, "evaluating", (extra, result))
+        drawn = {"salt_draw": {"source": beacon, "at": "2026-09-01T01:15:00Z"}}
+        self.assertEqual(self.replay_fold(**drawn).state, "canary")
+
+    def test_e_keys_ground_against_the_public_salt_miss_a_later_beacon(self):
+        ground = [
+            k
+            for k in (f"grind-{n}" for n in range(4000))
+            if lc.split_of(k) == "holdout"
+        ]
+        self.assertGreater(len(ground), 200)
+        beacon = "agent-hq@" + "9" * 40  # fixed after the keys were chosen
+        share = sum(lc.split_of(k, beacon) == "holdout" for k in ground) / len(ground)
+        self.assertLess(share, 0.4)  # back to the base rate, not 100%
+
+
 if __name__ == "__main__":
     unittest.main()

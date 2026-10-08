@@ -28,6 +28,10 @@
       "text": "Branch from main and run the unittest suite.",
       "tokens": 700
     },
+    "case_static-state-recall-behave-2": {
+      "text": "Branch from main and run the unittest suite.",
+      "tokens": 700
+    },
     "case_dynamic-state-tracking-extract": {
       "items": [
         "ci-python:3.11"
@@ -41,6 +45,10 @@
       ]
     },
     "case_dynamic-state-tracking-behave": {
+      "text": "CI runs Python 3.11 since the September bump.",
+      "tokens": 700
+    },
+    "case_dynamic-state-tracking-behave-2": {
       "text": "CI runs Python 3.11 since the September bump.",
       "tokens": 700
     },
@@ -61,6 +69,10 @@
       "text": "Regenerate the fixture, then run the smoke matrix.",
       "tokens": 700
     },
+    "case_workflow-knowledge-behave-2": {
+      "text": "Regenerate the fixture, then run the smoke matrix.",
+      "tokens": 700
+    },
     "case_environment-gotchas-extract": {
       "items": [
         "gotcha:heredoc-backslashes"
@@ -77,6 +89,10 @@
       "text": "Use a file write instead of a shell heredoc for backslash-heavy JSON.",
       "tokens": 700
     },
+    "case_environment-gotchas-behave-2": {
+      "text": "Use a file write instead of a shell heredoc for backslash-heavy JSON.",
+      "tokens": 700
+    },
     "case_false-premise-extract": {
       "items": [
         "premise:no-deploy-step"
@@ -90,6 +106,10 @@
       ]
     },
     "case_false-premise-behave": {
+      "abstained": true,
+      "text": "There is no deploy step."
+    },
+    "case_false-premise-behave-2": {
       "abstained": true,
       "text": "There is no deploy step."
     },

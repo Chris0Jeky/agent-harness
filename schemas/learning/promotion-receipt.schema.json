@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/promotion-receipt.schema.json",
+  "title": "promotion-receipt/v1",
+  "description": "A verifiable receipt on the path to live, written by the applier or the store, never by the learner: installed (the merge commit and blob hash on the destination's origin/main), observed (an attributed use after install), matured (the maturity window passed with no attributed regression) or reverted. Each receipt names the live promotion record it is about. Promotion metrics count receipts, not entry into active. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "at", "producer", "candidate", "record", "kind"],
+  "properties": {
+    "schema": {"const": "promotion-receipt/v1"},
+    "id": {
+      "description": "rcpt_ + sha256 of candidate|record|kind|its evidence (canonical JSON), first 16 hex: a re-issued receipt is the same receipt.",
+      "type": "string",
+      "pattern": "^rcpt_[0-9a-f]{16}$"
+    },
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "record": {
+      "description": "The live promotion record that installed the artifact.",
+      "$ref": "common.schema.json#/$defs/prom_id"
+    },
+    "kind": {"type": "string", "enum": ["installed", "observed", "matured", "reverted"]},
+    "installed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "commit", "path", "blob_sha256"],
+      "properties": {
+        "repo": {"$ref": "common.schema.json#/$defs/repo"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "path": {"$ref": "common.schema.json#/$defs/relpath"},
+        "blob_sha256": {"$ref": "common.schema.json#/$defs/sha256"}
+      }
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["experience"],
+      "properties": {"experience": {"$ref": "common.schema.json#/$defs/exp_id"}}
+    },
+    "matured": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["since", "through"],
+      "properties": {
+        "since": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "through": {"$ref": "common.schema.json#/$defs/timestamp"}
+      }
+    },
+    "reverted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "reason"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "reason": {"$ref": "common.schema.json#/$defs/short_text"}
+      }
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  },
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "installed"}}}, "then": {"required": ["installed"]}},
+    {"if": {"properties": {"kind": {"const": "observed"}}}, "then": {"required": ["observed"]}},
+    {"if": {"properties": {"kind": {"const": "matured"}}}, "then": {"required": ["matured"]}},
+    {"if": {"properties": {"kind": {"const": "reverted"}}}, "then": {"required": ["reverted"]}}
+  ]
+}

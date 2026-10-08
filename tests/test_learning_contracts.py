@@ -55,6 +55,8 @@ SURFACES = {
 
 def candidate(**changes):
     record = copy.deepcopy(example("learning-candidate.json")[0])
+    if "genome" not in changes:  # genome exclusion has its own tests
+        record.pop("genome", None)
     if "kind" in changes and "destination" not in changes:
         changes["destination"] = SURFACES[changes["kind"]]
     record.update(changes)
@@ -106,7 +108,13 @@ def gate(name, at, evaluator=ORACLE, result="pass"):
     if name == "owner":
         item["ref"] = "decision:test-owner-1"
     if name in ("offline_eval", "replay", "retrieval_regression"):
-        item.update(holdout_digest=HOLDOUT, training_excluded=True, anchors=[])
+        item.update(
+            holdout_digest=HOLDOUT,
+            training_excluded=True,
+            anchors=["exp_fixture-anchor"],
+            metrics={"cases": 20, "delta": 0.4, "wins": 8, "losses": 0, "anchored": 20},
+            salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
+        )
     return item
 
 
@@ -247,6 +255,93 @@ class ExampleTests(unittest.TestCase):
     def test_record_order_on_input_does_not_matter(self):
         result = lc.fold(candidate(), list(reversed(chain())))
         self.assertEqual((result.state, result.errors), ("active", []))
+
+
+class MinimaTests(unittest.TestCase):
+    """A passing hold-out gate's own results meet the pinned eval_minima (K3)."""
+
+    def fold_with(self, **metrics):
+        records = chain()
+        gate_ = records[1]["gates"][0]
+        gate_["metrics"].update(metrics)
+        if "delta" not in metrics:  # keep the counts coherent unless delta is the point
+            m = gate_["metrics"]
+            m["delta"] = (m["wins"] - m["losses"]) / m["cases"]
+        for name in [k for k, v in metrics.items() if v is None]:
+            del gate_["metrics"][name]
+        return lc.fold(candidate(), records)
+
+    def test_every_hold_out_gate_has_pinned_minima(self):
+        minima = dict(lc.classes()["eval_minima"])
+        minima.pop("description")
+        self.assertEqual(
+            set(minima), {"offline_eval", "replay", "retrieval_regression"}
+        )
+        for pinned in minima.values():
+            self.assertGreaterEqual(pinned["min_cases"], 20)
+            self.assertEqual(pinned["max_sign_p"], 0.05)
+
+    def test_short_or_lossy_or_unanchored_gates_do_not_count(self):
+        for metrics, fragment in (
+            ({"cases": 19, "anchored": 19}, "under 20"),
+            ({"delta": -0.01}, "delta"),
+            ({"wins": 4, "losses": 0}, "p = 0.062"),  # audit: W >= 5 at L = 0
+            ({"wins": 6, "losses": 1}, "p = 0.062"),  # W >= 7 at L = 1
+            ({"anchored": 5}, "anchored 0.21"),
+            ({"anchored": None}, "does not report anchored"),
+        ):
+            result = self.fold_with(**metrics)
+            self.assertEqual(result.state, "evaluating", metrics)
+            self.assertTrue(
+                any(fragment in e for e in result.errors), (metrics, result.errors)
+            )
+
+    def test_counts_are_bounded_coherent_integers_before_any_arithmetic(self):
+        # Review of #512: negative counts crashed the fold, huge ones hung it,
+        # and wins 5 / losses -1 computed p = 0.
+        for metrics, fragment in (
+            ({"wins": -1, "losses": 30}, "not integers"),
+            ({"wins": 5, "losses": -1}, "not integers"),
+            ({"losses": 10**7}, "not integers"),
+            ({"wins": 5.0}, "not integers"),
+            ({"wins": 25}, "exceed its cases"),
+            ({"anchored": 0}, "anchors"),
+            ({"delta": 0.9}, "delta is not"),
+            ({"delta": 10**400}, "outside -1..1"),
+        ):
+            result = self.fold_with(**metrics)
+            self.assertEqual(result.state, "evaluating", metrics)
+            self.assertTrue(
+                any(fragment in e for e in result.errors), (metrics, result.errors)
+            )
+
+    def test_the_draw_follows_the_genome_and_precedes_the_gate(self):
+        gate_ = chain()[1]["gates"][0]
+        cand = candidate()
+        self.assertEqual(lc.salt_errors(gate_, cand), [])
+        late_genome = {"at": gate_["salt_draw"]["at"]}  # committed with the draw
+        self.assertIn("its genome", lc.salt_errors(gate_, cand, late_genome)[0])
+        future = dict(
+            gate_, salt_draw=dict(gate_["salt_draw"], at="2100-01-01T00:00:00Z")
+        )
+        self.assertIn("after the gate", lc.salt_errors(future, cand)[0])
+
+    def test_an_invalid_candidate_is_refused_not_crashed_on(self):
+        broken = candidate()
+        del broken["evidence"]
+        result = lc.fold(broken, chain())
+        self.assertTrue(any("evidence" in e for e in result.errors), result.errors)
+
+    def test_the_sign_test_matches_the_audit_table(self):
+        # The smallest passing W for L = 0..4 at one-sided p < 0.05.
+        for losses, wins in enumerate((5, 7, 9, 10, 12)):
+            self.assertLess(lc.sign_p(wins, losses), 0.05, (wins, losses))
+            self.assertGreaterEqual(lc.sign_p(wins - 1, losses), 0.05, (wins, losses))
+
+    def test_a_failed_gate_is_not_held_to_the_minima(self):
+        records = chain()
+        records[1]["gates"][0].update(result="fail", metrics={})
+        self.assertEqual(lc.minima_errors(records[1]["gates"][0]), [])
 
 
 class RecordRuleTests(unittest.TestCase):
@@ -701,7 +796,9 @@ class ReviewRegressionTests(unittest.TestCase):
         records[1]["gates"][0]["anchors"] = [candidate()["evidence"][0]]
         result = lc.fold(candidate(), records)
         self.assertEqual(result.state, "evaluating")
-        self.assertTrue(any("own evidence" in e for e in result.errors), result.errors)
+        self.assertTrue(
+            any("own training evidence" in e for e in result.errors), result.errors
+        )
 
     def test_offline_gates_must_name_their_anchors(self):
         bare = gate("offline_eval", "2026-10-08T11:00:00Z")
@@ -833,6 +930,8 @@ class CommandLineTests(unittest.TestCase):
             str(EXAMPLES / "learning-candidate.json"),
             "--records",
             str(EXAMPLES / "promotion-chain.jsonl"),
+            "--genome",
+            str(EXAMPLES / "candidate-genome.json"),
         )
         self.assertEqual((code, json.loads(out)["state"]), (0, "active"))
 

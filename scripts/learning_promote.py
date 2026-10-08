@@ -55,6 +55,15 @@ def gate_results(items, candidate=None):
     schema = contracts._document("promotion-record.schema.json")["$defs"]["gate_result"]
     gates = []
     for item in items:
+        # Producible gate: an answered per-candidate decision about this
+        # candidate is its owner gate. (A matured receipt needs the chain and
+        # the install: see maturity_gate.)
+        if isinstance(item, dict) and item.get("schema") == "decision-resolution/v1":
+            if candidate is None:
+                raise PromotionRefusal(
+                    "an owner gate is produced for a named candidate"
+                )
+            item = owner_gate(item, candidate)
         if isinstance(item, dict) and item.get("schema") in REPORTS:
             problems = contracts.validate_record(item)
             if problems:
@@ -145,8 +154,106 @@ def target_state(candidate, state, gates, resolve=None):
     )
 
 
+TOOL_EVALUATOR = {"kind": "oracle", "runtime": "tool", "model": None}
+
+
+def maturity_gate(candidate, records, receipts, as_of=None, resolve=None, genome=None):
+    """The maturity gate of a live install, from its verified matured receipt.
+
+    receipt_status binds the receipt to this candidate's live install and voids
+    it on a revert inside the window; anything it does not verify is refused.
+    """
+    status, problems = contracts.receipt_status(
+        candidate, records, receipts, as_of=as_of, resolve=resolve, genome=genome
+    )
+    if status["matured"] is None:
+        raise PromotionRefusal(
+            "no verified matured receipt for this install"
+            + (f": {problems[0]}" if problems else "")
+        )
+    receipt = next(r for r in receipts if r.get("id") == status["matured"])
+    return {
+        "gate": "maturity",
+        "result": "pass",
+        "evaluator": {**TOOL_EVALUATOR, "session": receipt["producer"]["session"]},
+        "at": receipt["at"],
+        "ref": f"receipt:{receipt['id']}",
+    }
+
+
+def owner_gate(resolution, candidate):
+    """The owner gate an answered decision about this candidate produces: pass or fail as answered."""
+    if contracts.validate_record(resolution) or resolution["status"] != "answered":
+        raise PromotionRefusal(
+            "an owner gate comes from an answered decision-resolution"
+        )
+    wrong = contracts._subject_errors(
+        f"decision:{resolution['decision']}", resolution, candidate
+    )
+    if wrong:
+        raise PromotionRefusal(wrong[0])
+    approval = contracts.classes()["approval"]
+    meaning = contracts.meaning(resolution)
+    if meaning not in approval["grant"] + approval["deny"]:
+        raise PromotionRefusal(
+            f"{resolution['decision']} is not an approval or a decline"
+        )
+    return {
+        "gate": "owner",
+        "result": "pass" if meaning in approval["grant"] else "fail",
+        "evaluator": {
+            "kind": "owner",
+            "runtime": "owner",
+            "model": None,
+            "session": "agent-hq",
+        },
+        "at": resolution["answered_at"],
+        "ref": f"decision:{resolution['decision']}",
+    }
+
+
+def clock_maturity_gate(
+    candidate, records, at, regressed=False, resolve=None, genome=None
+):
+    """The shadow maturity gate: the probation stay has run its window.
+
+    A shadow candidate has no install and so no matured receipt; its maturity
+    is the clock plus the caller's word that no regression was attributed to
+    it (regressed=True fails the gate).
+    """
+    instant = contracts.parse_time(at)
+    if instant is None:
+        raise PromotionRefusal(f"{at} is not a contract timestamp")
+    folded = contracts.fold(
+        candidate, records, as_of=instant, resolve=resolve, genome=genome
+    )
+    if folded.errors or folded.state != "probation":
+        raise PromotionRefusal(
+            "the maturity clock runs only in a cleanly folded probation"
+        )
+    entered = next(r for r in records if r.get("id") == folded.chain[-1])
+    days = contracts.lifecycle()["maturity_days"]
+    if instant - contracts.parse_time(entered["at"]) < dt.timedelta(days=days):
+        raise PromotionRefusal(f"probation has not yet run {days} days")
+    return {
+        "gate": "maturity",
+        "result": "fail" if regressed else "pass",
+        "evaluator": {**TOOL_EVALUATOR, "session": "maturity-clock"},
+        "at": at,
+        "ref": f"prom:{entered['id']}",
+    }
+
+
 def next_record(
-    candidate, records, gates, producer, at, reason=None, as_of=None, resolve=None
+    candidate,
+    records,
+    gates,
+    producer,
+    at,
+    reason=None,
+    as_of=None,
+    resolve=None,
+    genome=None,
 ):
     """The next promotion-record/v1 for this candidate, already proven to fold.
 
@@ -158,7 +265,9 @@ def next_record(
     if instant is None or instant > as_of:
         raise PromotionRefusal(f"the record's time {at} is not a past contract instant")
     gates = sorted(gate_results(gates, candidate), key=lambda g: g["gate"])
-    current = contracts.fold(candidate, records, as_of=as_of, resolve=resolve)
+    current = contracts.fold(
+        candidate, records, as_of=as_of, resolve=resolve, genome=genome
+    )
     if current.errors:
         raise PromotionRefusal(f"the chain does not fold cleanly: {current.errors[0]}")
     if current.effect == "live":
@@ -190,7 +299,7 @@ def next_record(
     if candidate.get("genome"):
         record["genome"] = candidate["genome"]
     after = contracts.fold(
-        candidate, list(records) + [record], as_of=as_of, resolve=resolve
+        candidate, list(records) + [record], as_of=as_of, resolve=resolve, genome=genome
     )
     if after.errors or after.state != target:
         problem = after.errors[0] if after.errors else f"folded to {after.state}"
@@ -210,6 +319,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument(
+        "--genome", type=Path, help="the candidate-genome/v1 the candidate names"
+    )
+    parser.add_argument(
         "--records", type=Path, help="the candidate's promotion records"
     )
     parser.add_argument(
@@ -223,6 +335,16 @@ def main(argv=None):
     parser.add_argument("--session", required=True, help="producer session")
     parser.add_argument("--at", help="record timestamp (default: now)")
     parser.add_argument("--reason")
+    parser.add_argument(
+        "--mature",
+        action="store_true",
+        help="add the shadow maturity gate: probation has run its window at --at",
+    )
+    parser.add_argument(
+        "--regressed",
+        action="store_true",
+        help="with --mature: a regression was attributed, so the gate fails",
+    )
     parser.add_argument(
         "--resolutions",
         type=Path,
@@ -249,8 +371,27 @@ def main(argv=None):
             if args.resolutions
             else None
         )
+        genome = contracts.read_records(args.genome)[0] if args.genome else None
+        if args.mature:
+            gates.append(
+                clock_maturity_gate(
+                    candidates[0],
+                    records,
+                    at,
+                    args.regressed,
+                    resolve=resolve,
+                    genome=genome,
+                )
+            )
         record = next_record(
-            candidates[0], records, gates, producer, at, args.reason, resolve=resolve
+            candidates[0],
+            records,
+            gates,
+            producer,
+            at,
+            args.reason,
+            resolve=resolve,
+            genome=genome,
         )
     except (
         PromotionRefusal,

@@ -45,6 +45,7 @@ RECORD_SCHEMAS = {
     "system-run/v1": "system-run.schema.json",
     "decision-resolution/v1": "decision-resolution.schema.json",
     "learning-would-apply/v1": "would-apply.schema.json",
+    "promotion-receipt/v1": "promotion-receipt.schema.json",
 }
 SPLIT_SALT = "estate-experience/v1/split"
 HOLDOUT_PERCENT = 20
@@ -352,9 +353,14 @@ def experience_id(kind, key):
     return "exp_" + _digest16(f"{kind}|{key}")
 
 
-def split_of(split_key):
-    """Sealed hold-out membership; runs sharing a split_key share a side."""
-    digest = hashlib.sha256(f"{SPLIT_SALT}|{split_key}".encode("utf-8")).hexdigest()
+def split_of(split_key, salt=SPLIT_SALT):
+    """Hold-out membership; runs sharing a split_key share a side.
+
+    The default salt is a public constant, so anyone can grind keys into the
+    hold-out with it: a gate counts only when its split was drawn with a salt
+    fixed after the candidate was committed (salt_errors).
+    """
+    digest = hashlib.sha256(f"{salt}|{split_key}".encode("utf-8")).hexdigest()
     return "holdout" if int(digest[:8], 16) % 100 < HOLDOUT_PERCENT else "dev"
 
 
@@ -710,6 +716,7 @@ SEMANTIC_RULES = {
     "system-run/v1": _system_rules,
     "decision-resolution/v1": lambda record: _resolution_rules(record),
     "learning-would-apply/v1": lambda record: _would_apply_rules(record),
+    "promotion-receipt/v1": lambda record: _receipt_rules(record),
 }
 
 
@@ -824,6 +831,127 @@ def _report_authority_errors(cls, authority, at):
             f"$.authority.option: {authority['option']!r} does not let {cls} go live"
         )
     return errors
+
+
+RECEIPT_KINDS = ("installed", "observed", "matured", "reverted")
+
+
+def receipt_id(candidate, record, kind, evidence):
+    """rcpt_ + 16 hex of candidate|record|kind|evidence: a re-issue is the same receipt."""
+    return "rcpt_" + _digest16(f"{candidate}|{record}|{kind}|{_canonical(evidence)}")
+
+
+def _receipt_rules(record):
+    errors = _time_errors(record, ("at",))
+    kind = record["kind"]
+    extra = [k for k in RECEIPT_KINDS if k != kind and k in record]
+    if extra:
+        errors.append(f"$: a {kind} receipt carries no {', '.join(extra)}")
+    expected = receipt_id(record["candidate"], record["record"], kind, record[kind])
+    if record["id"] != expected:
+        errors.append(f"$.id: must be {expected}")
+    if kind == "matured":
+        span = record["matured"]
+        errors += _time_errors(span, ("since", "through"))
+        since, through = parse_time(span["since"]), parse_time(span["through"])
+        days = lifecycle()["maturity_days"]
+        if since and through and through - since < dt.timedelta(days=days):
+            errors.append(f"$.matured: spans less than {days} days")
+        if through and parse_time(record["at"]) and parse_time(record["at"]) < through:
+            errors.append("$.at: a maturity receipt is issued after its window")
+    return errors
+
+
+def receipt_status(candidate, records, receipts, as_of=None, resolve=None, genome=None):
+    """The receipts that hold for this candidate's folded chain, and why others do not.
+
+    installed: a receipt about a live record of the chain that entered an
+    installed state, in the candidate's destination repository and path,
+    issued no earlier than that record. observed, matured and reverted count
+    only against that installed record; matured needs its window to start no
+    earlier than the install and no revert inside it.
+    """
+    folded = fold(candidate, records, as_of=as_of, resolve=resolve, genome=genome)
+    by_id = {r["id"]: r for r in records if isinstance(r, dict) and "id" in r}
+    chain = [by_id[i] for i in folded.chain]
+    live = {r["id"]: r for r in chain if r["effect"] == "live" and r["to"] in INSTALLED}
+    destination = candidate["destination"] or {}
+    status = {"installed": None, "observed": [], "matured": None, "reverted": None}
+    problems = []
+    mine = []
+    for receipt in receipts:
+        errors = (
+            validate_record(receipt) if isinstance(receipt, dict) else ["not a record"]
+        )
+        if not errors and receipt["schema"] != "promotion-receipt/v1":
+            errors = ["not a promotion-receipt/v1"]
+        if not errors and receipt["candidate"] != candidate["id"]:
+            continue
+        if errors:
+            problems.append(
+                f"{receipt.get('id', '?') if isinstance(receipt, dict) else '?'}: {errors[0]}"
+            )
+            continue
+        if as_of and parse_time(receipt["at"]) > as_of:
+            problems.append(f"{receipt['id']}: is dated after as_of")
+            continue
+        learner = candidate["producer"]
+        if (
+            receipt["producer"]["session"] == learner["session"]
+            or receipt["producer"]["lane"] == learner["lane"]
+        ):
+            problems.append(
+                f"{receipt['id']}: the learner does not issue its own receipts"
+            )
+            continue
+        mine.append(receipt)
+    installed = None
+    for receipt in sorted(mine, key=lambda r: (r["at"], r["id"])):
+        if receipt["kind"] != "installed":
+            continue
+        record = live.get(receipt["record"])
+        where = receipt["installed"]
+        if record is None:
+            problems.append(
+                f"{receipt['id']}: {receipt['record']} is not a live install in the chain"
+            )
+        elif where["repo"] != destination.get("repo") or (
+            where["path"] != destination.get("path")
+        ):
+            problems.append(
+                f"{receipt['id']}: installed somewhere other than the destination"
+            )
+        elif parse_time(receipt["at"]) < parse_time(record["at"]):
+            problems.append(f"{receipt['id']}: issued before the record it installs")
+        elif installed is None:
+            installed = receipt
+    if installed is None:
+        return status, problems
+    status["installed"] = installed["id"]
+    since = parse_time(installed["at"])
+    later, reverted_at = [], None
+    for receipt in sorted(mine, key=lambda r: (r["at"], r["id"])):
+        if receipt["kind"] == "installed" or receipt["record"] != installed["record"]:
+            continue
+        if parse_time(receipt["at"]) < since:
+            problems.append(f"{receipt['id']}: dated before the install")
+            continue
+        later.append(receipt)
+        if receipt["kind"] == "observed":
+            status["observed"].append(receipt["id"])
+        elif receipt["kind"] == "reverted" and reverted_at is None:
+            status["reverted"], reverted_at = receipt["id"], parse_time(receipt["at"])
+    for receipt in later:
+        if receipt["kind"] != "matured":
+            continue
+        span = receipt["matured"]
+        if parse_time(span["since"]) < since:
+            problems.append(f"{receipt['id']}: its window starts before the install")
+        elif reverted_at is not None and reverted_at <= parse_time(span["through"]):
+            problems.append(f"{receipt['id']}: reverted inside its window")
+        elif status["matured"] is None:
+            status["matured"] = receipt["id"]
+    return status, problems
 
 
 def _resolution_rules(record):
@@ -1137,6 +1265,108 @@ def resolver_from(resolutions):
     return by_ref.get
 
 
+MAX_CASES = 4096  # anchors maxItems; keeps sign_p well under a second
+
+
+def sign_p(wins, losses):
+    """One-sided exact sign test on discordant pairs: P(W >= wins | p = 0.5)."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
+
+
+def salt_errors(gate, candidate, genome=None):
+    """Why a passing hold-out gate's split could have been aimed at (attack E).
+
+    Commit, then draw: the candidate is committed first and the salt is a public
+    beacon fixed after it, so no key could have been ground against it.
+    """
+    if gate["gate"] not in classes()["eval_minima"] or gate["result"] != "pass":
+        return []
+    draw = gate.get("salt_draw")
+    if not isinstance(draw, dict):
+        return [f"{gate['gate']} names no salt draw; a public split can be ground"]
+    drawn = parse_time(draw.get("at"))
+    committed = [parse_time(candidate["at"])]
+    if genome is not None:
+        committed.append(parse_time(genome["at"]))
+    if drawn is None or any(c is None or drawn <= c for c in committed):
+        return [
+            f"{gate['gate']} salt was drawn at {draw.get('at')}, not after the "
+            "candidate and its genome were committed (commit, then draw)"
+        ]
+    if drawn > parse_time(gate["at"]):
+        return [f"{gate['gate']} used a salt drawn after the gate was judged"]
+    return []
+
+
+def minima_errors(gate):
+    """Why a passing hold-out gate's own results fall short of the pinned minima."""
+    pinned = classes()["eval_minima"].get(gate["gate"])
+    if pinned is None or gate["result"] != "pass":
+        return []
+    metrics = gate.get("metrics") or {}
+    missing = [
+        k for k in ("cases", "delta", "wins", "losses", "anchored") if k not in metrics
+    ]
+    if not missing:
+        counts = [metrics[k] for k in ("cases", "wins", "losses", "anchored")]
+        if not all(
+            isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= MAX_CASES
+            for c in counts
+        ):
+            return [
+                f"{gate['gate']} counts are not integers in 0..{MAX_CASES}: {counts}"
+            ]
+        if (
+            metrics["wins"] + metrics["losses"] > metrics["cases"]
+            or metrics["anchored"] > metrics["cases"]
+        ):
+            return [f"{gate['gate']} wins, losses or anchored exceed its cases"]
+        anchors = len(set(gate.get("anchors", ())))
+        if anchors > metrics["anchored"] or (metrics["anchored"] > 0) != (anchors > 0):
+            return [
+                f"{gate['gate']} anchored {metrics['anchored']} cases on {anchors} anchors"
+            ]
+        if not -1 <= metrics["delta"] <= 1:  # exact for big ints; no float overflow
+            return [f"{gate['gate']} delta {metrics['delta']} is outside -1..1"]
+        if (
+            metrics["cases"]
+            and abs(
+                metrics["delta"]
+                - (metrics["wins"] - metrics["losses"]) / metrics["cases"]
+            )
+            > 1e-9
+        ):
+            return [f"{gate['gate']} delta is not (wins - losses) / cases"]
+    if missing:
+        return [
+            f"{gate['gate']} does not report {', '.join(missing)} against the pinned minima"
+        ]
+    errors = []
+    if metrics["cases"] < pinned["min_cases"]:
+        errors.append(
+            f"{gate['gate']} judged {metrics['cases']} cases, under {pinned['min_cases']}"
+        )
+    if metrics["delta"] < pinned["min_delta"]:
+        errors.append(
+            f"{gate['gate']} delta {metrics['delta']} is under {pinned['min_delta']}"
+        )
+    p = sign_p(int(metrics["wins"]), int(metrics["losses"]))
+    if p >= pinned["max_sign_p"]:
+        errors.append(
+            f"{gate['gate']} {metrics['wins']} wins / {metrics['losses']} losses: "
+            f"one-sided sign test p = {p:.3f}, not under {pinned['max_sign_p']}"
+        )
+    share = metrics["anchored"] / metrics["cases"] if metrics["cases"] else 0.0
+    if share < pinned["min_anchored_share"]:
+        errors.append(
+            f"{gate['gate']} anchored {share:.2f} of its cases, under {pinned['min_anchored_share']}"
+        )
+    return errors
+
+
 def _counts(gate, candidate, resolve=None):
     """Whether a passing gate result is admissible evidence for this candidate."""
     evaluator = gate["evaluator"]
@@ -1274,7 +1504,34 @@ def _distinct(records):
     return result
 
 
-def fold(candidate, records, as_of=None, resolve=None):
+def _training_evidence(candidate, genome):
+    """(experience ids the candidate learned from, problem or None).
+
+    A candidate built from a genome learned from that genome's training
+    evidence too, so an evaluation gate anchored on any of it is not hold-out.
+    """
+    training = set(candidate["evidence"])
+    named = candidate.get("genome")
+    if genome is None:
+        return training, None
+    if (
+        not isinstance(genome, dict)
+        or validate_record(genome)
+        or genome.get("schema") != "candidate-genome/v1"
+    ):
+        return (
+            training,
+            "the genome given to the fold is not a valid candidate-genome/v1",
+        )
+    if genome["id"] != named or candidate["id"] not in genome["candidates"]:
+        return (
+            training,
+            f"{genome['id']} is not the genome {candidate['id']} names and implements",
+        )
+    return training | set(genome["training_evidence"]["experiences"]), None
+
+
+def fold(candidate, records, as_of=None, resolve=None, genome=None):
     """Replay a candidate's promotion records into its state.
 
     The state is the one reached by the longest valid prefix of the chain;
@@ -1289,6 +1546,10 @@ def fold(candidate, records, as_of=None, resolve=None):
     backed by the class's resolved answer, and an owner gate counts only as
     the owner's resolved approval of this candidate; with no resolver neither
     can be verified, so neither passes.
+
+    ``genome`` is the candidate-genome/v1 the candidate names, if any: its
+    training evidence is excluded from evaluation like the candidate's own.
+    A candidate that names a genome folds its anchored gates only with it.
     """
     if not isinstance(candidate, dict):
         return Fold(None, None, {}, [], ["candidate: not a JSON object"])
@@ -1299,8 +1560,11 @@ def fold(candidate, records, as_of=None, resolve=None):
         )
     life = lifecycle()
     state, effect, latest, applied = life["initial"], "shadow", {}, []
-    if errors:
+    if errors:  # an invalid candidate is refused before anything reads its fields
         return Fold(state, effect, latest, applied, errors)
+    training, genome_problem = _training_evidence(candidate, genome)
+    if genome_problem:
+        return Fold(state, effect, latest, applied, [f"candidate: {genome_problem}"])
     valid = []
     for record in _distinct(records):
         problems = validate_record(record)
@@ -1334,10 +1598,17 @@ def fold(candidate, records, as_of=None, resolve=None):
             problems += _gate_timing(gate, record, previous_at, at, life)
             if as_of and (parse_time(gate["at"]) or as_of) > as_of:
                 problems.append(f"{gate['gate']} is dated after the fold's as_of")
-            leaked = sorted(set(gate.get("anchors", ())) & set(candidate["evidence"]))
+            problems += minima_errors(gate)
+            problems += salt_errors(gate, candidate, genome)
+            anchors = set(gate.get("anchors", ()))
+            leaked = sorted(anchors & training)
             if leaked:
                 problems.append(
-                    f"{gate['gate']} evaluated the candidate's own evidence: {leaked[:3]}"
+                    f"{gate['gate']} evaluated the candidate's own training evidence: {leaked[:3]}"
+                )
+            if "anchors" in gate and candidate.get("genome") and genome is None:
+                problems.append(
+                    f"{gate['gate']}: fold with genome {candidate['genome']} to exclude its training evidence"
                 )
         if record["to"] in life["activating"]:
             problems += _activation_errors(candidate, trial, record, resolve)
@@ -1410,7 +1681,7 @@ def _validate_command(paths):
     return 1 if failed else 0
 
 
-def _fold_command(candidate_path, records_path, as_of, resolutions=None):
+def _fold_command(candidate_path, records_path, as_of, resolutions=None, genome=None):
     candidates = read_records(candidate_path)
     if len(candidates) != 1:
         raise ValueError(f"{candidate_path}: expected exactly one candidate")
@@ -1419,7 +1690,10 @@ def _fold_command(candidate_path, records_path, as_of, resolutions=None):
     if instant is None:
         raise ValueError(f"--as-of is not a contract timestamp: {as_of}")
     resolve = resolver_from(read_records(resolutions)) if resolutions else None
-    result = fold(candidates[0], records, as_of=instant, resolve=resolve)
+    genome_record = read_records(genome)[0] if genome else None
+    result = fold(
+        candidates[0], records, as_of=instant, resolve=resolve, genome=genome_record
+    )
     print(json.dumps(result._asdict(), indent=2, sort_keys=True))
     return 1 if result.errors else 0
 
@@ -1442,6 +1716,9 @@ def main(argv=None):
         type=Path,
         help="decision-resolution/v1 records the caller read from agent-hq origin/main",
     )
+    fld.add_argument(
+        "--genome", type=Path, help="the candidate-genome/v1 the candidate names"
+    )
     eid = sub.add_parser("experience-id", help="print the deterministic experience id")
     eid.add_argument("--kind", required=True)
     eid.add_argument("--key", required=True)
@@ -1451,7 +1728,7 @@ def main(argv=None):
             return _validate_command(args.paths)
         if args.command == "fold":
             return _fold_command(
-                args.candidate, args.records, args.as_of, args.resolutions
+                args.candidate, args.records, args.as_of, args.resolutions, args.genome
             )
         print(experience_id(args.kind, args.key))
         return 0
