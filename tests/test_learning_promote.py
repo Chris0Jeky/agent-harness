@@ -59,6 +59,7 @@ def gate(name, at, result="pass", evaluator=ORACLE):
             training_excluded=True,
             anchors=[],
             metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
+            salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
         )
     if name == "owner":
         item["ref"] = "decision:test-1"
@@ -348,6 +349,7 @@ class GeneratorTests(unittest.TestCase):
             lc.read_records(suite / "experiences.jsonl"),
             gate="retrieval_regression",
             at="2026-09-05T00:00:00Z",
+            salt_draw={"source": "agent-hq@" + "7" * 40, "at": "2026-09-04T00:00:00Z"},
         )
         return cand, report
 

@@ -169,6 +169,7 @@ def activation(cand, landed="memory:synthetic/lesson.md", at=ACTIVE, until="acti
                         "losses": 0,
                         "anchored": 20,
                     },
+                    salt_draw={"source": "agent-hq@" + "5" * 40, "at": when},
                 )
             if name == "owner":
                 item.update(

@@ -23,6 +23,8 @@ lc = ev.contracts
 
 SUITE = ROOT / "schemas" / "learning" / "examples" / "memory-eval"
 AT = "2026-09-05T00:00:00Z"
+# The example suite's split salt: a synthetic beacon fixed after its candidate (09-03).
+SALT_DRAW = {"source": "agent-hq@" + "7" * 40, "at": "2026-09-04T00:00:00Z"}
 JUDGE = {"kind": "llm_judge", "runtime": "grok", "model": "m", "session": "judge-1"}
 
 
@@ -33,6 +35,7 @@ def load():
         "candidate_outputs": lc.read_records(SUITE / "candidate-outputs.json")[0],
         "candidate": lc.read_records(SUITE / "candidate.json")[0],
         "experiences": lc.read_records(SUITE / "experiences.jsonl"),
+        "salt_draw": dict(SALT_DRAW),
     }
 
 
@@ -40,6 +43,7 @@ def run(inputs=None, **options):
     inputs = inputs or load()
     options.setdefault("at", AT)
     options.setdefault("gate", "retrieval_regression")
+    options.setdefault("salt_draw", inputs.get("salt_draw"))
     return ev.evaluate(
         inputs["cases"],
         inputs["baseline"],
@@ -166,6 +170,22 @@ class RefusalTests(unittest.TestCase):
         with self.assertRaises(ev.EvalRefusal) as caught:
             run(inputs, **options)
         self.assertIn(fragment, str(caught.exception))
+
+    def test_the_salt_is_drawn_after_the_candidate(self):
+        early = dict(
+            SALT_DRAW, at="2026-09-03T09:00:00Z"
+        )  # the candidate's own instant
+        self.assertRefused("drawn after the candidate", salt_draw=early)
+        gate = run()["gate"]
+        self.assertEqual(gate["salt_draw"], SALT_DRAW)
+        cand = load()["candidate"]
+        self.assertEqual(lc.salt_errors(gate, cand), [])
+        self.assertIn("not after", lc.salt_errors(dict(gate, salt_draw=early), cand)[0])
+        # The beacon really drives the split: another beacon draws another hold-out.
+        other = dict(SALT_DRAW, source="agent-hq@" + "8" * 40)
+        self.assertNotEqual(
+            run(salt_draw=other)["holdout_digest"], run()["holdout_digest"]
+        )
 
     def test_unresolvable_training_evidence_refuses(self):
         inputs = load()
@@ -618,6 +638,10 @@ class CommandLineTests(unittest.TestCase):
             "retrieval_regression",
             "--at",
             AT,
+            "--salt-source",
+            SALT_DRAW["source"],
+            "--salt-at",
+            SALT_DRAW["at"],
             *extra,
         ]
         out, err = io.StringIO(), io.StringIO()

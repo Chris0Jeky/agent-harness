@@ -351,9 +351,14 @@ def experience_id(kind, key):
     return "exp_" + _digest16(f"{kind}|{key}")
 
 
-def split_of(split_key):
-    """Sealed hold-out membership; runs sharing a split_key share a side."""
-    digest = hashlib.sha256(f"{SPLIT_SALT}|{split_key}".encode("utf-8")).hexdigest()
+def split_of(split_key, salt=SPLIT_SALT):
+    """Hold-out membership; runs sharing a split_key share a side.
+
+    The default salt is a public constant, so anyone can grind keys into the
+    hold-out with it: a gate counts only when its split was drawn with a salt
+    fixed after the candidate was committed (salt_errors).
+    """
+    digest = hashlib.sha256(f"{salt}|{split_key}".encode("utf-8")).hexdigest()
     return "holdout" if int(digest[:8], 16) % 100 < HOLDOUT_PERCENT else "dev"
 
 
@@ -1120,6 +1125,26 @@ def sign_p(wins, losses):
     return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
 
 
+def salt_errors(gate, candidate):
+    """Why a passing hold-out gate's split could have been aimed at (attack E).
+
+    Commit, then draw: the candidate is committed first and the salt is a public
+    beacon fixed after it, so no key could have been ground against it.
+    """
+    if gate["gate"] not in classes()["eval_minima"] or gate["result"] != "pass":
+        return []
+    draw = gate.get("salt_draw")
+    if not isinstance(draw, dict):
+        return [f"{gate['gate']} names no salt draw; a public split can be ground"]
+    drawn = parse_time(draw.get("at"))
+    if drawn is None or drawn <= parse_time(candidate["at"]):
+        return [
+            f"{gate['gate']} salt was drawn at {draw.get('at')}, "
+            "not after the candidate was committed (commit, then draw)"
+        ]
+    return []
+
+
 def minima_errors(gate):
     """Why a passing hold-out gate's own results fall short of the pinned minima."""
     pinned = classes()["eval_minima"].get(gate["gate"])
@@ -1388,6 +1413,7 @@ def fold(candidate, records, as_of=None, resolve=None, genome=None):
             if as_of and (parse_time(gate["at"]) or as_of) > as_of:
                 problems.append(f"{gate['gate']} is dated after the fold's as_of")
             problems += minima_errors(gate)
+            problems += salt_errors(gate, candidate)
             anchors = set(gate.get("anchors", ()))
             leaked = sorted(anchors & training)
             if leaked:

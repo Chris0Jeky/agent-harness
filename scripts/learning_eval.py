@@ -119,7 +119,7 @@ def training_set(candidate, genome, experiences, ran=None):
     return ids, {effective_split_key(experiences[i]) for i in ids}
 
 
-def select(cases, split, training_ids, training_keys, experiences):
+def select(cases, split, training_ids, training_keys, experiences, salt=None):
     """Cases the candidate may be judged on, and why the others were dropped."""
     counts = {
         "total": len(cases),
@@ -147,7 +147,7 @@ def select(cases, split, training_ids, training_keys, experiences):
             raise EvalRefusal(
                 f"{case['id']}: split_key differs from its experience's; a case cannot move across the split"
             )
-        if contracts.split_of(case["split_key"]) != split:
+        if contracts.split_of(case["split_key"], *([salt] if salt else [])) != split:
             counts["other_split"] += 1
         elif case["experience"] in training_ids:
             counts["excluded_training"] += 1
@@ -360,10 +360,23 @@ def evaluate(
     gate="offline_eval",
     policy=None,
     at=None,
+    salt_draw=None,
 ):
-    """Judge a candidate against the baseline; returns an eval-run/v1 report."""
+    """Judge a candidate against the baseline; returns an eval-run/v1 report.
+
+    salt_draw ({source, at}) draws the split with a public beacon fixed after
+    the candidate was committed; without it the public salt is used and the
+    gate will not count.
+    """
     if gate not in GATES:
         raise EvalRefusal(f"gate must be one of {GATES}")
+    if salt_draw is not None and (
+        contracts.parse_time(salt_draw.get("at")) is None
+        or contracts.parse_time(salt_draw["at"])
+        <= contracts.parse_time(candidate["at"])
+    ):
+        raise EvalRefusal("the salt is drawn after the candidate is committed")
+    salt = salt_draw["source"] if salt_draw else None
     policy = {**default_policy(gate), **(policy or {})}
     if policy["min_cases"] < 1 or not 0 < policy["max_sign_p"] <= 1:
         raise EvalRefusal("min_cases is at least 1 and max_sign_p in (0, 1]")
@@ -380,7 +393,9 @@ def evaluate(
     training_ids, training_keys = training_set(
         candidate, genome, experiences, candidate_outputs["variant_ref"]
     )
-    chosen, counts = select(cases, split, training_ids, training_keys, experiences)
+    chosen, counts = select(
+        cases, split, training_ids, training_keys, experiences, salt
+    )
     label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
     graders = set()
     rows = []
@@ -443,6 +458,7 @@ def evaluate(
                 baseline["variant_ref"],
                 candidate_outputs["variant_ref"],
                 split,
+                salt or "",
                 gate,
                 holdout_digest,
                 json.dumps(policy, sort_keys=True),
@@ -523,6 +539,7 @@ def evaluate(
             "holdout_digest": holdout_digest,
             "training_excluded": True,
             "anchors": anchors,
+            **({"salt_draw": dict(salt_draw)} if salt_draw else {}),
             "metrics": {
                 "delta": delta,
                 "wins": wins,
@@ -595,6 +612,10 @@ def main(argv=None):
     parser.add_argument(
         "--max-sign-p", type=float, help="default: the gate's pinned minimum"
     )
+    parser.add_argument(
+        "--salt-source", help="public beacon fixed after the candidate (agent-hq@<sha>)"
+    )
+    parser.add_argument("--salt-at", help="when the beacon was fixed")
     parser.add_argument("--at", help="report timestamp (default: now)")
     args = parser.parse_args(argv)
     try:
@@ -620,6 +641,11 @@ def main(argv=None):
                 if v is not None
             },
             at=args.at,
+            salt_draw=(
+                {"source": args.salt_source, "at": args.salt_at}
+                if args.salt_source
+                else None
+            ),
         )
     except (EvalRefusal, contracts.ContractError, OSError, ValueError) as exc:
         print(json.dumps({"status": "refused", "error": str(exc)}), file=sys.stderr)

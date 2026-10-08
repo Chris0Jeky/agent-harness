@@ -90,6 +90,7 @@ def gate(name, at, evaluator=ORACLE, **extra):
             training_excluded=True,
             anchors=[],
             metrics={"cases": 20, "delta": 0.1, "wins": 8, "losses": 0, "anchored": 20},
+            salt_draw={"source": "agent-hq@" + "5" * 40, "at": at},
         )
     item.update(extra)
     return item

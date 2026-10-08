@@ -32,6 +32,16 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,31}:[^\\s]{1,480}$"
     },
+    "salt_draw": {
+      "description": "Where a hold-out split's salt was drawn from: a public beacon fixed after the candidate was committed (a later agent-hq main commit), and when it was fixed. The salt is the source string itself, so anyone can recompute the split, and nobody could aim keys at it before the candidate existed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "at"],
+      "properties": {
+        "source": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,40}@[0-9a-f]{40,64}$"},
+        "at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
     "relpath": {
       "description": "Repository-relative POSIX path: no leading slash or tilde, no drive, no backslash, no control character, no '..' or '.git' segment, no segment ending in a dot or space (Windows strips them, so '.git.' is '.git'), no '~' (8.3 short names alias real ones).",
       "type": "string",

@@ -1096,6 +1096,17 @@ it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite co
 LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
 training leak and a cluster leak the evaluator must drop.
 
+**Commit, then draw** (K3, attack E). `split_of`'s default salt is a public constant, so a producer
+who chooses split keys can grind them into the hold-out (46 of 200 in the red-team run), and a
+single-user host cannot hide a salt from its own agents. So the order is reversed: the candidate
+(with its evidence and genome) is committed first, and the split is drawn afterwards with a public
+beacon fixed after that commit, such as a later agent-hq `main` commit
+(`learning_eval.py --salt-source agent-hq@<sha> --salt-at <when it was fixed>`). The beacon string
+is the salt, so anyone can recompute the split. A passing hold-out gate names its `salt_draw`
+(`source`, `at`), and the fold refuses a gate with none or one drawn at or before the candidate's
+`at`. The fold checks the order only: that the source is the first beacon after the commit (no
+shopping among later commits) is the store's check (L3), which reads agent-hq history.
+
 ```powershell
 py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> --candidate-outputs <outputs.json> --candidate <lc.json> --experiences <experiences.jsonl> [--genome <gen.json>] [--labels <labels.json>...] [--split holdout|dev] [--gate offline_eval|replay|retrieval_regression]
 ```
@@ -1178,8 +1189,8 @@ dev-side runs the recipe or skill was written from) is excluded by the evaluator
 **Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
 is an attestation the fold checks for consistency, not proof: evaluator identity is still
 self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
-the salt is public, so a producer could choose a split key for a side (K3 replaces it with a
-committed salt). Authority is resolved rather than asserted, so its strength is the resolver's: once the store
+a hold-out split is only as unaimable as its beacon: the fold checks that it was drawn after the
+candidate, the store that it was the first beacon after it. Authority is resolved rather than asserted, so its strength is the resolver's: once the store
 builds resolutions from agent-hq `origin/main`, a record can no longer claim an answer the owner
 did not give. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
 can be re-run. Memory refs use the journal's spelling, `memory:<project>/<name>.md`, so every lane

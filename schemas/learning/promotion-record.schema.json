@@ -138,7 +138,8 @@
           "type": "object",
           "propertyNames": {"$ref": "common.schema.json#/$defs/slug"},
           "additionalProperties": {"type": "number"}
-        }
+        },
+        "salt_draw": {"$ref": "common.schema.json#/$defs/salt_draw"}
       },
       "allOf": [
         {
@@ -151,7 +152,7 @@
         {
           "if": {"properties": {"gate": {"enum": ["offline_eval", "replay", "retrieval_regression"]}}},
           "then": {
-            "required": ["holdout_digest", "training_excluded", "anchors"],
+            "required": ["holdout_digest", "training_excluded", "anchors", "salt_draw"],
             "properties": {"training_excluded": {"const": true}}
           }
         }
