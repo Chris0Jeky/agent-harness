@@ -917,3 +917,74 @@ fix diff (a fresh-context pass is owed only when the fixes changed logic or the 
 global law 2g; a manual `@codex review` is never a per-fix step, global law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
 high-risk work; T4 two adversarial reviews), never how many rounds run.
+
+## §15 Learning-plane contracts (L1 lab; draft 2026-10-08)
+
+The learning plane (experience -> candidate -> independent eval -> canary -> maturity -> promote or
+revert) shares five record contracts across the estate. agent-harness is their single writer:
+another lane asks on the bus for a field and never forks a schema. The JSON Schemas (draft
+2020-12) under `schemas/learning/` are the contract; this section names the rules around them and
+`scripts/learning_contracts.py` enforces both (standard library only; it refuses a schema that
+uses a keyword it does not interpret). Synthetic examples: `schemas/learning/examples/`.
+
+```powershell
+py -3 scripts\learning_contracts.py validate <file.json|file.jsonl>...   # exit 0 valid, 1 invalid, 2 refused
+py -3 scripts\learning_contracts.py fold --candidate <lc.json> --records <promotion records.jsonl>
+py -3 scripts\learning_contracts.py experience-id --kind <source kind> --key <source key>
+```
+
+**Storage.** Records reference private work, so they live outside every repository under
+`%USERPROFILE%\.estate\learning\` (beside `outcome-ledger\`) and are never committed. Records
+carry pointers (`ref`: `scheme:locator`), never transcripts; prose is bounded (`claim` 2,000
+characters, `reason` 280) and experience feedback carries no free text at all. Every record has
+`schema`, `id`, `at` (UTC, `Z`) and `producer` (`lane`, `runtime`, `model`, `session`), plus an
+optional `ext` object keyed by lane slug for producer-private fields consumers ignore.
+
+| Record | Fields | Rules beyond the schema |
+|---|---|---|
+| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
+| `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, not the run |
+| `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
+| `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
+| `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
+
+**Lifecycle** (`schemas/learning/lifecycle.json`). A candidate is born in `candidate` (the plan's
+"Observed" stage is the experience ledger itself; a refused admission is never a candidate). Every
+later move is a promotion record whose (`from`, `to`) is an edge of that file. A gate result may
+only be recorded on a record leaving one of its `gate_sources` states: evaluation gates leave
+`evaluating`, `canary` leaves `canary`, `maturity` leaves `probation`, `owner` and
+`independent_review` leave any live-path state. That placement is what forces a canary-class
+candidate through `canary` and a maturity-class one through `probation`. A record moving forward
+carries no failed gate.
+
+**Promotion classes** (`schemas/learning/promotion-classes.json`, P0-P8 as data: `kind_class`,
+per-class `activation_gates`, `conditional_gates` for `protected` and `consequential`,
+`owner_on_activation`). The fold of a candidate's records (`fold(candidate, records)`) is the
+promotion-gate decision logic. It stops at the first record that fails any of:
+
+- the chain is linear: one record with `prev: null`, no two records naming the same `prev` (a
+  fork), no record following an unknown or invalid one, `from` equal to the folded state, `at`
+  never earlier than the record before it, and the candidate's own `promotion_class`;
+- each gate was judged during the stay it leaves (`at` between entering and leaving that state),
+  and a `maturity` pass comes at least `maturity_days` (7) after entering `probation`;
+- entering `active`, every required gate holds a latest result of `pass`, from an evaluator that
+  is not `self` and whose `session` is not the candidate producer's (the learner never evaluates
+  itself), at least one of them from an `oracle`, the `owner` or an `independent_model` (an
+  `llm_judge` alone never activates), and the `owner` gate judged by the owner;
+- for P8 (`owner_on_activation`), the owner's pass sits on the activating record itself: policy,
+  security and authority are never automatic.
+
+**Shadow mode.** `effect: shadow` means evaluated and shown, nothing written to a live surface;
+`effect: live` above P0 requires `authority` (the owner decision, `decision:<inbox id>`). Until
+the owner answers the governance lane's decisions, producers write shadow only.
+
+**Hold-out.** Offline evaluation and replay gates name the sealed hold-out they ran on
+(`holdout_digest`) and assert `training_excluded: true`. An experience's split is derived, never
+stored: `split_of(split_key)`, a salted sha256 (`estate-experience/v1/split`) with a 20% hold-out,
+where `split_key` defaults to `source.kind|source.key`; producers set it to group runs that must
+land on one side (one PR, one finding cluster, one correction key).
+
+**Changing a contract.** Additive optional fields keep `/v1`; renaming, removing or tightening a
+field is `/v2`. Every change is announced on the learning-plane bus thread, and
+`tests/test_learning_contracts.py` pins the data files to the shared enums and this section's
+field lists to the schemas.
