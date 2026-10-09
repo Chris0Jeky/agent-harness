@@ -798,26 +798,70 @@ def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bo
     handed in directly is the caller's stated input, not a scan this script
     performed and can vouch for — but it is not a clean bill of health either,
     so the caller is told which of the two it got.
+
+    Raises:
+        CorpusCacheError: if the file cannot be opened, cannot be read to
+            the end, or holds a row that is not a JSON object. The cache
+            path aborts instead of skipping: unlike the transcript scan
+            (`iter_jsonl`), a corrupt cache row means the caller's stated
+            input is unknowable, not one line among thousands.
     """
     corpus: dict[str, dict[str, int]] = {}
     integrity: Counter[str] = Counter()
     recorded = False
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
+    try:
+        handle = path.open(encoding="utf-8")
+    except OSError as error:
+        raise CorpusCacheError(
+            f"cannot open corpus cache {path}: {type(error).__name__}: {error}"
+        ) from error
+    with handle:
+        while True:
+            try:
+                line = next(handle, None)
+            except (OSError, UnicodeError) as error:
+                raise CorpusCacheError(
+                    f"cannot read corpus cache {path}: "
+                    f"{type(error).__name__}: {error}"
+                ) from error
+            if line is None:
+                break
             line = line.strip()
             if not line:
                 continue
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except ValueError as error:
+                raise CorpusCacheError(
+                    f"corrupt corpus cache {path}: not JSON: {error}"
+                ) from error
+            if not isinstance(row, dict):
+                raise CorpusCacheError(
+                    f"corrupt corpus cache {path}: row is not an object"
+                )
             meta = row.get(CORPUS_CACHE_META_KEY)
             if isinstance(meta, dict):
                 recorded = True
-                for key, value in (meta.get("integrity") or {}).items():
-                    integrity[str(key)] += int(value)
+                try:
+                    entries = (meta.get("integrity") or {}).items()
+                    for key, value in entries:
+                        integrity[str(key)] += int(value)
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise CorpusCacheError(
+                        f"corrupt corpus cache {path}: bad integrity ledger: "
+                        f"{type(error).__name__}"
+                    ) from error
                 continue
             command = row.get("command")
             if not isinstance(command, str):
                 continue
-            corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
+            try:
+                corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
+            except (ValueError, TypeError) as error:
+                raise CorpusCacheError(
+                    f"corrupt corpus cache {path}: bad runtime counts: "
+                    f"{type(error).__name__}"
+                ) from error
     return corpus, integrity, recorded
 
 
@@ -878,6 +922,10 @@ class OfflineBindingError(ReplayHarnessError):
 
 class CheckSignatureError(ReplayHarnessError):
     """A loaded floor's `check()` cannot be invoked by this replay at all."""
+
+
+class CorpusCacheError(ReplayHarnessError):
+    """A cached corpus file could not be read, so there is nothing to replay."""
 
 
 def load_dispatch(name: str, path: Path) -> ModuleType:
@@ -2606,7 +2654,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     cache_had_ledger = True
     if args.from_corpus:
-        corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
+        try:
+            corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
+        except ReplayHarnessError as error:
+            sys.stderr.write(f"cannot load corpus cache: {error}\n")
+            return EXIT_TOOL_FAILURE
         stats: Counter[str] = Counter(
             {"extracted-loaded-from-corpus-file": len(corpus)}
         )
