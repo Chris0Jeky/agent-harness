@@ -849,20 +849,18 @@ def load_corpus(path: Path) -> tuple[dict[str, dict[str, int]], Counter[str], bo
                 except (ValueError, TypeError, AttributeError) as error:
                     raise CorpusCacheError(
                         f"corrupt corpus cache {path}: bad integrity ledger: "
-                        f"{type(error).__name__}: {error}"
+                        f"{type(error).__name__}"
                     ) from error
                 continue
             command = row.get("command")
             if not isinstance(command, str):
                 continue
             try:
-                corpus[command] = {
-                    name: int(row.get(name, 0)) for name in RUNTIMES
-                }
+                corpus[command] = {name: int(row.get(name, 0)) for name in RUNTIMES}
             except (ValueError, TypeError) as error:
                 raise CorpusCacheError(
-                    f"corrupt corpus cache {path}: bad counts for "
-                    f"{command!r}: {type(error).__name__}: {error}"
+                    f"corrupt corpus cache {path}: bad runtime counts: "
+                    f"{type(error).__name__}"
                 ) from error
     return corpus, integrity, recorded
 
@@ -2657,9 +2655,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     cache_had_ledger = True
     if args.from_corpus:
         try:
-            corpus, cached_integrity, cache_had_ledger = load_corpus(
-                args.from_corpus
-            )
+            corpus, cached_integrity, cache_had_ledger = load_corpus(args.from_corpus)
         except ReplayHarnessError as error:
             sys.stderr.write(f"cannot load corpus cache: {error}\n")
             return EXIT_TOOL_FAILURE
