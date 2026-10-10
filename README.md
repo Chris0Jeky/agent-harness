@@ -177,6 +177,10 @@ trusted with `/hooks` in a new Codex session; never stack a global and project C
 [the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
 for the exact-CWD TUI procedure and its runtime-evidence boundary.
 
+Default file sync refuses aliased homes and destinations, non-regular files, and destinations
+with multiple hard links before reserving backups. Changed files publish through a flushed
+sibling and rename; this protects other hard-link entries, not concurrent-writer exclusion.
+
 Future Codex skill backups live under `<codex-home>/backups/<timestamp>/skills/`, outside the
 configured shared skill root that Codex scans recursively. A custom `codex-home` whose backup tree
 overlaps the configured `skills-home`, or a selected source tree, is refused before writes. Legacy

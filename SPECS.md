@@ -700,6 +700,10 @@ Home: this repo. Implemented in the dependency-free `harness.py` (one implementa
   `<codex-home>/backups/<timestamp>/skills/`, outside the recursively scanned `skills-home`; custom
   overlapping home/source layouts fail before writes, and legacy `skills-home/.harness-backups/`
   trees are neither migrated nor deleted.
+  Default guidance, hook-byte and `hooks.json` destinations must be ordinary files with one link,
+  under non-aliased homes and ancestors; inspection failures refuse before backup reservation.
+  Changed files use the managed sibling publisher, preserving Windows destination security and
+  replacing the directory entry instead of modifying a shared inode. This is not a writer lock.
   Selected skill roots (`skill:` and `claude-skill:`) are probed together across both families with
   name-only directories on each shared destination parent before either family applies changes.
   Recovery-name checks run only for changed existing Codex targets and changed Claude staging
