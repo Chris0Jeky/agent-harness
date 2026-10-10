@@ -23,6 +23,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Iterator
 
@@ -1254,6 +1255,14 @@ def run_import(args: argparse.Namespace) -> int:
         limit=args.limit,
     )
     stats.update(build_stats)
+    sample = args.sample
+    if isinstance(sample, bool) or not isinstance(sample, int) or sample < 0:
+        print(
+            "import: invalid --sample: must be an integer >= 0",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     if args.sample and args.sample < len(events):
         keep = sorted(random.Random(args.seed).sample(range(len(events)), args.sample))
         events = [events[index] for index in keep]

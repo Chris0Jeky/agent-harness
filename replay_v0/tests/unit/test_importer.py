@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import argparse
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -994,6 +994,59 @@ class RunImportRedactTermsTests(unittest.TestCase):
                             2, run_import(self._args(tmpdir / "corpus", bad))
                         )
                     self.assertIn("import:", diagnostic.getvalue())
+
+
+class RunImportSampleTests(unittest.TestCase):
+    @staticmethod
+    def _args(output: Path, sample: int) -> argparse.Namespace:
+        return argparse.Namespace(
+            output=str(output),
+            redact_terms=None,
+            claude_root="none",
+            codex_root="none",
+            keep_duplicates=False,
+            limit=0,
+            sample=sample,
+            seed=0,
+        )
+
+    def _run_with_events(self, tmpdir: Path, sample: int) -> tuple[int, str, str]:
+        events = [{"command": "echo alpha"}, {"command": "echo bravo"}]
+        cases = [{"case_class": "opaque"}, {"case_class": "opaque"}]
+        root = tmpdir / "transcripts"
+        root.mkdir(exist_ok=True)
+        args = self._args(tmpdir / "corpus", sample)
+        args.claude_root = str(root)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch("replay_v0.importer.output_is_private", return_value=True),
+            mock.patch(
+                "replay_v0.importer.build_private_corpus",
+                return_value=(list(events), list(cases), Counter()),
+            ),
+            mock.patch("replay_v0.importer.write_corpus"),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            code = run_import(args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_run_import_rejects_negative_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            code, _, stderr = self._run_with_events(tmpdir, sample=-1)
+            self.assertEqual(2, code)
+            self.assertIn("import:", stderr)
+            self.assertNotIn("Traceback", stderr)
+            self.assertNotIn("echo alpha", stderr)
+            self.assertNotIn("echo bravo", stderr)
+
+            code, _, _ = self._run_with_events(tmpdir, sample=0)
+            self.assertEqual(0, code)
+
+            code, _, _ = self._run_with_events(tmpdir, sample=1)
+            self.assertEqual(0, code)
 
 
 if __name__ == "__main__":
