@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/system-run.schema.json",
+  "title": "system-run/v1",
+  "description": "A system evaluation: the outcomes of runs made under the candidate against runs made under the baseline (the canary's evidence), over the system metrics the estate already trusts: success, seven-day maturity, reverts, regressions, triage verdicts, owner corrections and cost. Its gate block is a promotion-record/v1 canary gate result. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "producer", "candidate", "baseline_variant",
+    "candidate_variant", "excluded_training", "arms", "policy", "verdict",
+    "reasons", "gate"
+  ],
+  "properties": {
+    "schema": {"const": "system-run/v1"},
+    "id": {"type": "string", "pattern": "^sys_[0-9a-f]{16}$"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "baseline_variant": {"$ref": "common.schema.json#/$defs/ref"},
+    "candidate_variant": {"$ref": "common.schema.json#/$defs/ref"},
+    "excluded_training": {"type": "integer", "minimum": 0},
+    "arms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/arm"},
+        "candidate": {"$ref": "#/$defs/arm"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_runs", "min_matured", "max_success_drop", "max_revert_rise", "max_correction_rise"],
+      "properties": {
+        "min_runs": {"type": "integer", "minimum": 1},
+        "min_matured": {"type": "integer", "minimum": 1},
+        "max_success_drop": {"type": "number", "minimum": 0},
+        "max_revert_rise": {"type": "number", "minimum": 0},
+        "max_correction_rise": {"type": "number", "minimum": 0}
+      }
+    },
+    "verdict": {"type": "string", "enum": ["pass", "fail", "insufficient"]},
+    "reasons": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/short_text"}
+    },
+    "gate": {
+      "anyOf": [
+        {"$ref": "promotion-record.schema.json#/$defs/gate_result"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "$defs": {
+    "rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runs", "success_rate", "matured", "clean_rate", "revert_rate",
+        "regression_rate", "confirmed", "refuted", "precision",
+        "correction_rate", "tokens_mean", "seconds_mean"
+      ],
+      "properties": {
+        "runs": {"type": "integer", "minimum": 0},
+        "success_rate": {"$ref": "#/$defs/rate"},
+        "matured": {"type": "integer", "minimum": 0},
+        "clean_rate": {"$ref": "#/$defs/rate"},
+        "revert_rate": {"$ref": "#/$defs/rate"},
+        "regression_rate": {"$ref": "#/$defs/rate"},
+        "confirmed": {"type": "integer", "minimum": 0},
+        "refuted": {"type": "integer", "minimum": 0},
+        "precision": {"$ref": "#/$defs/rate"},
+        "correction_rate": {"$ref": "#/$defs/rate"},
+        "tokens_mean": {"type": ["number", "null"], "minimum": 0},
+        "seconds_mean": {"type": ["number", "null"], "minimum": 0}
+      }
+    }
+  }
+}

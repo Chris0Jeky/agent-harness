@@ -917,3 +917,357 @@ fix diff (a fresh-context pass is owed only when the fixes changed logic or the 
 global law 2g; a manual `@codex review` is never a per-fix step, global law 2f) — then ship or park. Tier changes WHO reviews and how many eyes the single
 round gets (T1-T3 one independent pass, with a second distinct lens at T3 only for genuinely
 high-risk work; T4 two adversarial reviews), never how many rounds run.
+
+## §15 Learning-plane contracts (L1 lab; draft 2026-10-08)
+
+The learning plane (experience -> candidate -> independent eval -> canary -> maturity -> promote or
+revert) shares five record contracts across the estate. agent-harness is their single writer:
+another lane asks on the bus for a field and never forks a schema. The JSON Schemas (draft
+2020-12) under `schemas/learning/` are the contract; this section names the rules around them and
+`scripts/learning_contracts.py` enforces both (standard library only; it refuses a schema that
+uses a keyword it does not interpret). Synthetic examples: `schemas/learning/examples/`.
+
+```powershell
+py -3 scripts\learning_contracts.py validate <file.json|file.jsonl>...   # exit 0 valid, 1 invalid, 2 refused
+py -3 scripts\learning_contracts.py fold --candidate <lc.json> --records <promotion records.jsonl>
+py -3 scripts\learning_contracts.py experience-id --kind <source kind> --key <source key>
+```
+
+**Storage.** Records reference private work, so they live outside every repository under
+`%USERPROFILE%\.estate\learning\` (beside `outcome-ledger\`) and are never committed. Records
+carry pointers (`ref`: `scheme:locator`), never transcripts; prose is bounded (`claim` 2,000
+characters, `reason` 280) and experience feedback carries no free text at all. Every record has
+`schema`, `id`, `at` (UTC, `Z`) and `producer` (`lane`, `runtime`, `model`, `session`), plus an
+optional `ext` object keyed by lane slug for producer-private fields consumers ignore.
+
+| Record | Fields | Rules beyond the schema |
+|---|---|---|
+| `estate-experience/v1` (`exp_`) | `source`, `observed_at`, `started_at`, `repo`, `task_kind`, `recipe`, `base_sha`, `result_sha`, `trajectory_ref`, `joins`, `outcome`, `feedback`, `failure_keys`, `memory_used`, `skills_used`, `cost`, `variant`, `split_key` | `id` = `exp_` + sha256(`source.kind`\|`source.key`)[:16]; re-observed as the outcome advances (same id, later `observed_at`; readers keep the latest, `fold_experiences`); only a merged run matures; `joins` (`ledger:`, `pr:`, ...) joins `outcome-ledger/v1` rather than replacing it |
+| `outcome-event/v1` (`oev_`) | `observed_at`, `run`, `experience`, `version`, `supersedes`, `repo`, `task_kind`, `recipe`, `runtime`, `model`, `variant`, `outcome`, `success`, `verdicts`, `corrections`, `failure_keys` | `id` = `oev_` + sha256(`run.kind`\|`run.key`\|`version`)[:16]; `experience` matches the run's deterministic experience id; version 1 alone has null `supersedes`; `success` uses `experience_succeeded`; `observed_at` is no earlier than `at` |
+| `memory-use/v1` (`mu_`) | `observed_at`, `experience`, `memories`, `skills`, `method` | `id` = `mu_` + the experience id's suffix; a memory cited was supplied or read; `effect` (helped, harmed, neutral) comes from an evaluator, never `self` or the run's own session |
+| `learning-candidate/v1` (`lc_`) | `kind`, `trigger`, `claim`, `evidence`, `future_decision`, `confidence`, `context`, `scope`, `destination`, `promotion_class`, `protected`, `consequential`, `supersedes`, `contradicts`, `genome`, `valid_from`, `valid_until` | admission fails without a concrete `future_decision` (four or more words, not a placeholder, not the claim restated); `promotion_class` is at least the kind's class and is never lowered; only an episodic candidate has a null `destination`; immutable once written |
+| `candidate-genome/v1` (`gen_`) | `parent`, `parent_genome`, `changes`, `candidates`, `training_evidence`, `evaluation`, `objectives` | `parent_genome` makes the variant archive a tree; `training_evidence` is excluded from the variant's evaluation; most variants change one layer |
+| `promotion-record/v1` (`prom_`) | `candidate`, `prev`, `from`, `to`, `promotion_class`, `effect`, `authority`, `gates`, `reason`, `veto`, `landed`, `genome`, `merged_into`, `superseded_by`, `revert` | one record per lifecycle move in either direction, chained by `prev`; see the fold below |
+| `decision-resolution/v1` | `decision`, `source`, `status`, `option`, `option_label`, `answered_at`, `created`, `expires`, `subject`, `measures` | what an injected resolver returns for one agent-hq decision read at `origin/main` (`source: agent-hq@<sha>`); an answered or defaulted decision names its option and time; `subject` binds a per-promotion approval or veto window to one candidate; `measures` carries the exit bars and graduation the resolver measured |
+| `learning-would-apply/v1` (`wa_`) | `candidate`, `class`, `class_reasons`, `destination`, `op`, `base`, `bytes`, `sha256`, `authority`, `eligibility`, `verdict`, `reasons` | the applier's account of one candidate: the whole file it would write (UTF-8, LF, at most 256 KiB) and its sha256, which the validator recomputes; `base` names the replaced blob (null for an add) so a revert can guard on it; `would_apply` needs an eligible candidate with no problems, its required authority answered, and a class no lower than the destination's |
+| `promotion-receipt/v1` (`rcpt_`) | `candidate`, `record`, `kind`, `installed`, `observed`, `matured`, `reverted` | written by the applier or the store, never the learner; `id` = `rcpt_` + sha256(candidate\|record\|kind\|canonical evidence)[:16]; carries exactly its kind's evidence: `installed` the destination repo, merge commit, path and blob sha256 on `origin/main`, `observed` an attributed experience, `matured` a window (`since`, `through`) of at least `maturity_days`, issued after it, `reverted` the revert commit; `receipt_status` counts one only against a live record of the folded chain that entered an installed state |
+| `eval-case/v1` (`case_`) | `suite`, `experience`, `split_key`, `layer`, `category`, `input_ref`, `oracle` | one task built from history with its grader; `split_key` decides its side like an experience's and must equal its anchoring experience's; `category` is one of the five LongMemEval-V2 memory categories or `task`; `layer` is extraction, retrieval, behavioural, procedural or system |
+| `eval-outputs/v1` | `suite`, `variant`, `variant_ref`, `outputs` | what one variant (baseline or candidate) produced per case, recorded by whoever ran it; a missing output fails that case |
+| `eval-labels/v1` | `suite`, `variant`, `evaluator`, `labels` | pass/fail grades for `judge` cases from an evaluator that is never `self`; a run that uses any label is labelled with that evaluator's kind, never `oracle` |
+| `system-run/v1` (`sys_`) | `candidate`, `baseline_variant`, `candidate_variant`, `excluded_training`, `arms`, `policy`, `verdict`, `reasons`, `gate` | a system evaluation over the experience ledger's two arms (runs tagged with `variant`); a pass or fail emits the candidate's `canary` gate, `insufficient` none |
+| `eval-run/v1` (`run_`) | `suite`, `split`, `gate_name`, `candidate`, `genome`, `baseline_ref`, `candidate_ref`, `tier`, `evaluator`, `training`, `cases`, `holdout_digest`, `anchors`, `policy`, `results`, `verdict`, `gate` | the replay evaluator's report; on the hold-out its `gate` is a ready `promotion-record/v1` gate result whose digest and anchors match the run's |
+
+**Lifecycle** (`schemas/learning/lifecycle.json`). A candidate is born in `candidate` (the plan's
+"Observed" stage is the experience ledger itself; a refused admission is never a candidate). Every
+later move is a promotion record whose (`from`, `to`) is an edge of that file. A gate result may
+only be recorded on a record leaving one of its `gate_sources` states: evaluation gates leave
+`evaluating`, `canary` leaves `canary`, `maturity` leaves `probation`, `owner` and
+`independent_review` leave any live-path state. That placement is what forces a canary-class
+candidate through `canary`, and since every class above P0 needs `maturity`, every one of them
+through the seven-day `probation`; only P0 (episodic) goes `candidate` -> `active` directly. A
+record moving forward carries no failed gate, and no record carries two results for one gate (array
+order is not time order).
+
+**Promotion classes** (`schemas/learning/promotion-classes.json`, P0-P8 as data: `kind_class`,
+per-class `activation_gates`, `conditional_gates` for `protected` and `consequential`,
+`owner_on_activation`). The fold of a candidate's records (`fold(candidate, records, as_of)`) is
+the promotion-gate decision logic. Byte-identical retries count once; the fold stops at the first
+record that fails any of:
+
+- the chain is linear: one record with `prev: null`, no two different records naming the same
+  `prev` (a fork), no record following an unknown or invalid one, `from` equal to the folded
+  state, `at` never earlier than the record before it nor later than `as_of` (the CLI defaults it
+  to now), and the candidate's own `promotion_class`;
+- each gate was judged during the stay it leaves (`at` between entering and leaving that state),
+  a `maturity` pass comes at least `maturity_days` (7) after entering `probation`, and no
+  evaluation gate's `anchors` include the candidate's own `evidence`;
+- entering `active`, every required gate holds a latest result of `pass`, from an evaluator that
+  is not `self` and whose `session` is not the candidate producer's, at least one of them from an
+  `oracle`, the `owner` or an `independent_model` (an `llm_judge` alone never activates, and
+  `maturity`, a waiting period rather than a judgment, never vouches for the rest), and the
+  `owner` gate judged by the owner and citing the decision (`ref: decision:<id>`);
+- for P8 (`owner_on_activation`), the owner's pass sits on the activating record itself and on
+  the record that first turns the candidate live: policy, security and authority are never
+  automatic, whatever blanket decision exists.
+
+Any fold error forces the returned `effect` to `shadow`: a consumer stops applying a candidate
+whose history it cannot fold, so a malformed or contested revert fails closed.
+
+**Class is the blast radius** (K2). A candidate's class is `max(kind, destination, content)`
+(`effective_class`), and its declared `promotion_class` may be no lower; the reasons travel with
+the refusal. `destination_class` takes the highest class whose allowlist
+(`promotion-classes.json` `destinations.allow`) admits the repository and path, so an overlapping
+entry can only raise it: P1 and P2 write one curated memory note,
+`projects/<real project directory>/memory/<name>.md` in claude-config; P3 a `skills/<s>/SKILL.md`;
+P4 a Muse recipe or coordinator prompt; P5 `muse/agent-routes.json`; P6 the scheduler; P7 one tool
+or harness script, never gate, merge, token, tier, policy, hook, trust or learning-contract code.
+A destination on no allowlist is P8, and so is any path with a protected segment
+(`destinations.protected_segments`: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and the other
+auto-loaded instruction files, and Windows device names), in any case. An episodic candidate has
+`destination: null` and writes nothing. `content_class` is a tripwire, not a proof: it escalates to
+P8 on authority, permission or injection language (`content.patterns`) in the claim, the future
+decision, the destination path, and every string of `context`, `scope` and `ext`, after NFKC
+normalisation, removal of format characters, collapsing whitespace and casefolding. A broken
+pattern fails closed to P8. Paraphrases can still evade it; the owner's per-promotion approval of
+P8 and the reviewed PR of P1 notes are the real gate. `relpath` refuses `.git` segments, segments
+ending in a dot or space (Windows strips them) and `~` (8.3 short names). A `would_apply` report
+is checked the same way: its class is at least the destination's and its bytes' content class, its
+bytes are at most 262144 bytes of UTF-8, and its `authority` is what the class requires (`required`
+from the class's mode, the class's own decision with a live option for P1, P6 and P7, a
+per-promotion approval rather than a class decision for P8, answered before the report, with its
+ref and source), never what the report asserts. Paths are classed case-exactly, so the applier
+refuses a path whose on-disk spelling differs from the classed one (a case or short-name alias), a
+symlink or junction on any segment, and any write whose bytes do not hash to what the reviewer saw.
+
+**Authority is resolved, never asserted** (K1). `effect` says whether the candidate's artifact is
+on a live surface after the move: `shadow` means evaluated and shown, nothing written live. `live`
+is legal only moving into `canary`, `probation`, `active` or `reinforced`, and above P0 the fold
+checks it against the owner's answer: `fold(candidate, records, as_of, resolve)` takes an injected
+resolver that maps a `decision:` ref to a `decision-resolution/v1` read from agent-hq
+`origin/main` (an answer only in a working copy does not count). With no resolver nothing above
+P0 goes live and no owner gate counts. `promotion-classes.json` holds the map as data:
+`authority` names each class's decision (P1: `lp-p1-memory-autopromote`, which decides P1 notes
+only; P6 and P7: `lp-p6-p7-owner-approval`; P2 to P5: none, so never live; P8: the owner's
+approval of that one candidate, always), and `decisions` gives each answer option its meaning:
+live or shadow, the exit bar (`exit_bars`, each target a floor or a ceiling: P1 needs 28 days in
+shadow, 50 non-protected candidates judged, 0.90 precision and at most a 5% contradiction-or-revert
+rate), approval (`none`, `per_promotion`, or `until_graduated` per `graduations`), whether a
+protected candidate still needs the owner (`protected_approval`: yes for P1 options b and c, no
+for d), the veto window in days, and the landing channel.
+
+The owner's conditions hold on every live record, not only on activation. Each must carry
+`authority` that resolves, is answered (an approval is never defaulted) no later than the record,
+decides the candidate's class, and whose option permits live for it, with its exit bar in force
+at that instant (`at <= record < until`). Whichever record turns the candidate live, and the
+activating record, carry what the class requires: an owner gate whose `ref` resolves to an
+answer meaning `approve` (per-candidate decisions answer keys `a`/`b`, so the meaning is
+`option_label`: Approve or Decline, Allow or Veto) bound to this candidate (`subject.candidate`, and `subject.digest` when the owner
+approved one exact version), or, once the class has graduated, a veto window (`veto: decision:<id>`)
+bound to the candidate, opened during the stay it closes, running its full `veto_days` (a window
+that defaulted early does not count), and not answered `veto`; a window that expired unanswered
+after its days allows. Every installed live record (probation, active, reinforced) names where it
+landed: `landed: pr:https://github.com/<owner>/<repo>/pull/<n>` in the destination's repository
+for a PR channel. A class with no canary stage is never live in `canary`. Any owner gate, on any
+record, counts only as such a resolved approval, and an evaluator that calls itself the owner on
+an evaluation gate (owner-graded labels) counts as a grader but vouches for independence only when
+its ref resolves the same way. The resolver measures exit bars with
+`exit_bar_status(bar, measured)` and graduation with `graduation_status(rule, approved_at,
+reverted_at, as_of)` (events after `as_of` never change it); `resolver_from(resolutions)` adapts
+records a caller already trusts, which makes it exactly as trustworthy as whoever wrote them:
+until the store's reader of agent-hq `origin/main` builds the resolutions, `--resolutions` is a
+test and audit seam, not authority.
+
+**Hold-out.** An experience's split is derived, never stored: `split_of(split_key)`, a salted
+sha256 (`estate-experience/v1/split`) with a 20% hold-out, where `split_key` defaults to
+`source.kind|source.key`; producers set it to group runs that must land on one side (one PR, one
+finding cluster, one correction key). The first observation fixes an experience's `source` and
+split key: `fold_experiences` refuses a later observation that changes either, so a run never
+moves across the split. Offline evaluation and replay gates carry `holdout_digest` (sha256 of
+the evaluated case ids, sorted and newline-joined), `training_excluded: true` and `anchors` (the
+experiences the evaluated cases came from), which the fold checks against the candidate's
+evidence. The replay evaluator computes all three; excluding a genome's `training_evidence` and
+every case sharing a split key with the training evidence is its job, not the fold's.
+
+**Replay evaluator** (`scripts/learning_eval.py`, W1). It never runs a variant: whoever runs the
+baseline and the candidate records `eval-outputs/v1`, and the evaluator selects, grades and
+compares. Selection is the hold-out separation: a case is on the side `split_of(case.split_key)`
+gives; an anchored case's experience must be in the ledger and its split key must match; every
+case built from the candidate's `evidence` or its genome's `training_evidence`, and every case
+sharing a split key with that evidence, is dropped; the genome is exactly the one the candidate
+names or the candidate outputs ran as (`variant_ref: gen:<id>`); and evidence missing from the
+ledger refuses the run (exclusion that cannot be proven is not claimed). A re-worded copy of a
+training run is caught only if it keeps the run's split key. Deterministic oracles grade first (`exact`,
+`contains_all`, `contains_none`, `regex`, `set_match`, `ranked_recall`, `abstain`, `numeric`);
+an output without the field an oracle reads fails rather than passing vacuously. `set_match` may
+also name `forbidden_items` the output must not contain (with or without `expected_items`). A `judge` case
+takes its grade from `eval-labels/v1`, whose evaluator is never `self`, never `oracle` and never
+the candidate's or genome producer's session, and demotes the run's tier and gate evaluator from
+`oracle` to that evaluator's kind. Pairs are compared case by
+case by case (wins, losses, ties, an exact two-sided sign test reported in `results`; the
+verdict and the gate use the one-sided `sign_p`) with breakdowns by memory category and
+layer, retrieval recall@k and MRR, and mean cost. The verdict is `pass` when at least `min_cases`
+distinct inputs (`input_ref` and oracle; clones count once) were evaluated, the pass-rate delta is
+at least `min_delta` and the one-sided exact sign test on the discordant pairs is under
+`max_sign_p`; fewer cases is `insufficient`, which emits no gate. The defaults are each gate's
+pinned `eval_minima` in `promotion-classes.json` (20, 0, 0.05, from the 2026-10-08 statistics
+audit: `max_losses = 0` failed real improvements more often as n grew), and the fold re-checks a
+passing gate's own `metrics` (`cases`, `delta`, `wins`, `losses`, `anchored`) against them,
+computing the sign test itself, so a loosened policy never moves a candidate. The policy is part of the
+run id and of the gate's `metrics` and `summary`, so a loosened gate is visible as one. Only a hold-out run emits a
+gate (`offline_eval`, `replay` or `retrieval_regression`), validated against `eval-run/v1` before
+it is returned. `schemas/learning/examples/memory-eval/` is a synthetic suite covering the five
+LongMemEval-V2 categories across the extraction, retrieval and behavioural layers, with a
+training leak and a cluster leak the evaluator must drop.
+
+**Receipts, not claims** (K3). The path to live carries `promotion-receipt/v1` receipts, written
+by the applier or the store, never by the learner: `installed` (the destination repository, merge
+commit, path and blob sha256 on `origin/main`), `observed` (an attributed use), `matured` (a window
+of at least `maturity_days` with no attributed regression) and `reverted`. `receipt_status` counts a
+receipt only against a live record of the folded chain that entered an installed state, at the
+candidate's exact destination repository and path, issued by someone other than the learner
+(its producer's session and lane differ from the candidate's); observed, matured and reverted
+count only after that install, and a revert inside a maturity window voids it. The fold sees
+records, not git: that the commit is on the destination's `origin/main` and the blob hashes to
+`blob_sha256` is the store's verification (L3) before it admits a receipt. `learning_metrics` resolves authority from the dataset's
+`decision-resolution/v1` records, and `promoted` (with revert rate and time to learn) counts
+verified installs, never entry into `active`; `activated` counts entry into `active`, shadow
+included. The maturity and owner gates are producible: `learning_promote.py --gates` takes a
+matured receipt as the maturity gate (`ref: receipt:`) and an answered per-candidate decision as
+the owner gate (pass on Approve, fail on Decline), and `--mature` produces a shadow candidate's
+maturity gate from the clock once probation has run its window (`--regressed` fails it).
+
+**Commit, then draw** (K3, attack E). `split_of`'s default salt is a public constant, so a producer
+who chooses split keys can grind them into the hold-out (46 of 200 in the red-team run), and a
+single-user host cannot hide a salt from its own agents. So the order is reversed: the candidate
+(with its evidence and genome) is committed first, and the split is drawn afterwards with a public
+beacon fixed after that commit, such as a later agent-hq `main` commit
+(`learning_eval.py --salt-source agent-hq@<sha> --salt-at <when it was fixed>`). The beacon string
+is the salt, so anyone can recompute the split. A beaconed hold-out admits only cases anchored to
+an experience whose `at` is no later than the draw (an unanchored key, or one created after the
+beacon was published, could have been ground against it), and one case per distinct input, so
+the gate's `cases`, `wins`, `losses` and `delta` are over distinct inputs and clones cannot
+inflate the sign test. The fold also requires the gate's counts to be integers in range and
+coherent (`wins + losses <= cases`, `anchored <= cases`, distinct anchors <= `anchored`, and
+`delta = (wins - losses) / cases`). A hold-out gate, passing or failing (a split ground to force a
+fail is a denial lever), names its `salt_draw` (`source`, `at`), and the fold refuses a gate with
+none or one drawn at or before the candidate's `at`. A candidate built from a genome names it in
+`genome` (the genome lists the candidate back); the fold refuses its anchored gates without that
+genome, so allocate the genome id before staging the candidate. The fold checks the order only: that the source is the first beacon after the commit (no
+shopping among later commits), and that the candidate's own commit time is the store's import
+time rather than the self-reported `at`, are the store's checks (L3). The draw must also follow
+the genome's `at` and precede the gate's. Until the store binds those times, the fold closes
+attack E against reusing the public salt, not against a writer who back-dates its own records.
+
+```powershell
+py -3 scripts\learning_eval.py --cases <cases.jsonl> --baseline <outputs.json> --candidate-outputs <outputs.json> --candidate <lc.json> --experiences <experiences.jsonl> [--genome <gen.json>] [--labels <labels.json>...] [--split holdout|dev] [--gate offline_eval|replay|retrieval_regression]
+```
+
+Exit 0 pass, 1 fail, 3 insufficient, 2 refused.
+
+**Promotion-record generation** (`scripts/learning_promote.py`, W2). Given a candidate, its
+promotion records and the gate results of its current stay (raw gate results or `eval-run/v1`
+reports), it writes the record that moves the candidate to the next state on its class's path:
+`candidate` to `evaluating` (P0 straight to `active`); `evaluating` to `canary` or `probation`
+once every evaluation gate is present; `canary` to `probation` on its canary result; `probation`
+to `active` on maturity (and the owner's pass where the class needs it). Only passes the fold
+would count move a candidate forward (never the learner's, `self` or an LLM judge alone), since
+an evaluation gate recorded too early would strand the candidate in probation. A failed gate
+before activation (as a candidate, while evaluating, in canary or in probation) moves to `rejected`. Every generated move is shadow;
+a live candidate, reverts, reinforcement, supersession and decay are never generated, since they
+need blame, judgment or the owner. Run reports are accepted only for this candidate (and the
+genome it names). Gates are stored sorted and the id is derived from the move, so a retry with
+the same `--at`, producer and reason is byte-identical and the fold counts it once. The generator
+refuses times after now and returns a record only after folding the chain with it appended.
+
+```powershell
+py -3 scripts\learning_promote.py --candidate <lc.json> --records <promotion records.jsonl> --gates <gate or eval-run json>... --lane <lane> --session <session>
+```
+
+**Variant archive** (`scripts/learning_archive.py`, W3). Every `candidate-genome/v1` stays in the
+archive, linked by `parent_genome` into a tree (orphans become roots and cycles are reported, never
+followed), so a dominated variant can still parent a better one. Nothing is reduced to one
+number: `schemas/learning/objectives.json` gives each objective its direction (correctness and
+reliability up; cost, latency, owner intervention and reverts down), a genome is compared only
+when it measured every objective asked for, and the frontier is the set no other such genome
+dominates. Parents for the next generation are frontier members ranked by NSGA-II crowding
+distance, so the extremes and the sparse regions come first. The `learning-archive/v1` report lists
+each genome (parent, depth, children, layers, objectives, `frontier`, evaluation ref), the
+roots, the frontier, the unmeasured genomes, the best genome per objective and the chosen parents.
+
+```powershell
+py -3 scripts\learning_archive.py <genomes.json|jsonl>... [--objectives correctness,cost] [--parents 4]
+```
+
+**Procedural and system evals** (W2). A procedural case (`layer: procedural`, oracle
+`procedure`) replays a proposed skill on a historical task it was not generated from: the
+recorded output carries `completed`, `turns` and `recovered`, and the case passes when the run
+completed, within `max_turns` when set, and recovered from its injected failure when
+`require_recovery` is set. The run's `results.procedural` reports completion rate (an errored run did
+not complete), mean turns over completed runs, recovery rate over the cases that require recovery, and mean
+cost per variant. A system evaluation (`scripts/learning_system.py`)
+compares the runs the canary made under the candidate (`variant: gen:<id>`, which must be the
+genome the candidate names) with the runs made under the baseline, leaving out runs whose ids are
+the candidate's own evidence. A run's `variant` is fixed by its first observation, like its split
+key. Each arm reports success
+(`experience_succeeded`, the one success definition), maturity, clean and revert rates,
+regressions, triage precision, owner-correction rate and cost. It is a non-regression gate: with
+at least `min_runs` (20) runs and `min_matured` (10) matured runs per arm (reverts are only known
+once runs mature, so an unmatured arm is `insufficient`, never a silent pass), the candidate passes
+when success has not fallen, and reverts and owner corrections have not risen, beyond the policy's
+tolerances (0 by default). The
+`canary` gate it emits drops into the record leaving `canary`.
+
+```powershell
+py -3 scripts\learning_system.py --experiences <experiences.jsonl>... --candidate <lc.json> --baseline-variant <ref> --candidate-variant gen:<id> [--min-runs 20]
+```
+
+**Suite conventions.** A *recipe-replay* suite (`suite: recipe-replay-<recipe>`, `layer:
+procedural`, `category: task`) has one case per historical lens job. Its `experience` is that
+job's experience (so `split_key` is the job's), and its `input_ref` is the job spec to re-run
+(`muse-job:<lane>/<wave>/<job>`, carrying repo, base SHA and lens variables). Its oracle is
+`set_match`, with `expected_items` holding the location keys of findings triage confirmed (which
+the variant must still report) and `forbidden_items` holding those it refuted (which it must no
+longer report). A location key is `<path>#L<line // 40>` with the path normalised as the ledger does (lower case,
+forward slashes); keys are compared verbatim, and a key that lands in both lists makes the case
+uninformative, so the builder drops it.
+Both arms re-run the job at the same base, so runtime drift is shared; neither replays
+historical output. A *skill-procedure* suite (`suite: skill-procedure-<skill>`) has one case per
+historical run of the procedure. Its `input_ref` is that run's task, and its oracle is
+`procedure`, with `max_turns` and, where the run hit a failure, `require_recovery`. In both, the
+cases come from the hold-out side of the experience split, and the candidate's `evidence` (the
+dev-side runs the recipe or skill was written from) is excluded by the evaluator.
+
+**One outcome stream** (K4). `scripts/learning_outcomes.py` projects experience observations in
+`observed_at` order into immutable `outcome-event/v1` versions per run, starting at 1 and chained
+by `supersedes`. Only changes to `outcome`, triage `verdicts`, owner `corrections`, `failure_keys`,
+`variant` or routing metadata (`repo`, `task_kind`, `recipe`, `runtime`, `model`) emit a version; source, split-key and variant drift are skipped and reported using
+the experience fold's refusal rules. `read_since` reads strictly after a durable cursor
+(`observed_at`, `id`), ordered by UTC instant then id, and returns the advanced cursor for replay.
+All three reducers consume the latest version per run: `posterior` gives the Muse coordinator's
+Beta(1 + confirmed + clean merges, 1 + refuted + reverted) per repo and recipe (a merge counts
+only after its 7-day maturity is known); `lesson_eligible` selects matured runs or runs with owner
+corrections; `recurrences` finds correction or failure keys shared by more than one run. A late
+reversion replaces the earlier clean merge contribution in every consumer, rather than counting
+the run twice. `project <experiences...> [--out FILE]` writes JSONL (stdout by default), and
+`posterior --events FILE --repo R --recipe X` reads it; a refusal exits 2 with a JSON error on stderr.
+Projection is whole-history, and `observed_at` is the producer's clock, not an ingestion offset: an
+observation that arrives later with an earlier `observed_at` renumbers the run's later versions on
+the next projection, and an incremental reader whose cursor is past it never sees it. Until the
+stream gains a log offset (#511), a consumer re-reads the whole stream (the reducers are cheap and
+deterministic) rather than trusting a cursor across a re-projection.
+
+**Retiring a consolidated single** (cc#835). `probation -> merged` joins `evaluating -> merged`
+and `candidate -> merged`, so a single (typically a protected P1 owner correction) that reached
+probation before its consolidation was admitted can still retire into it. `merged` is not
+live-capable, so a merge out of a live probation folds to `effect: shadow` and the applier removes
+the installed note in that move, guarded by the expected hash. `merged_into` names the superseder;
+that it is admitted, of a class no lower than the single's, and (for a protected single) carries
+a counted owner pass is L2's and the store's check, since the fold sees one candidate.
+
+**The contract bundle** (K5). `scripts/learning_bundle.py build` writes the versioned
+`schemas/learning/BUNDLE.json`: every top-level `schemas/learning/*.json` file except the manifest
+itself, plus `scripts/learning_contracts.py`, in sorted repository-relative POSIX order. Each file
+is SHA-256 hashed after normalising CRLF to LF; the bundle digest is SHA-256 of the UTF-8 bytes of
+the sorted `path<TAB>sha256<LF>` lines. Consumers pin the value printed by `digest` and use
+`verify --vendored DIR` (with repeated `--map REL=VENDORED_REL` for renamed paths) to compare their
+copies against the manifest and report drift. `check` guards the committed manifest against
+contract edits, additions and removals. The synthetic `schemas/learning/compat/accept/` and
+`reject/` fixtures pin valid records for every schema and invalid records with expected errors;
+a fixture whose expected validation changes is a breaking contract change: run `build --bump`
+and announce it on the learning-plane bus. Never edit a fixture to make a red test green without
+that version bump and announcement.
+
+**Trust limits, stated rather than implied.** Records are written by agents, so an evaluation gate
+is an attestation the fold checks for consistency, not proof: evaluator identity is still
+self-reported (the session rule stops accidental self-evaluation, not a dishonest writer), and
+a hold-out split is only as unaimable as its beacon: the fold checks that it was drawn after the
+candidate, the store that it was the first beacon after it. Authority is resolved rather than asserted, so its strength is the resolver's: once the store
+builds resolutions from agent-hq `origin/main`, a record can no longer claim an answer the owner
+did not give. What makes an evaluation gate checkable is its `ref`: an `eval-run:` report
+can be re-run. Memory refs use the journal's spelling, `memory:<project>/<name>.md`, so every lane
+joins on one string.
+
+**Changing a contract.** Additive optional fields keep `/v1`; renaming, removing or tightening a
+field is `/v2`. Every change is announced on the learning-plane bus thread, and
+`tests/test_learning_contracts.py` pins the data files to the shared enums and this section's
+field lists to the schemas.

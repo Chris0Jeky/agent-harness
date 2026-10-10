@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/outcome-event.schema.json",
+  "title": "outcome-event/v1",
+  "description": "An immutable version of one run's projected outcome. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "observed_at", "producer", "run", "experience",
+    "version", "supersedes", "repo", "task_kind", "recipe", "runtime", "model",
+    "variant", "outcome", "success", "verdicts", "corrections", "failure_keys"
+  ],
+  "properties": {
+    "schema": {"const": "outcome-event/v1"},
+    "id": {"type": "string", "pattern": "^oev_[0-9a-f]{16}$"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "observed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "key"],
+      "properties": {
+        "kind": {"$ref": "common.schema.json#/$defs/slug"},
+        "key": {"type": "string", "minLength": 1, "maxLength": 400}
+      }
+    },
+    "experience": {"$ref": "common.schema.json#/$defs/exp_id"},
+    "version": {"type": "integer", "minimum": 1},
+    "supersedes": {
+      "anyOf": [
+        {"type": "string", "pattern": "^oev_[0-9a-f]{16}$"},
+        {"type": "null"}
+      ]
+    },
+    "repo": {"$ref": "common.schema.json#/$defs/repo"},
+    "task_kind": {"$ref": "common.schema.json#/$defs/slug"},
+    "recipe": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/slug"}, {"type": "null"}]
+    },
+    "runtime": {"$ref": "common.schema.json#/$defs/runtime"},
+    "model": {"type": ["string", "null"]},
+    "variant": {
+      "anyOf": [{"$ref": "common.schema.json#/$defs/ref"}, {"type": "null"}]
+    },
+    "outcome": {"$ref": "estate-experience.schema.json#/properties/outcome"},
+    "success": {"type": "boolean"},
+    "verdicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed", "refuted"],
+      "properties": {
+        "confirmed": {"type": "integer", "minimum": 0},
+        "refuted": {"type": "integer", "minimum": 0}
+      }
+    },
+    "corrections": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/slug"}
+    },
+    "failure_keys": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/slug"}
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/eval-labels.schema.json",
+  "title": "eval-labels/v1",
+  "description": "Grades for judge-oracle cases from an evaluator other than the learner. A run that uses any label carries that evaluator's kind (llm_judge unless the owner or an independent model graded), never oracle. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "at", "suite", "variant", "evaluator", "labels"],
+  "properties": {
+    "schema": {"const": "eval-labels/v1"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "suite": {"$ref": "common.schema.json#/$defs/slug"},
+    "variant": {"type": "string", "enum": ["baseline", "candidate"]},
+    "evaluator": {"$ref": "common.schema.json#/$defs/evaluator"},
+    "labels": {
+      "type": "object",
+      "propertyNames": {"pattern": "^case_[A-Za-z0-9_-]{6,64}$"},
+      "additionalProperties": {"type": "string", "enum": ["pass", "fail"]}
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  }
+}

@@ -24,6 +24,7 @@ from collections import Counter, defaultdict
 import copy
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -1044,7 +1045,13 @@ def main(argv=None):
     met = sub.add_parser(
         "metrics", help="aggregate a ledger; hold-out stays sealed by default"
     )
-    met.add_argument("--ledger", type=Path, required=True)
+    met.add_argument("--ledger", type=Path)
+    met.add_argument(
+        "--learning",
+        type=Path,
+        action="append",
+        help="learning records file or directory (repeatable)",
+    )
     met.add_argument("--split", choices=("dev", "holdout", "all"), default="dev")
     met.add_argument(
         "--unseal", metavar="REASON", help="required to read the hold-out split"
@@ -1083,6 +1090,10 @@ def main(argv=None):
             )
             print(json.dumps({"prs": len(prs), "out": str(args.out)}))
         else:
+            if not args.ledger and not args.learning:
+                raise LedgerError(
+                    "metrics requires at least one of --ledger or --learning"
+                )
             if args.split != "dev" and not args.unseal:
                 raise LedgerError(
                     "the hold-out is sealed: pass --unseal REASON to read it"
@@ -1090,7 +1101,18 @@ def main(argv=None):
             as_of = _parse_time(args.as_of) if args.as_of else None
             if args.as_of and as_of is None:
                 raise LedgerError(f"--as-of is not an ISO time: {args.as_of}")
-            result = metrics(load_ledger(args.ledger), args.split, as_of)
+            result = metrics(
+                load_ledger(args.ledger) if args.ledger else {}, args.split, as_of
+            )
+            if args.learning:
+                spec = importlib.util.spec_from_file_location(
+                    "learning_metrics", Path(__file__).with_name("learning_metrics.py")
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                result["learning"] = module.learning_metrics(
+                    module.load_learning(args.learning), args.split, as_of
+                )
             if args.unseal:
                 result["unsealed_because"] = args.unseal
             print(json.dumps(result, sort_keys=True, indent=2))

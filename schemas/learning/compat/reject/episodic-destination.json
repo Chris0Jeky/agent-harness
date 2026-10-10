@@ -1,0 +1,30 @@
+{
+  "schema": "learning-candidate/v1",
+  "id": "lc_class-0001",
+  "at": "2026-09-08T11:00:00Z",
+  "producer": {
+    "lane": "miner",
+    "runtime": "claude",
+    "model": null,
+    "session": "s-1"
+  },
+  "kind": "episodic",
+  "trigger": "repeated_failure",
+  "claim": "Run the unittest suite before reporting a fix as done.",
+  "evidence": [
+    "exp_class-evidence-1"
+  ],
+  "future_decision": "Whether an agent reports a fix as done before its tests ran.",
+  "scope": {
+    "repos": [
+      "*"
+    ]
+  },
+  "destination": {
+    "repo": "claude-config",
+    "path": "projects/example/memory/lesson.md"
+  },
+  "promotion_class": "P0",
+  "valid_from": "2026-09-08T11:00:00Z",
+  "_expect": "episodic candidate has none"
+}

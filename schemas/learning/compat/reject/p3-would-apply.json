@@ -1,0 +1,43 @@
+{
+  "schema": "learning-would-apply/v1",
+  "id": "wa_1111111111111111",
+  "at": "2026-10-08T16:00:00Z",
+  "producer": {
+    "lane": "applier",
+    "runtime": "tool",
+    "model": null,
+    "session": "ap-1"
+  },
+  "candidate": "lc_class-0001",
+  "class": "P3",
+  "class_reasons": [
+    "kind semantic is P1"
+  ],
+  "destination": {
+    "repo": "claude-config",
+    "path": "skills/example/SKILL.md"
+  },
+  "op": "add",
+  "base": {
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "blob_sha256": null
+  },
+  "bytes": "---\nname: tests-first\n---\n\nRun the tests first.\n",
+  "sha256": "fbb3a7282661ababc5f03399e1c2bfde5ad828e0593e0340d24ad1132124af44",
+  "authority": {
+    "required": true,
+    "ref": "decision:lp-p1-memory-autopromote",
+    "status": "answered",
+    "option": "c",
+    "answered_at": "2026-10-08T15:53:21Z",
+    "source": "agent-hq@ffffffffffffffffffffffffffffffffffffffff",
+    "reason": null
+  },
+  "eligibility": {
+    "eligible": true,
+    "problems": []
+  },
+  "verdict": "would_apply",
+  "reasons": [],
+  "_expect": "never would_apply"
+}

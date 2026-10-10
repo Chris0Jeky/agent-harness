@@ -1,0 +1,459 @@
+{
+  "schema": "learning-promotion-classes/v1",
+  "description": "Promotion classes P0-P8 as data. activation_gates must each hold a latest result of pass, from an accepted evaluator, before a candidate enters an activating state; conditional_gates add gates when the candidate sets that flag. Every class above P0 matures through probation before it activates. A live effect above P0 is resolved, never asserted: authority names which owner decision governs each class, decisions gives each answer option's meaning (live or shadow, exit bar, per-promotion approval, graduation, veto window, channel), and the fold checks the record's authority against a resolver's view of that decision on agent-hq origin/main. P8 is never automatic: an owner approval bound to the candidate sits on the record that turns it live and on the activating record. Contract: SPECS.md section 15.",
+  "kind_class": {
+    "episodic": "P0",
+    "semantic": "P1",
+    "consolidation": "P2",
+    "skill": "P3",
+    "prompt": "P4",
+    "recipe": "P4",
+    "routing": "P5",
+    "scheduler": "P6",
+    "harness": "P7",
+    "policy": "P8"
+  },
+  "evaluators": {
+    "never_satisfies": [
+      "self"
+    ],
+    "independent": [
+      "oracle",
+      "owner",
+      "independent_model"
+    ],
+    "owner_gate": [
+      "owner"
+    ],
+    "not_judgment": [
+      "maturity"
+    ]
+  },
+  "classes": {
+    "P0": {
+      "label": "episodic",
+      "creation": "autonomous",
+      "offline_eval": "no",
+      "canary": "no",
+      "owner_approval": "no",
+      "activation_gates": [],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P1": {
+      "label": "semantic memory",
+      "creation": "autonomous",
+      "offline_eval": "provenance and contradiction checks",
+      "canary": "no",
+      "owner_approval": "protected categories; live per decision lp-p1-memory-autopromote",
+      "activation_gates": [
+        "provenance",
+        "contradiction",
+        "maturity"
+      ],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P2": {
+      "label": "consolidation",
+      "creation": "autonomous",
+      "offline_eval": "retrieval regression",
+      "canary": "optional",
+      "owner_approval": "no",
+      "activation_gates": [
+        "retrieval_regression",
+        "maturity"
+      ],
+      "conditional_gates": {
+        "protected": [
+          "owner"
+        ]
+      },
+      "owner_on_activation": false
+    },
+    "P3": {
+      "label": "skill",
+      "creation": "autonomous",
+      "offline_eval": "yes",
+      "canary": "consequential skills",
+      "owner_approval": "no",
+      "activation_gates": [
+        "offline_eval",
+        "maturity"
+      ],
+      "conditional_gates": {
+        "consequential": [
+          "canary"
+        ],
+        "protected": [
+          "owner"
+        ]
+      },
+      "owner_on_activation": false
+    },
+    "P4": {
+      "label": "prompt, recipe",
+      "creation": "autonomous",
+      "offline_eval": "yes",
+      "canary": "yes",
+      "owner_approval": "no",
+      "activation_gates": [
+        "offline_eval",
+        "canary",
+        "maturity"
+      ],
+      "conditional_gates": {
+        "protected": [
+          "owner"
+        ]
+      },
+      "owner_on_activation": false
+    },
+    "P5": {
+      "label": "routing",
+      "creation": "autonomous",
+      "offline_eval": "historical replay",
+      "canary": "yes",
+      "owner_approval": "no",
+      "activation_gates": [
+        "replay",
+        "canary",
+        "maturity"
+      ],
+      "conditional_gates": {
+        "protected": [
+          "owner"
+        ]
+      },
+      "owner_on_activation": false
+    },
+    "P6": {
+      "label": "scheduler",
+      "creation": "autonomous",
+      "offline_eval": "strong comparative",
+      "canary": "yes",
+      "owner_approval": "per decision lp-p6-p7-owner-approval (answered b: approval until graduated, then a veto window)",
+      "activation_gates": [
+        "offline_eval",
+        "canary",
+        "maturity"
+      ],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P7": {
+      "label": "harness, tool logic",
+      "creation": "sandbox_only",
+      "offline_eval": "strong",
+      "canary": "yes",
+      "owner_approval": "per decision lp-p6-p7-owner-approval (answered b: approval until graduated, then a veto window)",
+      "activation_gates": [
+        "offline_eval",
+        "canary",
+        "maturity"
+      ],
+      "conditional_gates": {},
+      "owner_on_activation": false
+    },
+    "P8": {
+      "label": "security, authority, policy",
+      "creation": "proposal_only",
+      "offline_eval": "tests",
+      "canary": "never automatic",
+      "owner_approval": "always",
+      "activation_gates": [
+        "tests",
+        "maturity",
+        "owner"
+      ],
+      "conditional_gates": {},
+      "owner_on_activation": true
+    }
+  },
+  "authority": {
+    "P0": {
+      "mode": "none"
+    },
+    "P1": {
+      "mode": "decision",
+      "decision": "lp-p1-memory-autopromote"
+    },
+    "P2": {
+      "mode": "no_live",
+      "why": "lp-p1-memory-autopromote decides P1 notes only; consolidation has no answered decision"
+    },
+    "P3": {
+      "mode": "no_live"
+    },
+    "P4": {
+      "mode": "no_live"
+    },
+    "P5": {
+      "mode": "no_live"
+    },
+    "P6": {
+      "mode": "decision",
+      "decision": "lp-p6-p7-owner-approval"
+    },
+    "P7": {
+      "mode": "decision",
+      "decision": "lp-p6-p7-owner-approval"
+    },
+    "P8": {
+      "mode": "per_promotion"
+    }
+  },
+  "decisions": {
+    "lp-p1-memory-autopromote": {
+      "classes": [
+        "P1"
+      ],
+      "options": {
+        "a": {
+          "live": false
+        },
+        "b": {
+          "live": true,
+          "exit_bar": "p1-shadow-exit",
+          "approval": "none",
+          "channel": "direct_lane",
+          "protected_approval": true
+        },
+        "c": {
+          "live": true,
+          "exit_bar": "p1-shadow-exit",
+          "approval": "none",
+          "channel": "reviewed_pr",
+          "protected_approval": true
+        },
+        "d": {
+          "live": true,
+          "exit_bar": null,
+          "approval": "none",
+          "channel": "direct_lane",
+          "protected_approval": false
+        }
+      }
+    },
+    "lp-p6-p7-owner-approval": {
+      "classes": [
+        "P6",
+        "P7"
+      ],
+      "options": {
+        "a": {
+          "live": false
+        },
+        "b": {
+          "live": true,
+          "exit_bar": null,
+          "approval": "until_graduated",
+          "graduation": "p6-p7-graduation",
+          "veto_days": 3,
+          "channel": "pr"
+        },
+        "c": {
+          "live": true,
+          "exit_bar": null,
+          "approval": "per_promotion",
+          "channel": "pr"
+        },
+        "d": {
+          "live": true,
+          "exit_bar": null,
+          "approval": "none",
+          "channel": "pr"
+        },
+        "e": {
+          "per_class": {
+            "P6": {
+              "live": true,
+              "exit_bar": null,
+              "approval": "until_graduated",
+              "graduation": "p6-p7-graduation",
+              "veto_days": 3,
+              "channel": "pr"
+            },
+            "P7": {
+              "live": true,
+              "exit_bar": null,
+              "approval": "per_promotion",
+              "channel": "pr"
+            }
+          }
+        }
+      }
+    }
+  },
+  "exit_bars": {
+    "p1-shadow-exit": {
+      "description": "P1 leaves shadow after at least 4 weeks in shadow, at least 50 non-protected candidates judged, independent-judge precision of at least 0.90 on the sealed memory hold-out, and a contradiction-or-revert rate of at most 5% (lp-p1-memory-autopromote, options b and c).",
+      "suite": "memory-holdout",
+      "targets": {
+        "shadow_days": {
+          "min": 28
+        },
+        "judged": {
+          "min": 50
+        },
+        "precision": {
+          "min": 0.9
+        },
+        "contradiction_or_revert_rate": {
+          "max": 0.05
+        }
+      }
+    }
+  },
+  "graduations": {
+    "p6-p7-graduation": {
+      "description": "A class graduates once it has 3 approved promotions and 28 days have passed since the first of them, with no revert; a revert restarts the count.",
+      "approved_min": 3,
+      "days": 28,
+      "revert_restarts": true
+    }
+  },
+  "approval": {
+    "grant": [
+      "approve"
+    ],
+    "deny": [
+      "decline"
+    ]
+  },
+  "veto": {
+    "veto": [
+      "veto"
+    ],
+    "allow": [
+      "allow"
+    ]
+  },
+  "destinations": {
+    "description": "Where each class may write. A destination's class is the HIGHEST class whose allowlist admits it, so an overlapping entry can only raise it; a destination on no allowlist, or with a protected segment, is P8. Paths are matched case-exactly against the real names; the fold is pure, so the applier also refuses a path whose on-disk spelling differs from the classed one (a case or short-name alias), a path with a symlink or junction on any segment, a path that resolves outside its repository, and any write the rendered bytes do not hash to.",
+    "default_class": "P8",
+    "allow": [
+      {
+        "class": "P1",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^projects/[A-Za-z0-9][A-Za-z0-9._-]{0,199}/memory/[A-Za-z0-9][A-Za-z0-9._-]{0,120}[.]md$",
+        "what": "one curated memory note under a real project directory; never the MEMORY.md index or an instruction file (protected_segments)"
+      },
+      {
+        "class": "P3",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^skills/[a-z0-9][a-z0-9._-]{0,79}/SKILL\\.md$",
+        "what": "one skill definition"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/recipes/(?![Rr][Ee][Aa][Dd][Mm][Ee]\\.)[a-z0-9][a-z0-9._-]{0,79}\\.(md|json)$",
+        "what": "one Muse recipe"
+      },
+      {
+        "class": "P4",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/(coordinator-brief|coordinator-turn)\\.md$",
+        "what": "a coordinator prompt"
+      },
+      {
+        "class": "P5",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^muse/agent-routes\\.json$",
+        "what": "the routing table"
+      },
+      {
+        "class": "P6",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/muse_coordinator\\.py$",
+        "what": "the scheduler"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?claude-config$",
+        "path": "^tools/(?!muse_coordinator[.]py$)(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_-]{0,79}[.](py|ps1)$",
+        "what": "one tool script; never the scheduler (P6) or gate, token, tier, policy, hook, trust or learning-contract code (P8)"
+      },
+      {
+        "class": "P7",
+        "repo": "^(Chris0Jeky/)?agent-harness$",
+        "path": "^scripts/(?![a-z0-9_-]*(gate|token|tier|policy|polic|hardening|askpass|account|learning|merge|estop|floor|dispatch|permission|secret|credential|auth|hook|trust|guard))[a-z0-9][a-z0-9_]{0,79}[.]py$",
+        "what": "one harness script; never the hook templates or gate, merge, policy or learning-contract code (P8)"
+      }
+    ],
+    "protected_segments": {
+      "what": "Path segments that are never below P8, matched case-insensitively against each segment: auto-loaded instruction and index files, and Windows device names.",
+      "patterns": [
+        "^(memory|claude|claude[.]local|agents|gemini|copilot-instructions)[.]md$",
+        "^(con|prn|aux|nul|conin[$]|conout[$]|com[0-9¹²³]|lpt[0-9¹²³])([.].*)?$"
+      ]
+    }
+  },
+  "content": {
+    "description": "A tripwire, not a proof: authority, permission or injection language in a candidate's claim, future decision, destination path, context, scope or ext (every string, recursively), or in a would-apply report's bytes, makes it P8, because it touches who may do what. Text is NFKC-normalised, format characters are removed, whitespace runs collapse to one space and it is casefolded before matching; a broken pattern fails closed to P8. Paraphrases can still evade it: the owner's per-promotion approval of P8 and the reviewed PR of P1 notes are the real gate.",
+    "class": "P8",
+    "patterns": [
+      "\\bpermissions?\\b",
+      "\\bauthori[sz](e|ed|es|ation|ations|ing)\\b",
+      "\\bauthorit(y|ies)\\b",
+      "\\bapprov(e|ed|es|al|als|ing)\\b",
+      "\\bconsent\\b",
+      "\\bbypass",
+      "\\boverrid(e|es|ing|den)\\b",
+      "\\bskip(s|ped|ping)? (the |a |any |all )?(review|gate|check|test|hook|ci)s?\\b",
+      "\\b(disable|disables|disabled|disabling|turn off|turns off|turned off) (the |all |any )?(hooks?|checks?|reviews?|gates?|ci|floor)\\b",
+      "--no-verify",
+      "--force\\b",
+      "\\bpush -f\\b",
+      "\\bforce[- ]?push",
+      "\\bauto-?merge",
+      "\\bwithout (a |any |the )?(review|reviewer|approval|asking|permission|consent)\\b",
+      "\\bno (human |owner )?(review|reviewer|approval|consent|sign-?off)s? (is |are )?(needed|required)\\b",
+      "\\b(merge|push|land)(es|ed|ing|s)? (its|your|their|my|our) own\\b",
+      "\\b(straight|directly) (in)?to (main|master)\\b",
+      "\\b(tools?|commands?|actions?) (are |is )?(all )?(allowed|permitted)\\b",
+      "\\b(review|merge|tier|deny) gate\\b",
+      "\\bdeny[- ]floor\\b",
+      "\\btier\\.json\\b",
+      "\\blaws?\\.md\\b",
+      "(^|[\\s/`'\\\"])rules/",
+      "\\bsettings(\\.local)?\\.json\\b",
+      "(^|[\\s/`'\\\"])hooks?/",
+      "\\ballow[- ]?list\\b",
+      "\\bsudo\\b",
+      "\\badministrator\\b",
+      "\\bsecrets?\\b",
+      "\\bcredentials?\\b",
+      "\\bapi[ _-]?keys?\\b",
+      "\\b(access|auth|bearer|session|app) tokens?\\b",
+      "\\bestop\\b",
+      "\\bkill[- ]?switch\\b",
+      "\\b(ignore|disregard|forget)s? (all |any )?(of )?(the |these |those |your )?(previous|prior|above|earlier|preceding|former|other)\\b",
+      "\\bobey\\b",
+      "\\byou (must|should) now\\b",
+      "\\bsystem prompt\\b"
+    ]
+  },
+  "eval_minima": {
+    "description": "Pinned minima for a passing hold-out gate, checked by the fold against the gate's own results (metrics cases, delta, wins, losses, anchored), whatever policy the evaluator ran with. From the 2026-10-08 statistics audit: max_losses = 0 failed a true +0.30 candidate more often as n grew, so the gate is at least 20 distinct inputs, a non-negative delta and a one-sided exact sign test on the discordant pairs with p < max_sign_p (W >= 5, 7, 9, 10, 12 for L = 0 to 4), which kept false passes at or below 3.3% in every model tried. Plan for 45-50 cases for 90% power at +0.30.",
+    "offline_eval": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_sign_p": 0.05,
+      "min_anchored_share": 0.5
+    },
+    "replay": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_sign_p": 0.05,
+      "min_anchored_share": 0.5
+    },
+    "retrieval_regression": {
+      "min_cases": 20,
+      "min_delta": 0.0,
+      "max_sign_p": 0.05,
+      "min_anchored_share": 0.5
+    }
+  }
+}

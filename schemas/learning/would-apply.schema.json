@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Chris0Jeky/agent-harness/main/schemas/learning/would-apply.schema.json",
+  "title": "learning-would-apply/v1",
+  "description": "What the applier (the only writer to a live surface) would write for one candidate, and why it would or would not: the exact bytes the reviewer sees and their sha256, the candidate's effective class and its reasons, the authority it resolved and the eligibility the re-fold found. In shadow it is a report; live, the applier writes exactly these bytes and nothing else. Contract: SPECS.md section 15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "id", "at", "producer", "candidate", "class", "class_reasons",
+    "destination", "op", "base", "bytes", "sha256", "authority",
+    "eligibility", "verdict", "reasons"
+  ],
+  "properties": {
+    "schema": {"const": "learning-would-apply/v1"},
+    "id": {"type": "string", "pattern": "^wa_[0-9a-f]{16}$"},
+    "at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "producer": {"$ref": "common.schema.json#/$defs/producer"},
+    "candidate": {"$ref": "common.schema.json#/$defs/lc_id"},
+    "class": {"$ref": "common.schema.json#/$defs/promotion_class"},
+    "class_reasons": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "common.schema.json#/$defs/short_text"}
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "path"],
+      "properties": {
+        "repo": {"$ref": "common.schema.json#/$defs/repo"},
+        "path": {"$ref": "common.schema.json#/$defs/relpath"}
+      }
+    },
+    "op": {"type": "string", "enum": ["add", "modify"]},
+    "base": {
+      "description": "The file the bytes replace: its commit and blob hash, null blob for an add. A revert guards on it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "blob_sha256"],
+      "properties": {
+        "commit": {"$ref": "common.schema.json#/$defs/sha"},
+        "blob_sha256": {
+          "anyOf": [{"$ref": "common.schema.json#/$defs/sha256"}, {"type": "null"}]
+        }
+      }
+    },
+    "bytes": {
+      "description": "The whole file after the change: UTF-8, LF line endings.",
+      "type": "string",
+      "maxLength": 262144
+    },
+    "sha256": {
+      "description": "sha256 of bytes encoded as UTF-8; the validator recomputes it.",
+      "$ref": "common.schema.json#/$defs/sha256"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "ref", "status", "option", "answered_at", "source", "reason"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "ref": {
+          "anyOf": [{"type": "string", "pattern": "^decision:[A-Za-z0-9._:-]{1,200}$"}, {"type": "null"}]
+        },
+        "status": {
+          "anyOf": [
+            {"type": "string", "enum": ["answered", "defaulted", "open", "expired", "withdrawn", "unresolved"]},
+            {"type": "null"}
+          ]
+        },
+        "option": {"type": ["string", "null"], "maxLength": 40},
+        "answered_at": {
+          "anyOf": [{"$ref": "common.schema.json#/$defs/timestamp"}, {"type": "null"}]
+        },
+        "source": {
+          "anyOf": [{"type": "string", "pattern": "^agent-hq@[0-9a-f]{40}$"}, {"type": "null"}]
+        },
+        "reason": {
+          "anyOf": [{"$ref": "common.schema.json#/$defs/short_text"}, {"type": "null"}]
+        }
+      }
+    },
+    "eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eligible", "problems"],
+      "properties": {
+        "eligible": {"type": "boolean"},
+        "problems": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "common.schema.json#/$defs/text"}
+        }
+      }
+    },
+    "verdict": {"type": "string", "enum": ["would_apply", "blocked"]},
+    "reasons": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "common.schema.json#/$defs/short_text"}
+    },
+    "ext": {"$ref": "common.schema.json#/$defs/ext"}
+  }
+}

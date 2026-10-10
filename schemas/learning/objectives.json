@@ -1,0 +1,12 @@
+{
+  "schema": "learning-objectives/v1",
+  "description": "The objectives a candidate-genome/v1 records for the variant archive, and which way is better. No scalar utility: the archive keeps the Pareto frontier across all of them. Contract: SPECS.md section 15.",
+  "objectives": {
+    "correctness": "max",
+    "reliability": "max",
+    "cost": "min",
+    "latency": "min",
+    "owner_intervention": "min",
+    "reverts": "min"
+  }
+}

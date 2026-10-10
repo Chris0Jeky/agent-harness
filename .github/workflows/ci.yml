@@ -79,6 +79,16 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
+          scripts/learning_bundle.py tests/test_learning_bundle.py
+          tests/test_learning_authority.py tests/test_learning_adversarial.py
+          tests/test_learning_class.py
+          scripts/learning_metrics.py tests/test_learning_metrics.py
+          scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
+          scripts/learning_archive.py tests/test_learning_archive.py
+          scripts/learning_system.py tests/test_learning_system.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -121,6 +131,16 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
+          scripts/learning_bundle.py tests/test_learning_bundle.py
+          tests/test_learning_authority.py tests/test_learning_adversarial.py
+          tests/test_learning_class.py
+          scripts/learning_metrics.py tests/test_learning_metrics.py
+          scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
+          scripts/learning_archive.py tests/test_learning_archive.py
+          scripts/learning_system.py tests/test_learning_system.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
@@ -163,6 +183,16 @@ jobs:
           scripts/ops_cohort.py tests/test_ops_cohort.py
           scripts/outcome_ledger.py tests/test_outcome_ledger.py
           scripts/merge_gate_model.py tests/test_merge_gate_model.py
+          scripts/learning_contracts.py tests/test_learning_contracts.py
+          scripts/learning_outcomes.py tests/test_learning_outcomes.py
+          scripts/learning_bundle.py tests/test_learning_bundle.py
+          tests/test_learning_authority.py tests/test_learning_adversarial.py
+          tests/test_learning_class.py
+          scripts/learning_metrics.py tests/test_learning_metrics.py
+          scripts/learning_eval.py tests/test_learning_eval.py
+          scripts/learning_promote.py tests/test_learning_promote.py
+          scripts/learning_archive.py tests/test_learning_archive.py
+          scripts/learning_system.py tests/test_learning_system.py
           tests/test_evals_public_names.py
           scripts/build_docs_site.py tests/test_build_docs_site.py
           templates/hooks/dispatch.py templates/hooks/smoke_test.py
