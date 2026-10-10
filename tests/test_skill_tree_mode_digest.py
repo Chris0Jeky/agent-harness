@@ -878,6 +878,88 @@ class UnifiedSkillPreflightTests(unittest.TestCase):
                 self.assertEqual(before, harness.tree_digest(root))
 
 
+class SkillNameProbeCleanupTests(unittest.TestCase):
+    def test_probe_creation_and_removal_are_observed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            anchor = Path(tmp).resolve()
+            made, removed = [], []
+            real_make, real_remove = tempfile.mkdtemp, Path.rmdir
+
+            def create(*args, **kwargs):
+                result = Path(real_make(*args, **kwargs))
+                self.assertTrue(result.is_dir())
+                made.append(result)
+                return str(result)
+
+            def remove(path):
+                self.assertTrue(path.is_dir())
+                real_remove(path)
+                self.assertFalse(path.exists())
+                removed.append(path)
+
+            with mock.patch.object(
+                harness.tempfile, "mkdtemp", create
+            ), mock.patch.object(Path, "rmdir", remove):
+                self.assertFalse(
+                    harness.skill_name_chains_alias(
+                        anchor, ("left", "nested"), ("right", "nested")
+                    )
+                )
+            self.assertEqual(len(made), 1)
+            self.assertEqual(made[0].parent, anchor)
+            self.assertEqual(
+                removed, [made[0] / "left/nested", made[0] / "left", made[0]]
+            )
+            self.assertEqual(list(anchor.iterdir()), [])
+
+    def test_failed_cleanup_names_the_retained_probe(self):
+        for fail_at in ("child", "scratch"):
+            with self.subTest(fail_at=fail_at), tempfile.TemporaryDirectory() as tmp:
+                anchor = Path(tmp).resolve()
+                made, failed = [], []
+                real_make, real_remove = tempfile.mkdtemp, Path.rmdir
+
+                def create(*args, **kwargs):
+                    result = Path(real_make(*args, **kwargs))
+                    made.append(result)
+                    return str(result)
+
+                def remove(path):
+                    target = made[0] / "left" if fail_at == "child" else made[0]
+                    if path == target:
+                        failed.append(path)
+                        raise PermissionError("fixture cleanup denied")
+                    real_remove(path)
+
+                with mock.patch.object(
+                    harness.tempfile, "mkdtemp", create
+                ), mock.patch.object(Path, "rmdir", remove):
+                    with self.assertRaises(harness.HarnessError) as caught:
+                        harness.skill_name_chains_alias(anchor, ("left",), ("right",))
+                self.assertEqual(len(made), 1)
+                self.assertEqual(len(failed), 1)
+                self.assertTrue(made[0].is_dir())
+                self.assertIn("probe directory may remain", str(caught.exception))
+                self.assertIn(str(made[0]), str(caught.exception))
+                self.assertIn(str(failed[0]), str(caught.exception))
+                self.assertIsInstance(caught.exception.__cause__, PermissionError)
+
+    def test_creation_failure_does_not_claim_a_retained_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            anchor = Path(tmp).resolve()
+            with mock.patch.object(
+                harness.tempfile,
+                "mkdtemp",
+                side_effect=PermissionError("fixture create denied"),
+            ):
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "cannot preflight selected skill roots"
+                ) as caught:
+                    harness.skill_name_chains_alias(anchor, ("left",), ("right",))
+            self.assertNotIn("probe directory may remain", str(caught.exception))
+            self.assertEqual(list(anchor.iterdir()), [])
+
+
 class SkillDestinationOverlapTests(unittest.TestCase):
     """Cross-family destination overlap and absent-parent aliases (#444)."""
 
@@ -940,6 +1022,8 @@ class SkillDestinationOverlapTests(unittest.TestCase):
         return args
 
     def test_nested_cross_family_destinations_refuse_before_mutation(self):
+        # State 2 was already refused for unknown paths before overlap preflight.
+        # It is a diagnostic control, not proof of an earlier partial-write bug.
         for order in ("codex-in-claude", "claude-in-codex"):
             for state in (0, 1, 2):
                 for apply in (False, True):
@@ -952,6 +1036,49 @@ class SkillDestinationOverlapTests(unittest.TestCase):
                         self.assert_refuses(
                             args, root, "selected skill destinations overlap"
                         )
+
+    def test_dry_run_cleanup_failure_names_probe_without_installing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            claude_home = root / "claude-home"
+            claude_home.mkdir()
+            args = self.build(
+                root, "sample", "sample", claude_home / "Skills", claude_home
+            )
+            before = set(root.rglob("*"))
+            made = []
+            real_make, real_remove = tempfile.mkdtemp, Path.rmdir
+
+            def create(*args, **kwargs):
+                result = Path(real_make(*args, **kwargs))
+                made.append(result)
+                return str(result)
+
+            def remove(path):
+                if made and path == made[0]:
+                    raise PermissionError("fixture cleanup denied")
+                real_remove(path)
+
+            with mock.patch.object(
+                harness.tempfile, "mkdtemp", create
+            ), mock.patch.object(Path, "rmdir", remove), mock.patch.object(
+                harness, "reserve_backup_root", wraps=harness.reserve_backup_root
+            ) as reserve, mock.patch.object(
+                harness.shutil, "copytree", wraps=shutil.copytree
+            ) as copy, redirect_stdout(
+                io.StringIO()
+            ):
+                with self.assertRaises(harness.HarnessError) as caught:
+                    harness.sync_global(args)
+                reserve.assert_not_called()
+                copy.assert_not_called()
+            self.assertEqual(len(made), 1)
+            self.assertTrue(made[0].is_dir())
+            self.assertIn("probe directory may remain", str(caught.exception))
+            self.assertIn(str(made[0]), str(caught.exception))
+            self.assertEqual(set(root.rglob("*")), before | {made[0]})
+            self.assertFalse((claude_home / "Skills/sample").exists())
+            self.assertFalse((claude_home / "skills/sample").exists())
 
     def test_sibling_and_distinct_targets_are_not_overlap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1049,6 +1176,123 @@ class SkillDestinationOverlapTests(unittest.TestCase):
                     self.assertTrue((second / "sample/SKILL.md").is_file())
                 else:
                     self.assertEqual(before, harness.tree_digest(root))
+
+
+class ExistingSkillRootIdentityTests(unittest.TestCase):
+    """Existing roots can alias even when their parents do not (#459)."""
+
+    def test_existing_target_aliases_refuse_before_name_probes(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                left, right = root / "one/alpha", root / "two/beta"
+                left.mkdir(parents=True)
+                right.mkdir(parents=True)
+                before = harness.tree_digest(root)
+                real_samefile = Path.samefile
+
+                def bind_identity(path, other):
+                    # Model only the two target identities, not their parents.
+                    if {path, Path(other)} == {left, right}:
+                        return True
+                    return real_samefile(path, other)
+
+                targets = [right, left] if reverse else [left, right]
+                with mock.patch.object(
+                    Path, "samefile", bind_identity
+                ), mock.patch.object(
+                    harness.tempfile, "mkdtemp", wraps=tempfile.mkdtemp
+                ) as probe:
+                    with self.assertRaisesRegex(
+                        harness.HarnessError, "selected skill roots collide"
+                    ) as refused:
+                        harness.preflight_selected_skill_roots(
+                            targets, None, [], "fixture"
+                        )
+                    probe.assert_not_called()
+                self.assertIn(str(left), str(refused.exception))
+                self.assertIn(str(right), str(refused.exception))
+                self.assertEqual(before, harness.tree_digest(root))
+
+    def test_duplicate_existing_target_refuses_without_transient_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp).resolve() / "sample"
+            target.mkdir()
+            with mock.patch.object(
+                harness.tempfile, "mkdtemp", wraps=tempfile.mkdtemp
+            ) as probe:
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "selected skill roots collide"
+                ):
+                    harness.preflight_selected_skill_roots(
+                        [target, target], None, [], "fixture"
+                    )
+                probe.assert_not_called()
+
+    def test_unavailable_target_identity_refuses_without_probing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            left, right = root / "one/alpha", root / "two/beta"
+            left.mkdir(parents=True)
+            right.mkdir(parents=True)
+            real_samefile = Path.samefile
+
+            def unavailable(path, other):
+                if {path, Path(other)} == {left, right}:
+                    raise PermissionError("synthetic target identity failure")
+                return real_samefile(path, other)
+
+            with mock.patch.object(Path, "samefile", unavailable), mock.patch.object(
+                harness.tempfile, "mkdtemp"
+            ) as probe:
+                with self.assertRaisesRegex(
+                    harness.HarnessError, "synthetic target identity failure"
+                ):
+                    harness.preflight_selected_skill_roots(
+                        [left, right], None, [], "fixture"
+                    )
+                probe.assert_not_called()
+
+    def test_distinct_and_missing_targets_keep_parent_lookup_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            left, right = root / "one/sample", root / "two/sample"
+            left.mkdir(parents=True)
+            right.mkdir(parents=True)
+            for targets in (
+                [left, right],
+                [left, right / "absent"],
+                [left / "absent", right / "absent"],
+            ):
+                before = harness.tree_digest(root)
+                harness.preflight_selected_skill_roots(targets, None, [], "fixture")
+                self.assertEqual(before, harness.tree_digest(root))
+
+    def test_sync_refuses_target_identity_collision_before_backup_or_copy(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                home = root / "claude"
+                skills = root / "codex-skills"
+                args = SkillDestinationOverlapTests.build(
+                    self, root, "alpha", "beta", skills, home
+                )
+                args.apply = apply
+                left, right = skills / "alpha", home / "skills/beta"
+                for target in (left, right):
+                    target.mkdir(parents=True)
+                    (target / "SKILL.md").write_text("previous", encoding="utf-8")
+                real_samefile = Path.samefile
+
+                def bind_identity(path, other):
+                    if {path, Path(other)} == {left, right}:
+                        return True
+                    return real_samefile(path, other)
+
+                with mock.patch.object(Path, "samefile", bind_identity):
+                    SkillDestinationOverlapTests.assert_refuses(
+                        self, args, root, "selected skill roots collide"
+                    )
 
 
 if __name__ == "__main__":

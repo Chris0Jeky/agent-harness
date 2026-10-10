@@ -40,6 +40,7 @@ from replay_v0.policy_sources import (
     ProcessDecisionSource,
     RecordedDecisionSource,
     SNAPSHOT_MTIME_NS,
+    SNAPSHOT_XATTR_CONTRACT,
     validate_recorded_manifest,
 )
 from replay_v0.reports import (
@@ -56,7 +57,7 @@ DIAGNOSTIC_LINES = 20
 DIAGNOSTIC_CHARS = 300
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v9"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v10"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -153,7 +154,7 @@ def _read_jsonl_bytes(value: bytes, label: str) -> list[object]:
         except ReplayInputError:
             # Preserve the existing duplicate-key diagnostic.
             raise
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise ReplayInputError(
                 f"{label} line {line_number} is not valid JSON"
             ) from exc
@@ -216,7 +217,7 @@ def _load_recorded_source(raw_path: str) -> LoadedPolicySource:
     except (ReplayInputError, ValidationError):
         # Structural validation already has its own bounded input diagnostic.
         raise
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise ReplayInputError(
             "recorded source or sidecar is not readable JSON"
         ) from exc
@@ -327,6 +328,7 @@ def _load_process_source(
         "execution_inputs": "private-validated-identity-path-snapshot",
         "runner_directory_permission_bits": "0700",
         "snapshot_mtime_ns": SNAPSHOT_MTIME_NS,
+        "snapshot_xattrs": SNAPSHOT_XATTR_CONTRACT,
         "snapshot_parent_sha256": sha256_bytes(os.fsencode(snapshot_parent)),
         "working_directory": "identity-bound-parent-and-derived-snapshot-policy-parent",
     }

@@ -875,6 +875,46 @@ class CodeAwareLinkTests(StageBase):
         self.assertIn("    [u]: ../scripts/tool.py", text)
         self.assertIn(f"[v]: {BLOB}", text)
 
+    def test_continuation_reference_destinations_are_rewritten(self):
+        for indent in ("", " ", "  ", "    ", "\t"):
+            with self.subTest(indent=indent):
+                text = self.doc(
+                    f'# R\n\n[guide]:  \n{indent}<GUIDE.md#part> "Guide"\n'
+                    f"[tool]:\n{indent}../scripts/tool.py\n"
+                    "[home]: ../README.md\n"
+                )
+                self.assertIn(f'[guide]:  \n{indent}GUIDE.html#part "Guide"', text)
+                self.assertIn(f"[tool]:\n{indent}{BLOB}\n", text)
+                self.assertIn("[home]: ../index.html", text)
+
+    def test_continuation_references_keep_container_prefixes(self):
+        text = self.doc(
+            "# R\n\n> [quote]:\n>   ../scripts/tool.py\n\n"
+            "- [item]:\n    ../scripts/tool.py\n"
+        )
+        self.assertIn(f"> [quote]:\n>   {BLOB}", text)
+        self.assertIn(f"- [item]:\n    {BLOB}", text)
+
+    def test_continuation_reference_code_and_paragraph_text_stay_literal(self):
+        body = (
+            "# R\n\n```\n[fenced]:\n  ../scripts/tool.py\n```\n\n"
+            "    [indented]:\n      ../scripts/tool.py\n\n"
+            "some text\n[paragraph]:\n  ../scripts/tool.py\n\n"
+            "[blank]:\n\n    ../scripts/tool.py\n\n"
+            "`[span]:\n  ../scripts/tool.py`\n"
+        )
+        text = self.doc(body)
+        self.assertNotIn(BLOB, text)
+        self.assertIn(body, text)
+
+    def test_continuation_external_reference_does_not_stop_following_definitions(self):
+        text = self.doc(
+            "# R\n\n[external]:\n  <https://example.com/GUIDE.md>\n"
+            "[tool]:\n  ../scripts/tool.py\n"
+        )
+        self.assertIn("[external]:\n  <https://example.com/GUIDE.md>", text)
+        self.assertIn(f"[tool]:\n  {BLOB}", text)
+
     def test_reference_definition_inside_a_paragraph_is_text(self):
         text = self.doc("# R\n\nsome text\n[t]: ../scripts/tool.py\n")
         self.assertNotIn(BLOB, text)
@@ -1198,6 +1238,40 @@ class BuiltSiteCheckTests(unittest.TestCase):
     def test_links_may_not_escape_the_site(self):
         problems = self.check_files({"index.html": '<a href="../../etc/passwd">x</a>'})
         self.assertEqual(len(problems), 1)
+
+    def test_stylesheet_links_are_checked_with_other_local_targets(self):
+        problems = self.check_files(
+            {
+                "index.html": '<link rel="stylesheet" href="assets/missing.css">'
+                '<link rel="stylesheet" href="/outside.css">'
+                '<link rel="icon" href="../../outside.ico">',
+            }
+        )
+        self.assertEqual(len(problems), 3)
+        for target in ("assets/missing.css", "/outside.css", "../../outside.ico"):
+            self.assertTrue(any(target in problem for problem in problems), target)
+
+    def test_existing_and_external_stylesheet_links_are_valid(self):
+        problems = self.check_files(
+            {
+                "docs/G.html": '<link rel="stylesheet" href="../assets/a%20b.css?v=1">'
+                '<link rel="stylesheet" href="/agent-harness/assets/a%20b.css">'
+                '<link rel="stylesheet" href="https://example.com/style.css">'
+                '<link rel="preconnect" href="//example.com">',
+                "assets/a b.css": "body {}",
+            }
+        )
+        self.assertEqual(problems, [])
+
+    def test_cli_check_site_rejects_a_missing_stylesheet(self):
+        write(self.dir, "index.html", '<link rel="stylesheet" href="assets/docs.css">')
+        cmd = [sys.executable, str(SCRIPT), "--check-site", str(self.dir)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("assets/docs.css", proc.stderr)
+        write(self.dir, "assets/docs.css", "body {}")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_cli_check_site(self):
         write(self.dir, "index.html", '<a href="gone.html">x</a>')

@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 
-from replay_v0.compare import ComparisonError, compare_decisions
+from replay_v0.compare import (
+    ComparisonError,
+    ComparisonResult,
+    DIFF_CLASSES,
+    compare_decisions,
+)
+from replay_v0.policy_sources import SourceFailure
 from replay_v0.reports import (
     DECISION_REPLAY_LIMITATION,
     build_json_report,
@@ -336,6 +342,26 @@ class ComparisonTests(unittest.TestCase):
             markdown,
         )
         self.assertLess(markdown.index(later_id), markdown.index("## Limitations"))
+
+    def test_report_gate_error_overrides_triggered(self) -> None:
+        empty = ComparisonResult(results=(), counts={name: 0 for name in DIFF_CLASSES})
+        failures = (SourceFailure(code="recording-json-invalid", message="x"),)
+        report = build_json_report(empty, self.manifest, baseline_failures=failures)
+        self.assertEqual("error", report["gate"]["status"])
+        self.assertEqual([], report["gate"]["triggered"])
+        self.assertEqual(
+            "recording-json-invalid",
+            report["source_failures"]["baseline"][0]["code"],
+        )
+
+        triggered_counts = {name: 0 for name in DIFF_CLASSES}
+        triggered_counts["newly-allowed"] = 1
+        triggered_comparison = ComparisonResult(results=(), counts=triggered_counts)
+        triggered_report = build_json_report(
+            triggered_comparison, self.manifest, baseline_failures=failures
+        )
+        self.assertEqual("error", triggered_report["gate"]["status"])
+        self.assertEqual(["newly-allowed"], triggered_report["gate"]["triggered"])
 
 
 if __name__ == "__main__":

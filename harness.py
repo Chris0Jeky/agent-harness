@@ -7401,7 +7401,13 @@ def skill_name_chains_alias(
             return True
         finally:
             for path in reversed(created):
-                path.rmdir()
+                try:
+                    path.rmdir()
+                except OSError as exc:
+                    raise HarnessError(
+                        f"cannot clean up skill name probe: {path}: {exc}; "
+                        f"probe directory may remain: {created[0]}"
+                    ) from exc
     except OSError as exc:
         raise HarnessError(
             f"cannot preflight selected skill roots: {anchor}: {exc}"
@@ -7487,14 +7493,31 @@ def preflight_selected_skill_roots(
     destination parent, and the backup parent that holds same-named recovery
     copies of ``backup_targets``, is probed with name-only directories before
     any live or backup write, whether the destination is absent or populated.
+    Existing targets also compare their own filesystem identities: distinct
+    parents do not prove distinct roots when a target is a bind mount.
     """
     if len(targets) < 2 and (backup_parent is None or len(backup_targets) < 2):
         return
     by_parent: list[tuple[Path, list[str]]] = []
+    existing_targets: list[Path] = []
     for target in targets:
         reject_sync_path_aliases(target, label)
         parent = target.parent
         try:
+            try:
+                target.stat()
+            except FileNotFoundError:
+                pass  # Absent destinations still use their parent's lookup below.
+            else:
+                # Bind mounts can alias the targets without aliasing their parents.
+                # Never infer distinct roots solely from parent identity or names.
+                for known_target in existing_targets:
+                    if target.samefile(known_target):
+                        raise HarnessError(
+                            f"selected skill roots collide on this destination: "
+                            f"{known_target}; {target}"
+                        )
+                existing_targets.append(target)
             for known, names in by_parent:
                 # Path equality case-folds on Windows even in sensitive directories.
                 # Parents group by filesystem identity: the nearest existing
@@ -7967,8 +7990,26 @@ def copy_with_backup(source: Path, target: Path, backup_root: Path) -> str:
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, backup)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+    write_managed_codex_file(
+        target, source.read_bytes(), stat.S_IMODE(source.stat().st_mode)
+    )
     return "updated" if (backup_root / target.name).exists() else "created"
+
+
+def preflight_sync_file_target(target: Path) -> None:
+    reject_sync_path_aliases(target, "sync file destination")
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect sync file destination {target}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise HarnessError(
+            f"sync file destination must be an ordinary file with one link: {target}"
+        )
 
 
 def managed_codex_agents_state_path(codex_home: Path) -> Path:
@@ -8485,8 +8526,11 @@ def write_managed_codex_file(
                     # The requested owner did not stick: start over without one.
                     owner_fallback = True
                     old_descriptor, old_temporary = descriptor, temporary
-                    temporary = None
+                    # Discard consumes the descriptor even if unlink fails. Keep
+                    # the path for outer cleanup until removal actually succeeds.
+                    descriptor = None
                     windows_discard_staging_file(old_descriptor, old_temporary)
+                    temporary = None
                     descriptor, temporary = windows_create_staging_file(
                         path.parent, ".harness-agent-", fallback, read_only
                     )
@@ -8532,7 +8576,7 @@ def write_managed_codex_file(
                             f"destination's; refusing publication: {path}"
                         )
             except BaseException:
-                if temporary is not None:
+                if descriptor is not None:
                     os.close(descriptor)
                 raise
             if owner_fallback:
@@ -11087,20 +11131,24 @@ def sync_global(args: argparse.Namespace) -> int:
     codex_source = config_root / "codex"
     harness_root = Path(__file__).resolve().parent
     codex_selection = default_sync or sync_agents or bool(selected_skills)
-    codex_home = (
+    codex_home_input = (
         sync_input_path(
             args.codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"),
             "Codex home",
-        ).resolve()
+        )
         if codex_selection
         else None
     )
+    if default_sync:
+        assert codex_home_input is not None
+        reject_sync_path_aliases(codex_home_input, "Codex home")
+    codex_home = codex_home_input.resolve() if codex_home_input is not None else None
     claude_home_input = (
         sync_input_path(args.claude_home or Path.home() / ".claude", "Claude home")
         if default_sync or selected_claude_skills
         else None
     )
-    if selected_claude_skills:
+    if default_sync or selected_claude_skills:
         assert claude_home_input is not None
         reject_sync_path_aliases(claude_home_input, "Claude home")
     claude_home = claude_home_input.resolve() if claude_home_input is not None else None
@@ -11150,6 +11198,10 @@ def sync_global(args: argparse.Namespace) -> int:
         ]
     if default_sync and (codex_source / "REPOS.md").is_file():
         actions.append((codex_source / "REPOS.md", codex_home / "REPOS.md"))
+    if default_sync:
+        for _source, target in actions:
+            preflight_sync_file_target(target)
+        preflight_sync_file_target(codex_home / "hooks.json")
     if default_sync or selected_skills:
         assert skills_home is not None
     skill_actions = (
@@ -11411,17 +11463,23 @@ def sync_global(args: argparse.Namespace) -> int:
         assert claude_skill_backup_parent is not None
         claude_skill_backup = reserve_backup_root(claude_skill_backup_parent, stamp)
     for source, target in actions:
+        preflight_sync_file_target(target)
         copy_with_backup(source, target, backup_root)
     hooks_target = codex_home / "hooks.json" if codex_home is not None else None
     if default_sync and current_hooks != hook_text:
         assert hooks_target is not None
         assert backup_root is not None
+        preflight_sync_file_target(hooks_target)
         if hooks_target.exists():
             backup_root.mkdir(parents=True, exist_ok=True)
             shutil.copy2(hooks_target, backup_root / "hooks.json")
         if hook_text:
             hooks_target.parent.mkdir(parents=True, exist_ok=True)
-            hooks_target.write_text(hook_text, encoding="utf-8")
+            write_managed_codex_file(
+                hooks_target,
+                hook_text.encode("utf-8"),
+                stat.S_IMODE(hooks_target.stat().st_mode),
+            )
         else:
             hooks_target.unlink(missing_ok=True)
     for source, target, equal in skill_states:

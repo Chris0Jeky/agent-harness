@@ -41,6 +41,13 @@ def _jobs(value: str) -> int:
     return jobs
 
 
+def _nonnegative_count(value: str) -> int:
+    count = int(value)
+    if count < 0:
+        raise argparse.ArgumentTypeError("must be an integer >= 0")
+    return count
+
+
 def _add_hook_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime", choices=RUNTIMES, default="claude")
     parser.add_argument(
@@ -96,9 +103,12 @@ def _parser() -> argparse.ArgumentParser:
     importer.add_argument("--codex-root", help="default: ~/.codex/sessions")
     importer.add_argument("--output", default=".local/private-corpus")
     importer.add_argument("--keep-duplicates", action="store_true")
-    importer.add_argument("--limit", type=int, default=0)
+    importer.add_argument("--limit", type=_nonnegative_count, default=0)
     importer.add_argument(
-        "--sample", type=int, default=0, help="keep a seeded random sample"
+        "--sample",
+        type=_nonnegative_count,
+        default=0,
+        help="keep a seeded random sample",
     )
     importer.add_argument("--seed", type=int, default=0)
     importer.add_argument(
