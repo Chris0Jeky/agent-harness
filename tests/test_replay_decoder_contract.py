@@ -7,13 +7,78 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
+from replay_v0 import cli
 from replay_v0.tests.contract import test_cli as cli_fixtures
+from replay_v0.tests.unit import test_recorded_source as recorded_fixtures
+from replay_v0.policy_sources import RecordedDecisionSource
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReplayDecoderContractTests(unittest.TestCase):
+    def test_jsonl_recursion_failure_is_bounded(self):
+        error = RecursionError("decoder nesting limit")
+        with mock.patch.object(json, "loads", side_effect=error):
+            with self.assertRaisesRegex(
+                cli.ReplayInputError, "events.jsonl line 1 is not valid JSON"
+            ) as caught:
+                cli._read_jsonl_bytes(b"[\n", "events.jsonl")
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertEqual(
+            [{"a": 1}], cli._read_jsonl_bytes(b'{"a": 1}\n', "events.jsonl")
+        )
+
+    def test_recorded_source_loader_recursion_failure_is_bounded(self):
+        fixtures = recorded_fixtures.RecordedSourceTests()
+        with fixtures.recording(recorded_fixtures.DECISIONS) as path:
+            error = RecursionError("decoder nesting limit")
+            with mock.patch.object(json, "loads", side_effect=error):
+                with self.assertRaisesRegex(
+                    cli.ReplayInputError,
+                    "recorded source or sidecar is not readable JSON",
+                ) as caught:
+                    cli._load_recorded_source(str(path))
+            self.assertIs(caught.exception.__cause__, error)
+
+    def test_recorded_manifest_recursion_failure_is_indeterminate(self):
+        fixtures = recorded_fixtures.RecordedSourceTests()
+        with fixtures.recording(recorded_fixtures.DECISIONS) as path:
+            with mock.patch.object(json, "loads", side_effect=RecursionError):
+                result = RecordedDecisionSource(path).evaluate(recorded_fixtures.EVENTS)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(["indeterminate", "indeterminate"], fixtures.effects(result))
+        self.assertEqual(["recording-manifest-invalid"], fixtures.failure_codes(result))
+        self.assertEqual(
+            "Recorded manifest is invalid: RecursionError.", result.failures[0].message
+        )
+
+    def test_recorded_decision_recursion_failure_keeps_later_valid_decision(self):
+        fixtures = recorded_fixtures.RecordedSourceTests()
+        payload = "[" * 10000
+        real_loads = json.loads
+
+        def decode(value, *args, **kwargs):
+            # Decoder recursion behavior varies across Python versions.
+            if value == payload:
+                raise RecursionError("decoder nesting limit")
+            return real_loads(value, *args, **kwargs)
+
+        with fixtures.recording([payload, recorded_fixtures.DECISIONS[1]]) as path:
+            with mock.patch.object(json, "loads", side_effect=decode):
+                result = RecordedDecisionSource(path).evaluate(recorded_fixtures.EVENTS)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(["indeterminate", "allow"], fixtures.effects(result))
+        self.assertEqual(
+            ["recording-json-invalid", "recording-missing-event"],
+            fixtures.failure_codes(result),
+        )
+        self.assertEqual(
+            "Recorded decision line 1 is invalid JSON.", result.failures[0].message
+        )
+        self.assertNotIn(payload, str(result))
+
     def test_process_integer_limit_failure_publishes_reports_and_exits_three(self):
         fixtures = cli_fixtures.CliTests()
         with fixtures.fixture("same") as (directory, corpus, recording, candidate):
