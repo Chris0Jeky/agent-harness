@@ -17,7 +17,9 @@ class SyncOverlapIdentityTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
 
-    def assert_identity_refusal(self, args, source, home, alias=None):
+    def assert_identity_refusal(
+        self, args, source, home, alias=None, identity_source=None
+    ):
         home.mkdir()
         alias = home if alias is None else alias
         if alias != home:
@@ -25,9 +27,10 @@ class SyncOverlapIdentityTests(unittest.TestCase):
         before = harness.tree_digest(source), set(source.rglob("*"))
         before_home = set(home.rglob("*"))
         real_samefile = Path.samefile
+        identity_source = source if identity_source is None else identity_source
 
         def identity(path, other):
-            if {path, Path(other)} == {source, alias}:
+            if {path, Path(other)} == {identity_source, alias}:
                 return True
             return real_samefile(path, other)
 
@@ -109,6 +112,44 @@ class SyncOverlapIdentityTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(0, harness.sync_global(args))
                 self.assertEqual(source.read_bytes(), target.read_bytes())
+
+    def test_source_descendant_identity_overlap_refuses_before_writes(self):
+        for lane in ("bundle", "skill"):
+            for recovery in (False, True):
+                for apply in (False, True):
+                    with self.subTest(lane=lane, recovery=recovery, apply=apply):
+                        name = f"descendant-{lane}-{recovery}-{apply}"
+                        if lane == "bundle":
+                            config, home, _bin, args = (
+                                self.fixture.make_bundle_sync_fixture(name)
+                            )
+                            source = config / "muse/recipes"
+                        else:
+                            config, home, args = (
+                                self.fixture.make_claude_skill_sync_fixture(name)
+                            )
+                            source = config / "skills/sample"
+                        descendant = source / "assets"
+                        descendant.mkdir()
+                        (descendant / "sentinel.txt").write_text(
+                            "untouched", encoding="utf-8"
+                        )
+                        args.apply = apply
+                        alias = home / ".harness-backups" if recovery else home
+                        self.assert_identity_refusal(
+                            args, source, home, alias, identity_source=descendant
+                        )
+
+    def test_source_overlap_does_not_walk_absent_or_file_sources(self):
+        root = Path(self.fixture.temp.name)
+        source = root / "file"
+        source.write_bytes(b"ordinary")
+        with mock.patch.object(harness, "skill_tree_entry_kinds") as walk:
+            self.assertFalse(harness.sync_source_overlaps_path(source, root / "target"))
+            self.assertFalse(
+                harness.sync_source_overlaps_path(root / "absent", root / "target")
+            )
+            walk.assert_not_called()
 
     def test_lexical_overlap_and_absent_disjoint_paths(self):
         root = Path(self.fixture.temp.name)
