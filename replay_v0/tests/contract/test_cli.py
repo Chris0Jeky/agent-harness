@@ -207,6 +207,65 @@ for index, event in enumerate(events):
             self.assertIn(str(output), markdown)
             self.assertTrue((output / "run-manifest.json").is_file())
 
+    def test_table_cell_escapes_pipes_and_newlines(self) -> None:
+        import re
+
+        from replay_v0.reports import render_markdown_report
+
+        raw_reason = "a|b\\c\nd"
+        escaped_cell = "a\\|b\\\\c d"
+        report = {
+            "counts": {
+                "unchanged": 1,
+                "newly-allowed": 0,
+                "newly-denied": 0,
+                "newly-indeterminate": 0,
+                "resolved-indeterminate": 0,
+            },
+            "gate": {
+                "status": "pass",
+                "fail_on": ["newly-allowed"],
+                "triggered": [],
+            },
+            "policies": {
+                "baseline": {
+                    "id": "baseline",
+                    "kind": "recorded",
+                    "sha256": "0" * 64,
+                },
+                "candidate": {
+                    "id": "candidate",
+                    "kind": "recorded",
+                    "sha256": "1" * 64,
+                },
+            },
+            "corpus": {
+                "id": "charter-v0.1",
+                "event_count": 1,
+                "manifest_sha256": "2" * 64,
+            },
+            "limitations": [],
+            "source_failures": {"baseline": [], "candidate": []},
+            "results": [
+                {
+                    "event": {"event_id": "evt-1"},
+                    "classification": "unchanged",
+                    "baseline": {"effect": "deny", "reason": raw_reason},
+                    "candidate": {"effect": "deny", "reason": raw_reason},
+                }
+            ],
+        }
+        markdown = render_markdown_report(
+            report,
+            reproduction_argv=["replay", "--baseline", "recorded:x"],
+            reproduction_shell="posix-sh",
+        )
+        rows = [line for line in markdown.splitlines() if escaped_cell in line]
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        structural_pipes = re.findall(r"(?<!\\)\|", row)
+        self.assertEqual(5, len(structural_pipes))
+
     def test_host_reproduction_forms_preserve_the_proved_argv_subset(self) -> None:
         script = "import sys;print(chr(31).join(sys.argv[1:]))"
         if os.name == "nt":
