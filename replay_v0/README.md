@@ -192,7 +192,7 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v9 includes the executable's lexical invocation basename, the resolved executable target's
+identity v10 includes the executable's lexical invocation basename, the resolved executable target's
 bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
 regular-file bytes, and permission modes for the policy-parent root and entries, configured
 timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
@@ -201,8 +201,8 @@ snapshot parent without writing that absolute path to the run manifest. Process 
 therefore conservatively host/path-sensitive when policy-visible temporary roots differ. The digest
 is machine-derived data and can confirm an offline guess of a common temporary path; it avoids
 plaintext disclosure but is not a secrecy boundary. Process-source run IDs are host-context
-evidence, not portable cross-host correlation keys. V9 also
-binds the snapshot-mtime contract: every copied file and directory has modification time
+evidence, not portable cross-host correlation keys. V10 retains the v9 snapshot-mtime contract:
+every copied file and directory has modification time
 `946684800000000000` ns (2000-01-01T00:00:00Z). An
 executable alias and its target have distinct identities when their invocation names differ, while
 the snapshot still binds the resolved target bytes. Immediately before each process runs, the runner
@@ -236,8 +236,21 @@ A generic executable must be
 relocatable enough to run from the snapshot; adjacent loader libraries are copied as unbound
 runtime dependencies, and Python uses its host base prefix for its unbound standard library. If the
 captured executable cannot start, replay fails closed instead of falling back to the original path.
+Process identity v10 also binds the snapshot extended-attribute contract. On Linux,
+`linux-user-strip-v1` removes `user.*` attributes from every copied file and directory,
+including the executable and runner-owned directories, before launch. Only attribute names are
+inspected; values are neither read into the identity nor logged. Read-only copies temporarily gain
+owner-write permission only when removal needs it, and their original permission bits are restored.
+The original inputs are not changed. Enumeration/removal failures make the source indeterminate;
+pre/post checks reject any remaining or newly added `user.*` attribute and cleanup still runs.
+A filesystem that cannot supply the required operations fails closed rather than claiming they ran.
+On other operating systems the identity records `not-normalized-v1`; no extended-attribute
+normalization is claimed there. The version change deliberately separates these runs from v9.
+This is a bounded Linux namespace rule, not universal ACL, security-label, alternate-data-stream
+or metadata portability. A same-user modify-and-restore race remains outside the snapshot guarantee.
+
 External installed dependencies, files outside the policy tree, network responses, and other host
-metadata remain outside the identity; access/change/birth times and filesystem object identities
+metadata (including extended attributes outside Linux `user.*`) remain outside the identity; access/change/birth times and filesystem object identities
 are not normalized. Callers that depend on them must isolate and record that environment.
 
 Policy standard streams are backed by temporary files, so waiting for inherited pipe EOF cannot
