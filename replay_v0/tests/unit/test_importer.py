@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from replay_v0 import cli as kernel
+from replay_v0 import app
 from replay_v0.importer import (
     Scrubber,
     build_private_corpus,
@@ -1039,6 +1040,56 @@ class GitBoundaryTests(unittest.TestCase):
             check=True,
         ).stdout.split()
         self.assertFalse([path for path in paths if "private-corpus/" in path])
+
+
+class ImportCountCliTests(unittest.TestCase):
+    def test_negative_counts_refuse_before_import(self) -> None:
+        for option in ("--limit", "--sample"):
+            with self.subTest(option=option), mock.patch(
+                "replay_v0.importer.run_import", return_value=0
+            ) as imported, redirect_stderr(io.StringIO()) as stderr:
+                with self.assertRaises(SystemExit) as caught:
+                    app.main(
+                        [
+                            "import",
+                            "--claude-root",
+                            "none",
+                            "--codex-root",
+                            "none",
+                            option,
+                            "-1",
+                        ]
+                    )
+                self.assertEqual(2, caught.exception.code)
+                imported.assert_not_called()
+                self.assertIn(option, stderr.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_omitted_zero_and_positive_counts_reach_import_unchanged(self) -> None:
+        for options, expected in (
+            ([], (0, 0)),
+            (["--limit", "0", "--sample", "0"], (0, 0)),
+            (["--limit", "2", "--sample", "1"], (2, 1)),
+        ):
+            with self.subTest(options=options), mock.patch(
+                "replay_v0.importer.run_import", return_value=0
+            ) as imported:
+                self.assertEqual(
+                    0,
+                    app.main(
+                        [
+                            "import",
+                            "--claude-root",
+                            "none",
+                            "--codex-root",
+                            "none",
+                            *options,
+                        ]
+                    ),
+                )
+                imported.assert_called_once()
+                args = imported.call_args.args[0]
+                self.assertEqual(expected, (args.limit, args.sample))
 
 
 class RunImportRedactTermsTests(unittest.TestCase):
