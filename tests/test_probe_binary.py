@@ -181,6 +181,13 @@ class ProbeBinaryTests(unittest.TestCase):
         self.assertFalse(harness.probe_image_reparses("/usr/bin/gh"))
         self.assertFalse(harness.probe_image_reparses("/usr/bin/gh.cmd"))
 
+    def test_windows_suffix_gate_marks_only_shims(self) -> None:
+        with mock.patch.object(os, "name", "nt"):
+            self.assertFalse(harness.probe_image_reparses("C:/tools/gh.exe"))
+            self.assertFalse(harness.probe_image_reparses("C:/tools/gh.COM"))
+            self.assertTrue(harness.probe_image_reparses("C:/tools/gh.cmd"))
+            self.assertTrue(harness.probe_image_reparses("C:/tools/gh.bat"))
+
     # --- an explicit path keeps its meaning ---------------------------------
 
     def test_an_explicit_path_is_not_searched_for(self) -> None:
