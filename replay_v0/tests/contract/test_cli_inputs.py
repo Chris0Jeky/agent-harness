@@ -195,5 +195,31 @@ class TimeoutInputTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class FailOnInputTests(unittest.TestCase):
+    @staticmethod
+    def args():
+        return [
+            "replay",
+            "--baseline",
+            "recorded:not-read.jsonl",
+            "--candidate",
+            "process:not-launched,policy.py",
+            "--corpus",
+            "not-read",
+            "--output",
+            "not-created",
+            "--fail-on",
+            "newly-allowed,newly-allowed",
+        ]
+
+    def test_duplicate_fail_on_is_rejected(self):
+        diagnostic = io.StringIO()
+        with redirect_stderr(diagnostic):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(self.args())
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("must not be duplicated", diagnostic.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
