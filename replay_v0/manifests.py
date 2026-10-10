@@ -183,8 +183,8 @@ def build_corpus_manifest(
 ) -> dict[str, Any]:
     """Build a corpus manifest from exact bytes under a caller-supplied base."""
 
-    if isinstance(files, (str, bytes)):
-        raise ManifestError("CorpusManifest.files: expected a sequence of paths")
+    if isinstance(files, (str, bytes, Mapping)):
+        raise ManifestError("CorpusManifest.files: expected Sequence[str]")
     event_count = _require_positive_count(event_count, "CorpusManifest.event_count")
     base = Path(base_directory)
     entries: list[dict[str, str]] = []
