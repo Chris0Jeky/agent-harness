@@ -7890,10 +7890,28 @@ def reject_sync_path_aliases(path: Path, label: str) -> None:
 
 
 def sync_paths_overlap(left: Path, right: Path) -> bool:
-    """Return whether two resolved sync roots contain one another."""
+    """Return whether resolved names or existing ancestor identities overlap."""
     left = left.resolve(strict=False)
     right = right.resolve(strict=False)
-    return worktree_path_is_within(left, right) or worktree_path_is_within(right, left)
+    if worktree_path_is_within(left, right) or worktree_path_is_within(right, left):
+        return True
+    try:
+        for inner, outer in ((left, right), (right, left)):
+            try:
+                outer.stat()
+            except FileNotFoundError:
+                continue
+            for candidate in (inner, *inner.parents):
+                try:
+                    if candidate.samefile(outer):
+                        return True
+                except FileNotFoundError:
+                    continue
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect sync root overlap: {left}; {right}: {exc}"
+        ) from exc
+    return False
 
 
 def preflight_sync_backup_parent(
