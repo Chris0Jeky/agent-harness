@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
 from replay_v0.corpus import (
@@ -13,6 +14,7 @@ from replay_v0.corpus import (
     validate_command_events,
     validate_policy_decision,
 )
+from replay_v0.manifests import ManifestError, build_corpus_manifest
 
 VALID_EVENT = {
     "schema_version": "command-event.v1",
@@ -250,6 +252,28 @@ class SchemaContractTests(unittest.TestCase):
         )
         self.assertEqual([VALID_EVENT], validate_command_events([VALID_EVENT]))
         self.assertEqual([VALID_CASE], validate_charter_cases([VALID_CASE]))
+
+    def test_build_corpus_manifest_rejects_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            corpus_dir = Path(raw_directory)
+            (corpus_dir / "events.jsonl").write_bytes(b'{"event_id":"one"}\n')
+            with self.assertRaisesRegex(ManifestError, r"Sequence\[str\]"):
+                build_corpus_manifest(
+                    corpus_id="mapping-v0",
+                    event_count=1,
+                    base_directory=corpus_dir,
+                    files={"events.jsonl": "ignored-value"},  # type: ignore[arg-type]
+                )
+            manifest = build_corpus_manifest(
+                corpus_id="mapping-v0",
+                event_count=1,
+                base_directory=corpus_dir,
+                files=["events.jsonl"],
+            )
+            self.assertEqual(
+                ["events.jsonl"],
+                [entry["path"] for entry in manifest["files"]],
+            )
 
     def test_schema_documents_are_strict_and_loadable(self) -> None:
         schema_dir = Path(__file__).parents[2] / "schemas"
