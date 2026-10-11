@@ -893,6 +893,93 @@ class WriteCorpusAtomicityTests(unittest.TestCase):
             "staging directory was not cleaned up",
         )
 
+    def test_interrupt_after_backup_move_restores_every_original(self) -> None:
+        names = ("events.jsonl", "cases.jsonl", "corpus-manifest.json")
+        for interrupted_name in names:
+            with self.subTest(name=interrupted_name):
+                output = self.root / interrupted_name
+                write_corpus(output, *self._events_cases("old"))
+                before = {p.name: p.read_bytes() for p in output.iterdir()}
+                real_replace = Path.replace
+
+                def interrupt_after_move(path, target):
+                    result = real_replace(path, target)
+                    if path.parent == output and path.name == interrupted_name:
+                        raise KeyboardInterrupt("after completed backup move")
+                    return result
+
+                with mock.patch.object(Path, "replace", interrupt_after_move):
+                    with self.assertRaises(KeyboardInterrupt):
+                        write_corpus(output, *self._events_cases("new"))
+                self.assertEqual(
+                    before, {p.name: p.read_bytes() for p in output.iterdir()}
+                )
+
+    def test_interrupt_after_fresh_publication_removes_every_new_artifact(self) -> None:
+        for interrupted_name in ("events.jsonl", "cases.jsonl", "corpus-manifest.json"):
+            with self.subTest(name=interrupted_name):
+                output = self.root / interrupted_name
+                real_replace = Path.replace
+
+                def interrupt_after_move(path, target):
+                    result = real_replace(path, target)
+                    if path.parent.name == "staged" and path.name == interrupted_name:
+                        raise KeyboardInterrupt("after completed publication move")
+                    return result
+
+                with mock.patch.object(Path, "replace", interrupt_after_move):
+                    with self.assertRaises(KeyboardInterrupt):
+                        write_corpus(output, *self._events_cases("new"))
+                self.assertEqual(list(output.iterdir()), [])
+
+    def test_backup_failure_before_move_keeps_unchanged_original(self) -> None:
+        output = self.root / "corpus"
+        write_corpus(output, *self._events_cases("old"))
+        before = {p.name: p.read_bytes() for p in output.iterdir()}
+        real_replace = Path.replace
+
+        def fail_before_move(path, target):
+            if path.parent == output and path.name == "cases.jsonl":
+                raise PermissionError("backup was not moved")
+            return real_replace(path, target)
+
+        with mock.patch.object(Path, "replace", fail_before_move):
+            with self.assertRaisesRegex(PermissionError, "backup was not moved"):
+                write_corpus(output, *self._events_cases("new"))
+        self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
+
+    def test_incomplete_restore_after_interrupted_move_retains_original(self) -> None:
+        output = self.root / "corpus"
+        write_corpus(output, *self._events_cases("old"))
+        before = {p.name: p.read_bytes() for p in output.iterdir()}
+        real_replace = Path.replace
+
+        def fail_restore(path, target):
+            if path.parent.name == "previous" and path.name == "events.jsonl":
+                raise PermissionError("recovery target unavailable")
+            result = real_replace(path, target)
+            if path.parent == output and path.name == "events.jsonl":
+                raise KeyboardInterrupt("after completed backup move")
+            return result
+
+        with mock.patch.object(Path, "replace", fail_restore):
+            try:
+                write_corpus(output, *self._events_cases("new"))
+            except BaseException as error:
+                self.assertIsInstance(error, OSError)
+                self.assertIn("rollback was incomplete", str(error))
+                self.assertIsInstance(error.__cause__, KeyboardInterrupt)
+            else:
+                self.fail("interrupted publication returned success")
+        recovery = list(output.glob(".corpus-output-*"))
+        self.assertEqual(len(recovery), 1)
+        self.assertEqual(
+            (recovery[0] / "previous" / "events.jsonl").read_bytes(),
+            before["events.jsonl"],
+        )
+        for name in ("cases.jsonl", "corpus-manifest.json"):
+            self.assertEqual((output / name).read_bytes(), before[name])
+
     def test_write_corpus_manifest_shas(self) -> None:
         output = self.root / "sha-corpus"
         events, cases = self._events_cases("sha")
