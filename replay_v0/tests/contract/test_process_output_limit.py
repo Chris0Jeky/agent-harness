@@ -109,6 +109,14 @@ class ProcessOutputLimitTests(unittest.TestCase):
         self.assertEqual("output-limit", outcome.outcome)
         self.assertEqual("indeterminate", effect_for(outcome.outcome, "allow"))
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX process groups only")
+    def test_zombie_group_permission_error_keeps_the_output_limit(self):
+        with mock.patch.object(
+            policy_sources.os, "killpg", side_effect=PermissionError(1, "EPERM")
+        ):
+            result = self.evaluate("import os; os.write(1, b'x' * 65536)")
+        self.assert_output_limit(result)
+
     def test_capture_uses_temporary_storage_only_for_stdin(self):
         with mock.patch.object(
             policy_sources.tempfile, "TemporaryFile", wraps=tempfile.TemporaryFile

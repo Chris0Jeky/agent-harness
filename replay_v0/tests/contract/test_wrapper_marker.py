@@ -33,7 +33,7 @@ class WrapperMarkerTests(unittest.TestCase):
                     fdopen=os.fdopen,
                     read=os.read,
                     close=os.close,
-                    set_blocking=os.set_blocking,
+                    set_blocking=getattr(os, "set_blocking", None),
                 ),
             ),
             mock.patch.object(

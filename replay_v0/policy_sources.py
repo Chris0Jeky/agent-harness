@@ -196,7 +196,9 @@ def _run_posix_policy_process(
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # macOS answers EPERM, not ESRCH, for a group whose only member is an
+            # unreaped zombie; the wait below reaps it and still proves the group gone.
             pass
         try:
             process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
