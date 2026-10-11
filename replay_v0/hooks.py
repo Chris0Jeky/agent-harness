@@ -29,7 +29,7 @@ from typing import Any, Sequence
 
 from replay_v0.corpus import POLICY_DECISION_VERSION
 from replay_v0.digests import sha256_bytes
-from replay_v0.policy_sources import _run_policy_process
+from replay_v0.policy_sources import ProcessOutputLimitError, _run_policy_process
 
 RUNTIMES = ("claude", "codex")
 ASK_EFFECTS = ("deny", "allow", "indeterminate")
@@ -43,6 +43,7 @@ OUTCOMES = (
     "crash",
     "invalid-output",
     "start-failed",
+    "output-limit",
 )
 # Environment names passed through to the hook. Everything else is dropped so a
 # recording does not depend on, or leak into, the caller's full environment.
@@ -254,14 +255,18 @@ def run_hook(
 
     started = time.monotonic()
     try:
-        # The replay kernel's runner: temporary-file streams, and the hook's
-        # whole process family is killed on timeout (Job Object / process group).
+        # The runner bounds capture and kills its Job Object / root process group.
         completed = _run_policy_process(
             list(spec.argv),
             json.dumps(payload).encode("utf-8"),
             timeout_seconds=spec.timeout,
             cwd=str(workspace),
             environment=_hook_env(workspace),
+        )
+    except ProcessOutputLimitError:
+        elapsed = int((time.monotonic() - started) * 1000)
+        return HookOutcome(
+            "output-limit", "output capture quota exceeded", None, elapsed
         )
     except subprocess.TimeoutExpired:
         elapsed = int((time.monotonic() - started) * 1000)

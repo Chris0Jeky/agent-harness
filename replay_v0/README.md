@@ -192,10 +192,10 @@ version, both policy-source identities, the corpus-manifest digest, and gate con
 startup captures every corpus file and both recorded-source files once, validates those captured
 bytes, and retains the same immutable bytes for parsing and evaluation. Replacing a validated path
 later therefore cannot change a result under the earlier manifest or policy identity. Process
-identity v10 includes the executable's lexical invocation basename, the resolved executable target's
+identity v11 includes the executable's lexical invocation basename, the resolved executable target's
 bytes and four-octal-digit permission mode, entry-policy bytes, the relative names, exact
 regular-file bytes, and permission modes for the policy-parent root and entries, configured
-timeout, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
+timeout, output-capture quota contract, fixed environment, fixed `0700` runner-owned directory modes on POSIX, and policy-parent
 working-directory contract. It also binds an opaque SHA-256 digest of the selected resolved
 snapshot parent without writing that absolute path to the run manifest. Process identities are
 therefore conservatively host/path-sensitive when policy-visible temporary roots differ. The digest
@@ -253,17 +253,22 @@ External installed dependencies, files outside the policy tree, network response
 metadata (including extended attributes outside Linux `user.*`) remain outside the identity; access/change/birth times and filesystem object identities
 are not normalized. Callers that depend on them must isolate and record that environment.
 
-Policy standard streams are backed by temporary files, so waiting for inherited pipe EOF cannot
-extend the configured timeout. On Windows an event-gated supervisor enters a
+Policy stdout/stderr use polled pipes with bounded retained prefixes, without waiting for
+inherited pipe EOF. Policy stdout allows 64 KiB plus 8 KiB and the ASCII JSON-escaped event-id
+size per input event, capped at 16 MiB; stderr allows 64 KiB. Hook recording uses a 1 MiB stdout
+quota and the same stderr quota. These are execution quotas, not schema maxima: excess whitespace
+or a large otherwise-valid corpus can exceed them. Overflow stops capture, invokes the existing
+process-family cleanup, and returns `process-output-limit` with every policy decision indeterminate
+(`output-limit` for a recorded hook). Final reads and diagnostics stay bounded; only stdin uses
+temporary storage. On Windows an event-gated supervisor enters a
 kill-on-close Job Object before it can launch the policy and contains the policy process family. On
 POSIX the policy root starts in a new session and root process group; timeout and normal root
 completion send `SIGKILL` only to that root process group with bounded cleanup, so descendants that
 remain in it cannot outlive replay. A descendant that calls `setpgid`/`setpgrp` to create another
 group in the same session, or `setsid` to create another session, leaves POSIX v0 containment and
-may continue from a deleted snapshot. Process output has no byte quota. An escaped POSIX descendant
-can retain its temporary-file stream handles and continue consuming disk after timeout and after
-replay returns; replay no longer observes or caps that output. Callers requiring stronger
-containment must isolate the process externally.
+may continue from a deleted snapshot. Capture closes its pipe readers when replay returns, so
+escaped writers cannot keep consuming replay-owned output storage. Their own filesystem/network
+effects remain unsandboxed. Callers requiring stronger containment must isolate the process externally.
 
 The three report artifacts are fully staged before publication. Replacing an existing report set
 uses rollback: a publication error restores the prior complete set instead of leaving a new

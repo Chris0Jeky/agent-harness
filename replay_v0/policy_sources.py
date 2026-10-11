@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 from replay_v0.corpus import (
@@ -31,6 +33,11 @@ RECORDED_MANIFEST_VERSION = "recorded-policy-manifest.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PROCESS_CLEANUP_GRACE_SECONDS = 1.0
+_PROCESS_STDOUT_LIMIT_BYTES = 16 * 1024 * 1024
+_PROCESS_STDERR_LIMIT_BYTES = 64 * 1024
+_PROCESS_STDOUT_BASE_BYTES = 64 * 1024
+_PROCESS_STDOUT_EVENT_BYTES = 8 * 1024
+_PROCESS_HOOK_STDOUT_LIMIT_BYTES = 1024 * 1024
 _RUNNER_DIRECTORY_MODE = 0o700
 SNAPSHOT_MTIME_NS = 946684800_000_000_000
 SNAPSHOT_XATTR_CONTRACT = (
@@ -78,10 +85,87 @@ os._exit(process.wait())
 """
 
 
-def _read_process_stream(stream) -> bytes:
-    stream.flush()
-    stream.seek(0)
-    return stream.read()
+class ProcessOutputLimitError(ValueError):
+    """The runner stopped capture at its execution quota."""
+
+    def __init__(self, stderr: bytes) -> None:
+        super().__init__("policy process output exceeded its capture quota")
+        self.stderr = stderr
+
+
+class _BoundedOutputPipe:
+    def __init__(self, stack: ExitStack, limit: int) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            self.reader = os.fdopen(read_fd, "rb", buffering=0)
+        except BaseException:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise
+        stack.enter_context(self.reader)
+        try:
+            self.writer = os.fdopen(write_fd, "wb", buffering=0)
+        except BaseException:
+            os.close(write_fd)
+            raise
+        stack.enter_context(self.writer)
+        self.limit = limit
+        self.data = bytearray()
+        self.exceeded = False
+        if sys.platform == "win32":
+            import ctypes
+            import msvcrt
+
+            self.kernel32 = _windows_kernel32()
+            self.handle = msvcrt.get_osfhandle(read_fd)
+            self.available = ctypes.c_uint32()
+        else:
+            os.set_blocking(read_fd, False)
+
+    def drain(self) -> bool:
+        """Read only available bytes, with a bounded turn for deadline checks."""
+        read_any = False
+        for _ in range(16):
+            size = 8192
+            if sys.platform == "win32":
+                import ctypes
+
+                if not self.kernel32.PeekNamedPipe(
+                    self.handle, None, 0, None, ctypes.byref(self.available), None
+                ):
+                    error = ctypes.get_last_error()
+                    if error == 109:  # All writers closed their pipe handles.
+                        break
+                    raise ctypes.WinError(error)
+                size = min(size, self.available.value)
+                if not size:
+                    break
+            try:
+                chunk = os.read(self.reader.fileno(), size)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            read_any = True
+            remaining = self.limit - len(self.data)
+            self.data.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                self.exceeded = True
+                break
+        return read_any
+
+
+def _wait_policy_process(process, timeout_seconds, output_pipes) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        for pipe in output_pipes:
+            pipe.drain()
+        if any(pipe.exceeded for pipe in output_pipes) or process.poll() is not None:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(0.02, remaining))
 
 
 def _run_posix_policy_process(
@@ -90,6 +174,7 @@ def _run_posix_policy_process(
     stdin_stream,
     stdout_stream,
     stderr_stream,
+    output_pipes,
     timeout_seconds: float,
     cwd: str | None,
     environment: Mapping[str, str] | None,
@@ -104,23 +189,23 @@ def _run_posix_policy_process(
         cwd=cwd,
         env=environment,
     )
-    timed_out = False
     try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        stdout_stream.close()
+        stderr_stream.close()
+        timed_out = _wait_policy_process(process, timeout_seconds, output_pipes)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         try:
             process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            raise OSError("policy process group did not terminate") from exc
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                raise OSError("policy process group did not terminate") from exc
     return process.returncode, timed_out
 
 
@@ -155,6 +240,15 @@ def _windows_kernel32():
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.PeekNamedPipe.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    kernel32.PeekNamedPipe.restype = wintypes.BOOL
     return kernel32
 
 
@@ -218,6 +312,7 @@ def _run_windows_policy_process(
     stdin_stream,
     stdout_stream,
     stderr_stream,
+    output_pipes,
     timeout_seconds: float,
     cwd: str | None,
     environment: Mapping[str, str] | None,
@@ -268,12 +363,11 @@ def _run_windows_policy_process(
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         assigned = True
+        stdout_stream.close()
+        stderr_stream.close()
         if not kernel32.SetEvent(event):
             raise ctypes.WinError(ctypes.get_last_error())
-        try:
-            process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        timed_out = _wait_policy_process(process, timeout_seconds, output_pipes)
         if not kernel32.TerminateJobObject(job, 1):
             raise ctypes.WinError(ctypes.get_last_error())
         wait_result = kernel32.WaitForSingleObject(
@@ -307,20 +401,29 @@ def _run_policy_process(
     timeout_seconds: float,
     cwd: str | None,
     environment: Mapping[str, str] | None,
+    stdout_limit_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    with (
-        tempfile.TemporaryFile() as stdin_stream,
-        tempfile.TemporaryFile() as stdout_stream,
-        tempfile.TemporaryFile() as stderr_stream,
-    ):
+    with ExitStack() as stack:
+        stdin_stream = stack.enter_context(tempfile.TemporaryFile())
+        stdout_pipe = _BoundedOutputPipe(
+            stack,
+            (
+                min(_PROCESS_STDOUT_LIMIT_BYTES, _PROCESS_HOOK_STDOUT_LIMIT_BYTES)
+                if stdout_limit_bytes is None
+                else stdout_limit_bytes
+            ),
+        )
+        stderr_pipe = _BoundedOutputPipe(stack, _PROCESS_STDERR_LIMIT_BYTES)
+        output_pipes = (stdout_pipe, stderr_pipe)
         stdin_stream.write(input_bytes)
         stdin_stream.seek(0)
         if os.name == "nt":
             returncode, timed_out = _run_windows_policy_process(
                 argv,
                 stdin_stream=stdin_stream,
-                stdout_stream=stdout_stream,
-                stderr_stream=stderr_stream,
+                stdout_stream=stdout_pipe.writer,
+                stderr_stream=stderr_pipe.writer,
+                output_pipes=output_pipes,
                 timeout_seconds=timeout_seconds,
                 cwd=cwd,
                 environment=environment,
@@ -329,19 +432,25 @@ def _run_policy_process(
             returncode, timed_out = _run_posix_policy_process(
                 argv,
                 stdin_stream=stdin_stream,
-                stdout_stream=stdout_stream,
-                stderr_stream=stderr_stream,
+                stdout_stream=stdout_pipe.writer,
+                stderr_stream=stderr_pipe.writer,
+                output_pipes=output_pipes,
                 timeout_seconds=timeout_seconds,
                 cwd=cwd,
                 environment=environment,
             )
+        # A completed root may leave queued bytes or escaped writers; never wait for EOF.
+        while not any(pipe.exceeded for pipe in output_pipes):
+            drained = [pipe.drain() for pipe in output_pipes]
+            if not any(drained):
+                break
+        stderr = bytes(stderr_pipe.data)
         if timed_out:
             # What the policy wrote before the deadline is its only diagnostic.
-            raise subprocess.TimeoutExpired(
-                list(argv), timeout_seconds, stderr=_read_process_stream(stderr_stream)
-            )
-        stdout = _read_process_stream(stdout_stream)
-        stderr = _read_process_stream(stderr_stream)
+            raise subprocess.TimeoutExpired(list(argv), timeout_seconds, stderr=stderr)
+        if any(pipe.exceeded for pipe in output_pipes):
+            raise ProcessOutputLimitError(stderr)
+        stdout = bytes(stdout_pipe.data)
         if (
             os.name == "nt"
             and returncode == 127
@@ -1210,6 +1319,26 @@ class ProcessDecisionSource:
                 timeout_seconds=self.timeout_seconds,
                 cwd=cwd,
                 environment=self.environment,
+                stdout_limit_bytes=min(
+                    _PROCESS_STDOUT_LIMIT_BYTES,
+                    _PROCESS_STDOUT_BASE_BYTES
+                    + sum(
+                        _PROCESS_STDOUT_EVENT_BYTES
+                        + len(json.dumps(event["event_id"]).encode("ascii"))
+                        for event in events
+                    ),
+                ),
+            )
+        except ProcessOutputLimitError as exc:
+            failure = SourceFailure(
+                "process-output-limit",
+                "Policy process exceeded its output capture quota.",
+            )
+            diagnostics = tuple(
+                exc.stderr.decode("utf-8", errors="replace").splitlines()
+            )
+            return _all_indeterminate(
+                events, failure, "Process", diagnostics=diagnostics
             )
         except subprocess.TimeoutExpired as exc:
             failure = SourceFailure(

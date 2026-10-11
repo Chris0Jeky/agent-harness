@@ -1527,7 +1527,7 @@ for index, event in enumerate(events):
     def test_process_identity_versions_xattr_normalization(self) -> None:
         import replay_v0.cli as cli
 
-        self.assertEqual("process-policy-identity.v10", cli.PROCESS_IDENTITY_VERSION)
+        self.assertEqual("process-policy-identity.v11", cli.PROCESS_IDENTITY_VERSION)
         with tempfile.TemporaryDirectory() as raw:
             policy = Path(raw) / "policy.py"
             policy.write_text(
@@ -1542,6 +1542,17 @@ for index, event in enumerate(events):
             ):
                 unsupported = _load_process_source(f"{sys.executable},{policy}", 5.0)
             self.assertNotEqual(normalized.identity, unsupported.identity)
+
+    def test_process_identity_includes_output_capture_quota(self) -> None:
+        import replay_v0.cli as cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            policy = Path(raw) / "policy.py"
+            policy.write_text(self.policy_script("same"), encoding="utf-8")
+            ordinary = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            with mock.patch.object(cli, "_PROCESS_STDERR_LIMIT_BYTES", 4096):
+                bounded = _load_process_source(f"{sys.executable},{policy}", 5.0)
+            self.assertNotEqual(ordinary.identity, bounded.identity)
 
     def test_process_snapshot_normalizes_policy_and_runner_mtimes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
