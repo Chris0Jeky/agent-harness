@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 import json
 from pathlib import Path
 import tempfile
@@ -144,32 +145,43 @@ class ProcessOutputLimitTests(unittest.TestCase):
         self.assertTrue(result.is_valid)
 
     def test_final_drain_has_a_time_budget_without_waiting_for_eof(self):
-        turns = 0
-
-        def continuously_available(_pipe):
-            nonlocal turns
-            turns += 1
-            return turns < 100
-
-        with (
-            mock.patch.object(
-                policy_sources, "_run_windows_policy_process", return_value=(0, False)
-            ),
-            mock.patch.object(
-                policy_sources, "_run_posix_policy_process", return_value=(0, False)
-            ),
-            mock.patch.object(
-                policy_sources._BoundedOutputPipe, "drain", continuously_available
-            ),
-            mock.patch.object(
-                policy_sources.time, "monotonic", side_effect=[0.0, 0.5, 1.0]
-            ),
+        for timed_out, error in (
+            (False, policy_sources.ProcessOutputLimitError),
+            (True, subprocess.TimeoutExpired),
         ):
-            with self.assertRaises(policy_sources.ProcessOutputLimitError):
-                policy_sources._run_policy_process(
-                    ["fictional-policy"],
-                    b"",
-                    timeout_seconds=2,
-                    cwd=None,
-                    environment=None,
-                )
+            with self.subTest(timed_out=timed_out):
+                turns = 0
+
+                def continuously_available(_pipe):
+                    nonlocal turns
+                    turns += 1
+                    return turns < 100
+
+                with (
+                    mock.patch.object(
+                        policy_sources,
+                        "_run_windows_policy_process",
+                        return_value=(0, timed_out),
+                    ),
+                    mock.patch.object(
+                        policy_sources,
+                        "_run_posix_policy_process",
+                        return_value=(0, timed_out),
+                    ),
+                    mock.patch.object(
+                        policy_sources._BoundedOutputPipe,
+                        "drain",
+                        continuously_available,
+                    ),
+                    mock.patch.object(
+                        policy_sources.time, "monotonic", side_effect=[0.0, 0.5, 1.0]
+                    ),
+                ):
+                    with self.assertRaises(error):
+                        policy_sources._run_policy_process(
+                            ["fictional-policy"],
+                            b"",
+                            timeout_seconds=2,
+                            cwd=None,
+                            environment=None,
+                        )
