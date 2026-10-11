@@ -711,7 +711,7 @@ def _evaluate_decision_lines(
     for line_number, line in enumerate(lines, start=1):
         try:
             raw_value = json.loads(line, object_pairs_hook=_unique_json_object)
-        except ValueError:
+        except (ValueError, RecursionError):
             # JSON syntax, duplicate keys, and decoder integer limits are
             # invalid source evidence, not uncaught runner exceptions.
             failures.append(
@@ -843,7 +843,7 @@ class RecordedDecisionSource:
                 manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
             )
             manifest = validate_recorded_manifest(manifest_value)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             failure = SourceFailure(
                 "recording-manifest-invalid",
                 f"Recorded manifest is invalid: {exc.__class__.__name__}.",
