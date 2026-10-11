@@ -440,10 +440,13 @@ def _run_policy_process(
                 environment=environment,
             )
         # A completed root may leave queued bytes or escaped writers; never wait for EOF.
+        drain_deadline = time.monotonic() + _PROCESS_CLEANUP_GRACE_SECONDS
         while not any(pipe.exceeded for pipe in output_pipes):
             drained = [pipe.drain() for pipe in output_pipes]
             if not any(drained):
                 break
+            if time.monotonic() >= drain_deadline:
+                raise ProcessOutputLimitError(bytes(stderr_pipe.data))
         stderr = bytes(stderr_pipe.data)
         if timed_out:
             # What the policy wrote before the deadline is its only diagnostic.

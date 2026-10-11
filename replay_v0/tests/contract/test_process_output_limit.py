@@ -142,3 +142,34 @@ class ProcessOutputLimitTests(unittest.TestCase):
                 ]
             ).evaluate(EVENTS)
         self.assertTrue(result.is_valid)
+
+    def test_final_drain_has_a_time_budget_without_waiting_for_eof(self):
+        turns = 0
+
+        def continuously_available(_pipe):
+            nonlocal turns
+            turns += 1
+            return turns < 100
+
+        with (
+            mock.patch.object(
+                policy_sources, "_run_windows_policy_process", return_value=(0, False)
+            ),
+            mock.patch.object(
+                policy_sources, "_run_posix_policy_process", return_value=(0, False)
+            ),
+            mock.patch.object(
+                policy_sources._BoundedOutputPipe, "drain", continuously_available
+            ),
+            mock.patch.object(
+                policy_sources.time, "monotonic", side_effect=[0.0, 0.5, 1.0]
+            ),
+        ):
+            with self.assertRaises(policy_sources.ProcessOutputLimitError):
+                policy_sources._run_policy_process(
+                    ["fictional-policy"],
+                    b"",
+                    timeout_seconds=2,
+                    cwd=None,
+                    environment=None,
+                )

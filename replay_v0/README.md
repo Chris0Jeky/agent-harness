@@ -259,7 +259,8 @@ size per input event, capped at 16 MiB; stderr allows 64 KiB. Hook recording use
 quota and the same stderr quota. These are execution quotas, not schema maxima: excess whitespace
 or a large otherwise-valid corpus can exceed them. Overflow stops capture, invokes the existing
 process-family cleanup, and returns `process-output-limit` with every policy decision indeterminate
-(`output-limit` for a recorded hook). Final reads and diagnostics stay bounded; only stdin uses
+(`output-limit` for a recorded hook). Continuously available output after root cleanup also fails
+at the one-second drain budget. Final reads and diagnostics stay bounded; only stdin uses
 temporary storage. On Windows an event-gated supervisor enters a
 kill-on-close Job Object before it can launch the policy and contains the policy process family. On
 POSIX the policy root starts in a new session and root process group; timeout and normal root
