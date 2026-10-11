@@ -355,7 +355,6 @@ class DispatchAsHookTests(unittest.TestCase):
         )
         self.assertAllowed(completed)
 
-
     def test_rule_evaluation_exception_fail_closes(self):
         """A rule-evaluation exception through main() fails closed, unscaled.
 
