@@ -5317,6 +5317,8 @@ def floor_posture_checks() -> list[tuple[str, object, object]]:
         "git push origin :refs/tags/v1",
         "git push --mirror origin",
         "git push origin $REF --mirror",
+        # 1.8.1 (#485): mirror classification precedes receive-pack refusal.
+        "git push --receive-pack=git-receive-pack \\\n--mirror origin",
     ):
         first = run_case(command, 3, dict(default))
         key = key_from_last_reason()

@@ -856,6 +856,30 @@ class HookRoundTripTests(unittest.TestCase):
             self.invoke(f"rm -rf {OUTSIDE}-two # FLOOR_ACK={key}")[0], "deny"
         )
 
+    def test_continued_mirror_with_receiver_round_trips_in_both_runtimes(self):
+        command = "git push --receive-pack=git-receive-pack \\\n--mirror origin"
+        for runtime in ("claude", "codex"):
+            with self.subTest(runtime=runtime):
+                self.declare(2)
+                decision, reason = self.invoke(command, runtime)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("[tag-guard]", reason)
+                key = self.key_in(reason)
+                self.assertIsNotNone(key, reason)
+                self.assertEqual(
+                    self.invoke(f"{command} # FLOOR_ACK={key}", runtime),
+                    ("allow", ""),
+                )
+                self.assertEqual(
+                    self.invoke(f"{command} # FLOOR_ACK=0000000000", runtime)[0],
+                    "deny",
+                )
+                self.declare(4)
+                decision, reason = self.invoke(f"{command} # FLOOR_ACK={key}", runtime)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("[tag-guard]", reason)
+                self.assertNotIn("DOUBLE-CHECK", reason)
+
     def test_walls_ignore_acknowledgements(self):
         self.declare(1)
         key = self.key_in(self.invoke(RM_OUTSIDE)[1])
