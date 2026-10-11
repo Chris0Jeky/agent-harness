@@ -41,6 +41,11 @@ from replay_v0.policy_sources import (
     RecordedDecisionSource,
     SNAPSHOT_MTIME_NS,
     SNAPSHOT_XATTR_CONTRACT,
+    _PROCESS_CLEANUP_GRACE_SECONDS,
+    _PROCESS_STDERR_LIMIT_BYTES,
+    _PROCESS_STDOUT_BASE_BYTES,
+    _PROCESS_STDOUT_EVENT_BYTES,
+    _PROCESS_STDOUT_LIMIT_BYTES,
     validate_recorded_manifest,
 )
 from replay_v0.reports import (
@@ -57,7 +62,7 @@ DIAGNOSTIC_LINES = 20
 DIAGNOSTIC_CHARS = 300
 
 DEFAULT_FAIL_ON = ("newly-allowed", "newly-indeterminate")
-PROCESS_IDENTITY_VERSION = "process-policy-identity.v10"
+PROCESS_IDENTITY_VERSION = "process-policy-identity.v11"
 PROCESS_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONHASHSEED": "0",
@@ -329,6 +334,15 @@ def _load_process_source(
         "runner_directory_permission_bits": "0700",
         "snapshot_mtime_ns": SNAPSHOT_MTIME_NS,
         "snapshot_xattrs": SNAPSHOT_XATTR_CONTRACT,
+        "output_capture": {
+            "version": "bounded-pipes-v1",
+            "stdout_ceiling_bytes": _PROCESS_STDOUT_LIMIT_BYTES,
+            "stdout_base_bytes": _PROCESS_STDOUT_BASE_BYTES,
+            "stdout_per_event_bytes": _PROCESS_STDOUT_EVENT_BYTES,
+            "event_id_allowance": "ascii-json-escaped-bytes",
+            "stderr_limit_bytes": _PROCESS_STDERR_LIMIT_BYTES,
+            "final_drain_seconds": _PROCESS_CLEANUP_GRACE_SECONDS,
+        },
         "snapshot_parent_sha256": sha256_bytes(os.fsencode(snapshot_parent)),
         "working_directory": "identity-bound-parent-and-derived-snapshot-policy-parent",
     }

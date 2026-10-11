@@ -60,9 +60,13 @@ while not trigger_path.is_file():
     if time.monotonic() >= deadline:
         raise SystemExit(2)
     time.sleep(0.01)
-sys.stdout.write("escaped-output-after-return\\n")
-sys.stdout.flush()
-ack_path.write_text("wrote-after-return", encoding="ascii")
+try:
+    sys.stdout.write("escaped-output-after-return\\n")
+    sys.stdout.flush()
+except BrokenPipeError:
+    ack_path.write_text("capture-closed", encoding="ascii")
+else:
+    ack_path.write_text("wrote-after-return", encoding="ascii")
 time.sleep(30)
 """
 
@@ -110,7 +114,7 @@ if mode in {"setpgrp-exit", "setpgrp-timeout"}:
     else:
         for row in rows:
             print(json.dumps(row, sort_keys=True, separators=(",", ":")))
-elif mode in {"descendant-exit", "descendant-timeout"}:
+elif mode in {"descendant-exit", "descendant-timeout", "descendant-output-limit"}:
     pid_path = Path(sys.argv[2])
     state_path = pid_path.with_suffix(".json")
     child = subprocess.Popen(
@@ -123,7 +127,11 @@ elif mode in {"descendant-exit", "descendant-timeout"}:
         if child.poll() is not None or time.monotonic() >= deadline:
             raise RuntimeError("group child did not publish its startup state")
         time.sleep(0.01)
-    if mode == "descendant-timeout":
+    if mode == "descendant-output-limit":
+        sys.stderr.write("x" * 65536)
+        sys.stderr.flush()
+        time.sleep(5)
+    elif mode == "descendant-timeout":
         time.sleep(5)
     else:
         for row in rows:

@@ -24,7 +24,18 @@ class WrapperMarkerTests(unittest.TestCase):
             return returncode, timed_out
 
         with (
-            mock.patch.object(policy_sources, "os", SimpleNamespace(name=platform)),
+            mock.patch.object(
+                policy_sources,
+                "os",
+                SimpleNamespace(
+                    name=platform,
+                    pipe=os.pipe,
+                    fdopen=os.fdopen,
+                    read=os.read,
+                    close=os.close,
+                    set_blocking=getattr(os, "set_blocking", None),
+                ),
+            ),
             mock.patch.object(
                 policy_sources, "_run_windows_policy_process", side_effect=finish
             ) as windows,

@@ -371,13 +371,11 @@ class ProcessSourceTests(unittest.TestCase):
                         or time.monotonic() >= deadline
                     ):
                         self.fail(
-                            "escaped descendant did not write through its retained "
-                            "stdout handle after replay returned"
+                            "escaped descendant did not observe closed capture "
+                            "after replay returned"
                         )
                     time.sleep(0.01)
-                self.assertEqual(
-                    "wrote-after-return", ack_path.read_text(encoding="ascii")
-                )
+                self.assertEqual("capture-closed", ack_path.read_text(encoding="ascii"))
                 return result, elapsed
             finally:
                 if child_pid is None:
