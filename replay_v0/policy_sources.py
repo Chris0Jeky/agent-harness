@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -33,6 +33,9 @@ _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PROCESS_CLEANUP_GRACE_SECONDS = 1.0
 _RUNNER_DIRECTORY_MODE = 0o700
 SNAPSHOT_MTIME_NS = 946684800_000_000_000
+SNAPSHOT_XATTR_CONTRACT = (
+    "linux-user-strip-v1" if sys.platform == "linux" else "not-normalized-v1"
+)
 _WINDOWS_EXEC_FAILURE_PREFIX = b"replay-wrapper-exec-failed:"
 _WINDOWS_POLICY_WRAPPER = r"""
 import ctypes
@@ -474,6 +477,51 @@ def _normalize_snapshot_mtimes(root: Path) -> None:
     )
 
 
+def _snapshot_user_xattrs(root: Path) -> Iterator[tuple[Path, list[str]]]:
+    """Inspect names only, never values, in the bounded Linux user namespace."""
+    if SNAPSHOT_XATTR_CONTRACT != "linux-user-strip-v1":
+        return
+    if not all(hasattr(os, name) for name in ("listxattr", "removexattr")):
+        raise OSError("Linux snapshot xattr operations are unavailable")
+
+    def entries() -> Iterator[Path]:
+        yield root
+        for directory, directories, files in os.walk(root, onerror=_raise_walk_error):
+            for name in (*directories, *files):
+                yield Path(directory) / name
+
+    for path in entries():
+        mode = path.lstat().st_mode
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise OSError("snapshot metadata inspection requires ordinary entries")
+        yield path, [
+            name
+            for name in os.listxattr(path, follow_symlinks=False)
+            if name.startswith("user.")
+        ]
+
+
+def _normalize_snapshot_user_xattrs(root: Path) -> None:
+    """Strip copied Linux user attributes, preserving source-bound modes."""
+    for path, names in _snapshot_user_xattrs(root):
+        if not names:
+            continue
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        writable = mode | stat.S_IWUSR
+        if writable != mode:
+            os.chmod(path, writable, follow_symlinks=False)
+        try:
+            for name in names:
+                os.removexattr(path, name, follow_symlinks=False)
+        finally:
+            if writable != mode:
+                os.chmod(path, mode, follow_symlinks=False)
+
+
+def _snapshot_user_xattrs_are_normalized(root: Path) -> bool:
+    return all(not names for _path, names in _snapshot_user_xattrs(root))
+
+
 def _snapshot_mtimes_are_normalized(root: Path) -> bool:
     """Return whether the root and every copied entry retain the fixed mtime."""
 
@@ -511,6 +559,7 @@ class _ProcessInputSnapshot:
             actual_policy = sha256_file(policy)
             actual_tree = sha256_tree(policy_tree)
             mtimes_are_normalized = _snapshot_mtimes_are_normalized(self.root)
+            xattrs_are_normalized = _snapshot_user_xattrs_are_normalized(self.root)
         except OSError:
             return SourceFailure(
                 "process-snapshot-changed",
@@ -522,6 +571,7 @@ class _ProcessInputSnapshot:
             or actual_policy != self.policy_sha256
             or actual_tree != self.policy_tree_sha256
             or not mtimes_are_normalized
+            or not xattrs_are_normalized
         ):
             return SourceFailure(
                 "process-snapshot-changed",
@@ -1087,6 +1137,7 @@ class ProcessDecisionSource:
                 snapshot_root=snapshot_root,
             )
         try:
+            _normalize_snapshot_user_xattrs(snapshot_root)
             _normalize_snapshot_mtimes(snapshot_root)
         except (OSError, NotImplementedError):
             return self._snapshot_failure(
