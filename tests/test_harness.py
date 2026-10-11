@@ -460,7 +460,11 @@ class HarnessTests(unittest.TestCase):
         path.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        # Sync homes refuse any aliased ancestor (#273, #526), so the temp root must
+        # be the physical path: macOS /var -> /private/var, Windows 8.3 short names.
+        self.temp = tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
