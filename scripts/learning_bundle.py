@@ -355,9 +355,7 @@ def _write_metadata(root, documents, expected):
             except (OSError, BundleError):
                 retained.append(temporary_relative)
         if retained:
-            raise BundleError(
-                f"metadata staging cleanup refused; retained: {retained}"
-            )
+            raise BundleError(f"metadata staging cleanup refused; retained: {retained}")
 
 
 def build_manifest(root, *, bump=False, version=None):
