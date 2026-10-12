@@ -126,28 +126,57 @@ def events_from_experiences(records):
 
 
 def stream_errors(events):
-    """Why a stream is not whole: duplicate ids, or a run whose versions skip.
+    """Diagnose malformed records, incomplete runs and impossible chronology.
 
-    Each event is checked alone by validate_record; this checks them together.
-    A run's newest versions dropped from the end leave no gap, so a reader that
-    must not miss a revert re-projects from the experiences instead.
+    This is a complete-history check, not authenticity or tail-completeness
+    proof. A missing newest version leaves no gap; callers must obtain the
+    whole stream from their trusted source rather than infer it from a cursor.
     """
-    errors, seen, versions = [], set(), {}
-    for event in events:
-        if event["id"] in seen:
-            errors.append(f"{event['id']}: appears twice")
-        seen.add(event["id"])
-        versions.setdefault(_run_id(event), []).append(event["version"])
-    for run, found in sorted(versions.items()):
-        if sorted(found) != list(range(1, len(found) + 1)):
-            errors.append(f"{run}: versions {sorted(found)} are not 1..{len(found)}")
+    errors, seen, runs = [], set(), {}
+    for index, event in enumerate(events):
+        problems = contracts.validate_record(event)
+        if problems:
+            errors.extend(f"event {index}: {problem}" for problem in problems)
+            continue
+        if event["schema"] != "outcome-event/v1":
+            errors.append(f"event {index}: expected outcome-event/v1")
+            continue
+        ident = event["id"]
+        if ident in seen:
+            errors.append(f"{ident}: appears twice")
+        seen.add(ident)
+        outcome = event["outcome"]
+        if outcome["matured"] is not None and outcome["immediate"] != "merged":
+            errors.append(f"{ident}: only a merged run matures")
+        runs.setdefault(_run_id(event), []).append(event)
+    for run, records in sorted(runs.items()):
+        ordered = sorted(records, key=lambda event: event["version"])
+        versions = [event["version"] for event in ordered]
+        if versions != list(range(1, len(versions) + 1)):
+            errors.append(f"{run}: versions {versions} are not 1..{len(versions)}")
+        for previous, current in zip(ordered, ordered[1:]):
+            if contracts.parse_time(current["observed_at"]) < contracts.parse_time(
+                previous["observed_at"]
+            ):
+                errors.append(
+                    f"{current['id']}: observed_at moves backward across versions"
+                )
     return errors
 
 
+def _checked_events(events):
+    """Materialize a complete stream once; never reduce partially valid evidence."""
+    records = list(events)
+    problems = stream_errors(records)
+    if problems:
+        raise ValueError(f"broken outcome stream: {problems[0]}")
+    return records
+
+
 def latest(events):
-    """Newest version per run, keyed by run.kind|run.key."""
+    """Newest version per run from a validated complete stream, keyed by run."""
     by_run = {}
-    for event in events:
+    for event in _checked_events(events):
         run = _run_id(event)
         if run not in by_run or event["version"] > by_run[run]["version"]:
             by_run[run] = event
@@ -155,16 +184,20 @@ def latest(events):
 
 
 def read_since(events, cursor):
-    """Read strictly after a durable (observed_at, id) cursor; empty reads retain it."""
+    """Read after a cursor in a validated complete stream; retain empty cursors."""
+    if not isinstance(cursor, dict) or set(cursor) != {"observed_at", "id"}:
+        raise ValueError("cursor must contain exactly observed_at and id")
     timestamp, ident = cursor["observed_at"], cursor["id"]
     if (timestamp is None) != (ident is None):
         raise ValueError("cursor observed_at and id must both be null or both set")
     instant = contracts.parse_time(timestamp) if timestamp is not None else None
-    if timestamp is not None and (instant is None or not isinstance(ident, str)):
+    if timestamp is not None and (
+        instant is None or not isinstance(ident, str) or not ident
+    ):
         raise ValueError("invalid outcome cursor")
     result = [
         event
-        for event in sorted(events, key=_event_order)
+        for event in sorted(_checked_events(events), key=_event_order)
         if instant is None or _event_order(event) > (instant, ident)
     ]
     new_cursor = (
@@ -235,13 +268,6 @@ def main(argv=None):
                 sys.stdout.write(output)
         else:
             events = contracts.read_records(args.events)
-            for event in events:
-                problems = contracts.validate_record(event)
-                if problems or event["schema"] != "outcome-event/v1":
-                    raise ValueError(f"invalid outcome event: {problems}")
-            broken = stream_errors(events)
-            if broken:
-                raise ValueError(f"broken outcome stream: {broken[0]}")
             alpha, beta = posterior(events, args.repo, args.recipe)
             print(json.dumps({"alpha": alpha, "beta": beta}, sort_keys=True))
     except (contracts.ContractError, OSError, ValueError) as exc:
