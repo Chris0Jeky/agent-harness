@@ -1,5 +1,7 @@
 # agent-harness
 
+<p align="center"><img src="docs/assets/hero.svg" alt="agent-harness" width="100%"></p>
+
 The tier model, shared deny floor, and audit tools for the Codex and Claude repositories in this estate: what a repo is allowed to lose, what an argv line can prove, and whether the hook that claims to enforce it is actually wired.
 
 [![CI](https://github.com/Chris0Jeky/agent-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Chris0Jeky/agent-harness/actions/workflows/ci.yml)
@@ -28,6 +30,8 @@ This checkout is tier 3 (`workshop`), push free, merge free, with `"floor_wiring
 - **Internal evidence tools.** [`scripts/outcome_ledger.py`](scripts/outcome_ledger.py), [`scripts/merge_gate_model.py`](scripts/merge_gate_model.py), the `scripts/learning_*.py` gates, and [`ux_evaluation/`](ux_evaluation/__init__.py) produce local reports. They do not merge, deploy, or promote a floor.
 
 ## Architecture
+
+<p align="center"><img src="docs/assets/architecture.svg" alt="agent-harness architecture" width="100%"></p>
 
 ```mermaid
 flowchart TB
@@ -225,15 +229,4 @@ Near-term source work that those files still name, and that the code has not clo
 | File | What it is |
 |---|---|
 | [`BLUEPRINT.md`](BLUEPRINT.md) | Tier ladder T0–T4, principles P1–P12, regions, Gardener, model routing |
-| [`SPECS.md`](SPECS.md) | `tier.json` schema, budgets, hook wiring, deny-floor matrix |
-| [`BOOK.md`](BOOK.md) | Why the laws exist. Not required to operate the tools |
-| [`MIGRATION_PROMPT.md`](MIGRATION_PROMPT.md) | Paste-ready prompt for re-working another repo's harness |
-| [`AGENTS.md`](AGENTS.md) | Change rules for agents working in this checkout |
-| [`replay_v0/README.md`](replay_v0/README.md) | Replay commands, importer scrub limits, corpus privacy |
-| [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | Curl-derived option-arity fixture |
-
-## License
-
-The owner-authored contents of this repository are licensed under GNU General Public License version 3 only (`GPL-3.0-only`). See [`LICENSE`](LICENSE) and [`LICENSING.md`](LICENSING.md). The curl-derived option-arity fixture retains curl's own licence; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-This repository-level decision does not decide the licences of the possible future clean-repository plugin or replay products described in the blueprints.
+| [`SPECS.md`](SPECS.md) | `tier.json` schema, budgets, hook wiring, deny-floo[+955 bytes at .content[1].resource.text]
