@@ -10,8 +10,11 @@ import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -63,6 +66,180 @@ def labels(variant, verdicts, evaluator=JUDGE):
         "evaluator": evaluator,
         "labels": verdicts,
     }
+
+
+class EvaluationEvidenceSafetyTests(unittest.TestCase):
+    def test_candidate_retrieval_failures_stay_in_the_denominator(self):
+        expected = run()["results"]["retrieval"]["n"]
+        for output in (None, {"error": "synthetic failure"}, {"text": "no items"}):
+            with self.subTest(output=output):
+                inputs = load()
+                case = next(
+                    c
+                    for c in inputs["cases"]
+                    if c["oracle"]["kind"] == "ranked_recall"
+                )
+                outputs = inputs["candidate_outputs"]["outputs"]
+                if output is None:
+                    outputs.pop(case["id"])
+                else:
+                    outputs[case["id"]] = output
+                retrieval = run(inputs)["results"]["retrieval"]
+                self.assertEqual(retrieval["n"], expected)
+                self.assertAlmostEqual(
+                    retrieval["candidate"]["mrr"], (expected - 1) / expected
+                )
+                self.assertAlmostEqual(
+                    retrieval["candidate"]["recall_at_k"], (expected - 1) / expected
+                )
+
+    def test_all_failed_retrievals_still_report_both_arms(self):
+        inputs = load()
+        expected = run()["results"]["retrieval"]["n"]
+        for case in inputs["cases"]:
+            if case["oracle"]["kind"] == "ranked_recall":
+                for variant in ("baseline", "candidate_outputs"):
+                    inputs[variant]["outputs"].pop(case["id"], None)
+        retrieval = run(inputs)["results"]["retrieval"]
+        self.assertIsNotNone(retrieval)
+        self.assertEqual(retrieval["n"], expected)
+        for variant in ("baseline", "candidate"):
+            self.assertEqual(retrieval[variant], {"recall_at_k": 0.0, "mrr": 0.0})
+
+    def test_retrieval_gate_cannot_hide_rank_or_recall_regressions(self):
+        for rank_only in (False, True):
+            with self.subTest(rank_only=rank_only):
+                inputs = load()
+                for case in inputs["cases"]:
+                    if case["oracle"]["kind"] == "ranked_recall":
+                        items = case["oracle"]["expected_items"]
+                        inputs["baseline"]["outputs"][case["id"]] = {"items": items}
+                        inputs["candidate_outputs"]["outputs"][case["id"]] = {
+                            "items": ["irrelevant", *items] if rank_only else []
+                        }
+                # Other case wins are still statistically sufficient, but cannot
+                # license a regression in the gate's named retrieval metrics.
+                self.assertEqual(run(inputs, gate="offline_eval")["verdict"], "pass")
+                report = run(inputs)
+                self.assertEqual(report["verdict"], "fail")
+                self.assertEqual(report["gate"]["result"], "fail")
+                self.assertIn("retrieval", report["gate"]["summary"])
+                self.assertEqual(lc.validate_record(report), [])
+
+    def test_different_oracles_cannot_turn_one_input_into_independent_wins(self):
+        inputs = load()
+        base = next(c for c in inputs["cases"] if c["id"] == "case_static-tie")
+        inputs["cases"] = [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_tie-{n:06d}",
+                input_ref=f"synthetic:independent/{n}",
+            )
+            for n in range(19)
+        ] + [
+            dict(
+                copy.deepcopy(base),
+                id=f"case_win-{n:06d}",
+                input_ref="synthetic:one-dependent-input",
+                oracle={"kind": "contains_all", "needles": [f"needle-{n}"]},
+            )
+            for n in range(5)
+        ]
+        for variant in ("baseline", "candidate_outputs"):
+            inputs[variant]["outputs"] = {
+                case["id"]: {"text": "main"} for case in inputs["cases"]
+            }
+        for case in inputs["cases"][19:]:
+            inputs["candidate_outputs"]["outputs"][case["id"]] = {
+                "text": "needle-0 needle-1 needle-2 needle-3 needle-4"
+            }
+        with self.assertRaisesRegex(ev.EvalRefusal, "dependent.*input|input.*oracle"):
+            run(inputs)
+
+    def test_evaluator_revision_changes_derived_report_identity(self):
+        first = run()
+        with mock.patch.object(ev, "TOOL", "synthetic-evaluator:next-revision"):
+            second = run()
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["holdout_digest"], second["holdout_digest"])
+
+    def test_catastrophic_regex_is_bounded_by_an_outer_watchdog(self):
+        # The old code blocks in re.search. The test's own watchdog prevents that
+        # regression from wedging the suite; the repaired worker refuses sooner.
+        program = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('learning_eval', sys.argv[1])
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+try:
+    ev.grade({'id': 'case_bounded', 'oracle': {'kind': 'regex', 'pattern': '(a+)+$'}},
+             {'text': 'a' * 40 + '!'})
+except ev.EvalRefusal as exc:
+    print(str(exc))
+else:
+    raise SystemExit('regex did not refuse')
+"""
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    program,
+                    str(ROOT / "scripts/learning_eval.py"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("regex evaluation exceeded the independent 10-second watchdog")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("regex", result.stdout)
+        self.assertIn("timeout", result.stdout)
+
+    def test_regex_runner_failure_cannot_be_a_passing_grade(self):
+        with mock.patch(
+            "subprocess.run", side_effect=OSError("synthetic launch failure")
+        ):
+            with self.assertRaisesRegex(ev.EvalRefusal, "regex"):
+                ev.grade(
+                    {"id": "case_launch", "oracle": {"kind": "regex", "pattern": "x"}},
+                    {"text": "x"},
+                )
+
+    def test_regex_worker_protocol_failures_refuse_instead_of_grading(self):
+        for code, output in (
+            (1, '{"matched": true}'),
+            (0, "not json"),
+            (0, "[]"),
+            (0, '{"matched": 1}'),
+            (0, '{"matched": true, "extra": 1}'),
+            (0, '{"error": "synthetic worker failure"}'),
+        ):
+            completed = subprocess.CompletedProcess([], code, stdout=output)
+            with (
+                self.subTest(code=code, output=output),
+                mock.patch("subprocess.run", return_value=completed),
+            ):
+                with self.assertRaises(ev.EvalRefusal):
+                    ev.grade(
+                        {
+                            "id": "case_protocol",
+                            "oracle": {"kind": "regex", "pattern": "x"},
+                        },
+                        {"text": "x"},
+                    )
+
+    def test_regex_worker_preserves_false_grades(self):
+        passed, detail = ev.grade(
+            {"id": "case_no_match", "oracle": {"kind": "regex", "pattern": "^x$"}},
+            {"text": "y"},
+        )
+        self.assertFalse(passed)
+        self.assertEqual(detail, {})
 
 
 class SuiteTests(unittest.TestCase):

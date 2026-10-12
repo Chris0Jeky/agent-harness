@@ -33,7 +33,7 @@ import importlib.util
 import json
 import math
 from pathlib import Path
-import re
+import subprocess
 import sys
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -43,8 +43,19 @@ contracts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(contracts)
 
 RUN_SCHEMA = "eval-run/v1"
-TOOL = "agent-harness:scripts/learning_eval.py@1"
+TOOL = "agent-harness:scripts/learning_eval.py@2"
 GATES = ("offline_eval", "replay", "retrieval_regression")
+REGEX_TIMEOUT_SECONDS = 2.0
+_REGEX_WORKER = """
+import json, re, sys
+try:
+    pattern, text = json.load(sys.stdin)
+    compiled = re.compile(pattern)
+    result = {"matched": text is None or compiled.search(text) is not None}
+except Exception as exc:
+    result = {"error": type(exc).__name__ + ": " + str(exc)[:240]}
+print(json.dumps(result))
+"""
 
 
 def default_policy(gate):
@@ -55,6 +66,39 @@ def default_policy(gate):
 
 class EvalRefusal(Exception):
     """The run cannot be judged honestly (exit 2); no report is written."""
+
+
+def _bounded_regex(pattern, text=None):
+    """Compile/search outside this process; a deadline kills and reaps the worker."""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", _REGEX_WORKER],
+            input=json.dumps([pattern, text]),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=REGEX_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EvalRefusal(f"regex timeout after {REGEX_TIMEOUT_SECONDS:g}s") from exc
+    except OSError as exc:
+        raise EvalRefusal(f"regex worker unavailable: {exc}") from exc
+    if completed.returncode != 0:
+        raise EvalRefusal("regex worker failed; no grade is available")
+    try:
+        result = json.loads(completed.stdout)
+    except (ValueError, TypeError) as exc:
+        raise EvalRefusal("invalid regex worker response") from exc
+    if isinstance(result, dict) and isinstance(result.get("error"), str):
+        raise EvalRefusal(f"invalid pattern or regex resource failure: {result['error']}")
+    if (
+        not isinstance(result, dict)
+        or set(result) != {"matched"}
+        or type(result["matched"]) is not bool
+    ):
+        raise EvalRefusal("invalid regex worker response")
+    return result["matched"]
 
 
 # -- inputs -----------------------------------------------------------------
@@ -124,8 +168,9 @@ def select(
 ):
     """Cases the candidate may be judged on, and why the others were dropped.
 
-    One case per distinct input (input_ref, oracle): clones are one piece of
-    evidence, so every count the gate reports is over distinct inputs. With a
+    One case per distinct input_ref: identical-oracle clones count once;
+    conflicting oracles on one input refuse rather than inflate independent
+    evidence or silently choose the most convenient grading rule. With a
     beacon drawn at drawn_at, only cases anchored to an experience that existed
     by then are admitted; an unanchored case's key, or one created after the
     draw, could have been ground against the published beacon.
@@ -139,7 +184,7 @@ def select(
         "after_draw": 0,
         "clones": 0,
     }
-    seen, inputs, chosen = set(), set(), []
+    seen, inputs, chosen, checked_patterns = set(), {}, [], set()
     for case in sorted(cases, key=lambda c: c["id"]):
         if case["id"] in seen:
             raise EvalRefusal(f"duplicate case id {case['id']}")
@@ -150,10 +195,10 @@ def select(
                 f"{case['id']}: its experience is not in the ledger, so its split cannot be proven"
             )
         if case["oracle"]["kind"] == "regex":
-            try:
-                re.compile(case["oracle"]["pattern"])
-            except re.error as exc:
-                raise EvalRefusal(f"{case['id']}: invalid pattern ({exc})") from exc
+            pattern = case["oracle"]["pattern"]
+            if pattern not in checked_patterns:
+                _bounded_regex(pattern)
+                checked_patterns.add(pattern)
         if anchor is not None and effective_split_key(anchor) != case["split_key"]:
             raise EvalRefusal(
                 f"{case['id']}: split_key differs from its experience's; a case cannot move across the split"
@@ -168,12 +213,15 @@ def select(
             anchor is None or contracts.parse_time(anchor["at"]) > drawn_at
         ):
             counts["after_draw"] += 1
-        elif (
-            key := (case["input_ref"], json.dumps(case["oracle"], sort_keys=True))
-        ) in inputs:
+        elif case["input_ref"] in inputs:
+            if inputs[case["input_ref"]] != json.dumps(case["oracle"], sort_keys=True):
+                raise EvalRefusal(
+                    f"{case['id']}: dependent input has conflicting oracles: "
+                    f"{case['input_ref']}"
+                )
             counts["clones"] += 1
         else:
-            inputs.add(key)
+            inputs[case["input_ref"]] = json.dumps(case["oracle"], sort_keys=True)
             counts["unanchored"] += anchor is None
             chosen.append(case)
     counts["evaluated"] = len(chosen)
@@ -211,7 +259,7 @@ def grade(case, output):
     if kind == "contains_none":
         return not any(_fold_text(n) in text for n in oracle["needles"]), {}
     if kind == "regex":
-        return re.search(oracle["pattern"], output.get("text") or "") is not None, {}
+        return _bounded_regex(oracle["pattern"], output.get("text") or ""), {}
     if kind == "abstain":
         return bool(output.get("abstained")) == oracle["expected_abstain"], {}
     if kind == "procedure":
@@ -296,8 +344,10 @@ def _breakdown(rows, key):
     return dict(sorted(groups.items()))
 
 
-def _retrieval(rows):
-    ranked = [r for r in rows if "recall_at_k" in r["detail"]["candidate"]]
+def _retrieval(rows, cases):
+    # Membership comes from the sealed cases, never a variant's success/failure.
+    ranked_ids = {c["id"] for c in cases if c["oracle"]["kind"] == "ranked_recall"}
+    ranked = [r for r in rows if r["case"] in ranked_ids]
     if not ranked:
         return None
     result = {"n": len(ranked)}
@@ -470,11 +520,21 @@ def evaluate(
     base_rate = _rate(sum(r["baseline"] for r in rows), len(rows))
     cand_rate = _rate(sum(r["candidate"] for r in rows), len(rows))
     delta = cand_rate - base_rate if rows else None
+    retrieval = _retrieval(rows, chosen)
+    retrieval_regressed = (
+        gate == "retrieval_regression"
+        and retrieval is not None
+        and any(
+            retrieval["candidate"][metric] < retrieval["baseline"][metric]
+            for metric in ("recall_at_k", "mrr")
+        )
+    )
     if counts["distinct_inputs"] < policy["min_cases"]:
         verdict = "insufficient"
     elif (
         delta >= policy["min_delta"]
         and contracts.sign_p(wins, losses) < policy["max_sign_p"]
+        and not retrieval_regressed
     ):
         verdict = "pass"
     else:
@@ -486,6 +546,7 @@ def evaluate(
         "run_"
         + _digest(
             [
+                TOOL,
                 candidate["id"],
                 genome["id"] if genome else "",
                 baseline["variant_ref"],
@@ -547,7 +608,7 @@ def evaluate(
             "sign_test_p": sign_test(wins, losses),
             "by_category": _breakdown(rows, "category"),
             "by_layer": _breakdown(rows, "layer"),
-            "retrieval": _retrieval(rows),
+            "retrieval": retrieval,
             "procedural": _procedural(rows, chosen, baseline, candidate_outputs),
             "cost": {
                 "baseline": _cost(baseline["outputs"], chosen),
@@ -565,7 +626,8 @@ def evaluate(
             "at": at,
             "ref": f"eval-run:{run_id}",
             "summary": (
-                f"{len(rows)} hold-out cases: candidate {cand_rate:.3f} vs baseline "
+                ("retrieval metrics regressed; " if retrieval_regressed else "")
+                + f"{len(rows)} hold-out cases: candidate {cand_rate:.3f} vs baseline "
                 f"{base_rate:.3f}, {wins} wins, {losses} losses (policy: min_delta "
                 f"{policy['min_delta']}, max_sign_p {policy['max_sign_p']})"
             )[:280],
