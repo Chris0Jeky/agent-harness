@@ -166,7 +166,14 @@ def training_set(candidate, genome, experiences, ran=None):
 
 
 def select(
-    cases, split, training_ids, training_keys, experiences, salt=None, drawn_at=None
+    cases,
+    split,
+    training_ids,
+    training_keys,
+    experiences,
+    salt=None,
+    drawn_at=None,
+    evidence=None,
 ):
     """Cases the candidate may be judged on, and why the others were dropped.
 
@@ -175,7 +182,8 @@ def select(
     evidence or silently choose the most convenient grading rule. With a
     beacon drawn at drawn_at, only cases anchored to an experience that existed
     by then are admitted; an unanchored case's key, or one created after the
-    draw, could have been ground against the published beacon.
+    draw, could have been ground against the published beacon. When evaluation
+    evidence is supplied, clones must also agree on both outputs and judge labels.
     """
     counts = {
         "total": len(cases),
@@ -187,6 +195,7 @@ def select(
         "clones": 0,
     }
     seen, inputs, chosen, checked_patterns = set(), {}, [], set()
+    outcomes = {}
     for case in sorted(cases, key=lambda c: c["id"]):
         if case["id"] in seen:
             raise EvalRefusal(f"duplicate case id {case['id']}")
@@ -221,9 +230,20 @@ def select(
                     f"{case['id']}: dependent input has conflicting oracles: "
                     f"{case['input_ref']}"
                 )
+            if evidence is not None and outcomes[case["input_ref"]] != json.dumps(
+                evidence[case["id"]], sort_keys=True
+            ):
+                raise EvalRefusal(
+                    f"{case['id']}: dependent input has conflicting evidence: "
+                    f"{case['input_ref']}"
+                )
             counts["clones"] += 1
         else:
             inputs[case["input_ref"]] = json.dumps(case["oracle"], sort_keys=True)
+            if evidence is not None:
+                outcomes[case["input_ref"]] = json.dumps(
+                    evidence[case["id"]], sort_keys=True
+                )
             counts["unanchored"] += anchor is None
             chosen.append(case)
     counts["evaluated"] = len(chosen)
@@ -472,6 +492,20 @@ def evaluate(
     training_ids, training_keys = training_set(
         candidate, genome, experiences, candidate_outputs["variant_ref"]
     )
+    label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
+    # A clone is duplicate evidence, not permission to pick its best trial.
+    evidence = {
+        case["id"]: {
+            "baseline": baseline["outputs"].get(case["id"]),
+            "candidate": candidate_outputs["outputs"].get(case["id"]),
+            "labels": {
+                variant: label_file["labels"].get(case["id"])
+                for variant, label_file in label_files.items()
+                if label_file is not None and case["oracle"]["kind"] == "judge"
+            },
+        }
+        for case in cases
+    }
     chosen, counts = select(
         cases,
         split,
@@ -480,8 +514,8 @@ def evaluate(
         experiences,
         salt,
         contracts.parse_time(salt_draw["at"]) if salt_draw else None,
+        evidence=evidence,
     )
-    label_files = {v: _labels_for(labels, v, suite) for v in ("baseline", "candidate")}
     graders = set()
     rows = []
     for case in chosen:
@@ -531,7 +565,9 @@ def evaluate(
             for metric in ("recall_at_k", "mrr")
         )
     )
-    if counts["distinct_inputs"] < policy["min_cases"]:
+    if counts["distinct_inputs"] < policy["min_cases"] or (
+        gate == "retrieval_regression" and retrieval is None
+    ):
         verdict = "insufficient"
     elif (
         delta >= policy["min_delta"]
@@ -544,30 +580,28 @@ def evaluate(
     at = at or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     evaluated = [r["case"] for r in rows]
     holdout_digest = _digest(evaluated)
-    run_id = (
-        "run_"
-        + _digest(
-            [
-                TOOL,
-                candidate["id"],
-                genome["id"] if genome else "",
-                baseline["variant_ref"],
-                candidate_outputs["variant_ref"],
-                split,
-                salt or "",
-                gate,
-                holdout_digest,
-                json.dumps(policy, sort_keys=True),
-                _digest(
-                    [
-                        json.dumps(o["outputs"], sort_keys=True)
-                        for o in (baseline, candidate_outputs)
-                    ]
-                ),
-                _digest(sorted(json.dumps(lab, sort_keys=True) for lab in labels)),
-            ]
-        )[:16]
-    )
+    # Preserve holdout_digest's case-ID meaning. The report identity separately
+    # binds selected contracts and role-labelled inputs, never an unordered bag
+    # of baseline/candidate outputs that collides when the arms are exchanged.
+    identity = {
+        "tool": TOOL,
+        "candidate": candidate["id"],
+        "genome": genome["id"] if genome else None,
+        "baseline_ref": baseline["variant_ref"],
+        "candidate_ref": candidate_outputs["variant_ref"],
+        "split": split,
+        "salt": salt,
+        "gate": gate,
+        "holdout_digest": holdout_digest,
+        "selected_cases": chosen,
+        "policy": policy,
+        "outputs": {
+            "baseline": baseline["outputs"],
+            "candidate": candidate_outputs["outputs"],
+        },
+        "labels": sorted(json.dumps(lab, sort_keys=True) for lab in labels),
+    }
+    run_id = "run_" + _digest([json.dumps(identity, sort_keys=True)])[:16]
     evaluator = _run_evaluator(graders, run_id)
     anchors = sorted({c["experience"] for c in chosen if c["experience"]})
     report = {
