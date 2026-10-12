@@ -1,0 +1,99 @@
+{
+  "schema": "learning-compat-fixtures/v1",
+  "version": 2,
+  "files": [
+    {
+      "path": "schemas/learning/compat/README.md",
+      "sha256": "f452a357d12f0d1ff7a80e90ab4686c0b6bcf5f85732b41c6924f5d3901ba25c"
+    },
+    {
+      "path": "schemas/learning/compat/accept/candidate-genome-v1.jsonl",
+      "sha256": "d923d89b3c27a60b7bac021d83b01b733bf6622e562f6025a666a7e0a786cfd4"
+    },
+    {
+      "path": "schemas/learning/compat/accept/decision-resolution-v1.jsonl",
+      "sha256": "b8fc647d611450e1cc22d46670039f61555dce57330e0f05fcbf3301016f6818"
+    },
+    {
+      "path": "schemas/learning/compat/accept/estate-experience-v1.jsonl",
+      "sha256": "5a39b2e9c2456a2bcd89de7ce223de6e650a9fe5f765b8c38832cda9025757cd"
+    },
+    {
+      "path": "schemas/learning/compat/accept/eval-case-v1.jsonl",
+      "sha256": "7eb3aae1440c497809572019406649e8a03c16545fc4d0f2ecf310f1d34e2fa1"
+    },
+    {
+      "path": "schemas/learning/compat/accept/eval-labels-v1.jsonl",
+      "sha256": "b77b21f89f326ac4414fcba71151c8e19c9f900f8609936bddde71762834a898"
+    },
+    {
+      "path": "schemas/learning/compat/accept/eval-outputs-v1.jsonl",
+      "sha256": "f39e612fdbfddc9ee4c341937ef4846363000ec6a26bababcb10824b932c699e"
+    },
+    {
+      "path": "schemas/learning/compat/accept/eval-run-v1.jsonl",
+      "sha256": "94c306260bff068e188691c15b2eb22eef06a77d6b64cc096ebf7dd109d51b3e"
+    },
+    {
+      "path": "schemas/learning/compat/accept/learning-candidate-v1.jsonl",
+      "sha256": "29bd5181c160df3bb23e9c89a74050902972f38631ffdfad9075197fe93fcc4a"
+    },
+    {
+      "path": "schemas/learning/compat/accept/learning-would-apply-v1.jsonl",
+      "sha256": "38ce4f3a5381eed2baf9b0bcc87627952f58aba74fd661915b670b126d36d17b"
+    },
+    {
+      "path": "schemas/learning/compat/accept/memory-use-v1.jsonl",
+      "sha256": "8609f2856072330125cc8252c4d2e6f8cee3de21500bce8f8519a888589ba758"
+    },
+    {
+      "path": "schemas/learning/compat/accept/outcome-event-v1.jsonl",
+      "sha256": "dd440f4cb813d6c7cd9539ebfc2bf940b2ca30624b533ba5812b792920277455"
+    },
+    {
+      "path": "schemas/learning/compat/accept/promotion-receipt-v1.jsonl",
+      "sha256": "b44ee93fcd1299469bf093d76804bddff4999aec2c18aa8d69c54d51f96124cc"
+    },
+    {
+      "path": "schemas/learning/compat/accept/promotion-record-v1.jsonl",
+      "sha256": "1ab92eec32fb91d2eeac55cc6700648de9ec9076adac43acd43b0be7db490d9f"
+    },
+    {
+      "path": "schemas/learning/compat/accept/system-run-v1.jsonl",
+      "sha256": "ca43beec87c38cd8c00b80682432e5b9e12ecc6b41ddaab9a3f29fad6a4aad3d"
+    },
+    {
+      "path": "schemas/learning/compat/reject/episodic-destination.json",
+      "sha256": "f4408f23a46bbb692cbf2c1571d0480b9efb74069f6747723059638a0da68581"
+    },
+    {
+      "path": "schemas/learning/compat/reject/eval-without-sign-policy.json",
+      "sha256": "ee9b3a8eaf676853a0e8e7b29141e20c8414d75813b03fdd296b6a8c5baea0a6"
+    },
+    {
+      "path": "schemas/learning/compat/reject/git-path-segment.json",
+      "sha256": "c8a87d3b8e96774dd6ea94fe09a46efb7639fdbc61e6f74a19a84e91feef27dd"
+    },
+    {
+      "path": "schemas/learning/compat/reject/holdout-without-salt.json",
+      "sha256": "d4019650c1ab0d3c11c19085111525f888ca5aeaf46163fd118f70a08d2bc21e"
+    },
+    {
+      "path": "schemas/learning/compat/reject/open-decision-option.json",
+      "sha256": "bf06a9c6fea1b3c7cced04c7601e574797916ba795086860cc3b03852bea3cbe"
+    },
+    {
+      "path": "schemas/learning/compat/reject/p1-laws-destination.json",
+      "sha256": "5317d6d51ac226848d3649d094a9e62c63ba4dcd4ad0d03d35ec843630f1500f"
+    },
+    {
+      "path": "schemas/learning/compat/reject/p3-would-apply.json",
+      "sha256": "7b2d8a387529529f642aa32dae3a16cd71a9256e8f1e137ad54506700356e8ed"
+    },
+    {
+      "path": "schemas/learning/compat/reject/would-apply-wrong-hash.json",
+      "sha256": "39d2944009619400ed8a602eb917dd5a0c33f7ca3f195402a2e1d2279daf2d8b"
+    }
+  ],
+  "digest": "5f0052ce6048188bc1eb1a7b0c9f4b693953cd93a978530495c9d9f9549bd35e"
+}

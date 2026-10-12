@@ -12,6 +12,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = "schemas/learning/BUNDLE.json"
 BUNDLE_SCHEMA = "learning-contract-bundle/v1"
+FIXTURE_PATH = "schemas/learning/compat/FIXTURES.json"
+FIXTURE_SCHEMA = "learning-compat-fixtures/v1"
 _SPEC = importlib.util.spec_from_file_location(
     "learning_contracts", ROOT / "scripts" / "learning_contracts.py"
 )
@@ -113,10 +115,15 @@ def _read_manifest(root):
     return document
 
 
-def manifest(root):
+def manifest(root, *, version=None):
     """Describe current bundle bytes, preserving the recorded version if present."""
     root = Path(root)
-    version = _read_manifest(root)["version"] if (root / MANIFEST_PATH).exists() else 1
+    if version is None:
+        version = (
+            _read_manifest(root)["version"] if (root / MANIFEST_PATH).exists() else 1
+        )
+    if type(version) is not int or version < 1:
+        raise BundleError("bundle version must be a positive integer")
     files = [
         {"path": path, "sha256": file_digest(root / path)}
         for path in _bundle_files(root)
@@ -138,7 +145,7 @@ def _drift(expected, actual):
     )
 
 
-def _verify(document, vendored, mappings):
+def _verify(document, vendored, mappings, *, strict=False):
     vendored = Path(vendored).resolve()
     if not vendored.is_dir():
         raise BundleError(f"vendored directory does not exist: {vendored}")
@@ -160,7 +167,144 @@ def _verify(document, vendored, mappings):
             raise BundleError(f"vendored path escapes directory: {path}")
         if not target.is_file() or file_digest(target) != item["sha256"]:
             drift.append(path)
-    return {"digest": document["digest"], "matches": not drift, "drift": drift}
+    result = {"digest": document["digest"], "matches": not drift, "drift": drift}
+    if strict:
+        # Include explicitly mapped schema directories, not unrelated consumer trees.
+        parents = {"schemas/learning"} | {
+            str(PurePosixPath(renamed.get(path, path)).parent)
+            for path in paths
+            if path.startswith("schemas/learning/")
+        }
+        extra = []
+        for parent in sorted(parents):
+            directory = vendored / parent
+            if not directory.resolve().is_relative_to(vendored):
+                raise BundleError(f"vendored schema directory escapes: {parent}")
+            if not directory.is_dir():
+                continue
+            for entry in directory.iterdir():
+                relative = entry.relative_to(vendored).as_posix()
+                if (
+                    entry.suffix == ".json"
+                    and relative != MANIFEST_PATH
+                    and relative not in targets
+                ):
+                    extra.append(relative)
+        result["extra"] = sorted(set(extra))
+        result["matches"] = not drift and not extra
+    return result
+
+
+def fixture_manifest(root, version):
+    """Pin compat bytes separately; consumers need not vendor the fixture corpus."""
+    root = Path(root)
+    directory = root / "schemas/learning/compat"
+    if directory.is_symlink() or not directory.is_dir():
+        raise BundleError(
+            "compatibility fixture directory must be an ordinary directory"
+        )
+    files = []
+    for path in sorted(
+        directory.rglob("*"), key=lambda path: path.relative_to(root).as_posix()
+    ):
+        relative = path.relative_to(root).as_posix()
+        if relative == FIXTURE_PATH:
+            continue
+        if path.is_symlink():
+            raise BundleError(
+                f"compatibility fixture aliases are unsupported: {relative}"
+            )
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise BundleError(
+                f"compatibility fixture is not an ordinary file: {relative}"
+            )
+        files.append({"path": relative, "sha256": file_digest(path)})
+    if not files:
+        raise BundleError("compatibility fixtures must be nonempty")
+    return {
+        "schema": FIXTURE_SCHEMA,
+        "version": version,
+        "files": files,
+        "digest": _digest(files),
+    }
+
+
+def _read_fixture_lock(root):
+    document = contracts.loads((root / FIXTURE_PATH).read_text("utf-8"))
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "version", "files", "digest"}
+        or document["schema"] != FIXTURE_SCHEMA
+        or type(document["version"]) is not int
+        or document["version"] < 1
+        or not isinstance(document["files"], list)
+        or not document["files"]
+    ):
+        raise BundleError("invalid compatibility fixture lock")
+    paths = []
+    for item in document["files"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or not isinstance(item["path"], str)
+            or not isinstance(item["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+        ):
+            raise BundleError("invalid compatibility fixture entry")
+        relative = _relpath(item["path"])
+        if (
+            not relative.startswith("schemas/learning/compat/")
+            or relative == FIXTURE_PATH
+        ):
+            raise BundleError(f"path outside compatibility fixtures: {relative}")
+        paths.append(relative)
+    if paths != sorted(set(paths)) or document["digest"] != _digest(document["files"]):
+        raise BundleError("invalid compatibility fixture order or digest")
+    return document
+
+
+def build_manifest(root, *, bump=False, version=None):
+    """Refresh both pins; changed or unpinned fixtures require a version advance."""
+    root = Path(root)
+    previous = None
+    if (root / MANIFEST_PATH).exists():
+        try:
+            previous = _read_manifest(root)
+        except (OSError, ValueError, contracts.ContractError):
+            if version is None:
+                raise
+    locked = None
+    if (root / FIXTURE_PATH).exists():
+        try:
+            locked = _read_fixture_lock(root)
+        except (OSError, ValueError, contracts.ContractError):
+            if not bump and version is None:
+                raise
+    prior_version = max(
+        previous["version"] if previous else 0,
+        locked["version"] if locked else 0,
+    )
+    if previous is None and (root / FIXTURE_PATH).exists() and version is None:
+        raise BundleError("missing bundle manifest; recover with build --version N")
+    selected = version
+    if selected is None:
+        selected = (previous["version"] if previous else 1) + int(bump)
+    if type(selected) is not int or selected < 1 or selected < prior_version:
+        raise BundleError("bundle version must be positive and must not decrease")
+    document = manifest(root, version=selected)
+    fixtures = fixture_manifest(root, selected)
+    changed = locked is None or locked["digest"] != fixtures["digest"]
+    if changed and prior_version and selected <= prior_version:
+        raise BundleError(
+            "compatibility fixtures changed or unpinned; build --bump required"
+        )
+    # A failed second write leaves a detectable version mismatch, never a green check.
+    for relative, value in ((FIXTURE_PATH, fixtures), (MANIFEST_PATH, document)):
+        (root / relative).write_text(
+            json.dumps(value, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 class _Parser(argparse.ArgumentParser):
@@ -172,35 +316,39 @@ def main(argv=None):
     parser = _Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
-    build.add_argument("--bump", action="store_true")
+    version = build.add_mutually_exclusive_group()
+    version.add_argument("--bump", action="store_true")
+    version.add_argument("--version", type=int)
     commands.add_parser("check")
     verify = commands.add_parser("verify")
     verify.add_argument("--vendored", required=True)
     verify.add_argument("--map", action="append", default=[])
+    verify.add_argument("--strict", action="store_true")
     commands.add_parser("digest")
     try:
         args = parser.parse_args(argv)
         if args.command == "build":
-            document = manifest(ROOT)
-            if args.bump:
-                document["version"] += 1
-            (ROOT / MANIFEST_PATH).write_text(
-                json.dumps(document, indent=2) + "\n", encoding="utf-8", newline="\n"
-            )
+            build_manifest(ROOT, bump=args.bump, version=args.version)
             return 0
         document = _read_manifest(ROOT)
         if args.command == "digest":
             print(document["digest"])
             return 0
         if args.command == "verify":
-            result = _verify(document, args.vendored, args.map)
+            result = _verify(document, args.vendored, args.map, strict=args.strict)
             print(json.dumps(result))
             return 0 if result["matches"] else 1
         current = manifest(ROOT)
-        if document == current:
+        locked = _read_fixture_lock(ROOT)
+        fixtures = fixture_manifest(ROOT, document["version"])
+        drift = _drift(document, current) + _drift(locked, fixtures)
+        if document != current and not _drift(document, current):
+            drift.append(MANIFEST_PATH)
+        if locked != fixtures and not _drift(locked, fixtures):
+            drift.append(FIXTURE_PATH)
+        if not drift:
             return 0
-        drift = _drift(document, current)
-        print(json.dumps(drift or [MANIFEST_PATH]), file=sys.stderr)
+        print(json.dumps(sorted(set(drift))), file=sys.stderr)
         return 1
     except (OSError, ValueError, contracts.ContractError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)

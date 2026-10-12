@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -29,6 +30,7 @@ class BundleTests(unittest.TestCase):
             target = self.tree / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)
+        shutil.copytree(COMPAT, self.tree / "schemas/learning/compat")
         shutil.copyfile(
             ROOT / "scripts" / "learning_bundle.py",
             self.tree / "scripts" / "learning_bundle.py",
@@ -75,6 +77,16 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), document["digest"])
 
+    def test_fixture_order_does_not_depend_on_platform_path_ordering(self):
+        def casefold_order(left, right):
+            return str(left).casefold() < str(right).casefold()
+
+        with mock.patch.object(type(self.tree), "__lt__", casefold_order):
+            document = bundle.fixture_manifest(self.tree, self.document()["version"])
+        paths = [item["path"] for item in document["files"]]
+        self.assertEqual(paths, sorted(paths))
+        self.assertEqual(paths[0], "schemas/learning/compat/README.md")
+
     def test_crlf_and_lf_have_the_same_file_digest(self):
         lf, crlf = self.tree / "lf.txt", self.tree / "crlf.txt"
         lf.write_bytes(b"synthetic\nbytes\n")
@@ -119,6 +131,7 @@ class BundleTests(unittest.TestCase):
     def test_build_preserves_version_and_bump_increments_it(self):
         target = self.tree / bundle.MANIFEST_PATH
         target.unlink()
+        (self.tree / "schemas/learning/compat/FIXTURES.json").unlink(missing_ok=True)
         self.assertEqual(bundle.manifest(self.tree)["version"], 1)
         result = self.cli("build")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -248,6 +261,214 @@ class BundleTests(unittest.TestCase):
         result = self.cli("digest")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("error", json.loads(result.stderr))
+
+    def test_strict_verify_reports_extra_schemas_without_changing_default(self):
+        consumer = self.consumer()
+        extra = "schemas/learning/unlisted.schema.json"
+        (consumer / extra).write_text("{}\n", encoding="utf-8")
+        args = (
+            "verify",
+            "--vendored",
+            str(consumer),
+            "--map",
+            "scripts/learning_contracts.py=tools/learning_contracts.py",
+        )
+        ordinary = self.cli(*args)
+        self.assertEqual(ordinary.returncode, 0, ordinary.stderr)
+        self.assertNotIn("extra", json.loads(ordinary.stdout))
+        strict = self.cli(*args, "--strict")
+        self.assertEqual(strict.returncode, 1, strict.stderr)
+        result = json.loads(strict.stdout)
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["drift"], [])
+        self.assertEqual(result["extra"], [extra])
+        (consumer / extra).unlink()
+        clean = self.cli(*args, "--strict")
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertEqual(json.loads(clean.stdout)["extra"], [])
+
+    def test_strict_verify_checks_mapped_schema_parents(self):
+        consumer = self.consumer()
+        (consumer / "schemas/learning/lifecycle.json").rename(
+            consumer / "tools/lifecycle.json"
+        )
+        extra = "tools/obsolete.schema.json"
+        (consumer / extra).write_text("{}\n", encoding="utf-8")
+        result = self.cli(
+            "verify",
+            "--vendored",
+            str(consumer),
+            "--strict",
+            "--map",
+            "scripts/learning_contracts.py=tools/learning_contracts.py",
+            "--map",
+            "schemas/learning/lifecycle.json=tools/lifecycle.json",
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["extra"], [extra])
+        self.assertEqual(json.loads(result.stdout)["drift"], [])
+
+    def test_explicit_version_recovers_conflicted_manifest(self):
+        target = self.tree / bundle.MANIFEST_PATH
+        target.write_text("<<<<<<< conflicted\n", encoding="utf-8")
+        failed = self.cli("build")
+        self.assertEqual(failed.returncode, 2, failed.stderr)
+        result = self.cli("build", "--version", "17")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.document()["version"], 17)
+        self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_explicit_version_rejects_invalid_or_decreasing_values(self):
+        self.assertEqual(self.cli("build", "--version", "17").returncode, 0)
+        before = (self.tree / bundle.MANIFEST_PATH).read_bytes()
+        for value in ("0", "-1", "true", "16"):
+            with self.subTest(version=value):
+                result = self.cli("build", "--version", value)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("error", json.loads(result.stderr))
+                self.assertEqual(
+                    (self.tree / bundle.MANIFEST_PATH).read_bytes(), before
+                )
+        self.assertEqual(
+            self.cli("build", "--bump", "--version", "18").returncode, 2
+        )
+
+    def test_compatibility_fixture_changes_require_a_bump(self):
+        # Bootstrap the fixture lock; only synthetic files are involved.
+        initial = self.cli("build", "--bump")
+        self.assertEqual(initial.returncode, 0, initial.stderr)
+        relative = "schemas/learning/compat/reject/new-refusal.json"
+        before = (self.tree / bundle.MANIFEST_PATH).read_bytes()
+        (self.tree / relative).write_text("{}\n", encoding="utf-8")
+        check = self.cli("check")
+        self.assertEqual(check.returncode, 1, check.stderr)
+        self.assertIn(relative, json.loads(check.stderr))
+        refused = self.cli("build")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("bump", json.loads(refused.stderr)["error"])
+        self.assertEqual((self.tree / bundle.MANIFEST_PATH).read_bytes(), before)
+        old_version = self.document()["version"]
+        bumped = self.cli("build", "--bump")
+        self.assertEqual(bumped.returncode, 0, bumped.stderr)
+        self.assertEqual(self.document()["version"], old_version + 1)
+        self.assertEqual(self.cli("check").returncode, 0)
+        # Modification and deletion cannot evade the inventory either.
+        for action in ("change", "remove"):
+            with self.subTest(action=action):
+                if action == "change":
+                    (self.tree / relative).write_text("{ }\n", encoding="utf-8")
+                else:
+                    (self.tree / relative).unlink()
+                check = self.cli("check")
+                self.assertEqual(check.returncode, 1, check.stderr)
+                self.assertIn(relative, json.loads(check.stderr))
+                self.assertEqual(self.cli("build").returncode, 2)
+                self.assertEqual(self.cli("build", "--bump").returncode, 0)
+
+    def test_fixture_lock_is_separate_from_vendored_contract_bytes(self):
+        before = self.document()["digest"]
+        result = self.cli("build", "--bump")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lock = self.tree / "schemas/learning/compat/FIXTURES.json"
+        self.assertTrue(lock.is_file(), "build must pin compatibility fixtures")
+        document = json.loads(lock.read_text("utf-8"))
+        self.assertEqual(document["version"], self.document()["version"])
+        self.assertEqual(self.document()["digest"], before)
+        self.assertTrue(document["files"])
+        self.assertNotIn("schemas/learning/compat/FIXTURES.json", bundle.BUNDLE_FILES)
+
+    def test_missing_manifest_does_not_reset_a_pinned_version(self):
+        version = self.document()["version"]
+        target = self.tree / bundle.MANIFEST_PATH
+        target.unlink()
+        for args in (("build",), ("build", "--bump")):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(target.exists())
+        result = self.cli("build", "--version", str(version))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.document()["version"], version)
+        self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_corrupt_fixture_lock_needs_a_version_advance(self):
+        before = (self.tree / bundle.MANIFEST_PATH).read_bytes()
+        version = self.document()["version"]
+        target = self.tree / "schemas/learning/compat/FIXTURES.json"
+        target.write_text("<<<<<<< conflicted\n", encoding="utf-8")
+        for args in (("build",), ("build", "--version", str(version))):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(
+                    (self.tree / bundle.MANIFEST_PATH).read_bytes(), before
+                )
+        result = self.cli("build", "--bump")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.document()["version"], version + 1)
+        self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_missing_manifest_and_corrupt_lock_need_explicit_recovery(self):
+        (self.tree / bundle.MANIFEST_PATH).unlink()
+        lock = self.tree / "schemas/learning/compat/FIXTURES.json"
+        lock.write_text("{", encoding="utf-8")
+        result = self.cli("build", "--bump")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse((self.tree / bundle.MANIFEST_PATH).exists())
+        result = self.cli("build", "--version", "17")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.document()["version"], 17)
+        self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_fixture_line_endings_do_not_change_the_pin(self):
+        path = next((self.tree / "schemas/learning/compat/accept").glob("*.jsonl"))
+        path.write_bytes(
+            path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        )
+        before = self.document()["version"]
+        result = self.cli("check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.cli("build").returncode, 0)
+        self.assertEqual(self.document()["version"], before)
+
+    def test_partial_metadata_write_is_detected_and_recoverable(self):
+        version = self.document()["version"]
+        target = self.tree / bundle.MANIFEST_PATH
+        original = target.read_bytes()
+        real_write = Path.write_text
+
+        def fail_manifest(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("synthetic metadata interruption")
+            return real_write(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "write_text", fail_manifest):
+            with self.assertRaisesRegex(PermissionError, "synthetic"):
+                bundle.build_manifest(self.tree, bump=True)
+        self.assertEqual(target.read_bytes(), original)
+        result = self.cli("check")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(
+            json.loads(result.stderr), ["schemas/learning/compat/FIXTURES.json"]
+        )
+        recovered = self.cli("build", "--version", str(version + 1))
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(self.cli("check").returncode, 0)
+
+    def test_strict_verification_ignores_unrelated_json_and_manifest(self):
+        consumer = self.consumer()
+        (consumer / "tools/unrelated.json").write_text("{}\n", encoding="utf-8")
+        (consumer / bundle.MANIFEST_PATH).write_text("{}\n", encoding="utf-8")
+        result = self.cli(
+            "verify",
+            "--vendored",
+            str(consumer),
+            "--map",
+            "scripts/learning_contracts.py=tools/learning_contracts.py",
+            "--strict",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["extra"], [])
 
 
 class CompatibilityTests(unittest.TestCase):
