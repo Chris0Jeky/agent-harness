@@ -75,9 +75,7 @@ class EvaluationEvidenceSafetyTests(unittest.TestCase):
             with self.subTest(output=output):
                 inputs = load()
                 case = next(
-                    c
-                    for c in inputs["cases"]
-                    if c["oracle"]["kind"] == "ranked_recall"
+                    c for c in inputs["cases"] if c["oracle"]["kind"] == "ranked_recall"
                 )
                 outputs = inputs["candidate_outputs"]["outputs"]
                 if output is None:

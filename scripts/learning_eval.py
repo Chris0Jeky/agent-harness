@@ -91,7 +91,9 @@ def _bounded_regex(pattern, text=None):
     except (ValueError, TypeError) as exc:
         raise EvalRefusal("invalid regex worker response") from exc
     if isinstance(result, dict) and isinstance(result.get("error"), str):
-        raise EvalRefusal(f"invalid pattern or regex resource failure: {result['error']}")
+        raise EvalRefusal(
+            f"invalid pattern or regex resource failure: {result['error']}"
+        )
     if (
         not isinstance(result, dict)
         or set(result) != {"matched"}
