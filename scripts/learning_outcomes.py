@@ -96,7 +96,8 @@ def events_from_experiences(records):
         if prior and all(prior[field] == value for field, value in projected.items()):
             continue
         version = prior["version"] + 1 if prior else 1
-        run = record["source"]
+        # Outcome run identity excludes optional experience attribution.
+        run = {key: record["source"][key] for key in ("kind", "key")}
         digest = hashlib.sha256(
             f"{run['kind']}|{run['key']}|{version}".encode("utf-8")
         ).hexdigest()[:16]
