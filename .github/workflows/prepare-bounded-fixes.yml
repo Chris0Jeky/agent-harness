@@ -1,0 +1,107 @@
+name: Prepare bounded pass-four fixes
+
+on:
+  push:
+    branches: [chatgpt/prepare-bounded-fixes-pass4]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        fix: [canary, recurrence]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ac10b2179ca2e078675085019f81204308e51cce
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.11'
+      - name: Reconstruct the exact readable patch
+        env:
+          FIX: ${{ matrix.fix }}
+        shell: python
+        run: |
+          import base64, gzip, hashlib, os, subprocess
+          from pathlib import Path
+          payloads = {
+            'canary': ('111074602788eeb274f2607cc8276b7a71e8abea00e10ddb652b300b2207c31f', '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'),
+            'recurrence': ('79b7ae3cf863c1bea33c9e76c5eba94010989d79d94c884c65d0aaea09d05147', 'H4sIAAAAAAAC/91XUW/jNgx+z68Q/DL74viSNEvvAmS4oeiAPexlKPZiBIZi0alQ13YluXdFkf8+UrYbxU6T7uUe5gKNYn4iKfIjqQiZZWwy2UnD+GedKlkZ/TkHrgpZ7JJHMEqmOqpe2PacdCQLAT/Y9Zf5cp5BFGWzq+vF/AubTafLxWI0mUzOax+Nx+MLFr59Y5PZ8tdwNmNj+zln+EpAxpKnmhdG5uA/87wGHbKnYDVi9GfFCtJaKShS8OFHBUrSElEP8KIROGb4eJ53U9aFYcDTe5KwEkEM0SwrcwGCqboImbmHgnGDTm1rAyznBgEo0b8wBRVwoyPUNCKNrEw7s5qtyRNe50bI1Pi51CZoQFmp2MEpJgumS2VA+I2Ynr7P65w/bgWn9yvmp2VhFE/RcMWVhsTIR3vM2OPG2wQhs2spcN2oxBNPOtVknc6KZikYTni6uPRQGozfR1Ks3cc5d4zYTcSrCgrhbIm9SpWiTkF5m9jD8JHTbw623zFmNiOgfGVd2KmyrsgJx0DUZNwPLEKR1MLi2epNXZN9gfp0/ejnUPgWErDf2Oyy4mAk3AoxoJGf9D85XSTnAW2diO2cL7NpFH29mi1hAcd1ckFFUyoXQFQty/nXcMnG9HG9oGJJc641+8ui7mi/XxfSkI6Ivt5wDf1k7sPDdwxoQwqqKmtZ1FUuUyyCJC0xcKmRZaETWSRlAQnmMeEKkqI0TglqX0OeufQ6bMUUvR7e27J8wIB5K+aV3wtQjhUv7AEVZIQTkEqN8lUmlTYDlJa7gucE/K7KYjeQI19J2NSyK9075UCa0dUDn/2elpO2MwCx5enDOj6cImTu2vYG9wWeaX04kQasdeEFG0dxcFhSWCPMLyhziw0x7znFdzsFO0yVb70L4kFInSR5m57zvbR0sdIYrFl4QtYVXdKCpidB6A3JoukZFUSZ9xRsX5KueazY674H2R/HqUdd59xvLNaJKC1dZZHlltWq1NoSubWD23DxszhMjv4sCnekPcnTDfvEFkdcIyqerYGWrSFOy/XvN3d//nMbdp197WEjqgWcMXZ1kuLmXqrzVi2iNfrH3e3fjs3HWp+zOD9pkSylxg6P12GcT9F/QP0hoKH9bED7HuXnffEx3bsgkgXWnA6X+3cSTtMRM6KEpkHn+zZQYUOEsM0nXhb8ZhUyVx64TKfnuzT3Tb/R9ZYmh4+KQa3jxkRz3XBsksnW+qav6wOta9jCPrXaLnaxtwQONQ5bgoJyiz48c6uHFyLpyJLY83XdIVVAzaGpMErJ/7EfnB5p70yxweSia6pX4m1Z4bw6WVnUX63NtKxeIgFQ0aIdTn0YptlmBquKbrW4q2kpQ1znnwXFZ/06Hr5ONzhoxaDhbRw19aZn2Nq7xL8z07lRHTdtBIk6Dz4APu4tuGv6H3bZtvLRPU6vwS2ve6oWdlQtmuM4zLjMawXOodsJmcAzqJeuRqiWGghdU1vFXdGwD02l1hAdfB2/sZl5eIN9qg8/Ht6dTv8CnnP69+gOAAA=')
+          }
+          expected, encoded = payloads[os.environ['FIX']]
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == expected
+          assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip() == 'ac10b2179ca2e078675085019f81204308e51cce'
+          target = Path(os.environ['RUNNER_TEMP']) / 'verified.patch'
+          target.write_bytes(patch)
+          print(patch.decode(), flush=True)
+          subprocess.run(['git','apply','--check',str(target)],check=True)
+          subprocess.run(['git','apply',str(target)],check=True)
+          subprocess.run(['git','add','-A'],check=True)
+      - name: Install repository-pinned checks
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Normalize formatting without changing Python semantics
+        shell: python
+        run: |
+          import ast, subprocess
+          from pathlib import Path
+          paths = subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines()
+          changed = [p for p in paths if p.endswith('.py')]
+          before = {p: ast.dump(ast.parse(Path(p).read_text('utf-8')),include_attributes=False) for p in changed}
+          subprocess.run(['python','-m','black',*changed],check=True)
+          assert before == {p: ast.dump(ast.parse(Path(p).read_text('utf-8')),include_attributes=False) for p in changed}
+          print('FORMATTING_ONLY_DIFF',flush=True)
+          subprocess.run(['git','diff'],check=True)
+          subprocess.run(['git','add',*changed],check=True)
+          subprocess.run(['python','-m','ruff','check',*changed],check=True)
+          subprocess.run(['python','-m','black','--check',*changed],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+      - name: Run complete candidate verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset TARGET
+          python scripts/learning_bundle.py check
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python templates/hooks/smoke_test.py
+          git diff --exit-code
+      - name: Record Doctor limitations
+        shell: bash
+        run: |
+          set +e
+          python harness.py doctor
+          code=$?
+          echo "DOCTOR_EXIT=$code (hosted workspace, not native runtime qualification)"
+          test "$code" -le 1
+      - name: Store verified blobs without publishing references
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIX: ${{ matrix.fix }}
+        shell: python
+        run: |
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          paths = subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines()
+          allowed = {
+            'canary': {'scripts/learning_system.py','tests/test_learning_system.py','docs/CANARY_CHRONOLOGY.md'},
+            'recurrence': {'scripts/learning_metrics.py','tests/test_learning_metrics.py'},
+          }
+          assert set(paths) == allowed[os.environ['FIX']]
+          files = []
+          for path in paths:
+              data = Path(path).read_bytes()
+              expected = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              result = subprocess.run(['gh','api','--method','POST','repos/Chris0Jeky/agent-harness/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}),text=True,capture_output=True,check=True)
+              assert json.loads(result.stdout)['sha'] == expected
+              files.append({'path':path,'mode':'100644','type':'blob','sha':expected})
+          tree = subprocess.check_output(['git','write-tree']).decode().strip()
+          print('PREPARED_FIX='+json.dumps({'fix':os.environ['FIX'],'tree':tree,'files':files},sort_keys=True),flush=True)
+          print('No branch, pull request or main ref was updated by this workflow.')
