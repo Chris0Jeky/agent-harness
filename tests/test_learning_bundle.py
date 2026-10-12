@@ -329,9 +329,7 @@ class BundleTests(unittest.TestCase):
                 self.assertEqual(
                     (self.tree / bundle.MANIFEST_PATH).read_bytes(), before
                 )
-        self.assertEqual(
-            self.cli("build", "--bump", "--version", "18").returncode, 2
-        )
+        self.assertEqual(self.cli("build", "--bump", "--version", "18").returncode, 2)
 
     def test_compatibility_fixture_changes_require_a_bump(self):
         # Bootstrap the fixture lock; only synthetic files are involved.
