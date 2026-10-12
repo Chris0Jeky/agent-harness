@@ -347,7 +347,9 @@ class ReviewEvidenceBindingTests(unittest.TestCase):
                 for i in range(6):
                     for j in range(2):
                         arm = (
-                            "baseline" if (j == 0) == wins_first else "candidate_outputs"
+                            "baseline"
+                            if (j == 0) == wins_first
+                            else "candidate_outputs"
                         )
                         inputs[arm]["outputs"][f"case_{i}-{j}"] = {"text": "master"}
                 with self.assertRaisesRegex(ev.EvalRefusal, "conflicting.*evidence"):
