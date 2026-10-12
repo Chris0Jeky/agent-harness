@@ -1,409 +1,239 @@
 # agent-harness
 
-Docs site: https://chris0jeky.github.io/agent-harness/
+The tier model, shared deny floor, and audit tools for the Codex and Claude repositories in this estate: what a repo is allowed to lose, what an argv line can prove, and whether the hook that claims to enforce it is actually wired.
 
-An active agent-operations workbench for measuring, diagnosing, and improving the policies and
-configuration used across Chris's Codex and Claude repositories. The frozen legacy deny floor,
-the internal replay Policy Lab, Doctor, estate operations, measurements, and runtime adapters
-share one repository while keeping their contracts explicit.
+[![CI](https://github.com/Chris0Jeky/agent-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Chris0Jeky/agent-harness/actions/workflows/ci.yml)
+[![Pages](https://github.com/Chris0Jeky/agent-harness/actions/workflows/pages.yml/badge.svg)](https://github.com/Chris0Jeky/agent-harness/actions/workflows/pages.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB)](https://github.com/Chris0Jeky/agent-harness/blob/main/.github/workflows/ci.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
+
+Docs site: <https://chris0jeky.github.io/agent-harness/>
+
+## What it is
+
+A repo's harness is its blast radius. Tiers scale verification with that radius. The deny floor sits in front of shell commands and refuses the irreversible cases an argv parser can see. Doctor and audit check the declaration against the files and remotes that exist. Replay measures a policy change against a pinned corpus before anyone treats it as deployed.
+
+This repository is that source of truth. Codex and Claude share the policy and the parser. Each runtime still gets its own hook output. The canonical dispatcher is feature-frozen: false-positive fixes, the ratified #21 slices, SPECS §6 charter repairs, and owner-ratified exceptions recorded in [BLUEPRINT §2](BLUEPRINT.md#2-the-floor-analyzer-contract-posture-and-wiring). A new bypass family becomes a line in [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md).
+
+This checkout is tier 3 (`workshop`), push free, merge free, with `"floor_wiring": "none"` in [`.agent-harness/tier.json`](.agent-harness/tier.json). No PreTool floor runs here. That declaration is what keeps a floorless tree valid.
+
+## What it does
+
+- **Deny floor.** [`templates/hooks/dispatch.py`](templates/hooks/dispatch.py) is the shared PreToolUse dispatcher. `FLOOR_VERSION` is `1.8.1 (2026-10-07)`. It reads the strictest tier from `.agent-harness/tier.json` and a legacy `.claude/tier.json` when both exist, strips quoted strings before matching, allows unparseable stdin, and denies when rule evaluation raises. Since 1.8.0, branch force, lease, `+refspec`, branch deletion, and `--prune` proceed at every tier; the tag guard still double-checks a forced or deleting tag push and `git push --mirror`. 1.8.1 classifies that mirror push before a receive-pack override (`f7f5399`). Default posture below T4 / `wave_mode`, for a repository that is not `sensitive_data`, is `core`: local destruction, secret-file mutation, a downloaded program run directly, privilege elevation, and the tag guard. `guide` and `wall` stay declarable. A `sensitive_data` repository never runs `core`.
+- **Harness CLI.** [`harness.py`](harness.py) is one stdlib-only file: `audit`, `seed`, `doctor`, `sync-global`, `worktrees`, `worktree-lease`. Inspect first. Nothing installs itself.
+- **Policy Lab.** [`replay_v0/`](replay_v0/README.md) is the internal `charter-replay` package. [`pyproject.toml`](pyproject.toml) versions the distribution `0.1.0.dev0`; `replay_v0/__init__.py` reports `0.1.0`. It replays recorded command events through two hooks and diffs allow / deny / ask / indeterminate. It does not re-run the original agent, shell, or side effects. Checked-in corpora: `charter-v0.1` (50 events) and `charter-v0.2` (494 events).
+- **Doctor.** Static inspection of global guidance, the shared dispatcher, Codex hook topology, MCP command topology, and one repo's project floor. The adapter marker is audit-only. The runtime never hashes `dispatch.py`. A CWD-specific new-session `/hooks` review, individual trust, and live allow/deny canaries remain mandatory wherever a PreTool floor is enabled.
+- **Audit.** Doc budgets, tier schema, stale hard-coded profile paths, and reality checks: `sensitive_data` against remote visibility, vendored floor bytes against this template, `human_todo` and `status_doc` against files that exist, and default-branch history protection when the posture needs it. `MISMATCH` exits 1. `UNPROVEN` is counted and never printed as a pass.
+- **Estate sync and worktree closeout.** `sync-global` diffs by default and backs up what `--apply` replaces. `worktrees` is read-only unless you ask it to remove a candidate that survived the lease protocol below.
+- **Internal evidence tools.** [`scripts/outcome_ledger.py`](scripts/outcome_ledger.py), [`scripts/merge_gate_model.py`](scripts/merge_gate_model.py), the `scripts/learning_*.py` gates, and [`ux_evaluation/`](ux_evaluation/__init__.py) produce local reports. They do not merge, deploy, or promote a floor.
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph sources [What the tools read]
+    tier[".agent-harness/tier.json"]
+    legacyTier["legacy .claude/tier.json"]
+    claudeHome["Claude home settings and hooks"]
+    codexHome["Codex home and project hooks.json / config.toml"]
+  end
+
+  subgraph floor [templates/hooks]
+    dispatch["dispatch.py"]
+    smoke["smoke_test.py"]
+  end
+
+  subgraph cli [harness.py]
+    seed["seed"]
+    audit["audit"]
+    doctor["doctor"]
+    sync["sync-global"]
+    trees["worktrees / worktree-lease"]
+  end
+
+  subgraph lab [replay_v0]
+    replay["charter-replay"]
+    corpora["charter-v0.1 and charter-v0.2"]
+  end
+
+  subgraph evidence [Local evidence only]
+    ledger["outcome_ledger.py"]
+    gate["merge_gate_model.py"]
+    learn["learning_*.py"]
+    ux["ux_evaluation"]
+    pages["build_docs_site.py"]
+  end
+
+  tier --> dispatch
+  legacyTier --> dispatch
+  tier --> audit
+  tier --> doctor
+  dispatch --> smoke
+  dispatch --> sync
+  claudeHome --> doctor
+  codexHome --> doctor
+  corpora --> replay
+  dispatch --> replay
+  pages --> site["GitHub Pages"]
+```
+
+`legacy/` holds the April 2026 `bootstrap-*.ps1` scripts. They are historical template material. Do not run them.
+
+## Quickstart
+
+CI calls `python` on 3.11. The Windows docs use `py -3`. This tree was checked with `python3`. The scripts are the same.
+
+```bash
+python3 harness.py audit . --offline
+python3 harness.py doctor
+python3 harness.py doctor --repo . --offline
+python3 harness.py worktrees --repo . --json
+```
+
+`audit . --offline` on this checkout exited 0. The summary reported one `UNPROVEN` check: default-branch history protection, because `--offline` refuses `gh` and `git ls-remote`. Vendored-floor, `human_todo`, and `status_doc` checks passed. Tier printed as T3 from `.agent-harness/tier.json`.
+
+`doctor` on a machine with no `codex` binary and no deployed `~/.claude/hooks` exits 1. That is the live-home axis. The project line on this repo is separate and was `[ok]`: floorless by `floor_wiring: none`. Supply `--config-root` when you have the `claude-config` checkout whose bytes should match the deployed global guidance.
+
+Seed is write-once. It refuses to overwrite an existing runtime-neutral tier file. When `.gitignore` does not already cover `/.claude/worktrees/`, seed adds that line. `--dry-run` prints the declaration and the ignore plan, and writes nothing.
+
+```bash
+python3 harness.py seed PATH --tier 2 --sensitive-data --dry-run
+```
+
+Sync diffs unless you pass `--apply`. `--only` fails closed on an unknown component.
+
+```bash
+python3 harness.py sync-global --config-root PATH/TO/claude-config
+python3 harness.py sync-global --config-root PATH/TO/claude-config --apply
+python3 harness.py sync-global --config-root PATH/TO/claude-config --only codex-agents --only skill:route-codex-work
+python3 harness.py sync-global --config-root PATH/TO/claude-config --only claude-skill:resume-repo-work
+python3 harness.py sync-global --config-root PATH/TO/claude-config --only bundle:muse-runtime
+python3 harness.py sync-global --config-root PATH/TO/claude-config --only bundle:muse-runtime --rollback-receipt PATH/TO/receipt.json
+```
+
+Policy Lab, without installing the package (the console script name after `pip install .` is `charter-replay`):
+
+```bash
+PYTHONPATH=. python3 -m replay_v0.cli validate --corpus replay_v0/corpora/charter
+PYTHONPATH=. python3 replay_v0/app.py hooks \
+  --baseline "python3 examples/toy-guard/guard_v1.py" \
+  --candidate "python3 examples/toy-guard/guard_v2.py" \
+  --corpus replay_v0/corpora/charter \
+  --output /tmp/toy-replay \
+  --jobs 1
+```
+
+Both corpus validates exited 0 (`charter-v0.1`, 50 events; `charter-v0.2`, 494 events). The toy-guard hooks run exited 1, which is the default regression gate: `summary.json` recorded `"newly-allowed": 4`. CI's `replay-package` job asserts that same count. The checked-in write-up is [`examples/toy-guard/README.md`](examples/toy-guard/README.md).
+
+The floor example compares one dispatcher against tier-3 and tier-4 workspaces:
+
+```bash
+PYTHONPATH=. python3 replay_v0/app.py hooks \
+  --baseline "python3 templates/hooks/dispatch.py --event pre --runtime claude" \
+  --candidate "python3 templates/hooks/dispatch.py --event pre --runtime claude" \
+  --baseline-workspace examples/floor/workspace-t3 \
+  --candidate-workspace examples/floor/workspace-t4 \
+  --corpus replay_v0/corpora/charter \
+  --output /tmp/floor-replay \
+  --fail-on newly-allowed \
+  --jobs 1
+```
+
+On this tree that run exited 0: 10 newly denied, 0 newly allowed, 40 unchanged, out of 50 charter-v0.1 events. [`examples/floor/report/summary.md`](examples/floor/report/summary.md) is an older recording (15 newly denied). Use the command, not that file, for the current bytes.
+
+Dev tools, pinned in [`requirements-dev.txt`](requirements-dev.txt):
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m unittest discover -s tests -p "test_*.py" -v
+python3 templates/hooks/smoke_test.py
+python3 -m unittest discover -s replay_v0/tests -v
+```
+
+Ruff, Black, and `py_compile` use the explicit file list in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Add a new Python module to all three steps or CI will not lint it.
+
+## Contracts that bite
+
+### Audit
+
+`audit` compares declarations with remotes and bytes. A public push URL on a repository that declares `sensitive_data` is a `MISMATCH`. A public fetch URL behind a private push URL is an `advisory`. The owner-ratified `public_synthetic_publication` object can mark one exact remote/repository pair `ok`. Credentials in a remote URL are redacted before they reach a finding. Probes are read-only, deadline-bounded, and resolve binaries from absolute `PATH` entries. `--offline` skips network resolvers, including `git ls-remote`. A harness checkout used as the canonical floor reference must be clean on `main` and level with the published tip. A detached CI checkout cannot be that reference, so the canonical-template leg stays `UNPROVEN` there. The deployed `~/.claude/hooks` copy is an advisory for `audit`; `doctor` owns that axis.
+
+### Doctor
+
+`doctor --repo` walks active `.codex` layers only when every inspectable `project_root_markers` value is absent or exactly `[".git"]`. It requires one project-floor candidate, one conservative POSIX and Windows command shape, and the current normalized dispatcher marker, unless `floor_wiring` is `none`, in which case it requires the absence of a Codex floor handler and of a global Claude dispatcher. Static validation does not execute the hook. Managed-cloud, MDM, per-invocation, and plugin hooks are runtime-only. For a linked worktree, Codex maps hook layers back to the root checkout that owns the Git common directory. Trust hashes are not hand-edited.
+
+When a PreTool floor is enabled, the supported bootstrap is the exact-CWD TUI procedure in [SPECS: Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap). Linked-worktree candidate checks are in [SPECS: Candidate validation from linked worktrees](SPECS.md#candidate-validation-from-linked-worktrees). Posture rendering is [SPECS §5.4](SPECS.md#54-posture-and-floor_ack-owner-decisions-2026-09-02-and-2026-09-27-21-slices-26--62-356).
+
+### sync-global
+
+Dry-run is the default. `--apply` backs up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed `codex/agents/*.toml` files before replacing them. Stale managed Codex agents are removed only when the deployed bytes still match the last harness-managed version. Default file sync refuses aliased homes, non-regular files, and destinations with multiple hard links, then publishes through a flushed sibling and a rename.
+
+`--only claude-skill:<name>` copies one skill from `<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. `--only bundle:muse-runtime` reads schema 1 from `<config-root>/.agent-harness/sync-global.json` and deploys only the files that manifest names. Rollback is dry-run unless `--apply` is set, and it restores a component only while live and backup digests still match the receipt. Neither lane promises crash-atomic multi-file writes or exclusion of a concurrent writer. Remaining fault and platform notes are in [#278](https://github.com/Chris0Jeky/agent-harness/issues/278).
+
+Future Codex skill backups go under `<codex-home>/backups/<timestamp>/skills/`, outside the skill root Codex scans. A backup tree that overlaps the skill home is refused. Legacy `<skills-home>/.harness-backups/` copies are left in place.
+
+### Worktree closeout
+
+`worktrees` does not fetch, lease, remove, prune, or delete branches unless you say so. `--refresh` fetches every configured remote. A grafts file, a replace ref, or a per-worktree `core.worktree` redirect blocks the candidate. The Git subprocess environment disables replace objects and drops an inherited `GIT_GRAFT_FILE`.
+
+The lease is cooperative. `worktree-lease --action acquire` writes a short-lived record in that linked worktree's Git administrative directory, scoped to one physical common-Git directory and worktree path. The claimant is a self-declared session id, not an authenticated principal. Creation refuses an existing lease. The same claimant may renew or release. An expired lease is replaceable only with `acquire --replace-stale`.
+
+`--apply` requires `--refresh`, the same `--claimant`, at least ten seconds left on the lease, and a fingerprint whose monotonic age and suspend-inclusive UTC age are both at most 60 seconds. UTC clock rollback fails closed. Apply holds the per-worktree mutation lock from the last lease check through removal. The only destructive command is plain `git worktree remove` of the canonical path. There is no `--force`, no branch deletion, and no `git worktree prune`. Dirty, ignored, mode-only (POSIX), detached, reflog, and `ORIG_HEAD` states block removal. `--json` schema version 3 carries the preservation evidence. The lease cannot see a process that ignores it.
+
+### Floor limits
+
+The dispatcher is an argv tripwire. It does not see `apply_patch`, Edit, Write, MCP, or a stdin-fed interpreter. Known gaps are the catalogue in [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md). This repository does not ship a separate `SECURITY.md`. Report a floor bypass as a limitation line unless it regresses the SPECS §6 charter matrix in canonical form, which is repaired.
+
+Changing `dispatch.py` means the smoke matrix, the harness unit tests, an independent read-only review, a `FLOOR_VERSION` bump, and a refreshed audit marker in [`templates/codex/hooks.json`](templates/codex/hooks.json) and in every consumer. The marker is not a runtime pin. Each enabled consumer still needs a new-session `/hooks` re-trust. This producer repo is floorless; its own Codex re-trust is not a consumer canary.
+
+## Tech stack
+
+| Piece | What the repo actually uses |
+|---|---|
+| Language | Python. CI is 3.11 on `ubuntu-latest`, `windows-latest`, and `macos-latest` ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). `requires-python` is omitted on purpose so Black does not reformat the rest of the tree to a target taken from the replay package. |
+| Runtime deps | None. `harness.py`, `dispatch.py`, and `replay_v0` are stdlib. |
+| Package | setuptools builds only `replay_v0` as `charter-replay`. The console entry is `replay_v0.app:main`. |
+| Dev pins | `black==26.3.1`, `ruff==0.15.13`, `pytest==9.0.3`. Unittest is the CI lane. Pytest is the extra compatibility job `operations-contract`. |
+| CI | Workflow `CI`: `verify`, `replay-package`, `replay-fast`, `replay-lint`, `replay-tests`, `charter-digests`, `recorded-baseline`, `operations-contract`. Actions are pinned to commit SHAs. `verify` is 30 minutes, lint first. |
+| Docs | [`scripts/build_docs_site.py`](scripts/build_docs_site.py) stages an allowlist. Pages builds it with `actions/jekyll-build-pages` and checks rendered links. Pull requests build; deploy runs on `main`. |
+| Fixture workflow | [`.github/workflows/bughunt-micro.yml`](.github/workflows/bughunt-micro.yml) runs only when its fixture paths change, and the job is `continue-on-error`. It is not a merge gate. |
+
+## Status and roadmap
+
+The version the code declares is `FLOOR_VERSION` in `templates/hooks/dispatch.py`: **1.8.1 (2026-10-07)**.
+
+Dated write-ups lag that constant. Read them for evidence, then check the constant before you quote a deployment:
+
+| File | Role | Snapshot it names |
+|---|---|---|
+| [`AGENT_HARNESS_AGENT_BRIEF.md`](AGENT_HARNESS_AGENT_BRIEF.md) | Mission: Policy Lab, Pattern Guard, Doctor, estate operations | Last reviewed 2026-07-30 |
+| [`plans/ACTIVE.md`](plans/ACTIVE.md) | Declared `status_doc`. At most two active workstreams, plus later owner decisions | 2026-10-02, with owner decisions from 2026-09-29 |
+| [`docs/SYSTEM_STATE.md`](docs/SYSTEM_STATE.md) | Capability ledger and evidence vocabulary | Opens 2026-09-02; later notes through 2026-10-01 |
+| [`ROADMAP.md`](ROADMAP.md) | Epic map AH-1 through AH-10 | 2026-08-08. Its `FLOOR_VERSION` sentence still says 1.6.27 |
+| [`HUMAN_TODO.md`](HUMAN_TODO.md) | Human gates | Open: H-18 (private-repo Actions billing), H-19 (PyPI trusted publisher for the replay extraction), H-22 (1.8.0 consumer re-trust and canaries) |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Measured baselines and what they do not prove | Historical B-series |
+| [`docs/observability/AGENT_LOOP_SPANS.md`](docs/observability/AGENT_LOOP_SPANS.md) | Proposed span contract | No exporter, no merge gate |
+
+H-22 records that floor **1.8.0** was vendored and that several consumer marker PRs merged, with extract-api's adapter proof still open, as of 2026-10-05. That record is about 1.8.0. It is not a runtime proof of 1.8.1. Do not describe a consumer as canaried because this source moved.
+
+`plans/ACTIVE.md` records an owner decision (2026-09-29) that a clean public replay repository may be extracted as `charter-replay` under Apache-2.0, and that PyPI publication is H-19. This repository stays `GPL-3.0-only`. Blueprint-plugin extraction stays deferred. Public replay work does not relicense this tree.
+
+Near-term source work that those files still name, and that the code has not closed: Doctor correctness follow-ups, bounded Pattern Guard gaps tracked from [`FLOOR_LIMITATIONS.md`](FLOOR_LIMITATIONS.md), and the human rollout in H-22. Integrated measurement beyond the scripts above is not a live gate.
+
+## Where to read next
 
 | File | What it is |
 |---|---|
-| `AGENT_HARNESS_AGENT_BRIEF.md` | Current mission, workbench architecture, and AH-1 through AH-10 direction |
-| `docs/SYSTEM_STATE.md` | Verified current state and evidence level by capability |
-| `ROADMAP.md` | Epic dependencies, issue/PR ownership, evidence, and outcome state |
-| `plans/ACTIVE.md` | At most two active, executable workstreams |
-| `docs/BENCHMARKS.md` | Measured baselines and their reproducibility limits |
-| [Agent-loop observability v0](docs/observability/AGENT_LOOP_SPANS.md) | Proposed advisory span/event contract; no runtime exporter or merge gate |
-| `BLUEPRINT.md` | The policy: tier ladder (T0 tombstone → T4 live wire), design principles P1-P12, regions, the Gardener loop, model/effort routing, current migration pointers |
-| `SPECS.md` | The details: tier.json schema, budget table, hook wiring, deny-floor test matrix, skeletons, Gardener/skill-forge specs |
-| `BOOK.md` | The why: field notes and the origin stories behind every law — read on a couch, not in a context window |
-| `MIGRATION_PROMPT.md` | Paste-ready prompt (+ per-repo appendices) to re-work any repo's harness with a top-model session |
-| `harness.py` | Dependency-free CLI: repo `seed`/`audit`, live `doctor`, guarded worktree closeout, and backed-up shared global sync |
-| `templates/hooks/` | Canonical cross-runtime `dispatch.py` + self-counting bypass matrix (version = `FLOOR_VERSION` in `dispatch.py`). `sync-global` installs these shared bytes in `~/.claude/hooks`; each active Codex repo owns one pinned `.codex/hooks.json` adapter |
-| `legacy/` | The four salvaged Apr-2026 `bootstrap-*.ps1` scripts — template source material only; superseded, never run |
-
-## Use
-
-```powershell
-# Inspect first; installation is never implicit.
-py -3 .\harness.py doctor
-py -3 .\harness.py doctor --json
-py -3 .\harness.py doctor --config-root C:\path\to\claude-config
-py -3 .\harness.py doctor --repo C:\path\to\repo
-py -3 .\harness.py audit C:\path\to\repo
-py -3 .\harness.py seed C:\path\to\repo --tier 2 --sensitive-data
-py -3 .\harness.py worktrees --repo C:\path\to\repo
-py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --json
-py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action acquire --claimant session-123
-py -3 .\harness.py worktree-lease --repo C:\path\to\repo\.worktrees\slice --action renew --claimant session-123
-py -3 .\harness.py worktrees --repo C:\path\to\repo --refresh --claimant session-123 --apply --json
-
-# Diff, then install global guidance, skills, and the shared dispatcher with backups.
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --apply
-
-# Limit a rollout to reviewed custom agents and one named global skill. Repeat
-# --only for each component; an unknown component or absent selected skill fails closed.
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only codex-agents --only skill:route-codex-work --apply
-
-# Preview one Claude-native skill from <config-root>/skills without reading or
-# writing the Codex globals, shared skill home, Claude hooks, or other Claude skills.
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only claude-skill:resume-repo-work --apply
-
-# Preview/apply the reviewed Muse consumer manifest, then use the emitted
-# receipt for a separate compare-and-swap rollback preview/apply.
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --apply
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --rollback-receipt C:\path\to\receipt.json
-py -3 .\harness.py sync-global --config-root C:\path\to\claude-config --only bundle:muse-runtime --rollback-receipt C:\path\to\receipt.json --apply
-```
-
-`worktrees` is a guarded closeout command. Its default is read-only: it does not fetch, acquire or
-renew leases, remove worktrees, prune worktree metadata, or delete branches. An explicit
-`--refresh` fetches and prunes every configured remote's complete branch namespace, then accepts
-reachability only from the refreshed remote-tracking refs. A repository grafts file or any replace
-ref blocks the candidate, and the Git subprocess environment disables replace objects and removes
-an inherited `GIT_GRAFT_FILE`. A per-worktree `core.worktree` redirect also blocks the candidate
-rather than letting status inspect another directory.
-
-APPLY is a cooperative protocol. `worktree-lease --action acquire` creates a short-lived record in
-that linked worktree's Git administrative directory, scoped to one canonical physical common-Git
-directory and worktree path. The claimant is a stable, unique, self-declared session identity, not
-an authenticated principal; cooperating writers must not share it. Creation refuses any existing
-lease. The same claimant may renew or release it; an expired lease may be replaced only by an
-explicit `acquire --replace-stale`. Missing, malformed, wrong-schema, wrong-scope, wrong-path,
-expired, nearly expired, or differently owned records are keep verdicts. APPLY requires
-`--refresh --claimant <same-id> --apply`, at least ten seconds remaining on the lease, a fingerprint
-whose monotonic active-runtime age and suspend-inclusive UTC age are both no more than 60 seconds, and
-immediate fingerprint plus lease revalidation. UTC clock rollback fails closed. APPLY holds the same
-per-worktree mutation lock used by acquire/renew from final lease validation through plain removal,
-so a cooperating successor cannot reclaim an expiring lease mid-removal.
-
-Every existing path is converted once to its physical canonical spelling and that identity is used
-for discovery, containment, lookup, reporting, fingerprinting, and the removal operand. This
-collapses Windows 8.3/long-name aliases and macOS `/var`/`/private/var` aliases. Tracked, staged,
-untracked, ignored, observable executable-mode-only, assume-unchanged, skip-worktree, and index
-resolve-undo state blocks removal. Native Windows omits only the forced executable-mode comparison:
-Git for Windows otherwise reports a clean tracked `100755` baseline as a synthetic `100644`
-working-tree mode. POSIX keeps the forced comparison even when `core.fileMode=false`, so a real mode
-change remains a preservation blocker. So do detached or non-local-branch HEADs, a pending
-`COMMIT_EDITMSG` that differs from the current commit message, worktree-local refs, non-baseline
-administrative/operation state, a non-regular HEAD reflog, a direct non-commit `ORIG_HEAD` target,
-and commits found on either side of a raw HEAD reflog record or in `ORIG_HEAD` that are not retained
-by a local branch or tag.
-Requiring an attached `refs/heads/*`
-branch keeps current HEAD rooted in a local ref while plain removal runs.
-The only destructive command is plain `git worktree remove -- <canonical-path>`; a
-refusal becomes keep. There is no `--force`, branch deletion, or repository-wide
-`git worktree prune`.
-
-The lease coordinates only participants that follow this contract. It cannot discover or stop a
-non-cooperating external process, watcher, or writer; such a process can still race after the last
-inspection, including by creating an ignored file. The command reports that limitation in text and
-JSON and does not claim arbitrary occupancy detection. `--json` schema version 3 emits the complete
-preservation evidence and result summary.
-
-Install the pinned development tools with `py -3 -m pip install -r requirements-dev.txt`.
-The same unit, smoke, Ruff, Black, and compile gates run on Windows, macOS, and Linux for every
-pull request and push to `main`; workflow actions are pinned to immutable commit SHAs.
-
-`audit` also measures declarations against reality instead of against other documents:
-a declared `sensitive_data` overlay against each remote's actual host visibility, vendored
-`dispatch.py` and `smoke_test.py` bytes under `hooks/` or `.claude/hooks/` against the canonical
-template (reporting `FLOOR_VERSION` alongside the hashes), and a declared
-`human_todo` against a file that exists, and default-branch server-side history protection
-(`non_fast_forward` + `deletion` ruleset or classic equivalent) on the remote `git push` targets, when the effective floor
-posture is `core` or the repo declares `floor_wiring: none` — reported as `advisory` when
-missing or bypassable by the auditing token, never a failure (issues #356, #370).
-An implicit sole remote is measured even when it is not named `origin`; explicit push-remote
-configuration still wins. Mixed push URLs are scoped individually, so a non-GitHub destination
-does not hide the GitHub destinations. Fallback counts include URL-less remote names. Explicitly
-empty selectors and unresolved URL-valued selections stay `UNPROVEN` (#438).
-A repo that vendors nothing says so rather than
-emitting nothing. The deployed `~/.claude/hooks` copy is reported as an `advisory`, never a
-failure: it is the auditing machine's state, so making it a repo verdict would let the same
-repo pass in CI and fail on a developer box; `doctor` owns that axis. Each reports `MISMATCH` (a hard failure, exit 1),
-`UNPROVEN` (the check could not run — never rendered as a pass, never a failure), or `ok`.
-Only a PUBLIC endpoint work is actually PUSHED to is a `MISMATCH`: the push URL of `origin`,
-or of any remote when no `origin` is configured. A public `upstream` or mirror on a private
-fork, and a public fetch URL behind a private `pushurl`, are reported as an `advisory` naming
-the remote and the reason. The owner-ratified `public_synthetic_publication` object makes one
-exact remote/repository pair an `ok` while retaining `sensitive_data`; disagreement, a second
-push URL, or any other public publishing endpoint remains a mismatch. Any credential embedded
-in a remote URL is redacted before it
-reaches a finding.
-Every probe is read-only, bounded by a per-command timeout and an aggregate deadline, and
-skipped entirely when the repo declares nothing to check, so an offline or `gh`-less run
-degrades to `UNPROVEN` and exits 0. A probe's binary is resolved against absolute `PATH`
-entries only, never the current directory — Windows' `CreateProcess` searches the cwd first,
-and the cwd of an audit is a repository that could otherwise answer to the name `git`
-(issue #112). A `.EXE`/`.COM` anywhere on `PATH` outranks a `.CMD`/`.BAT` shim everywhere on
-it, and a shim is spawned only with arguments that survive `cmd.exe` re-parsing. On Windows,
-Doctor also reports the PATH/PATHEXT-effective Git target separately from its safe native probe
-target, and rejects an effective Git `.CMD`/`.BAT` shim because it can corrupt caret-bearing
-revision expressions; invoke the reported native Git target directly or remove/replace the shim. A name that
-cannot be resolved is a named `UNPROVEN`, never a silent empty answer. `audit --offline` and `doctor --repo --offline` run no network resolver at all — including `git ls-remote`, which contacts the host despite being a `git` subcommand. Because the byte comparison reads the harness working
-tree, a harness checkout that is not on `main`, is dirty under `templates/hooks`, or has
-diverged from `origin/main` is refused as the canonical reference and said so. `origin/main`
-is a local tracking ref, so currency is proven against the published tip with a bounded
-`git ls-remote`; a stale tracking ref, or a published tip that cannot be read (offline,
-unreachable), refuses the reference rather than assuming it. A detached-HEAD
-CI checkout (what `actions/checkout` produces) is never a reference, so the canonical-template
-leg is permanently `UNPROVEN` there and live only on a checkout sitting on a clean `main`. The audit summary line and `--json` both carry the count of `UNPROVEN` checks, so a run
-that measured nothing cannot read as a clean one. `doctor` surfaces the same findings for
-`--repo`, plus a global `floor version` check; when the reference is refused that check prints
-`[UNPROVEN]`, never `[ok]`, and — like every unproven check — leaves the exit code alone.
-
-Supply `doctor --config-root C:\path\to\claude-config` to compare the source checkout's
-`CLAUDE.md`, `rules/laws.md` (the law set Claude loads, #366) and `codex/AGENTS.md` bytes with
-their respective deployed global runtime files, as three separate checks. An `[ok]` source must
-be the checkout root of the harness origin's `claude-config` sibling, clean on `main`, level with
-its published `origin/main`, and free of hidden index flags on all three guidance files. An omitted, absent, unreadable, or noncanonical source is `UNPROVEN`; a readable
-byte mismatch or absent deployed target fails.
-
-`seed` refuses to overwrite an existing runtime-neutral tier declaration, and adds
-`/.claude/worktrees/` to `.gitignore` when nothing ignores it yet (#236). `sync-global` backs
-up changed global guidance, shared Claude-home hook bytes, managed skill folders, and reviewed
-`codex/agents/*.toml` definitions before replacing them. Agent definitions deploy to
-`<codex-home>/agents`; the durable managed-entry record permits stale removal only when the
-deployed bytes still match the last harness-managed version, so unrelated or locally changed files
-are preserved. Removing the source `codex/agents/` directory reconciles that managed set to empty;
-a checkout that never had a managed-entry record remains a no-op. It also prunes the obsolete managed global Codex floor while preserving unrelated
-Codex hooks. Each active repo must update its project `.codex/hooks.json` pin and be reviewed and
-trusted with `/hooks` in a new Codex session; never stack a global and project Codex floor. See
-[the supported Codex project-hook trust bootstrap](SPECS.md#codex-project-hook-trust-bootstrap)
-for the exact-CWD TUI procedure and its runtime-evidence boundary.
-
-Default file sync refuses aliased homes and destinations, non-regular files, and destinations
-with multiple hard links before reserving backups. Changed files publish through a flushed
-sibling and rename; this protects other hard-link entries, not concurrent-writer exclusion.
-
-Future Codex skill backups live under `<codex-home>/backups/<timestamp>/skills/`, outside the
-configured shared skill root that Codex scans recursively. A custom `codex-home` whose backup tree
-overlaps the configured `skills-home`, or a selected source tree, is refused before writes. Legacy
-`<skills-home>/.harness-backups/` copies are left untouched; inspecting or moving those existing
-copies is a separate recovery operation.
-
-Changed managed Codex skill trees preflight source names with disposable, empty probes on the
-destination filesystem before live copies or backups. Dry-run removes those sibling probes and
-leaves the destination unchanged. Native NTFS fixtures cover absent/existing targets and preserve
-per-directory case sensitivity and Unicode-distinct names. Unavailable lookup flags or a different
-probe volume refuse safely. Non-inherited POSIX directory lookup flags and normalization-collapsing
-filesystems still need their own platform qualification; final digest/recovery checks remain in place.
-
-`--only claude-skill:<name>` is a separate, opt-in lane from
-`<config-root>/skills/<name>` to `<claude-home>/skills/<name>`. Every selected source and
-destination is validated before a write. Selectors are basenames; aliases, reparse points,
-overlapping source/destination roots, unsupported tree entries, missing `SKILL.md`, and destination
-paths absent from the source tree fail closed. Matching destination paths may contain different
-bytes: `--apply` backs up the complete existing destination directory under
-`<claude-home>/.harness-backups/<timestamp>/skills/` before replacing it. Source trees are first
-staged under the same hidden run root, outside skill discovery, and must retain their preflight
-digest. An existing live directory moves into its backup atomically, then the moved snapshot is
-validated before the staged source is promoted. A late save causes refusal and is retained in the
-live tree or recovery backup; a failed promotion restores a live copy while retaining the backup.
-This is drift detection and recovery, not lock-free writer exclusion, and the lane does not infer
-whether changed bytes at source-owned paths were edited locally. Omitting `--only` retains the
-existing default sync set and does not add Claude-native skills.
-
-`--only bundle:muse-runtime` is a second isolated opt-in lane. It reads schema 1 from
-`<config-root>/.agent-harness/sync-global.json`, selects only `bundles.muse-runtime.components`,
-and maps canonical relative `file` or `tree` sources to canonical relative paths under the logical
-`claude-home` or `user-bin-home` roots. Planning rejects observed absolute, traversal, aliased,
-colliding or overlapping paths and unsupported filesystem entries. Apply revalidates sources
-and targets, but these checks do not exclude later filesystem changes. The selector cannot be
-mixed with other sync components; omitting it leaves the established default sync set unchanged.
-
-Apply stages every component and revalidates every source and target before moving the first live
-target. Replaced targets move to complete recovery backups; a versioned receipt is then published
-atomically under `<claude-home>/.harness-backups/sync-global-bundles/`. The receipt stores only
-logical roots and relative paths. `--rollback-receipt` is also dry-run by default and restores or
-removes a component only while its live digest still equals the installed digest and every named
-backup still equals its recorded digest. Rolled-back installed bytes remain in the receipt's
-recovery directory. This lane deploys only the files the reviewed consumer manifest names. The
-Muse manifest contract excludes vendor executables, settings, credentials, policy, repository
-declarations, and noncanonical launchers; manifest review remains the scope gate. Deployment makes
-no runtime or canary claim.
-
-Install and rollback preflight the existing rename operation's same-filesystem requirement
-against recovery storage. Device equality is necessary, not a guarantee that a later rename
-will succeed. If post-promotion inspection fails, recovery attempts to quarantine unverified
-bytes and restore prior state. Recovery can itself fail: preserve the reported backup and
-quarantine locations, and inspect the reported live state before retrying. The lane does not
-promise crash-atomic multi-component writes or concurrent-writer exclusion. Remaining fault
-and platform qualifications are tracked in [#278](https://github.com/Chris0Jeky/agent-harness/issues/278).
-
-For a dispatcher or adapter-marker candidate made in a linked worktree, see
-[safe candidate validation](SPECS.md#candidate-validation-from-linked-worktrees) before treating
-the candidate as installed or live.
-`doctor` rejects deny-floor copies in every statically inspectable global hook source: user and
-system `hooks.json`, system `requirements.toml`, inline system/base and selectable profile-v2
-hooks, and the legacy managed config file. On Windows it resolves the system layer through the
-ProgramData known folder, as Codex does. Before counting a floor, it validates the complete hook
-subtree and the hook-specific metadata it statically interprets: every supported event, the JSON
-object wrapper and parser constraints, config hook state, and managed requirements hook paths — a
-managed hook directory must be absolute and, unless it is a UNC path no audit should block on,
-must exist on the platform that resolves it. It
-scans every selectable profile-v2 file conservatively; unreadable or malformed hook sources and
-profile enumeration fail closed. Other ConfigToml and requirements fields are not fully
-schema-validated. Ignored JSON values are traversed iteratively, but the stdlib JSON decoder still
-imposes an explicit fail-closed bound at pathological nesting depths before schema inspection.
-Managed-cloud, MDM, per-invocation, and plugin hooks remain runtime-only evidence and must be
-reconciled in `/hooks`.
-
-`doctor --repo` accepts the Git-root layer walk only when every inspectable top-level
-`project_root_markers` declaration in the system, base-user, and stored profile-v2 configs is
-absent or exactly `[".git"]`; any other, conflicting, malformed, or unreadable declaration fails
-closed. CLI and managed-cloud overrides are not statically inspectable. Under
-that qualified default topology, it walks every active `.codex` layer from the checkout root
-through the requested directory and audits both `hooks.json` and inline `[hooks]` in `config.toml`,
-because Codex loads both forms. Across those sources it
-requires exactly one project-floor candidate, one conservatively recognized POSIX/Windows
-execution shape, and one current normalized dispatcher marker. That marker is **audit-only**: it
-is never passed to or verified by `dispatch.py` at runtime, so it proves the trusted hook
-definition was written against those bytes and nothing more (see SPECS §5 for the mandatory
-refresh/re-trust sequencing after a dispatcher change). A separate `Codex adapter contract` check
-names every candidate handler and platform command that declares no marker, declares a stale one,
-or never passes `--event pre --runtime codex`; a vendored dispatcher or wrapper flag delegation is
-reported as inventory rather than a failure. Because Codex runs hook commands from the session
-cwd, a repo-relative wrapper path is rejected when the session cwd is not the hook source root,
-and recorded as a cwd-dependency note in the audits where it does resolve.
-The same read-only layer walk checks the base user and active project MCP declarations. An exact
-server name that is active and command-backed at both scopes fails as a duplicate spawning
-topology, as does an active `docker mcp gateway run` declaration with neither `--servers` nor
-`--profile` (including Windows `docker.cmd` and `docker.bat` shims). An effective layered
-`enabled = false` state suppresses only a cross-layer mixed command/URL topology conflict; a
-single table declaring both transports remains malformed, and a later re-enable exposes the
-retained conflict. Active mixed layered transports fail closed. This topology check does not prove
-that Codex's full configuration loader accepts every inactive definition. The check prints only
-canonical source paths and escaped server names, never command arguments, and does not inspect
-stored profiles, system/managed policy, CLI overrides, or runtime processes.
-That floor must be the canonical root
-`.codex/hooks.json` adapter — unless the repository declares `"floor_wiring": "none"` (SPECS §2), in
-which case `doctor --repo` requires the opposite: no Codex floor handler and no global Claude
-dispatcher registered in the Claude home's `settings.json`, lifecycle-only hooks allowed; nested
-config-only layers are allowed. Static validation does not
-execute the hook or grant trust. It also rejects inspectable activation blockers: managed-only
-requirements, managed hook-feature requirements, persisted canonical/legacy hook feature
-disables, and a disabled canonical handler state, plus the unsupported stored legacy `profile`
-selector. A managed requirements pin of the hook feature *on* does not clear a persisted disable:
-Codex's merge order for that contest is not statically provable, so `doctor` names both
-declarations, calls the outcome UNPROVEN, and fails closed. Valid feature values inside the
-inactive legacy profile map do not affect activation; malformed hook feature values still fail the
-typed-load boundary. A CLI-selected profile-v2 name colliding with that legacy map remains a
-runtime-only boundary. CLI, session, and managed-cloud activation can override the static result,
-so a CWD-specific new-session `/hooks` review and live safe/deny canary remain mandatory whenever
-the PreTool floor is enabled. The owner's 2026-08-02 pause was explicitly lifted on 2026-08-03.
-That authorization permits a bounded per-repository rollout; it does not let one repository's
-trust or canaries stand in for another's.
-
-For a linked Git worktree, Codex maps each active hook layer to the same relative `.codex` directory
-in the root checkout that owns the Git common directory. `doctor --repo` reports those mapped
-sources and rejects worktree-only or different local `hooks.json` and inline-hook declarations. An
-identical tracked worktree copy is allowed but remains inactive. Static root discovery currently
-fails closed for linked worktrees whose primary checkout uses `--separate-git-dir`, and when the
-common Git directory has no checkout (for example, a bare repository). Configure, review, and trust
-the root-checkout adapter through `/hooks`; do not edit trust hashes manually or use a bypass flag.
-
-Producer source (2026-10-04): **1.8.0** deletes the branch-history families from the analyzer
-(owner decision on #356 step 2): force, lease, `+refspec`, branch deletion and `--prune` proceed at
-every tier, `sensitive_data` included, because every floored repository protects its default branch
-with a server-side ruleset. The narrow tag guard stays (`[tag-guard]`: a forced or deleting tag
-push, `--mirror`), a core double-check. The source adapter's audit marker matches those bytes.
-Deployment and consumer re-pins follow as separate reviewed rollout work, each with an owner
-re-trust and canary (HUMAN_TODO H-22). The previous producer source, 1.7.3, restored the
-unscaled dispatcher-error deny when a later-fragment analyzer raises.
-
-Posture baseline (2026-09-28): **1.7.2** (1.7.0 plus #372's long-form rm hint and #365's
-false-positive fixes: a download piped into a literal `python -c`/`node -e` program is data, and the core
-hint reads commands rather than PR-body or heredoc prose), the **core posture** (SPECS §5.4,
-owner decision 2026-09-27, issue #356). It is now the default below T4/`wave_mode` for a
-non-sensitive repository. Default-branch history is protected server-side by rulesets, so the
-client floor keeps only local destruction as `FLOOR_ACK` double-checks: deletes outside the
-project or through an unresolved operand, secret-file mutation, downloaded program text run
-directly, and privilege elevation. Force-push, ref deletion, git config execution, work-loss and
-pure opacity proceed. A `sensitive_data` repository never runs core (its declared `core` renders
-as `guide`), and `guide`/`wall` stay declarable. 1.7.2 is deployed to `~/.claude/hooks` on the owner's main box
-(2026-09-29: vendored in claude-config#530; consumer markers merged in SwarmingLilMen#80, collaborative-hill-lab#14 and
-Pulseboard#168; EvidenceDeck#35 waits on H-18; each root's re-trust and canaries are H-14). History before 1.7.0 (2026-09-03): the immutable
-`floor-v1-final` tag preserves 1.6.21, and 1.6.31 is the **guide posture** (SPECS §5.4, owner decision 2026-09-02): below
-T4/`wave_mode`, and outside `sensitive_data` unless declared otherwise, a deny that only reports
-the parser's uncertainty proceeds, and every other deny or ask is one acknowledgeable
-double-check (`# FLOOR_ACK=<key>`) instead of a wall; T4, `wave_mode` and by-default sensitive
-repositories keep the walls, and any repo can declare `floor_posture: wall`; 1.6.32 (the late #260 review's P1) re-checks every later command
-segment (split on `;`, `&&`, `||`, `&`, newline) with the analyzer itself, so a masked work-loss
-or publication action in one of them is a double-check whatever its spelling; a pipeline's right
-side and shell-variable indirection remain the hint's job. 1.6.33 carries the two PR #262 review
-repairs that do **not** touch segmentation: one remote-resolution cache and deadline now span the
-whole hook invocation rather than one per analysis (two independent 3.5s budgets could exceed the
-adapter's declared 5s timeout and return no verdict), and the `gh` charter hint names mutating
-subcommands only, so `gh repo view`, `gh gist list` and `gh repo autolink list` behind an opacity
-are allowed while `create`/`delete`/`edit --visibility` still double-check. The **segmentation**
-repair was attempted and reverted: a quote-aware splitter that also covered `|` produced two
-bypasses and three false positives against 1.6.32, and the bypass involving a quoted interpreter
-payload is provably unreachable from the segmentation layer — the measurement, and the residuals
-left standing (a quoted separator still splits; a bare `|` is still not a separator), are in
-`FLOOR_LIMITATIONS.md` and #268. 1.6.30 honours
-Git's numeric booleans in the exact `--no-follow-tags` narrowing (#201, PR #239). 1.6.29 upstreams two owner decisions of 2026-08-18 that were authored directly
-in claude-config's deployed copy (`hooks/dispatch.py` commits `4078905` and `3c6069e`) and had
-left canonical trailing the runtime: 1.6.28 narrows the `sensitive_data` `gh api` mutation guard
-to the irreversible/exfiltration surfaces (repo/gist creation, visibility flips, non-branch
-DELETEs) so routine PR/issue/comment mutations pass (#59), and 1.6.29 allows an explicit
-named-branch remote deletion (`git push --delete <branch>`, `:<branch>`) while wildcards, tags,
-other ref namespaces, protected/production names and dynamic tokens stay denied; the
-`sensitive_data` push narrowing still rejects every deletion selector. 1.6.27 was the bounded
-#227 repair: a valueless `push.followTags` is parsed with Git's true semantics, while every other
-separator-free configuration record remains malformed and fail-closed. It retains the owner-authorized exact-route Developer Lens publication exception and
-its bounded post-merge security follow-up: that route requires exactly one refspec and rejects
-configured `core.gitProxy`/`core.sshCommand` and declared-remote `receivepack`/`vcs`, plus
-command-line `--receive-pack`/`--exec`. It retains the 1.6.24 #184
-security-preservation and #196 bounded-usability repairs. A late #200 review proved that the
-ordinary-submodule case cannot exclude an unobservable separate checkout, so that one case remains
-fail-closed. **Deployed state on 2026-09-03 (historical; current state is above):** claude-config PR #199 merged the byte-identical 1.6.33
-`hooks/` (smoke 2383/2383), `sync-global --apply` installed the two files into `~/.claude/hooks`
-with a backup, `doctor` proves canonical 1.6.33 == deployed 1.6.33, and the **Claude** runtime
-canary trio of SPECS §5.4 plus the 1.6.33-specific `gh … --help` pair passed live in the deploying
-session. **Deployed and canonical were both 1.6.33 then**; the producer's own Codex re-trust and canaries are
-VOID since 2026-09-07 (the producer is floorless by owner decision, PR #274; H-15 is closed) and
-only the consumer roots' legs remain — **H-14** step 3 in `HUMAN_TODO.md` carries them. **Codex runtime proof is still at 1.6.26**: the registry inventory found exactly three
-current Codex consumers (EvidenceDeck PR #20, SwarmingLilMen PR #51, collaborative-hill-lab PR #4
-merged their 1.6.26 adapters, each reviewed, trusted, enabled, Doctor-green and canaried). The
-consumer marker refreshes and each root's exact-CWD re-trust are
-human-only, one root at a time, merge first — see **H-14** in `HUMAN_TODO.md` and issue #232; no sibling,
-future, or changed adapter inherits prior evidence.
-
-The 2026-08-07/08 wave changed tests and documentation only (PR #240 / #110, PR #237 / #130,
-the state record PR #234). The 2026-09-02 session then moved implementation: PR #238 landed
-#139's nested logical repo root with its three review defects fixed (#258 tracks one LOW
-follow-up); PR #257 upstreamed 1.6.29; PR #239 carries #201 as 1.6.30; and 1.6.31 is the guide
-posture above, which also fixes the four 1.6.29 carve-out defects the #257 review found (#259).
-Every producer marker change re-owes runtime proof: **H-15** in `HUMAN_TODO.md`.
-Replay v0
-is implemented on `main` as an internal, experimental Policy Lab with a 50-event synthetic
-charter; it is not a live enforcement product. The CLI, static Doctor/audit and MCP-topology
-checks, estate seed/sync foundations, and guarded worktree closeout are implemented. Closeout
-remains an internal experimental capability with bounded follow-ups. Further Doctor correctness,
-bounded Pattern Guard v2, integrated measurement, and private `claude-config` integration remain
-roadmap work. Public replay or blueprint-plugin extraction is deferred under AH-10.
-
-The legacy floor remains a defense-in-depth argv tripwire, not an exhaustive shell sandbox.
-Its canonical limitations stay in `FLOOR_LIMITATIONS.md`; current capability and verification
-boundaries stay in `docs/SYSTEM_STATE.md`. H-2 is closed at the 2026-08-03 current-consumer snapshot;
-static byte equality still does not prove a future, moved, or changed adapter's runtime activation.
-
-Provenance: synthesized by Fable 5 from a 12-agent estate survey, three independent
-architecture proposals, and an adversarial completeness critique. This repo obeys its own
-laws: one home per policy, budgets with rotation, no speculative scaffolding.
+| [`BLUEPRINT.md`](BLUEPRINT.md) | Tier ladder T0–T4, principles P1–P12, regions, Gardener, model routing |
+| [`SPECS.md`](SPECS.md) | `tier.json` schema, budgets, hook wiring, deny-floor matrix |
+| [`BOOK.md`](BOOK.md) | Why the laws exist. Not required to operate the tools |
+| [`MIGRATION_PROMPT.md`](MIGRATION_PROMPT.md) | Paste-ready prompt for re-working another repo's harness |
+| [`AGENTS.md`](AGENTS.md) | Change rules for agents working in this checkout |
+| [`replay_v0/README.md`](replay_v0/README.md) | Replay commands, importer scrub limits, corpus privacy |
+| [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | Curl-derived option-arity fixture |
 
 ## License
 
-The owner-authored contents of this repository are licensed under GNU General
-Public License version 3 only (`GPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
-The curl-derived option-arity fixture retains curl's own licence; see
-`THIRD_PARTY_NOTICES.md`.
+The owner-authored contents of this repository are licensed under GNU General Public License version 3 only (`GPL-3.0-only`). See [`LICENSE`](LICENSE) and [`LICENSING.md`](LICENSING.md). The curl-derived option-arity fixture retains curl's own licence; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-This repository-level decision does not decide the licences of the possible
-future clean-repository plugin or replay products described in the blueprints.
+This repository-level decision does not decide the licences of the possible future clean-repository plugin or replay products described in the blueprints.
